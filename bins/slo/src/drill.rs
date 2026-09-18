@@ -65,6 +65,7 @@ pub struct Mark {
     pub node: String,
     pub taint: Option<String>,
     pub label: Option<String>,
+    pub action: Option<DrillAction>,
     pub original_taint: Option<String>,
     pub original_cordon: Option<bool>,
     pub original_decommission: Option<String>,
@@ -117,9 +118,13 @@ pub trait Cluster: Send + Sync {
     async fn restore_taint(&self, node: &str, _run: &str) -> Result<()> {
         self.taint(node, None).await
     }
-    async fn restore_marked(&self, node: &str, _run: &str) -> Result<()> {
-        self.cordon(node, false).await?;
-        self.decommission(node, false).await?;
+    async fn restore_marked(&self, node: &str, _run: &str, action: DrillAction) -> Result<()> {
+        if matches!(action, DrillAction::Cordon | DrillAction::Both) {
+            self.cordon(node, false).await?;
+        }
+        if matches!(action, DrillAction::Decommission | DrillAction::Both) {
+            self.decommission(node, false).await?;
+        }
         self.mark(node, None).await
     }
     /// `Some(spec)` creates the NetworkPolicy, `None` deletes it.
@@ -191,7 +196,7 @@ pub async fn with_decommission<T>(
 ) -> Result<T> {
     k.mark_for(node, Some(run), DrillAction::Decommission).await?;
     k.decommission(node, true).await?;
-    undoing(cap, body, || k.restore_marked(node, run)).await
+    undoing(cap, body, || k.restore_marked(node, run, DrillAction::Decommission)).await
 }
 
 pub async fn with_cordon<T>(
@@ -203,7 +208,7 @@ pub async fn with_cordon<T>(
 ) -> Result<T> {
     k.mark_for(node, Some(run), DrillAction::Cordon).await?;
     k.cordon(node, true).await?;
-    undoing(cap, body, || k.restore_marked(node, run)).await
+    undoing(cap, body, || k.restore_marked(node, run, DrillAction::Cordon)).await
 }
 
 pub async fn with_netpol<T>(
@@ -244,7 +249,7 @@ pub async fn sweep_nodes(k: &dyn Cluster, mine: &dyn Fn(&str) -> bool) {
         if !m.label.as_deref().is_some_and(&mine) {
             continue;
         }
-        match k.restore_marked(&m.node, m.label.as_deref().unwrap_or_default()).await {
+        match k.restore_marked(&m.node, m.label.as_deref().unwrap_or_default(), m.action.unwrap_or(DrillAction::Both)).await {
             Ok(()) => tracing::info!(kind = "marked-node", name = %m.node, "slo.drill.swept"),
             Err(e) => tracing::warn!(kind = "marked-node", name = %m.node, error = %format!("{e:#}"), "slo.drill.sweep.failed"),
         }
@@ -487,7 +492,7 @@ impl Cluster for kube::Client {
         }
     }
 
-    async fn restore_marked(&self, node: &str, run: &str) -> Result<()> {
+    async fn restore_marked(&self, node: &str, run: &str, _action: DrillAction) -> Result<()> {
         use kloudlite_workspaces::crd::{DECOMMISSION_LABEL, DECOMMISSION_STATUS, DRAINED_PREFIX};
         let api: kube::Api<k8s_openapi::api::core::v1::Node> = kube::Api::all(self.clone());
         let current = api.get(node).await?;
@@ -577,6 +582,7 @@ impl Cluster for kube::Client {
                     node: kube::ResourceExt::name_any(n),
                     taint,
                     label,
+                    action: originals.as_ref().and_then(|value| DrillAction::from_str(value.get("action").and_then(Value::as_str))),
                     original_taint: originals.as_ref().and_then(|value| value.get("taint")).and_then(Value::as_str).map(str::to_owned),
                     original_cordon: originals.as_ref().and_then(|value| value.get("cordon")).and_then(Value::as_bool),
                     original_decommission: originals.as_ref().and_then(|value| value.get("decommission")).and_then(Value::as_str).map(str::to_owned),
@@ -769,12 +775,12 @@ pub(crate) mod tests {
         let k = FakeKube::default();
         *k.marks.lock().expect("lock") = vec![
             Mark { node: "node-a".into(), taint: Some(RUN.into()), label: None, ..Default::default() },
-            Mark { node: "node-b".into(), taint: None, label: Some(RUN.into()), ..Default::default() },
+            Mark { node: "node-b".into(), taint: None, label: Some(RUN.into()), action: Some(DrillAction::Cordon), ..Default::default() },
         ];
         sweep_nodes(&k, &|v| v == RUN).await;
         assert_eq!(
             k.calls(),
-            ["taint node-a -", "cordon node-b false", "decommission node-b false", "mark node-b -"]
+            ["taint node-a -", "cordon node-b false", "mark node-b -"]
         );
     }
 

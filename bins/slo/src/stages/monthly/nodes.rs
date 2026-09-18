@@ -51,7 +51,7 @@ pub(crate) async fn decommission(c: &mut Ctx) {
             // go back on every path out, in the order that leaves the node usable.
             let undo = || async {
                 use crate::drill::Cluster;
-                let restored = k.restore_marked(&node, &run).await.context("the node's drill-owned state was not restored");
+                let restored = k.restore_marked(&node, &run, crate::drill::DrillAction::Both).await.context("the node's drill-owned state was not restored");
                 restored
             };
             let body = async {

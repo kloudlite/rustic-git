@@ -1,0 +1,67 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>Architecture review tasks</title>
+  <style>
+    :root { color-scheme: light dark; font: 15px/1.45 system-ui, sans-serif; }
+    body { margin: 0; padding: 2rem; background: Canvas; color: CanvasText; }
+    main { max-width: 1180px; margin: auto; }
+    h1 { margin: 0 0 .25rem; font-size: 1.5rem; }
+    .meta { color: GrayText; margin: 0 0 1.25rem; }
+    .table-wrap { overflow-x: auto; border: 1px solid color-mix(in srgb, CanvasText 20%, transparent); border-radius: .5rem; }
+    table { width: 100%; min-width: 760px; border-collapse: collapse; }
+    th, td { padding: .65rem .75rem; text-align: left; vertical-align: top; border-bottom: 1px solid color-mix(in srgb, CanvasText 14%, transparent); }
+    th { font-size: .8rem; text-transform: uppercase; letter-spacing: .04em; color: GrayText; }
+    tr:last-child td { border-bottom: 0; }
+    .finding { font-weight: 650; white-space: nowrap; }
+    .status { display: inline-block; padding: .15rem .45rem; border: 1px solid currentColor; border-radius: 999px; font-size: .78rem; white-space: nowrap; }
+    .planned { color: #9a6700; } .implementing { color: #0969da; } .review { color: #8250df; } .testing { color: #bc4c00; } .verified { color: #1a7f37; }
+    .updated { white-space: nowrap; color: GrayText; font-size: .85rem; }
+    @media (max-width: 700px) { body { padding: 1rem; } }
+  </style>
+</head>
+<body>
+  <main>
+    <p><a href="index.html">Architecture review</a></p>
+    <h1>Architecture review tasks</h1>
+    <p class="meta" id="summary">Loading tasks…</p>
+    <p class="meta" id="meta"></p>
+    <div class="table-wrap">
+      <table>
+        <thead><tr><th>Finding</th><th>Status</th><th>Current work</th><th>Test evidence</th><th>Last updated</th></tr></thead>
+        <tbody id="tasks"><tr><td colspan="5">Loading…</td></tr></tbody>
+      </table>
+    </div>
+  </main>
+  <script>
+    const statuses = new Set(["planned", "implementing", "review", "testing", "verified"]);
+    const text = (value) => String(value ?? "");
+    const cell = (value) => { const node = document.createElement("td"); node.textContent = text(value); return node; };
+    async function load() {
+      const response = await fetch("tasks.json", { cache: "no-store" });
+      if (!response.ok) throw new Error(`tasks.json: ${response.status}`);
+      const data = await response.json();
+      const rows = Array.isArray(data) ? data : data.tasks ?? [];
+      const body = document.querySelector("#tasks");
+      body.replaceChildren();
+      for (const task of Array.isArray(rows) ? rows : rows.tasks ?? []) {
+        const row = document.createElement("tr");
+        const finding = cell(task.finding ?? task.id); finding.className = "finding"; row.append(finding);
+        const status = cell(statuses.has(task.status) ? task.status : "planned"); status.className = `status ${status.textContent}`; row.append(status);
+        row.append(cell(task.currentWork ?? task.current));
+        row.append(cell(task.testEvidence ?? task.tests));
+        const updated = cell(task.lastUpdated ?? task.updated); updated.className = "updated"; row.append(updated);
+        body.append(row);
+      }
+      const counts = Object.fromEntries([...statuses].map((status) => [status, rows.filter((task) => task.status === status).length]));
+      document.querySelector("#summary").textContent = `${text(Array.isArray(data) ? "" : data.summary)}${Array.isArray(data) ? "" : " · "}${body.rows.length} findings · ${[...statuses].map((status) => `${status}: ${counts[status]}`).join(" · ")}`;
+      document.querySelector("#meta").textContent = `data updated ${text(Array.isArray(data) ? "unknown" : data.updatedAt)} · page refreshed ${new Date().toLocaleTimeString()}`;
+    }
+    async function refresh() { try { await load(); } catch (error) { document.querySelector("#meta").textContent = `Unable to load tasks.json: ${error.message}`; } }
+    refresh();
+    setInterval(refresh, 15000);
+  </script>
+</body>
+</html>

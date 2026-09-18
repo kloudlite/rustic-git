@@ -1,8 +1,30 @@
 #!/usr/bin/env bash
 set -euo pipefail
-trap 'exit 130' INT TERM
 
-ROOT=$(cd "$(dirname "$0")/../../.." && pwd)
+SCRIPT_DIR=$(cd "$(dirname "$0")" && pwd)
+. "$SCRIPT_DIR/source-provenance.sh"
+
+ROOT=$(cd "$SCRIPT_DIR/../../.." && pwd)
+RECORD=${KL_HARNESS_GATE_RECORD:-}
+RECORD_TMP=
+RECORD_PENDING=0
+cleanup_record() {
+  local status=$?
+  if [ "$RECORD_PENDING" = 1 ]; then
+    rm -f "$RECORD"
+    if [ -n "$RECORD_TMP" ]; then rm -f "$RECORD_TMP"; fi
+  fi
+  return "$status"
+}
+trap cleanup_record EXIT
+trap 'exit 130' INT TERM HUP
+if [ -n "$RECORD" ]; then
+  RECORD_PENDING=1
+  rm -f "$RECORD"
+fi
+SHA=$(source_provenance_capture "$ROOT")
+[ -z "${GITHUB_SHA:-}" ] || [ "$GITHUB_SHA" = "$SHA" ] || { echo "checkout SHA $SHA differs from GITHUB_SHA $GITHUB_SHA" >&2; exit 2; }
+
 NODE24_BIN=${KL_NODE24_BIN:-/work/review-node24/node_modules/node/bin}
 if [ -x "$NODE24_BIN/node" ]; then
   PATH="$NODE24_BIN:$PATH"
@@ -20,11 +42,11 @@ npm run typecheck
 xvfb-run -a npm run bench:test
 xvfb-run -a node --test 'bench/test/renderer-boot.test.ts'
 
-if [ -n "${KL_HARNESS_GATE_RECORD:-}" ]; then
-  sha=$(git -C "$ROOT" rev-parse HEAD)
-  [ -z "${GITHUB_SHA:-}" ] || [ "$GITHUB_SHA" = "$sha" ] || { echo "checkout SHA $sha differs from GITHUB_SHA $GITHUB_SHA" >&2; exit 2; }
-  mkdir -p "$(dirname "$KL_HARNESS_GATE_RECORD")"
-  tmp="$KL_HARNESS_GATE_RECORD.tmp.$$"
-  printf '%s\n' "$sha" > "$tmp"
-  mv "$tmp" "$KL_HARNESS_GATE_RECORD"
+# Unconditional, not only under RECORD: a recordless run is a plain pass/fail a human reads, so it
+# must catch a checkout that moved during the gate too.
+source_provenance_verify "$ROOT" "$SHA"
+if [ -n "$RECORD" ]; then
+  RECORD_TMP="$RECORD.tmp.$$"
+  source_provenance_write_record "$RECORD" "$RECORD_TMP" "$SHA"
+  RECORD_PENDING=0
 fi

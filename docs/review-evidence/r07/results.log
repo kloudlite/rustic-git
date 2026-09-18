@@ -1,0 +1,9 @@
+
+running 3 tests
+test r07_interrupted_fresh_checkout_repairs_ownership_on_retry ... Create subvolume '/tmp/.tmpYbUtWo/mnt/vol/v1/live/.creating-ws-1'
+ok
+test r07_invalid_staging_paths_are_refused_without_publication ... ok
+test r07_restored_checkout_keeps_the_sources_ownership ... ok
+
+test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 19 filtered out; finished in 0.09s
+

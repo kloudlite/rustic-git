@@ -7,7 +7,10 @@
 #   pod/ship.sh            # test + clippy + build + push
 #   pod/ship.sh --no-gate  # skip test + clippy (they already passed this cycle)
 set -euo pipefail
+SCRIPT_DIR=$(cd "$(dirname "$0")" && pwd)
+. "$SCRIPT_DIR/source-provenance.sh"
 cd /work/src
+SHA=$(source_provenance_head "$PWD")
 # The gate's own target dir, never the shared /work/target: cargo keys a workspace member by its
 # workspace-RELATIVE path, so a fix/* worktree building `crates/git` at the same time overwrites
 # the very rlib the gate is linking against — the ship of 2026-09-12 05:07 failed to compile
@@ -22,14 +25,30 @@ export CARGO_INCREMENTAL=0
 # runtime unless one is called. CI's master images build without it.
 export RUSTFLAGS="--cfg tokio_unstable"
 FEATURES="--features kloudlite-agent-bin/stall-dump"
-git diff --quiet && git diff --cached --quiet || { echo "the tree is dirty; commit first" >&2; exit 2; }
-SHA=$(git rev-parse HEAD)
 GATE_RECORD_DIR=${KL_GATE_RECORD_DIR:-/work/gate-records}
 GATE_RECORD="$GATE_RECORD_DIR/$SHA"
+GATE_RECORD_TMP=
+GATE_RECORD_PENDING=0
+HARNESS_GATE_RECORD=/tmp/harness-gate-$SHA
+cleanup_gate_record() {
+  local status=$?
+  if [ "$GATE_RECORD_PENDING" = 1 ]; then
+    rm -f "$GATE_RECORD" "$HARNESS_GATE_RECORD"
+    if [ -n "$GATE_RECORD_TMP" ]; then rm -f "$GATE_RECORD_TMP"; fi
+  fi
+  return "$status"
+}
+trap cleanup_gate_record EXIT
+trap 'exit 130' INT TERM HUP
 case "${1:-}" in
   ""|--no-gate) ;;
   *) echo "unknown option: $1" >&2; exit 2 ;;
 esac
+if [ "${1:-}" != "--no-gate" ]; then
+  GATE_RECORD_PENDING=1
+  rm -f "$GATE_RECORD" "$HARNESS_GATE_RECORD"
+fi
+source_provenance_require_clean "$PWD"
 # Any origin OR platform branch, not only master: a feature branch is verified on the fleet BEFORE
 # it merges (fixed means verified on the carrying build), and during the platform-first loop the
 # code only lives on `platform` until verification passes. Tolerate one remote being unreachable —
@@ -42,7 +61,6 @@ git branch -r --contains "$SHA" | grep -qE '^ *(origin|platform)/' \
   || { echo "HEAD is on no origin or platform branch; push first" >&2; exit 2; }
 
 if [ "${1:-}" != "--no-gate" ]; then
-  rm -f "$GATE_RECORD"
   echo "==> gate: clippy + tests (CI's exact commands)"
   # Old test binaries are never collected by cargo; see prune-deps.py for the day they filled the disk.
   /work/src/deploy/dev/pod/prune-deps.py
@@ -76,7 +94,7 @@ if [ "${1:-}" != "--no-gate" ]; then
   wait $NX || { grep -E 'FAIL|panicked|^error|Summary' /tmp/ship-test.log | head -20; exit 1; }
   echo "==> harness: typecheck + bench + renderer boot"
   KL_NODE24_BIN=${KL_NODE24_BIN:-/work/review-node24/node_modules/node/bin} \
-  KL_HARNESS_GATE_RECORD=/tmp/harness-gate-$SHA \
+  KL_HARNESS_GATE_RECORD="$HARNESS_GATE_RECORD" \
     ./deploy/dev/pod/harness-gate.sh > /tmp/ship-harness.log 2>&1 \
     || { tail -40 /tmp/ship-harness.log; exit 1; }
   # The web's own gate (web.yml's exact steps), since the web image ships from here too.
@@ -86,9 +104,9 @@ if [ "${1:-}" != "--no-gate" ]; then
     || { tail -30 /tmp/ship-web.log; exit 1; }
   # A retried-then-passed test (.config/nextest.toml) must not vanish into the log.
   grep -E '^\s*FLAKY' /tmp/ship-test.log || true
-  mkdir -p "$GATE_RECORD_DIR"
-  printf '%s\n' "$SHA" > "$GATE_RECORD.tmp"
-  mv "$GATE_RECORD.tmp" "$GATE_RECORD"
+  source_provenance_verify "$PWD" "$SHA"
+  GATE_RECORD_TMP="$GATE_RECORD.tmp.$$"
+  source_provenance_write_record "$GATE_RECORD" "$GATE_RECORD_TMP" "$SHA"
   echo "gate passed: $(grep -oE 'Summary.*' /tmp/ship-test.log | tail -1)"
 else
   [ -f "$GATE_RECORD" ] || { echo "no gate record for $SHA at $GATE_RECORD; run without --no-gate first" >&2; exit 2; }
@@ -96,6 +114,7 @@ else
   echo "verified gate record for $SHA"
 fi
 
+source_provenance_verify "$PWD" "$SHA"
 # `dev-image`, not `release`: this fleet is the dev fleet, and thin LTO + one codegen unit cost
 # 3.5 min of single-threaded relinking per ship for a few percent of runtime. CI's master images
 # keep the full release profile (`image.yml`), so a production repin is never built here.
@@ -134,6 +153,7 @@ mkdir -p "$CTX/harness"
 cp harness/package.json harness/package-lock.json "$CTX/harness/"
 cp -r harness/bench harness/pi harness/skills "$CTX/harness/"
 
+source_provenance_verify "$PWD" "$SHA"
 for t in server:kloudlite agent:kloudlite-agent gateway:kloudlite-gateway controller:kloudlite-controller builder-gate:kloudlite-builder-gate slo:kloudlite-slo workspace:kloudlite-workspace intercept-proxy:kloudlite-intercept-proxy; do
   target=${t%%:*}; image=${t#*:}
   echo "==> $image:$SHA"
@@ -158,7 +178,13 @@ echo "==> kloudlite-web:$SHA"
 # `/docs` reads `apps/web/content/docs` in the image (see `lib/docs.ts`); git-ignored, so this
 # is the only way it gets there.
 rm -rf web/apps/web/content/docs && mkdir -p web/apps/web/content && cp -r docs/product web/apps/web/content/docs
+# The web image is the one build that reads the LIVE checkout (`--local context=web`), not the
+# frozen $CTX — verify right here so a checkout that moved during the loop fails BEFORE the web
+# image is built, instead of at the post-push check, which by then has already pushed it.
+source_provenance_verify "$PWD" "$SHA"
 buildctl build --frontend dockerfile.v0 --local context=web --local dockerfile=web \
   --output "type=image,\"name=ghcr.io/kloudlite/kloudlite-web:$SHA,ghcr.io/kloudlite/kloudlite-web:latest\",push=true" \
   --progress plain 2>&1 | grep -E '^#[0-9]+ (DONE|ERROR|CACHED)|exporting|pushing|error' | tail -4
+source_provenance_verify "$PWD" "$SHA"
 echo "shipped $SHA — on the laptop: deploy/pin.sh $SHA $SHA && git commit -am 'Pin every tier to ${SHA:0:8}' && deploy/roll.sh"
+GATE_RECORD_PENDING=0

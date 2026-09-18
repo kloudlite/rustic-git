@@ -5,7 +5,7 @@
 //! `--ignored`, where an unmet prerequisite is a failure and not a green. Fixture copied from `engine_ops.rs`'s `LoopbackPool`:
 //! integration test files cannot share code across `tests/*.rs`.
 
-use kloudlite_workspaces::engine::{Engine, Pool, have_btrfs};
+use kloudlite_workspaces::engine::{Engine, Pool, have_btrfs, is_subvolume};
 
 struct LoopbackPool {
     pool: Pool,
@@ -456,4 +456,162 @@ fn an_unprivileged_checkout_is_not_refused_for_want_of_a_chown() {
     // that one, never a permission error from the chown path.
     let err = e.checkout("v1", None, "ws-1").unwrap_err().0;
     assert!(!err.to_lowercase().contains("operation not permitted"), "{err}");
+}
+
+#[test]
+#[ignore = "needs root and btrfs: run with --ignored on a btrfs node"]
+fn r07_interrupted_fresh_checkout_repairs_ownership_on_retry() {
+    use std::os::unix::fs::MetadataExt;
+    assert!(have_btrfs(), "needs root and a btrfs-capable kernel");
+    let uid = kloudlite_workspaces::k8s::SSH_UID as u32;
+    let lb = LoopbackPool::new();
+    let e = engine(lb.pool());
+    let volume = "v1";
+    let ws = "ws-1";
+
+    let live_dir = e.pool.live(volume);
+    std::fs::create_dir_all(&live_dir).unwrap();
+    let staging = live_dir.join(format!(".creating-{ws}"));
+    let staging_str = staging.to_str().unwrap();
+    run(&["btrfs", "subvolume", "create", staging_str]);
+    assert_eq!(std::fs::metadata(&staging).unwrap().uid(), 0, "the seeded staging subvolume starts root-owned");
+    run(&["btrfs", "property", "set", "-ts", staging_str, "ro", "true"]);
+
+    let err = e.checkout(volume, None, ws).unwrap_err();
+    assert!(err.0.to_lowercase().contains("read-only"), "unexpected error: {}", err.0);
+    assert!(!e.pool.worktree(volume, ws).exists(), "a failed chown must not publish a live worktree");
+    assert!(is_subvolume(&staging), "the staging subvolume must survive for the retry");
+    assert_eq!(std::fs::metadata(&staging).unwrap().uid(), 0, "the refused chown must not have re-owned the staging subvolume");
+
+    run(&["btrfs", "property", "set", "-ts", staging_str, "ro", "false"]);
+    let e2 = engine(lb.pool());
+    e2.checkout(volume, None, ws).unwrap();
+    assert!(!staging.exists(), "the staging subvolume must be published, not left behind");
+    let live = e2.pool.worktree(volume, ws);
+    assert!(is_subvolume(&live));
+    let made = std::fs::metadata(&live).unwrap();
+    assert_eq!((made.uid(), made.gid()), (uid, uid), "the published worktree must be the tenant's");
+
+    let st = std::process::Command::new("setpriv")
+        .args([
+            "--reuid=1000",
+            "--regid=1000",
+            "--clear-groups",
+            "sh",
+            "-c",
+            "mkdir -p .bench && printf tenant > .bench/state.txt",
+        ])
+        .current_dir(&live)
+        .status()
+        .unwrap();
+    assert!(st.success(), "uid 1000 must be able to create bench state in the published worktree");
+    let state = live.join(".bench/state.txt");
+    assert_eq!(std::fs::read(&state).unwrap(), b"tenant");
+    let written = std::fs::metadata(&state).unwrap();
+    assert_eq!((written.uid(), written.gid()), (uid, uid), "the tenant's write must land owned by the tenant");
+}
+
+#[test]
+#[ignore = "needs root and btrfs: run with --ignored on a btrfs node"]
+fn r07_restored_checkout_keeps_the_sources_ownership() {
+    use std::os::unix::fs::MetadataExt;
+    assert!(have_btrfs(), "needs root and a btrfs-capable kernel");
+    let lb = LoopbackPool::new();
+    let e = engine(lb.pool());
+    let volume = "v1";
+    let other = 4242u32;
+
+    e.checkout(volume, None, "src").unwrap();
+    let src = e.pool.worktree(volume, "src");
+    std::fs::write(src.join("root-owned.txt"), b"root owned").unwrap();
+    std::fs::create_dir(src.join("other")).unwrap();
+    std::fs::write(src.join("other/child.txt"), b"other owned").unwrap();
+    for p in [src.clone(), src.join("root-owned.txt")] {
+        std::os::unix::fs::chown(&p, Some(0), Some(0)).unwrap();
+    }
+    for p in [src.join("other"), src.join("other/child.txt")] {
+        std::os::unix::fs::chown(&p, Some(other), Some(other)).unwrap();
+    }
+
+    e.snapshot_worktree(volume, "src", "cut-1").unwrap();
+    e.checkout(volume, Some("cut-1"), "restored").unwrap();
+
+    let dst = e.pool.worktree(volume, "restored");
+    assert!(is_subvolume(&dst));
+    let owners = |p: &std::path::Path| {
+        let m = std::fs::metadata(p).unwrap();
+        (m.uid(), m.gid())
+    };
+    assert_eq!(owners(&dst), (0, 0), "a restored worktree keeps its source's owner, not the tenant's");
+    assert_eq!(owners(&dst.join("root-owned.txt")), (0, 0));
+    assert_eq!(owners(&dst.join("other")), (other, other));
+    assert_eq!(owners(&dst.join("other/child.txt")), (other, other));
+    assert_eq!(std::fs::read(dst.join("root-owned.txt")).unwrap(), b"root owned");
+    assert_eq!(std::fs::read(dst.join("other/child.txt")).unwrap(), b"other owned");
+}
+
+#[test]
+#[ignore = "needs root and btrfs: run with --ignored on a btrfs node"]
+fn r07_invalid_staging_paths_are_refused_without_publication() {
+    use std::os::unix::fs::MetadataExt;
+    assert!(have_btrfs(), "needs root and a btrfs-capable kernel");
+    let lb = LoopbackPool::new();
+    let e = engine(lb.pool());
+    let other = 4242u32;
+    let ws = "ws-1";
+
+    let volume = "v-dir";
+    let live = e.pool.live(volume);
+    std::fs::create_dir_all(&live).unwrap();
+    let staging = live.join(format!(".creating-{ws}"));
+    std::fs::create_dir(&staging).unwrap();
+    let sentinel = staging.join("sentinel.txt");
+    std::fs::write(&sentinel, b"directory sentinel").unwrap();
+    run(&["chown", "-h", "4242:4242", staging.to_str().unwrap()]);
+
+    let err = e.checkout(volume, None, ws).unwrap_err();
+    assert!(err.0.contains("staging path is not a subvolume"), "unexpected error: {}", err.0);
+    assert_eq!(std::fs::read(&sentinel).unwrap(), b"directory sentinel");
+    let m = std::fs::symlink_metadata(&staging).unwrap();
+    assert!(m.file_type().is_dir() && !is_subvolume(&staging));
+    assert_eq!((m.uid(), m.gid()), (other, other), "the refused staging dir must keep its owner");
+    assert!(!e.pool.worktree(volume, ws).exists(), "nothing may be published from an invalid staging path");
+
+    let volume = "v-file";
+    let live = e.pool.live(volume);
+    std::fs::create_dir_all(&live).unwrap();
+    let staging = live.join(format!(".creating-{ws}"));
+    std::fs::write(&staging, b"file sentinel").unwrap();
+    run(&["chown", "-h", "4242:4242", staging.to_str().unwrap()]);
+
+    let err = e.checkout(volume, None, ws).unwrap_err();
+    assert!(err.0.contains("staging path is not a subvolume"), "unexpected error: {}", err.0);
+    assert_eq!(std::fs::read(&staging).unwrap(), b"file sentinel");
+    let m = std::fs::symlink_metadata(&staging).unwrap();
+    assert!(m.file_type().is_file());
+    assert_eq!((m.uid(), m.gid()), (other, other), "the refused staging file must keep its owner");
+    assert!(!e.pool.worktree(volume, ws).exists());
+
+    let volume = "v-link";
+    let live = e.pool.live(volume);
+    std::fs::create_dir_all(&live).unwrap();
+    let target = lb.mount.join("link-target");
+    std::fs::create_dir_all(&target).unwrap();
+    let target_sentinel = target.join("sentinel.txt");
+    std::fs::write(&target_sentinel, b"symlink target sentinel").unwrap();
+    run(&["chown", "-hR", "4242:4242", target.to_str().unwrap()]);
+    let staging = live.join(format!(".creating-{ws}"));
+    std::os::unix::fs::symlink(&target, &staging).unwrap();
+    run(&["chown", "-h", "4242:4242", staging.to_str().unwrap()]);
+
+    let err = e.checkout(volume, None, ws).unwrap_err();
+    assert!(err.0.contains("staging path is not a subvolume"), "unexpected error: {}", err.0);
+    let m = std::fs::symlink_metadata(&staging).unwrap();
+    assert!(m.file_type().is_symlink(), "the planted symlink must not be replaced");
+    assert_eq!((m.uid(), m.gid()), (other, other), "the planted symlink must keep its owner");
+    assert_eq!(std::fs::read_link(&staging).unwrap(), target);
+    assert_eq!(std::fs::read(&target_sentinel).unwrap(), b"symlink target sentinel");
+    let tm = std::fs::metadata(&target).unwrap();
+    assert_eq!((tm.uid(), tm.gid()), (other, other), "the symlink target must keep its owner");
+    assert!(!e.pool.worktree(volume, ws).exists(), "a planted symlink must never be published");
 }

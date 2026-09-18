@@ -182,6 +182,10 @@ impl Ctx {
         Self::build(cfg, suite, run_id, true).await
     }
 
+    /// The in-process test fixture: it must never take the roll lock nor build a cluster client, so
+    /// it says `coordinate=false` whatever a deployment would do. The out-of-process test cannot
+    /// use this — it runs the shipped binary — and points a mandatory lock at a fake cluster
+    /// instead.
     #[cfg(test)]
     pub(crate) async fn new_for_test(cfg: Config, suite: Suite, run_id: Option<String>) -> anyhow::Result<Ctx> {
         Self::build(cfg, suite, run_id, false).await
@@ -213,14 +217,20 @@ impl Ctx {
             Some(g) => format!("{}-{}-g{g}", suite.as_str(), started.timestamp()),
             None => format!("{}-{}", suite.as_str(), started.timestamp()),
         });
+        // Whether this process may touch a cluster AT ALL: the coordination lock and the client
+        // below both hang off this. There is NO runtime opt-out — a shipped run takes the roll
+        // lock or it fails to start, which is the whole point of a fail-closed guard. The one way
+        // to say no is `coordinate=false`, which only the `cfg(test)` fixture `Ctx::new_for_test`
+        // passes: an in-process unit test has no cluster and must not reach one, while the
+        // out-of-process test runs the real binary against a fake API server over KUBECONFIG.
         let coordination_enabled = coordinate;
         let group_owner = parent_run && suite == Suite::Hourly && group.is_none_or(|index| index == 0);
         let coordination_group = group_owner.then(|| std::env::var("KLOUDLITE_SLO_JOB_NAME").unwrap_or_default()).filter(|name| !name.is_empty());
         let coordination = if parent_run && coordination_enabled && (suite != Suite::Hourly || group_owner) {
-            Some(crate::coordination::acquire(crate::drill::incluster()?, &effective_run_id).await?)
+            Some(crate::coordination::acquire(crate::coordination::client().await?, &effective_run_id).await?)
         } else if parent_run && coordination_enabled && suite == Suite::Hourly && group.is_some() {
             let job_name = std::env::var("KLOUDLITE_SLO_JOB_NAME").map_err(|_| anyhow::anyhow!("hourly probe has no job name"))?;
-            crate::coordination::wait_for_group_owner(crate::drill::incluster()?, &job_name, Duration::from_secs(120)).await?;
+            crate::coordination::wait_for_group_owner(crate::coordination::client().await?, &job_name, Duration::from_secs(120)).await?;
             None
         } else {
             None
@@ -252,7 +262,9 @@ impl Ctx {
             // Reads `KUBECONFIG` (or the in-cluster ServiceAccount) itself, which is why `Config`
             // carries no kubeconfig field. The probe is never the reason a run fails to start:
             // no cluster reachable means the Kubernetes-only steps skip, and HTTP still runs.
-            kube: if coordinate {
+            // Only a context allowed to coordinate holds a client at all: the in-process test
+            // fixture must not reach a cluster even through a kubeconfig lying around the machine.
+            kube: if coordination_enabled {
                 match kube::Client::try_default().await {
                     Ok(c) => Some(c),
                     Err(e) => {
@@ -367,7 +379,7 @@ impl Ctx {
     pub async fn release_coordination(&mut self) -> anyhow::Result<()> {
         if let Some(lock) = self.coordination.take() {
             if let Some(job_name) = self.coordination_group.take() {
-                let client = crate::drill::incluster()?;
+                let client = crate::coordination::client().await?;
                 let pod_uid = std::env::var("KLOUDLITE_POD_UID").unwrap_or_default();
                 crate::coordination::wait_for_group(client, &job_name, &pod_uid, Duration::from_secs(3300)).await?;
             }

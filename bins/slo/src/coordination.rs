@@ -16,6 +16,15 @@ pub struct RollLock {
     resource_version: String,
 }
 
+pub async fn client() -> Result<kube::Client> {
+    if std::env::var_os("KUBERNETES_SERVICE_HOST").is_some() || std::env::var_os("KUBERNETES_SERVICE_PORT").is_some() {
+        return crate::drill::incluster();
+    }
+    kube::Client::try_default()
+        .await
+        .map_err(|e| anyhow!("no kube client for roll coordination: {e}"))
+}
+
 pub async fn acquire(client: kube::Client, run_id: &str) -> Result<RollLock> {
     let api = Api::namespaced(client.clone(), NAMESPACE);
     let pod_uid = std::env::var("KLOUDLITE_POD_UID").unwrap_or_else(|_| "manual".into());
