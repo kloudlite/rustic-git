@@ -1,4 +1,4 @@
-import { For, Show, createEffect, createMemo, createSignal, onCleanup, onMount, untrack, type JSX } from "solid-js";
+import { For, Show, createEffect, createMemo, createSignal, on, onCleanup, onMount, untrack, type JSX } from "solid-js";
 import { marked } from "marked";
 import "../syntax";
 import { Icon } from "../ui/Icon";
@@ -1164,9 +1164,17 @@ function ToolGroup(props: { rows: Action[] }) {
   const t = setInterval(() => setNow(Date.now()), 500);
   onCleanup(() => clearInterval(t));
   const state = () => timing(props.rows, now());
-  const [open, setOpen] = createSignal(true);
-  // A finished group folds itself away; a failure keeps it open, like a single row does.
-  createEffect(() => !state().running && !props.rows.some((r) => r.ok === false) && setOpen(false));
+  // Open while it runs; a group that arrives finished (a replayed transcript) starts folded.
+  const [open, setOpen] = createSignal(untrack(() => state().running));
+  // A finished group folds itself away ONCE, on the moment it finishes; a failure keeps it open,
+  // like a single row does. Folding on every clock tick re-closed the group 500 ms after the person
+  // opened it (owner, 2026-09-18: "its closing immediately").
+  createEffect(
+    on(
+      () => state().running,
+      (running, was) => was && !running && !props.rows.some((r) => r.ok === false) && setOpen(false),
+    ),
+  );
   return (
     <div class="flex flex-col">
       <button class="group flex w-full items-baseline gap-2 py-px text-left" onClick={() => setOpen((v) => !v)}>
