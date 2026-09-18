@@ -396,14 +396,19 @@ pub async fn ide_server(c: &mut Ctx) {
     let Some(id) = ws_id else {
         return c.skip("ide.exec", "the tool server never came up");
     };
+    // Cloned: the step's closure takes one, and the sandbox check after it needs the same pod.
+    let for_step = id.clone();
     c.step("ide.exec", EXEC, move |c| {
         async move {
             // Output, not only an exit code: build fb3673f1's login shell died in /etc/profile with
             // status 0 and `true` passed on a server that ran nothing.
             let body = r#"{"cmd":"echo ide-$(id -un)"}"#;
-            let script = format!("curl -sf -X POST http://127.0.0.1:7788/tools/exec -H 'content-type: application/json' -d '{body}'");
-            let (code, out, err) = ws_exec(c, &id, &script, EXEC).await?;
-            drop_ws(c, &id).await;
+            // The token from the file this container mounts: the tool server takes nothing else.
+            let script = format!(
+                "curl -sf -X POST http://127.0.0.1:7788/tools/exec -H 'content-type: application/json' \
+                 -H \"authorization: Bearer $(cat {WS_TOKEN_FILE})\" -d '{body}'"
+            );
+            let (code, out, err) = ws_exec(c, &for_step, &script, EXEC).await?;
             if code != 0 {
                 return Err(anyhow!("the tool call exited {code}: {}", err.trim()));
             }
@@ -411,6 +416,56 @@ pub async fn ide_server(c: &mut Ctx) {
                 return Err(anyhow!("exec through the tool server did not run as kl with exit_code 0: {}", out.trim()));
             }
             Ok(())
+        }
+        .boxed()
+    })
+    .await;
+    sandbox_active(c, &id).await;
+    drop_ws(c, &id).await;
+}
+
+/// `ide.sandbox.active`: the tool server says, in its own log, that it wrapped an exec.
+///
+/// A POSITIVE signal on purpose. Three outages came from believing the sandbox was on because
+/// nothing said it was off — a log with no `ide.sandbox.unavailable` is equally what a server that
+/// has run no execs looks like. The line is written once, by the preflight that actually started
+/// `bwrap` with the real flags, so its presence is the only thing that means execs are sandboxed.
+///
+/// Runs AFTER `ide.exec`, which is the first exec: the preflight is lazy, so before it there is
+/// nothing to have said anything.
+///
+/// A failure reads "execs are not sandboxed" and carries the reason the server gave, because
+/// `ide.sandbox.unavailable` names WHY on the same line — today, on the fleet, that is
+/// `preflight:bwrap: setting up uid map: Operation not permitted` (spec §4.7), which is a known
+/// open item rather than a regression.
+async fn sandbox_active(c: &mut Ctx, id: &str) {
+    const ID: &str = "ide.sandbox.active";
+    if c.kube.is_none() {
+        return c.skip(ID, "no kubeconfig");
+    }
+    let ws = id.to_string();
+    c.step(ID, EXEC, move |c| {
+        let ws = ws.clone();
+        async move {
+            let Some(k) = c.kube.clone() else { return Err(anyhow!("no kubeconfig")) };
+            let ns = kloudlite_workspaces::crd::ws_namespace(&c.cfg.probe_user, "");
+            let pods: kube::Api<k8s_openapi::api::core::v1::Pod> = kube::Api::namespaced(k, &ns);
+            let text = pods
+                .logs(&ws, &kube::api::LogParams { container: Some("workspace".into()), tail_lines: Some(500), ..Default::default() })
+                .await
+                .context("could not read the workspace container's log")?;
+            if text.contains("ide.sandbox.active") {
+                return Ok(());
+            }
+            // The server's own reason if it gave one, so a failure is a sentence rather than an
+            // absence somebody has to go and look up.
+            let why = text
+                .lines()
+                .rev()
+                .find(|l| l.contains("ide.sandbox.unavailable"))
+                .map(|l| l.chars().take(200).collect::<String>())
+                .unwrap_or_else(|| "the server said nothing about the sandbox at all".to_string());
+            Err(anyhow!("execs are not sandboxed: {why}"))
         }
         .boxed()
     })

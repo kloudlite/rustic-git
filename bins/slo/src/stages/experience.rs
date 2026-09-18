@@ -37,6 +37,7 @@ pub const IDS: &[&str] = &[
     "ws.cache.travels",
     "ide.serve.up",
     "ide.exec",
+    "ide.sandbox.active",
     "ws.tree.cut",
     "ws.tree.isolated",
     "ws.tree.no_travel",
@@ -143,7 +144,9 @@ pub async fn run(c: &mut Ctx) {
             "ws.cache.travels" => super::experience_ws::cache_in_tree(c).await,
             // One workspace, two assertions about its tool server.
             "ide.serve.up" => super::experience_ws::ide_server(c).await,
-            "ide.exec" => {}
+            // Both filed by the call above: the sandbox line can only be read after the first
+            // exec has made the server look for `bwrap` at all.
+            "ide.exec" | "ide.sandbox.active" => {}
             // One workspace, five assertions about the trees served from its tool server.
             "ws.tree.cut" => super::experience_trees::trees(c).await,
             "ws.tree.isolated" | "ws.tree.no_travel" | "ws.tree.ports" | "ws.tree.closed" => {}

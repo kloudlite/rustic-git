@@ -580,6 +580,7 @@ export const CATALOGUE: [string, string, string, string, string, string][] = [
   ["ws.cache.travels", "Workspaces", "A file written under `{ws}/.cache` before a push is present in a workspace restored from that push", "95 % ≤ 240000 ms", "hourly", "14 · Experience"],
   ["ide.serve.up", "Workspaces", "`kl ide serve` inside a fresh workspace answers /healthz within 240 s of the create", "95 % ≤ 240000 ms", "hourly", "14 · Experience"],
   ["ide.exec", "Workspaces", "An exec through the workspace's own tool API runs as `kl` and answers exit code 0", "99.9 %", "hourly", "14 · Experience"],
+  ["ide.sandbox.active", "Workspaces", "The workspace's tool server reports `ide.sandbox.active` after the first exec, so execs really are wrapped", "99.9 %", "hourly", "14 · Experience"],
   ["ws.tree.cut", "Workspaces", "A tree asked for on a running workspace is ready within 10 s, lists the source's files, and `main` is refused a path under `.agents/`", "95 % ≤ 60000 ms", "hourly", "14 · Experience"],
   ["ws.tree.isolated", "Workspaces", "A file written in a tree is not there in `main`, and neither is one written in `main` there in the tree", "99.9 %", "hourly", "14 · Experience"],
   ["ws.tree.no_travel", "Workspaces", "A workspace pushed with a tree restores elsewhere with `.agents/{name}` empty", "95 % ≤ 290000 ms", "hourly", "14 · Experience"],

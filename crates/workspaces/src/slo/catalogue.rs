@@ -539,6 +539,10 @@ pub const CATALOGUE: &[Slo] = &[
     // call every agent makes first. Read from INSIDE the pod, the way the ssh tunnel would.
     Slo { id: "ide.serve.up", feature: "Workspaces", sli: "`kl ide serve` inside a fresh workspace answers /healthz within 240 s of the create", target: p95(240_000), suite: Suite::Hourly, stage: "14 · Experience" },
     Slo { id: "ide.exec", feature: "Workspaces", sli: "An exec through the workspace's own tool API runs as `kl` and answers exit code 0", target: avail(99.9), suite: Suite::Hourly, stage: "14 · Experience" },
+    // A POSITIVE signal, and the reason this id exists at all: three outages came from believing
+    // the sandbox was on because nothing said it was off. Only a preflight that actually started
+    // `bwrap` writes that line (spec §4.7).
+    Slo { id: "ide.sandbox.active", feature: "Workspaces", sli: "The workspace's tool server reports `ide.sandbox.active` after the first exec, so execs really are wrapped", target: avail(99.9), suite: Suite::Hourly, stage: "14 · Experience" },
     // Subagent trees (spec §4.8). All five read through the workspace's own tool server, because
     // the tree only exists as something a session acts on: a subvolume nobody can address is not
     // the thing being probed.

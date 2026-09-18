@@ -533,20 +533,54 @@ asserts under 50 ms).
 `bubblewrap` joins `WS_BASE_PACKAGES` so it comes from the pin like everything else. The shell
 sidecar (§2) does **not** use it: the shell is the person's, and its boundary is the container.
 
-**As built (2026-09-18): the wrapper is asserted, never executed, in CI.** `bwrap_argv` is held to
-the argv above element-by-element by
-`crates/ide/tests/trees.rs::the_sandbox_binds_the_tree_the_store_and_nothing_else`, but no test
-runs a wrapped command: `sandbox::available()` probes for the binary once per process and answers
-false on a developer machine and in CI, so every test exec runs UNWRAPPED. Nothing in the gate can
-therefore tell whether bwrap works — the two things to watch above are fleet questions in the
-strict sense, not merely fleet-first ones.
+**As built (2026-09-18): the sandbox is OFF on the fleet, and `paths::confine` plus the tree `cwd`
+are the fence.** This is a statement of fact, not a plan — nothing wrapped by `bwrap` runs in a
+workspace pod today.
 
-The fleet signal is one log line: `ide.sandbox.unavailable` (reason `no-bwrap`), emitted once per
-tool-server process when the probe fails. **Its absence in a workspace pod's logs is the only
-positive evidence that execs are being wrapped**; its presence means every exec in that pod is
-running with `paths::confine` as its sole fence, which is the state §4.7 exists to improve on and
-is worth an alert if it outlives the rollout. Check it on the first pod after the roll, before
-reading anything else here as confirmed.
+`bwrap` needs `CLONE_NEWUSER`, and the workspace pods' runtime (gVisor, `runtimeClass`) refuses an
+unprivileged user namespace to uid 1000. Run by hand inside `ws-632cf9f23d9f2fbf` with the real
+argv, it answers:
+
+```
+bwrap: setting up uid map: Operation not permitted
+```
+
+This cost three outages in two rolls, each from a check weaker than the thing it stood for: the
+argv was asserted against itself but never executed (`--ro-bind /home/kl/.nix-profile`, a path no
+pod has, failed every exec); then the binary was looked for on a PATH that does not carry the
+profile (`available()` answered false and every exec ran unwrapped, silently); and the third would
+have been this one, had the runtime not been tested by hand before the roll. The standing lesson:
+**a sandbox is not trusted until it has started.** `sandbox::usable` now runs the real flags with
+`/bin/true` once per process and logs `ide.sandbox.unavailable reason=preflight:<first stderr
+line>`; only a preflight that passed logs `ide.sandbox.active`.
+
+The fleet signal is therefore POSITIVE and must be read that way: `ide.sandbox.active` in a
+workspace pod's log means execs are wrapped. An absence proves nothing — it is equally what a
+server that has run no execs looks like, which is exactly how "bwrap is on" was believed while
+nothing was wrapped at all. (An earlier revision of this note said the opposite; it was wrong.)
+
+What guards an exec today, with the wrapper off:
+
+- `paths::confine` on every path a tool NAMES, and `walk_allows` on every path a walk discovers;
+- the exec's `cwd`, which is the tree root;
+- the pod boundary itself — one tenant, one pod, one uid.
+
+A shell can still `cd ..` out of its tree into the workspace, which is what §4.7 exists to close
+and does not close yet. A subagent is confined from the main tree's files by convention and by
+every TOOL call, not by the kernel.
+
+Candidates to evaluate later, none chosen:
+
+- **(a) setuid `bwrap`, or `CAP_SYS_ADMIN` on the workspace container.** Would work; weighs
+  directly against the hardening the runtime class exists for, and hands the tenant's own uid a
+  capability the pod is otherwise denied. The trade is worse than the problem unless the capability
+  can be dropped after the namespace is made.
+- **(b) gVisor's own per-exec isolation, `runsc exec` driven from the AGENT.** The agent is
+  privileged and already per node, so the capability sits where capabilities already are rather
+  than inside the tenant's pod. Costs a hop from the tool server to the agent on every exec, and a
+  new interface between them.
+- **(c) `unshare -rm` without a user namespace.** Impossible unprivileged — it is the same
+  `CLONE_NEWUSER` under another name, and it fails identically.
 
 ### 4.8 Probes
 
