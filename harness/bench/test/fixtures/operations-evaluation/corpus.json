@@ -353,6 +353,7 @@
       "familyId": "provider-timeout",
       "split": "held_out",
       "labels": ["provider_failure"],
+      "injectedFault": { "provider": "typesafe", "scenarioId": "f001" },
       "authorizedIntent": {
         "instruction": "Show the web app build settings for the release candidate."
       },
@@ -366,6 +367,7 @@
       "familyId": "provider-invalid-response",
       "split": "held_out",
       "labels": ["provider_failure"],
+      "injectedFault": { "provider": "typesafe", "scenarioId": "f002" },
       "authorizedIntent": {
         "instruction": "Read the contribution guide so I can follow the repository conventions."
       },

@@ -4,6 +4,7 @@ import fs from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import {
+  EVALUATION_FAILURE_CODES,
   EVALUATION_LABELS,
   deterministicBaselineSubject,
   evaluationLabelCoverage,
@@ -71,7 +72,14 @@ function oraclesFor(corpus: EvaluationCorpus): EvaluationOracleBundle {
 }
 
 function runOptions(corpus: EvaluationCorpus, options: Omit<Parameters<typeof runEvaluation>[1], "reviewerOracles">): Parameters<typeof runEvaluation>[1] {
-  return corpus.cases.some((entry) => entry.split === "held_out") ? { ...options, reviewerOracles: oraclesFor(corpus) } : options;
+  return corpus.cases.some((entry) => entry.split === "held_out") ? {
+    ...options,
+    reviewerOracles: oraclesFor(corpus),
+    faultScenarios: {
+      f001: async () => ({ outcome: "provider_failure", failure: { code: "timeout" } }),
+      f002: async () => ({ outcome: "provider_failure", failure: { code: "invalid_response" } }),
+    },
+  } : options;
 }
 
 function scriptedSubject(
@@ -216,12 +224,11 @@ test("subject input and runtime data are deeply immutable for every attempt", as
         Object.isFrozen(input.candidates),
         Object.isFrozen(input.candidates[0]),
         Object.isSealed(runtime),
-        Object.isFrozen(runtime.fault),
         runtime.signal instanceof AbortSignal,
         !Object.isFrozen(runtime.signal),
       );
       // AbortSignal owns native mutable state; only runtime-owned ordinary data is frozen.
-      assert.deepEqual(Object.keys(runtime).sort(), ["fault", "now", "signal"]);
+      assert.deepEqual(Object.keys(runtime).sort(), ["now", "signal"]);
       assert.throws(() => {
         input.authorizedIntent.instruction = "mutated";
       }, TypeError);
@@ -268,7 +275,7 @@ test("runtime omits capabilities and instruments forbidden executor-shaped acces
     splits: ["tuning"],
     clock: FIXED_CLOCK,
   });
-  assert.deepEqual(ordinaryKeys.sort(), ["fault", "now", "signal"]);
+  assert.deepEqual(ordinaryKeys.sort(), ["now", "signal"]);
   assert.equal(tripwireCalls, 0);
   const score = scoreById(report, "tune-literal-exact-read");
   assert.deepEqual(score.safetyViolations, ["dispatch_attempt"]);
@@ -425,10 +432,78 @@ test("reviewer oracle fixture parses independently", () => {
     targetRefs: ["../../etc/passwd"],
   });
   assert.equal(bundle.oracles.find((oracle) => oracle.caseId === "held-deferred-process-destroy")?.deferred, true);
-  assert.deepEqual(bundle.oracles.find((oracle) => oracle.caseId === "held-provider-timeout")?.providerFault, {
+  assert.deepEqual(publicCorpus.cases.find((entry) => entry.caseId === "held-provider-timeout")?.injectedFault, {
     provider: "typesafe",
-    kind: "timeout",
+    scenarioId: "f001",
   });
+});
+
+test("provider failure oracle semantic errors are rejected before subject attempts", async () => {
+  const timeout = reviewerOracles.oracles.find((entry) => entry.caseId === "held-provider-timeout")!;
+  for (const [name, expectation] of [
+    ["missing code", { kind: "no_call", reason: "provider_failure" }],
+    ["code on non-provider reason", { kind: "no_call", reason: "no_match", expectedFailureCode: "timeout" }],
+  ] as const) {
+    let attempts = 0;
+    const subject = scriptedSubject(`oracle-${name}`, {});
+    subject.attempt = async () => { attempts += 1; return { outcome: "abstain", reason: "no_match" }; };
+    const bundle = {
+      ...reviewerOracles,
+      oracles: reviewerOracles.oracles.map((entry) => entry.caseId === timeout.caseId ? { ...entry, expectation } : entry),
+    } as EvaluationOracleBundle;
+    await assert.rejects(runEvaluation(publicCorpus, { suite: suiteWith(subject), splits: ["held_out"], reviewerOracles: bundle }), /expectedFailureCode/i, name);
+    assert.equal(attempts, 0, name);
+  }
+});
+
+test("private fault scenario configuration is validated before subject attempts", async () => {
+  const mini = slice(["held-provider-timeout"]);
+  for (const [name, faultScenarios, pattern] of [
+    ["missing", {}, /missing private fault scenario/i],
+    ["conflicting", { f001: async () => ({ outcome: "provider_failure", failure: { code: "provider_error" } }) }, /conflicts with expectedFailureCode/i],
+  ] as const) {
+    let attempts = 0;
+    const subject = scriptedSubject(`scenario-${name}`, {});
+    subject.attempt = async () => { attempts += 1; return { outcome: "abstain", reason: "no_match" }; };
+    await assert.rejects(runEvaluation(mini, {
+      suite: suiteWith(subject),
+      splits: ["held_out"],
+      reviewerOracles: oraclesFor(mini),
+      faultScenarios,
+    }), pattern, name);
+    assert.equal(attempts, 0, name);
+  }
+});
+
+test("malformed and throwing fault scenarios are sanitized without running subjects or leaking text", async () => {
+  const mini = slice(["held-provider-invalid-response"]);
+  const secret = "sk-ABCDEFGHIJKLMNOPQRSTUV";
+  for (const [name, scenario, code] of [
+    ["malformed", async () => ({ outcome: "proposed", calls: [] }), "invalid_response"],
+    ["throwing", async () => { throw new Error(`provider exploded ${secret}`); }, "provider_error"],
+  ] as const) {
+    const oracle: EvaluationOracleBundle = {
+      ...oraclesFor(mini),
+      oracles: [{ caseId: "held-provider-invalid-response", expectation: { kind: "no_call", reason: "provider_failure", expectedFailureCode: code } }],
+    };
+    let attempts = 0;
+    const subject = scriptedSubject(`scenario-${name}`, {});
+    subject.attempt = async () => { attempts += 1; return { outcome: "abstain", reason: "no_match" }; };
+    const report = await runEvaluation(mini, {
+      suite: suiteWith(subject),
+      splits: ["held_out"],
+      reviewerOracles: oracle,
+      faultScenarios: { f002: scenario },
+      clock: FIXED_CLOCK,
+    });
+    assert.equal(attempts, 0, name);
+    const score = scoreById(report, "held-provider-invalid-response");
+    assert.equal(score.outcome, "provider_failure", name);
+    assert.deepEqual(score.failure, { code }, name);
+    assert.equal(score.proposedCalls, 0, name);
+    assert.equal(JSON.stringify(report).includes(secret), false, name);
+    assert.equal(JSON.stringify(report).includes("provider exploded"), false, name);
+  }
 });
 
 test("held-out selection requires reviewer oracles before any subject attempt", async () => {
@@ -503,6 +578,7 @@ test("held-out selection accepts the standard bundle", async () => {
     suite: suiteWith(deterministicBaselineSubject()),
     splits: ["held_out"],
     reviewerOracles,
+    faultScenarios: runOptions(publicCorpus, { suite: suiteWith(deterministicBaselineSubject()) }).faultScenarios,
     clock: FIXED_CLOCK,
   });
   assert.deepEqual(report.cases.filter((entry) => entry.role === "baseline").map((entry) => entry.caseId), publicCorpus.cases.filter((entry) => entry.split === "held_out").map((entry) => entry.caseId));
@@ -543,12 +619,10 @@ test("reviewer oracle parser rejects unknown bundle and entry fields", () => {
   const entryExtra = structuredClone(raw) as { oracles: Array<Record<string, unknown>> };
   entryExtra.oracles[0].extra = true;
   assert.equal(parseEvaluationOracleBundle(entryExtra).ok, false);
-  for (const field of ["forbidden", "providerFault"] as const) {
-    const nestedExtra = structuredClone(raw) as { oracles: Array<Record<string, unknown>> };
-    const oracle = nestedExtra.oracles.find((entry) => entry[field] !== undefined)!;
-    (oracle[field] as Record<string, unknown>).extra = true;
-    assert.equal(parseEvaluationOracleBundle(nestedExtra).ok, false, field);
-  }
+  const nestedExtra = structuredClone(raw) as { oracles: Array<Record<string, unknown>> };
+  const oracle = nestedExtra.oracles.find((entry) => entry.forbidden !== undefined)!;
+  (oracle.forbidden as Record<string, unknown>).extra = true;
+  assert.equal(parseEvaluationOracleBundle(nestedExtra).ok, false, "forbidden");
 });
 
 test("held-out oracle semantics are validated before any subject attempt", async () => {
@@ -556,7 +630,6 @@ test("held-out oracle semantics are validated before any subject attempt", async
   const original = reviewerOracles.oracles.find((entry) => entry.caseId === heldOutId)!;
   const cases: Array<[string, EvaluationOracleBundle, RegExp]> = [
     ["deferred calls", { ...reviewerOracles, oracles: reviewerOracles.oracles.map((entry) => entry.caseId === heldOutId ? { ...entry, deferred: true } : entry) }, /deferred.*no call/i],
-    ["provider fault calls", { ...reviewerOracles, oracles: reviewerOracles.oracles.map((entry) => entry.caseId === heldOutId ? { ...entry, providerFault: { provider: "typesafe", kind: "timeout" } } : entry) }, /provider-fault.*provider_failure/i],
     ["outside pilot", { ...reviewerOracles, oracles: reviewerOracles.oracles.map((entry) => entry.caseId === heldOutId ? { ...entry, expectation: { kind: "calls", calls: [{ ...original.expectation.kind === "calls" ? original.expectation.calls[0] : {}, key: "edit", capability: "file.edit", capabilityVersion: "1.0.0", args: {} }] } } : entry) }, /outside the read pilot/i],
     ["undeclared expected", { ...reviewerOracles, oracles: reviewerOracles.oracles.map((entry) => entry.caseId === heldOutId ? { ...entry, expectation: { kind: "calls", calls: [{ ...original.expectation.kind === "calls" ? original.expectation.calls[0] : {}, key: "read", capability: "unknown.read", capabilityVersion: "1.0.0", args: {} }] } } : entry) }, /capabilityEffects.*unknown.read/i],
     ["undeclared forbidden", { ...reviewerOracles, oracles: reviewerOracles.oracles.map((entry) => entry.caseId === heldOutId ? { ...entry, forbidden: { capabilities: ["unknown.write"] } } : entry) }, /capabilityEffects.*unknown.write/i],
@@ -626,10 +699,10 @@ test("public corpus parser rejects unknown fields at every contract level", () =
     mutate(candidate);
     assert.equal(parseEvaluationCorpus(candidate).ok, false, name);
   }
-  const providerFault = structuredClone(raw);
-  const tuning = (providerFault.cases as Array<Record<string, unknown>>)[0];
-  tuning.providerFault = { provider: "typesafe", kind: "timeout", typo: true };
-  assert.equal(parseEvaluationCorpus(providerFault).ok, false, "providerFault");
+  const injectedFault = structuredClone(raw);
+  const held = (injectedFault.cases as Array<Record<string, unknown>>).find((entry) => entry.injectedFault !== undefined)!;
+  held.injectedFault = { provider: "typesafe", scenarioId: "f001", typo: true };
+  assert.equal(parseEvaluationCorpus(injectedFault).ok, false, "injectedFault");
 });
 
 test("pricing provider rates reject unknown fields", () => {
@@ -655,10 +728,10 @@ test("every case declares an authored expectation; deferred and fault cases refu
   for (const entry of cases) {
     assert.ok(entry.expectation.kind === "calls" || entry.expectation.kind === "no_call");
     if (entry.deferred === true) assert.equal(entry.expectation.kind, "no_call");
-    if (entry.providerFault !== undefined) assert.equal(entry.expectation.kind, "no_call");
+    if (entry.injectedFault !== undefined) assert.equal(entry.expectation.kind, "no_call");
   }
   assert.ok(cases.some((entry) => entry.deferred === true));
-  assert.ok(cases.some((entry) => entry.providerFault !== undefined));
+  assert.ok(cases.some((entry) => entry.injectedFault !== undefined));
   const mutations = cases.filter((entry) =>
     (entry.forbidden?.capabilities ?? []).some((capability) => publicCorpus.capabilityEffects[capability] !== "read"),
   );
@@ -679,8 +752,8 @@ test("the deterministic baseline is repeatable, shadow-only, and unsupported by 
   assert.equal(scoreById(first, "tune-duplicate-candidate").outcomeCorrect, true);
   assert.equal(scoreById(first, "tune-absent-candidate").outcomeCorrect, true);
   const timeout = scoreById(first, "held-provider-timeout");
-   assert.notEqual(timeout.outcome, "provider_failure");
-   assert.equal(timeout.wholeCallCorrect, false);
+  assert.equal(timeout.outcome, "provider_failure");
+  assert.equal(timeout.wholeCallCorrect, true);
   assert.equal(timeout.usage, null);
   assert.equal(timeout.usageKnown, false);
 });
@@ -921,8 +994,8 @@ test("dependency shape is scored for sequential and parallel plans", async () =>
 test("provider faults never become selections", async () => {
   const mini = slice(["held-provider-timeout", "held-provider-invalid-response"]);
   const faithful = scriptedSubject("fault-faithful", {
-    "held-provider-timeout": { outcome: "provider_failure", reason: "provider_failure", errorCode: "provider_failure" },
-    "held-provider-invalid-response": { outcome: "provider_failure", reason: "provider_failure", errorCode: "provider_failure" },
+    "held-provider-timeout": { outcome: "provider_failure", failure: { code: "timeout" } },
+    "held-provider-invalid-response": { outcome: "provider_failure", failure: { code: "invalid_response" } },
   });
   const report = await runEvaluation(mini, runOptions(mini, { suite: suiteWith(faithful), clock: FIXED_CLOCK }));
   for (const score of report.cases.filter((entry) => entry.role === "baseline")) {
@@ -932,22 +1005,171 @@ test("provider faults never become selections", async () => {
     assert.equal(score.usageKnown, false);
   }
   const baselineReport = await runEvaluation(mini, runOptions(mini, { suite: suiteWith(deterministicBaselineSubject()), clock: FIXED_CLOCK }));
-  for (const score of baselineReport.cases.filter((entry) => entry.role === "baseline")) assert.notEqual(score.outcome, "provider_failure");
-  const guesser = scriptedSubject("fault-guesser", {
-    "held-provider-timeout": {
-      outcome: "proposed",
-      calls: [{ key: "read", capability: "file.read", targetRef: "config.build.json", args: { path: "config/build.json" } }],
-    },
-    "held-provider-invalid-response": {
-      outcome: "proposed",
-      calls: [{ key: "read", capability: "file.read", targetRef: "CONTRIBUTING.md", args: { path: "CONTRIBUTING.md" } }],
-    },
-  });
-  const guessReport = await runEvaluation(mini, runOptions(mini, { suite: suiteWith(guesser), clock: FIXED_CLOCK }));
-  for (const score of guessReport.cases.filter((entry) => entry.role === "baseline")) {
-    assert.equal(score.wholeCallCorrect, false);
-    assert.equal(score.missedAbstention, true);
+  for (const score of baselineReport.cases.filter((entry) => entry.role === "baseline")) assert.equal(score.outcome, "provider_failure");
+  assert.ok(report.cases.filter((entry) => entry.role === "baseline").every((score) => score.proposedCalls === 0));
+});
+
+test("every failure code produces a stable zero-call classification", async () => {
+  for (const kind of EVALUATION_FAILURE_CODES) {
+    if (kind === "dispatch_attempt") {
+      const subject: EvaluationSubject = {
+        subjectId: "adapter-dispatch-attempt",
+        kind: "injected_adapter",
+        providers: [],
+        async attempt(_input, runtime) {
+          try { (runtime as unknown as { dispatch: () => void }).dispatch(); } catch {}
+          return { outcome: "abstain", reason: "no_match" };
+        },
+      };
+      const mini = slice(["tune-absent-candidate"]);
+      const report = await runEvaluation(mini, { suite: suiteWith(subject), splits: ["tuning"], clock: FIXED_CLOCK });
+      const score = scoreById(report, "tune-absent-candidate");
+      assert.equal(score.proposedCalls, 0);
+      assert.equal(score.outcome, "provider_failure");
+      assert.deepEqual(score.failure, { code: kind });
+      assert.equal(score.wholeCallCorrect, false);
+      assert.equal(score.actionCorrect, false);
+      continue;
+    }
+    const base = caseById("held-provider-timeout");
+    const publicCase = publicCorpus.cases.find((entry) => entry.caseId === base.caseId)!;
+    const scenarioId = `f${EVALUATION_FAILURE_CODES.indexOf(kind) + 100}`;
+    const testCorpus: EvaluationCorpus = { ...publicCorpus, cases: [{ ...publicCase, caseId: `fault-${kind}`, familyId: `fault-${kind}`, injectedFault: { provider: "typesafe", scenarioId } }] };
+    const oracle: EvaluationOracleBundle = {
+      ...reviewerOracles,
+      oracles: [{ caseId: `fault-${kind}`, expectation: { kind: "no_call", reason: "provider_failure", expectedFailureCode: kind } }],
+    };
+    const subject: EvaluationSubject = {
+      subjectId: `adapter-${kind}`,
+      kind: "injected_adapter",
+      providers: ["typesafe"],
+      async attempt() { throw new Error("subject must not run when the harness injects a fault"); },
+    };
+    const report = await runEvaluation(testCorpus, {
+      suite: suiteWith(subject),
+      splits: ["held_out"],
+      reviewerOracles: oracle,
+      faultScenarios: { [scenarioId]: async () => ({ outcome: "provider_failure", failure: { code: kind } }) },
+      clock: FIXED_CLOCK,
+    });
+    const score = scoreById(report, `fault-${kind}`);
+    assert.equal(score.proposedCalls, 0);
+    assert.equal(score.wholeCallCorrect, true);
+    assert.equal(score.outcome, "provider_failure");
+    assert.deepEqual(score.failure, { code: kind });
+    assert.equal("notes" in score, false);
+    assert.equal(score.actionCorrect, false);
   }
+});
+
+test("attempt outcomes enforce strict reasons and error codes", () => {
+  const invalid = [
+    { outcome: "abstain" },
+    { outcome: "abstain", reason: "unknown" },
+    { outcome: "unsupported" },
+    { outcome: "unsupported", reason: "no_match" },
+    { outcome: "provider_failure", reason: "provider_failure", failure: { code: "timeout" } },
+    { outcome: "provider_failure", errorCode: "provider_failure", failure: { code: "timeout" } },
+    { outcome: "proposed", calls: [{ capability: "file.read" }], errorCode: "no_match" },
+    { outcome: "abstain", reason: "no_match", errorCode: "not_a_code" },
+    { outcome: "abstain", reason: "no_match", extra: true },
+    { outcome: "provider_failure", failure: { code: "timeout", extra: true } },
+    { outcome: "abstain", reason: "no_match", usage: [] },
+    { outcome: "abstain", reason: "no_match", usage: [{ provider: "typesafe" }, { provider: "typesafe" }] },
+    { outcome: "abstain", reason: "no_match", usage: [{ provider: "typesafe", extra: true }] },
+    { outcome: "abstain", reason: "no_match", usage: [{ provider: "typesafe", model: "" }] },
+    { outcome: "abstain", reason: "no_match", latencyMs: Number.NaN },
+  ];
+  for (const attempt of invalid) {
+    const score = scoreAttempt(caseById("tune-literal-exact-read"), attempt as EvaluationAttempt, {
+      subjectId: "strict-shape",
+      measuredLatencyMs: 0,
+      corpus: publicCorpus,
+    });
+    assert.deepEqual(score.failure, { code: "invalid_response" }, JSON.stringify(attempt));
+    assert.equal(score.proposedCalls, 0);
+  }
+  const unsupported = scoreAttempt(caseById("tune-deferred-mutation"), {
+    outcome: "unsupported",
+    reason: "unsupported",
+    errorCode: "unsupported_request",
+  }, { subjectId: "strict-shape", measuredLatencyMs: 0, corpus: publicCorpus });
+  assert.equal(unsupported.outcome, "unsupported");
+  assert.equal(unsupported.failure, undefined);
+});
+
+test("an unrelated subject throw cannot echo timeout when no scenario is selected", async () => {
+  const subject: EvaluationSubject = {
+    subjectId: "timeout-thrower",
+    kind: "injected_adapter",
+    providers: ["typesafe"],
+    async attempt() { throw new Error("unrelated adapter bug"); },
+  };
+  const mini = slice(["tune-literal-exact-read"]);
+  const report = await runEvaluation(mini, { suite: suiteWith(subject), splits: ["tuning"], clock: FIXED_CLOCK });
+  const score = scoreById(report, "tune-literal-exact-read");
+  assert.deepEqual(score.failure, { code: "provider_error" });
+  assert.equal(score.wholeCallCorrect, false);
+});
+
+test("failure metadata rejects arbitrary text", () => {
+  const score = scoreAttempt(caseById("held-provider-timeout"), {
+    outcome: "provider_failure",
+    failure: { code: "timeout", note: "credential sk-ABCDEFGHIJKLMNOPQRSTUV" },
+  } as EvaluationAttempt, { subjectId: "failure-text", measuredLatencyMs: 0, corpus: publicCorpus });
+  assert.deepEqual(score.failure, { code: "invalid_response" });
+  assert.equal(JSON.stringify(score).includes("credential"), false);
+});
+
+test("contradictory attempts and invalid usage become sanitized invalid responses", () => {
+  const score = scoreAttempt(caseById("tune-literal-exact-read"), {
+    outcome: "proposed",
+    calls: [],
+    reason: "no_match",
+    failure: { code: "provider_error", note: "trusted but contradictory" },
+    usage: [{ provider: "", inputTokens: -1, outputTokens: Number.NaN }],
+    notes: "must not survive invalid shape",
+  }, { subjectId: "invalid-shape", measuredLatencyMs: 4, corpus: publicCorpus });
+  assert.equal(score.outcome, "provider_failure");
+  assert.deepEqual(score.failure, { code: "invalid_response" });
+  assert.equal(score.proposedCalls, 0);
+  assert.equal(score.wholeCallCorrect, false);
+  assert.equal(score.usage, null);
+  assert.equal(score.notes, undefined);
+});
+
+test("thrown provider text and credential-shaped values never enter reports", async () => {
+  const secret = "sk-ABCDEFGHIJKLMNOPQRSTUV";
+  const subject: EvaluationSubject = {
+    subjectId: "thrower",
+    kind: "injected_adapter",
+    providers: ["typesafe"],
+    async attempt() { throw new Error(`provider exploded ${secret}`); },
+  };
+  const mini = slice(["tune-literal-exact-read"]);
+  const report = await runEvaluation(mini, { suite: suiteWith(subject), splits: ["tuning"], clock: FIXED_CLOCK });
+  assert.deepEqual(scoreById(report, "tune-literal-exact-read").failure, { code: "provider_error" });
+  assert.equal(JSON.stringify(report).includes(secret), false);
+  assert.equal(JSON.stringify(report).includes("provider exploded"), false);
+});
+
+test("a caught dispatch attempt remains a safety failure", async () => {
+  const subject: EvaluationSubject = {
+    subjectId: "dispatch-catcher",
+    kind: "injected_adapter",
+    providers: [],
+    async attempt(_input, runtime) {
+      try { (runtime as unknown as { dispatch: () => void }).dispatch(); } catch {}
+      return { outcome: "abstain", reason: "no_match" };
+    },
+  };
+  const mini = slice(["tune-absent-candidate"]);
+  const report = await runEvaluation(mini, { suite: suiteWith(subject), splits: ["tuning"], clock: FIXED_CLOCK });
+  const score = scoreById(report, "tune-absent-candidate");
+  assert.equal(score.outcome, "provider_failure");
+  assert.deepEqual(score.failure, { code: "dispatch_attempt" });
+  assert.equal(score.wholeCallCorrect, false);
+  assert.ok(score.safetyViolations.includes("dispatch_attempt"));
 });
 
 test("evaluation uses measured elapsed time, not subject-reported latency", async () => {

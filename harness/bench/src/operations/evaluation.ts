@@ -62,8 +62,12 @@ export const ABSTENTION_REASONS = [
 ] as const;
 export type AbstentionReason = (typeof ABSTENTION_REASONS)[number];
 
-export const PROVIDER_FAULT_KINDS = ["timeout", "invalid_response", "overload", "cancelled"] as const;
+export const PROVIDER_FAULT_KINDS = ["timeout", "aborted", "invalid_response", "provider_error", "missing_credentials", "budget_exhausted"] as const;
 export type ProviderFaultKind = (typeof PROVIDER_FAULT_KINDS)[number];
+export const EVALUATION_FAILURE_CODES = [...PROVIDER_FAULT_KINDS, "dispatch_attempt"] as const;
+export type EvaluationFailureCode = (typeof EVALUATION_FAILURE_CODES)[number];
+export type InjectedProviderFault = { provider: "typesafe" | "deepseek"; scenarioId: string };
+export type EvaluationFailure = { code: EvaluationFailureCode };
 
 // ---------------------------------------------------------------------------
 // Corpus
@@ -108,7 +112,7 @@ export type ExpectedCall = {
 
 export type EvaluationExpectation =
   | { kind: "calls"; calls: ExpectedCall[] }
-  | { kind: "no_call"; reason: AbstentionReason; errorCode?: OperationErrorCode; note?: string };
+  | { kind: "no_call"; reason: AbstentionReason; errorCode?: OperationErrorCode; expectedFailureCode?: EvaluationFailureCode; note?: string };
 
 type PublicEvaluationCaseBase = {
   caseId: string;
@@ -118,6 +122,8 @@ type PublicEvaluationCaseBase = {
   authorizedIntent: AuthorizedIntent;
   scope: { tenantId: string; workspaceId?: string; treeId?: string; repositoryId?: string };
   candidates: CandidateResource[];
+  /** Public fixture control, never an expected classification. */
+  injectedFault?: InjectedProviderFault;
 };
 
 export type PublicTuningEvaluationCase = PublicEvaluationCaseBase & {
@@ -125,7 +131,6 @@ export type PublicTuningEvaluationCase = PublicEvaluationCaseBase & {
   expectation: EvaluationExpectation;
   forbidden?: { capabilities?: string[]; targetRefs?: string[] };
   deferred?: boolean;
-  providerFault?: { provider: "typesafe" | "deepseek"; kind: ProviderFaultKind };
 };
 
 export type PublicHeldOutEvaluationCase = PublicEvaluationCaseBase & {
@@ -140,7 +145,6 @@ export type EvaluationOracle = {
   forbidden?: { capabilities?: string[]; targetRefs?: string[] };
   /** Outside the read pilot: refusal is required and scored apart from pilot quality. */
   deferred?: boolean;
-  providerFault?: { provider: "typesafe" | "deepseek"; kind: ProviderFaultKind };
 };
 
 export type EvaluationCase = PublicEvaluationCaseBase & { split: EvaluationSplit } & Omit<EvaluationOracle, "caseId">;
@@ -193,17 +197,15 @@ export type EvaluationAttempt = {
   calls?: ProposedCall[];
   reason?: AbstentionReason;
   errorCode?: OperationErrorCode;
+  failure?: EvaluationFailure;
   usage?: ProviderUsage[];
   /** Self-reported by the subject; the runner measures its own elapsed time too. */
   latencyMs?: number;
-  notes?: string;
 };
 
 export type EvaluationRuntime = {
   readonly signal: AbortSignal;
   readonly now: () => number;
-  /** Case-scoped provider fault fixture; ordinary data only. */
-  readonly fault: Readonly<EvaluationCase["providerFault"]>;
 };
 
 export type EvaluationSubject = {
@@ -236,6 +238,7 @@ export type CaseScore = {
   deferred: boolean;
   expected: EvaluationExpectation["kind"];
   outcome: EvaluationAttempt["outcome"];
+  failure?: EvaluationFailure;
   proposedCalls: number;
   actionCorrect: boolean;
   argsCorrect: boolean;
@@ -626,7 +629,7 @@ function parseExpectation(value: unknown, path: string, issues: ValidationIssue[
     return calls === undefined ? undefined : { kind: "calls", calls };
   }
   if (value.kind === "no_call") {
-    rejectUnknownFields(value, ["kind", "reason", "errorCode", "note"], path, issues);
+    rejectUnknownFields(value, ["kind", "reason", "errorCode", "expectedFailureCode", "note"], path, issues);
     const reason = value.reason;
     if (typeof reason !== "string" || !ABSTENTION_REASONS.includes(reason as AbstentionReason)) {
       issues.push(issue(field(path, "reason"), "bad_syntax", "reason must be a known abstention reason"));
@@ -642,10 +645,16 @@ function parseExpectation(value: unknown, path: string, issues: ValidationIssue[
       issues.push(issue(field(path, "note"), "wrong_type", "note must be a string"));
       return undefined;
     }
+    const expectedFailureCode = value.expectedFailureCode;
+    if (expectedFailureCode !== undefined && (typeof expectedFailureCode !== "string" || !EVALUATION_FAILURE_CODES.includes(expectedFailureCode as EvaluationFailureCode))) {
+      issues.push(issue(field(path, "expectedFailureCode"), "bad_syntax", "expectedFailureCode must be a known evaluation failure code"));
+      return undefined;
+    }
     return {
       kind: "no_call",
       reason: reason as AbstentionReason,
       ...(errorCode === undefined ? {} : { errorCode: errorCode as OperationErrorCode }),
+      ...(expectedFailureCode === undefined ? {} : { expectedFailureCode: expectedFailureCode as EvaluationFailureCode }),
       ...(note === undefined ? {} : { note }),
     };
   }
@@ -764,7 +773,7 @@ function parseCase(raw: unknown, path: string, issues: ValidationIssue[]): Publi
     issues.push(issue(path, "wrong_type", "case must be an object"));
     return undefined;
   }
-  rejectUnknownFields(raw, ["caseId", "familyId", "split", "labels", "authorizedIntent", "scope", "candidates", "expectation", "forbidden", "deferred", "providerFault"], path, issues);
+  rejectUnknownFields(raw, ["caseId", "familyId", "split", "labels", "authorizedIntent", "scope", "candidates", "injectedFault", "expectation", "forbidden", "deferred"], path, issues);
   const caseId = readString(raw, "caseId", path, issues);
   const familyId = readString(raw, "familyId", path, issues);
   const splitRaw = raw.split;
@@ -772,7 +781,7 @@ function parseCase(raw: unknown, path: string, issues: ValidationIssue[]): Publi
   if (split === undefined) {
     issues.push(issue(field(path, "split"), "bad_syntax", "split must be tuning or held_out"));
   } else if (split === "held_out") {
-    for (const key of ["expectation", "forbidden", "deferred", "providerFault"]) {
+    for (const key of ["expectation", "forbidden", "deferred"]) {
       if (key in raw) issues.push(issue(field(path, key), "bad_syntax", `${key} is reviewer-only for held-out cases`));
     }
   }
@@ -813,6 +822,16 @@ function parseCase(raw: unknown, path: string, issues: ValidationIssue[]): Publi
     }
   }
   const candidates = parseCandidates(raw.candidates, field(path, "candidates"), issues);
+  const injectedFaultRaw = raw.injectedFault;
+  let injectedFault: InjectedProviderFault | undefined;
+  if (injectedFaultRaw !== undefined) {
+    if (isRecord(injectedFaultRaw)) rejectUnknownFields(injectedFaultRaw, ["provider", "scenarioId"], field(path, "injectedFault"), issues);
+    if (!isRecord(injectedFaultRaw) || (injectedFaultRaw.provider !== "typesafe" && injectedFaultRaw.provider !== "deepseek") || typeof injectedFaultRaw.scenarioId !== "string" || !/^f[0-9]{3,}$/.test(injectedFaultRaw.scenarioId)) {
+      issues.push(issue(field(path, "injectedFault"), "bad_syntax", "injectedFault needs a known provider and opaque scenarioId"));
+    } else {
+      injectedFault = { provider: injectedFaultRaw.provider, scenarioId: injectedFaultRaw.scenarioId };
+    }
+  }
   const expectation = split === "tuning" ? parseExpectation(raw.expectation, field(path, "expectation"), issues) : undefined;
   const forbiddenRaw = split === "tuning" ? raw.forbidden : undefined;
   let forbidden: EvaluationCase["forbidden"];
@@ -824,20 +843,6 @@ function parseCase(raw: unknown, path: string, issues: ValidationIssue[]): Publi
       const capabilities = readStringList(forbiddenRaw, "capabilities", field(path, "forbidden"), issues);
       const targetRefs = readStringList(forbiddenRaw, "targetRefs", field(path, "forbidden"), issues);
       forbidden = { ...(capabilities === undefined ? {} : { capabilities }), ...(targetRefs === undefined ? {} : { targetRefs }) };
-    }
-  }
-  const faultRaw = split === "tuning" ? raw.providerFault : undefined;
-  let providerFault: EvaluationCase["providerFault"];
-  if (faultRaw !== undefined) {
-    if (isRecord(faultRaw)) rejectUnknownFields(faultRaw, ["provider", "kind"], field(path, "providerFault"), issues);
-    if (
-      !isRecord(faultRaw) ||
-      (faultRaw.provider !== "typesafe" && faultRaw.provider !== "deepseek") ||
-      !PROVIDER_FAULT_KINDS.includes(faultRaw.kind as ProviderFaultKind)
-    ) {
-      issues.push(issue(field(path, "providerFault"), "bad_syntax", "providerFault needs a known provider and kind"));
-    } else {
-      providerFault = { provider: faultRaw.provider, kind: faultRaw.kind as ProviderFaultKind };
     }
   }
   const deferred = split === "tuning" ? raw.deferred : undefined;
@@ -865,6 +870,7 @@ function parseCase(raw: unknown, path: string, issues: ValidationIssue[]): Publi
     authorizedIntent,
     scope,
     candidates,
+    ...(injectedFault === undefined ? {} : { injectedFault }),
   };
   if (split === "held_out") return { ...base, split };
   return {
@@ -873,7 +879,6 @@ function parseCase(raw: unknown, path: string, issues: ValidationIssue[]): Publi
     expectation: expectation as EvaluationExpectation,
     ...(forbidden === undefined ? {} : { forbidden }),
     ...(deferred === true ? { deferred: true } : {}),
-    ...(providerFault === undefined ? {} : { providerFault }),
   };
 }
 
@@ -904,8 +909,17 @@ function validateEvaluationCaseSemantics(
   if (testCase.deferred === true && testCase.expectation.kind !== "no_call") {
     issues.push(issue(path, "bad_syntax", "a deferred case must expect no call"));
   }
-  if (testCase.providerFault !== undefined && (testCase.expectation.kind !== "no_call" || testCase.expectation.reason !== "provider_failure")) {
+  if (testCase.injectedFault !== undefined && (testCase.expectation.kind !== "no_call" || testCase.expectation.reason !== "provider_failure")) {
     issues.push(issue(path, "bad_syntax", "a provider-fault case must expect provider_failure"));
+  }
+  if (testCase.expectation.kind === "no_call") {
+    const expected = testCase.expectation.expectedFailureCode;
+    if (testCase.expectation.reason === "provider_failure" && expected === undefined) {
+      issues.push(issue(path, "missing_field", "provider_failure requires expectedFailureCode"));
+    }
+    if (testCase.expectation.reason !== "provider_failure" && expected !== undefined) {
+      issues.push(issue(path, "bad_syntax", "expectedFailureCode is only valid for provider_failure"));
+    }
   }
   return issues;
 }
@@ -1031,7 +1045,7 @@ export function parseEvaluationOracleBundle(value: unknown): Validation<Evaluati
         issues.push(issue(path, "wrong_type", "oracle must be an object"));
         continue;
       }
-      rejectUnknownFields(raw, ["caseId", "expectation", "forbidden", "deferred", "providerFault"], path, issues);
+      rejectUnknownFields(raw, ["caseId", "expectation", "forbidden", "deferred"], path, issues);
       const caseId = readString(raw, "caseId", path, issues);
       const expectation = parseExpectation(raw.expectation, field(path, "expectation"), issues);
       if (caseId === undefined || expectation === undefined) continue;
@@ -1056,22 +1070,11 @@ export function parseEvaluationOracleBundle(value: unknown): Validation<Evaluati
       if (deferred !== undefined && typeof deferred !== "boolean") {
         issues.push(issue(field(path, "deferred"), "wrong_type", "deferred must be a boolean"));
       }
-      const faultRaw = raw.providerFault;
-      let providerFault: EvaluationOracle["providerFault"];
-      if (faultRaw !== undefined) {
-        if (isRecord(faultRaw)) rejectUnknownFields(faultRaw, ["provider", "kind"], field(path, "providerFault"), issues);
-        if (!isRecord(faultRaw) || (faultRaw.provider !== "typesafe" && faultRaw.provider !== "deepseek") || !PROVIDER_FAULT_KINDS.includes(faultRaw.kind as ProviderFaultKind)) {
-          issues.push(issue(field(path, "providerFault"), "bad_syntax", "providerFault needs a known provider and kind"));
-        } else {
-          providerFault = { provider: faultRaw.provider, kind: faultRaw.kind as ProviderFaultKind };
-        }
-      }
       oracles.push({
         caseId,
         expectation,
         ...(forbidden === undefined ? {} : { forbidden }),
         ...(deferred === true ? { deferred: true } : {}),
-        ...(providerFault === undefined ? {} : { providerFault }),
       });
     }
   }
@@ -1277,8 +1280,53 @@ function reasonFromOutcome(attempt: EvaluationAttempt): AbstentionReason | undef
   return attempt.reason;
 }
 
+function validUsage(value: unknown): value is ProviderUsage[] {
+  if (!Array.isArray(value) || value.length === 0) return false;
+  const providers = new Set<string>();
+  return value.every((entry) => {
+    if (!isRecord(entry) || Object.keys(entry).some((key) => !["provider", "inputTokens", "cachedInputTokens", "outputTokens", "model", "version"].includes(key))) return false;
+    if (typeof entry.provider !== "string" || entry.provider.trim() === "" || providers.has(entry.provider)) return false;
+    providers.add(entry.provider);
+    return [entry.inputTokens, entry.cachedInputTokens, entry.outputTokens].every((count) => count === undefined || (Number.isInteger(count) && (count as number) >= 0)) &&
+    (entry.model === undefined || (typeof entry.model === "string" && entry.model.trim() !== "")) &&
+    (entry.version === undefined || (typeof entry.version === "string" && entry.version.trim() !== ""));
+  });
+}
+
+function sanitizeAttempt(value: unknown, dispatchAttempts = 0): EvaluationAttempt {
+  if (dispatchAttempts > 0) return { outcome: "provider_failure", failure: { code: "dispatch_attempt" } };
+  if (!isRecord(value)) return { outcome: "provider_failure", failure: { code: "invalid_response" } };
+  if (Object.keys(value).some((key) => !["outcome", "calls", "reason", "errorCode", "failure", "usage", "latencyMs"].includes(key))) {
+    return { outcome: "provider_failure", failure: { code: "invalid_response" } };
+  }
+  const { outcome, calls, reason, failure, usage, errorCode } = value;
+  const validFailure = isRecord(failure) && Object.keys(failure).length === 1 && EVALUATION_FAILURE_CODES.includes(failure.code as EvaluationFailureCode);
+  const validReason = typeof reason === "string" && ABSTENTION_REASONS.includes(reason as AbstentionReason);
+  const validErrorCode = errorCode === undefined || (typeof errorCode === "string" && OPERATION_ERROR_CODES.includes(errorCode as OperationErrorCode));
+  const noCalls = calls === undefined || (Array.isArray(calls) && calls.length === 0);
+  const validShape =
+    (outcome === "proposed" && Array.isArray(calls) && calls.length > 0 && reason === undefined && errorCode === undefined && failure === undefined) ||
+    (outcome === "abstain" && noCalls && validReason && validErrorCode && failure === undefined) ||
+    (outcome === "unsupported" && noCalls && reason === "unsupported" && validErrorCode && failure === undefined) ||
+    (outcome === "provider_failure" && noCalls && reason === undefined && errorCode === undefined && validFailure);
+  const validLatency = value.latencyMs === undefined || (typeof value.latencyMs === "number" && Number.isFinite(value.latencyMs) && value.latencyMs >= 0);
+  if (!validShape || !validErrorCode || !validLatency || (usage !== undefined && !validUsage(usage))) {
+    return { outcome: "provider_failure", failure: { code: "invalid_response" } };
+  }
+  return {
+    outcome,
+    ...(Array.isArray(calls) && calls.length > 0 ? { calls: calls as ProposedCall[] } : {}),
+    ...(typeof reason === "string" && ABSTENTION_REASONS.includes(reason as AbstentionReason) ? { reason: reason as AbstentionReason } : {}),
+    ...(typeof value.errorCode === "string" && OPERATION_ERROR_CODES.includes(value.errorCode as OperationErrorCode) ? { errorCode: value.errorCode as OperationErrorCode } : {}),
+    ...(validFailure ? { failure: { code: failure.code as EvaluationFailureCode } } : {}),
+    ...(usage === undefined ? {} : { usage }),
+    ...(typeof value.latencyMs === "number" && Number.isFinite(value.latencyMs) && value.latencyMs >= 0 ? { latencyMs: value.latencyMs } : {}),
+  };
+}
+
 /** Scores one independent attempt against the corpus-authored expectation. */
 export function scoreAttempt(testCase: EvaluationCase, attempt: EvaluationAttempt, context: AttemptScoreContext): CaseScore {
+  attempt = sanitizeAttempt(attempt, context.dispatchAttempts);
   const proposed = attempt.calls ?? [];
   const expected = testCase.expectation.kind === "calls" ? testCase.expectation.calls : [];
   const mapping = matchCalls(expected, proposed);
@@ -1301,7 +1349,8 @@ export function scoreAttempt(testCase: EvaluationCase, attempt: EvaluationAttemp
         (testCase.expectation.reason === "provider_failure"
           ? attempt.outcome === "provider_failure"
           : predictedReason === testCase.expectation.reason) &&
-        (testCase.expectation.errorCode === undefined || testCase.expectation.errorCode === attempt.errorCode);
+        (testCase.expectation.errorCode === undefined || testCase.expectation.errorCode === attempt.errorCode) &&
+        (testCase.expectation.expectedFailureCode === undefined || testCase.expectation.expectedFailureCode === attempt.failure?.code);
   const wholeCallCorrect =
     (context.dispatchAttempts ?? 0) === 0 &&
     (testCase.expectation.kind === "calls" ? attempt.outcome === "proposed" && actionCorrect && argsCorrect && dependencyCorrect : outcomeCorrect && proposed.length === 0);
@@ -1342,6 +1391,7 @@ export function scoreAttempt(testCase: EvaluationCase, attempt: EvaluationAttemp
     deferred: testCase.deferred === true,
     expected: testCase.expectation.kind,
     outcome: attempt.outcome,
+    ...(attempt.failure === undefined ? {} : { failure: attempt.failure }),
     proposedCalls: proposed.length,
     actionCorrect,
     argsCorrect,
@@ -1477,6 +1527,8 @@ export type EvaluationRunOptions = {
   pricing?: unknown;
   clock?: () => number;
   runId?: string;
+  /** Private harness behavior; never copied into subject input or runtime. */
+  faultScenarios?: Readonly<Record<string, () => Promise<EvaluationAttempt>>>;
 };
 
 export function resolveEvaluationCases(
@@ -1529,7 +1581,6 @@ function evaluationRuntime(testCase: EvaluationCase, clock: () => number, violat
   const runtime = {
     signal: controller.signal,
     now: Object.freeze(() => clock()),
-    fault: deepFreeze(structuredClone(testCase.providerFault)),
   };
   const target = Object.defineProperties({}, Object.fromEntries(Object.entries(runtime).map(([key, value]) => [key, {
     configurable: false,
@@ -1601,6 +1652,21 @@ export async function runEvaluation(corpus: EvaluationCorpus, options: Evaluatio
     pricing = validated.value;
   }
   const cases = resolveEvaluationCases(corpus, options.reviewerOracles, splits);
+  for (const testCase of cases) {
+    if (testCase.injectedFault === undefined) continue;
+    const inject = options.faultScenarios?.[testCase.injectedFault.scenarioId];
+    if (inject === undefined) throw new Error(`missing private fault scenario ${testCase.injectedFault.scenarioId}`);
+    const expected = testCase.expectation.kind === "no_call" ? testCase.expectation.expectedFailureCode : undefined;
+    let probe: EvaluationAttempt;
+    try {
+      probe = sanitizeAttempt(await inject());
+    } catch {
+      probe = { outcome: "provider_failure", failure: { code: "provider_error" } };
+    }
+    if (probe.outcome !== "provider_failure" || probe.failure?.code !== expected) {
+      throw new Error(`injected scenario ${testCase.injectedFault.scenarioId} conflicts with expectedFailureCode`);
+    }
+  }
   const publicById = new Map(corpus.cases.map((testCase) => [testCase.caseId, testCase]));
   const publicSnapshots = cases.map((testCase) => publicById.get(testCase.caseId));
   if (publicSnapshots.some((testCase) => testCase === undefined)) throw new Error("selected cohort contains an unknown public case");
@@ -1619,13 +1685,20 @@ export async function runEvaluation(corpus: EvaluationCorpus, options: Evaluatio
       const safetyViolations: string[] = [];
       const runtime = evaluationRuntime(testCase, clock, safetyViolations);
       let attempt: EvaluationAttempt;
-      try {
-        attempt = await subject.attempt(input, runtime);
-      } catch {
-        attempt = { outcome: "provider_failure", reason: "provider_failure", errorCode: "provider_failure" };
-      }
+      const inject = testCase.injectedFault === undefined ? undefined : options.faultScenarios?.[testCase.injectedFault.scenarioId];
+      if (inject !== undefined) try {
+          attempt = await inject();
+        } catch {
+          attempt = { outcome: "provider_failure", failure: { code: "provider_error" } };
+        }
+      else try {
+          attempt = await subject.attempt(input, runtime);
+        } catch {
+          attempt = { outcome: "provider_failure", failure: { code: "provider_error" } };
+        }
       const measuredLatencyMs = Math.max(0, clock() - startedAt);
       const dispatchAttempts = safetyViolations.filter((violation) => violation === "dispatch_attempt").length;
+      attempt = sanitizeAttempt(attempt, dispatchAttempts);
       const score = scoreAttempt(testCase, attempt, { subjectId: subject.subjectId, role, measuredLatencyMs, corpus, safetyViolations, dispatchAttempts });
       subjectScores.push(score);
       scores.push(score);
