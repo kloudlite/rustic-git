@@ -23,3 +23,5 @@ Example — add NATS, then take the api service over:
 
     kl_environment_service_add {id: "devstack", service: {name: "nats", image: "nats:2", ports: [4222]}}
     kl_intercept {id: "devstack", service: "api", workspace: "svelte-backend", ports: [{from: 8080, to: 3000}]}
+
+- An environment is chosen for the whole space (the team) with `kl_env_switch`, never for one workspace: every workspace in the space resolves that environment’s services by bare name, and there is no per-workspace attach.
