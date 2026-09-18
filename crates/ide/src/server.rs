@@ -46,6 +46,11 @@ impl App {
 }
 
 pub fn router(app: Arc<App>) -> Router {
+    // Read from the config so a test can point it at a tempdir; the default is the file the keys
+    // beat projects into the workspace container and the shell sidecar does not mount.
+    let tokens = Arc::new(crate::auth::Tokens {
+        path: app.cfg.token_path.clone().unwrap_or_else(|| std::path::PathBuf::from(crate::auth::TOKEN_PATH)),
+    });
     Router::new()
         .route("/healthz", get(healthz))
         .route("/tools", get(crate::api::list))
@@ -69,6 +74,11 @@ pub fn router(app: Arc<App>) -> Router {
         // never a path or query; `/healthz` is untraced, and a stream is one span that ends at the
         // upgrade, never one per message. Untrusted like a public door: a caller's sampled flag
         // counts only for probe traffic, within the probe bucket (`kloudlite_trace::sampler`).
+        // ABOVE the trace layer, so a refused request is still one line in the log — a 401 from
+        // the shell sidecar is the fence working, and the fleet should be able to count them.
+        // Below nothing else: every route but `/healthz` needs the credential, including the two
+        // WebSocket upgrades, which carry headers like any other request.
+        .layer(axum::middleware::from_fn_with_state(tokens, crate::auth::require))
         .layer(axum::middleware::from_fn(kloudlite_trace::traced))
         .layer(DefaultBodyLimit::max(crate::tools::files::MAX_BYTES as usize + (1 << 20)))
         .with_state(app)
@@ -103,6 +113,16 @@ mod tests {
     use tower::ServiceExt;
 
     const PARENT: &str = "00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01";
+    /// The workspace token these tests present. Written into each fixture's own tempdir, so the
+    /// router reads a real file the way it does in a pod.
+    const TOKEN: &str = "test-workspace-token";
+
+    /// A token file beside the fixture, and the path to hand `Config`.
+    fn token_in(dir: &std::path::Path) -> Option<std::path::PathBuf> {
+        let p = dir.join("workspace-token");
+        std::fs::write(&p, TOKEN).unwrap();
+        Some(p)
+    }
 
     fn traced_app() -> (tempfile::TempDir, Arc<App>) {
         let tmp = tempfile::tempdir().unwrap();
@@ -110,12 +130,12 @@ mod tests {
         let root = home.join("workspaces/api");
         std::fs::create_dir_all(root.join("secret-dir")).unwrap();
         std::fs::write(root.join("secret-dir/a.txt"), "SECRET-CONTENT\n").unwrap();
-        (tmp, Arc::new(App::new(Config { bind: "127.0.0.1:0".parse().unwrap(), root, home, graft_dir: None })))
+        (tmp, Arc::new(App::new(Config { bind: "127.0.0.1:0".parse().unwrap(), token_path: token_in(&home), root, home, graft_dir: None })))
     }
 
     /// Probe-marked so the flag is obeyed: the tool server trusts nobody else's.
     async fn send(app: &Arc<App>, req: axum::http::request::Builder, body: axum::body::Body) -> u16 {
-        let req = req.header("traceparent", PARENT).header(kloudlite_trace::PROBE_HEADER, "1").body(body).unwrap();
+        let req = req.header("traceparent", PARENT).header(kloudlite_trace::PROBE_HEADER, "1").header("authorization", format!("Bearer {TOKEN}")).body(body).unwrap();
         router(app.clone()).oneshot(req).await.unwrap().status().as_u16()
     }
 
@@ -163,10 +183,71 @@ mod tests {
     /// The tool server carries NO terminal (spec §2.3, 2026-09-17): a terminal is the shell
     /// sidecar's ttyd on 7790, in a container with the home and no code, no token and no tools.
     /// The three PTY routes and their named-session table are gone, and this is what keeps a
+    /// The shell sidecar shares this pod's network namespace, so it reaches the tool server on
+    /// LOOPBACK, where no NetworkPolicy applies. A `curl` from a person's terminal ran a command
+    /// as the workspace user (2026-09-18, ws-632cf9f23d9f2fbf). The fence is the credential now,
+    /// and this is what the shell sends: nothing.
+    ///
+    /// Every route FAMILY, not one route: the hole was that `/tools/exec` was reachable, and a
+    /// test of `/tools/exec` alone would not have caught `/fs/file` reading the same tree.
+    #[tokio::test]
+    async fn without_the_workspace_token_every_route_but_healthz_is_401() {
+        let (_t, app) = traced_app();
+        let bare = |uri: &'static str, method: &'static str| {
+            let app = app.clone();
+            async move {
+                let req = match method {
+                    "POST" => axum::http::Request::post(uri).header("content-type", "application/json"),
+                    _ => axum::http::Request::get(uri),
+                };
+                router(app).oneshot(req.body(axum::body::Body::from("{}")).unwrap()).await.unwrap().status().as_u16()
+            }
+        };
+        for (uri, method) in [
+            ("/tools", "GET"),
+            ("/tools/exec", "POST"),
+            ("/fs/tree", "GET"),
+            ("/fs/stat?path=.", "GET"),
+            ("/fs/file?path=a.txt", "GET"),
+            ("/fs/git", "GET"),
+            ("/fs/changes", "GET"),
+            ("/fs/diff", "GET"),
+            ("/stream/process/p-1", "GET"),
+            ("/stream/watch/w-1", "GET"),
+        ] {
+            assert_eq!(bare(uri, method).await, 401, "{method} {uri} is reachable without a token");
+        }
+        // Liveness stays open: a kubelet probe has no Secret to read, and the answer says nothing
+        // about the workspace beyond "this process is up".
+        assert_eq!(bare("/healthz", "GET").await, 200);
+    }
+
+    /// A WRONG token is refused exactly like a missing one — no hint that a credential exists or
+    /// that this one was close.
+    #[tokio::test]
+    async fn a_token_that_is_not_this_workspaces_is_401() {
+        let (_t, app) = traced_app();
+        let r = router(app)
+            .oneshot(
+                axum::http::Request::post("/tools/exec")
+                    .header("content-type", "application/json")
+                    .header("authorization", "Bearer some-other-workspaces-token")
+                    .body(axum::body::Body::from(r#"{"cmd":"true"}"#))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(r.status(), 401);
+        assert_eq!(r.headers().get("www-authenticate").and_then(|v| v.to_str().ok()), Some("Bearer"));
+    }
+
     /// convenience from quietly putting one back.
     #[tokio::test]
     async fn no_pty_route() {
-        let cfg = Config { bind: "127.0.0.1:0".parse().unwrap(), root: "/home/kl/workspaces/api".into(), home: "/home/kl".into(), graft_dir: None };
+        // A real token: the point is that the route does not EXIST, and a 401 would hide that
+        // behind the credential check.
+        let tmp = tempfile::tempdir().unwrap();
+        let cfg = Config { bind: "127.0.0.1:0".parse().unwrap(), root: "/home/kl/workspaces/api".into(), home: "/home/kl".into(), graft_dir: None, token_path: token_in(tmp.path()) };
         let app = Arc::new(App::new(cfg));
         for path in ["/stream/pty", "/stream/pty/sessions", "/stream/pty/sessions/probe-1"] {
             assert_eq!(send(&app, axum::http::Request::get(path), axum::body::Body::empty()).await, 404, "{path}");
@@ -175,7 +256,7 @@ mod tests {
 
     #[tokio::test]
     async fn healthz_names_the_root() {
-        let cfg = Config { bind: "127.0.0.1:0".parse().unwrap(), root: "/home/kl/workspaces/api".into(), home: "/home/kl".into(), graft_dir: None };
+        let cfg = Config { bind: "127.0.0.1:0".parse().unwrap(), root: "/home/kl/workspaces/api".into(), home: "/home/kl".into(), graft_dir: None, token_path: None };
         let r = router(Arc::new(App::new(cfg))).oneshot(axum::http::Request::get("/healthz").body(axum::body::Body::empty()).unwrap()).await.unwrap();
         assert_eq!(r.status(), 200);
         let b = axum::body::to_bytes(r.into_body(), 1 << 16).await.unwrap();
@@ -185,7 +266,7 @@ mod tests {
     }
 
     async fn post(app: &Arc<App>, name: &str, body: serde_json::Value) -> (u16, serde_json::Value) {
-        let r = router(app.clone()).oneshot(axum::http::Request::post(format!("/tools/{name}")).header("content-type", "application/json").body(axum::body::Body::from(body.to_string())).unwrap()).await.unwrap();
+        let r = router(app.clone()).oneshot(axum::http::Request::post(format!("/tools/{name}")).header("content-type", "application/json").header("authorization", format!("Bearer {TOKEN}")).body(axum::body::Body::from(body.to_string())).unwrap()).await.unwrap();
         let status = r.status().as_u16();
         (status, serde_json::from_slice(&axum::body::to_bytes(r.into_body(), 1 << 20).await.unwrap()).unwrap())
     }
@@ -199,8 +280,8 @@ mod tests {
         let root = home.join("workspaces/api");
         std::fs::create_dir_all(&root).unwrap();
         std::fs::write(root.join("a.txt"), "one\ntwo\n").unwrap();
-        let app = Arc::new(App::new(Config { bind: "127.0.0.1:0".parse().unwrap(), root, home, graft_dir: None }));
-        let r = router(app.clone()).oneshot(axum::http::Request::get("/tools").body(axum::body::Body::empty()).unwrap()).await.unwrap();
+        let app = Arc::new(App::new(Config { bind: "127.0.0.1:0".parse().unwrap(), token_path: token_in(&home), root, home, graft_dir: None }));
+        let r = router(app.clone()).oneshot(axum::http::Request::get("/tools").header("authorization", format!("Bearer {TOKEN}")).body(axum::body::Body::empty()).unwrap()).await.unwrap();
         assert_eq!(r.status(), 200);
         let v: serde_json::Value = serde_json::from_slice(&axum::body::to_bytes(r.into_body(), 1 << 20).await.unwrap()).unwrap();
         let names: Vec<&str> = v["tools"].as_array().unwrap().iter().map(|t| t["name"].as_str().unwrap()).collect();
@@ -232,7 +313,7 @@ mod tests {
     }
 
     async fn get(app: &Arc<App>, uri: &str, inm: Option<&str>) -> (u16, Option<String>, Vec<u8>) {
-        let mut req = axum::http::Request::get(uri);
+        let mut req = axum::http::Request::get(uri).header("authorization", format!("Bearer {TOKEN}"));
         if let Some(t) = inm {
             req = req.header("if-none-match", t);
         }
@@ -259,7 +340,7 @@ mod tests {
         sh(&["commit", "-q", "-m", "one"]);
         std::fs::write(root.join("README.md"), "hi\nmore\n").unwrap();
         std::fs::write(root.join("src/new.rs"), "fn a() {}\n").unwrap();
-        let app = Arc::new(App::new(Config { bind: "127.0.0.1:0".parse().unwrap(), root: root.clone(), home: home.clone(), graft_dir: None }));
+        let app = Arc::new(App::new(Config { bind: "127.0.0.1:0".parse().unwrap(), root: root.clone(), home: home.clone(), graft_dir: None, token_path: token_in(&home) }));
 
         let (s, etag, b) = get(&app, "/fs/tree?depth=2", None).await;
         assert_eq!(s, 200);
@@ -348,7 +429,7 @@ mod tests {
         assert_eq!(get(&app, "/fs/log?n=201", None).await.0, 400);
 
         // Not a repository is an answer, not an error.
-        let plain = Arc::new(App::new(Config { bind: "127.0.0.1:0".parse().unwrap(), root: home.join("workspaces"), home: home.clone(), graft_dir: None }));
+        let plain = Arc::new(App::new(Config { bind: "127.0.0.1:0".parse().unwrap(), root: home.join("workspaces"), home: home.clone(), graft_dir: None, token_path: token_in(&home) }));
         let (s, _, b) = get(&plain, "/fs/git", None).await;
         let v: serde_json::Value = serde_json::from_slice(&b).unwrap();
         assert_eq!((s, v["repo"].as_bool()), (200, Some(false)));

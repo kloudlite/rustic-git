@@ -423,14 +423,25 @@ pub async fn ide_server(c: &mut Ctx) {
 ///
 /// `curl -s -o - -w` rather than `-f`: `-f` swallows the body on a 4xx, which is exactly the body
 /// these steps assert on.
+/// The token file the keys beat projects into every workspace container, and the credential the
+/// tool server checks (`kloudlite_ide::auth::TOKEN_PATH`, `k8s::secrets::USER_KEY_PATH` + the
+/// Secret key). Spelled here rather than imported: `bins/slo` does not depend on `kloudlite-ide`,
+/// and one path constant is not a reason to make it. `the_token_file_is_the_one_the_pod_mounts`
+/// holds this equal to the workspaces crate's own.
+const WS_TOKEN_FILE: &str = "/etc/kloudlite/ssh/workspace-token";
+
 pub(crate) async fn ws_tool(c: &Ctx, id: &str, tool: &str, args: &Value) -> Result<(u16, String)> {
     // Single-quoted into a shell, so a single quote inside the JSON would end the string early.
     // None of ours carry one today; escaped anyway, because a probe that mangles its own request
     // reports a fleet failure that is its own.
     let body = serde_json::to_string(args)?.replace('\'', r"'\''");
+    // The token comes from the file the keys beat projects into THIS container — read inside the
+    // pod, never carried in from the probe, so the call is exactly the one a session makes. The
+    // shell sidecar has no such file, which is the whole fence (`shell.no_tools`).
     let script = format!(
         "curl -s -o /tmp/kl-tool.out -w '%{{http_code}}' -X POST http://127.0.0.1:7788/tools/{tool} \
-         -H 'content-type: application/json' -d '{body}'; echo; cat /tmp/kl-tool.out"
+         -H 'content-type: application/json' \
+         -H \"authorization: Bearer $(cat {WS_TOKEN_FILE})\" -d '{body}'; echo; cat /tmp/kl-tool.out"
     );
     let (code, out, err) = ws_exec(c, id, &script, EXEC).await?;
     if code != 0 {
@@ -884,6 +895,17 @@ async fn drop_vol(c: &Ctx, name: &str) {
 
 #[cfg(test)]
 mod tests {
+    /// The path this probe reads is the one the pod actually mounts. `USER_KEY_PATH` is the mount
+    /// and `workspace-token` the Secret key, both from the crate that writes them — so a move
+    /// there fails here rather than on the fleet as a 401 nobody expected.
+    #[test]
+    fn the_token_file_is_the_one_the_pod_mounts() {
+        assert_eq!(
+            super::WS_TOKEN_FILE,
+            format!("{}/workspace-token", kloudlite_workspaces::k8s::USER_KEY_PATH)
+        );
+    }
+
     use super::*;
     use crate::testkit;
     use axum::routing::{get, patch, post as apost};

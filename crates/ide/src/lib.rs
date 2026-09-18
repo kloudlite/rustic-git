@@ -18,6 +18,7 @@
 //! family), `procs` (detached processes and their ring buffers), `stream` (the two WebSocket
 //! streams), `graft` (the child and the freshness triggers).
 pub mod api;
+pub mod auth;
 pub mod fs;
 pub mod graft;
 pub mod guard;
@@ -47,6 +48,10 @@ pub struct Config {
     pub home: PathBuf,
     /// A graft context directory other than `{root}/graft`.
     pub graft_dir: Option<PathBuf>,
+    /// The workspace token every request must carry, as a FILE — read per request, because the
+    /// keys beat re-mints it and a value cached at boot would refuse its own callers an hour in.
+    /// `None` is the default path (`auth::TOKEN_PATH`); a test points it at a tempdir.
+    pub token_path: Option<PathBuf>,
 }
 
 pub use server::serve;

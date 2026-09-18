@@ -22,7 +22,7 @@ fn workspace() -> (tempfile::TempDir, Arc<App>) {
     std::fs::create_dir_all(root.join(".agents/x/src")).unwrap();
     std::fs::write(root.join("src/main.rs"), "fn main() {}\n").unwrap();
     std::fs::write(root.join(".agents/x/src/main.rs"), "fn main() {}\n").unwrap();
-    let cfg = Config { bind: "127.0.0.1:0".parse().unwrap(), root, home, graft_dir: None };
+    let cfg = Config { bind: "127.0.0.1:0".parse().unwrap(), root, home, graft_dir: None, token_path: None };
     (tmp, Arc::new(App::new(cfg)))
 }
 

@@ -39,7 +39,7 @@ mod tests {
     #[test]
     fn preflight_names_every_missing_precondition() {
         let tmp = tempfile::tempdir().unwrap();
-        let cfg = Config { bind: "127.0.0.1:0".parse().unwrap(), root: tmp.path().join("ws"), home: tmp.path().to_path_buf(), graft_dir: None };
+        let cfg = Config { bind: "127.0.0.1:0".parse().unwrap(), root: tmp.path().join("ws"), home: tmp.path().to_path_buf(), graft_dir: None, token_path: None };
         let why = preflight_with(&cfg, 1000, 1000).unwrap_err();
         assert!(why.contains("workspace dir"), "{why}");
         std::fs::create_dir_all(&cfg.root).unwrap();

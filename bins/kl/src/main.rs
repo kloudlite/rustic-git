@@ -240,7 +240,10 @@ fn container(cmd: ContainerCmd) -> Result<(), String> {
 fn serve_ide(bind: std::net::SocketAddr, graft_dir: Option<std::path::PathBuf>) -> Result<(), String> {
     let root = std::path::PathBuf::from(env("KL_WORKSPACE")?);
     let home = std::path::PathBuf::from(env("HOME")?);
-    let cfg = kloudlite_ide::Config { bind, root, home, graft_dir };
+    // `token_path: None` is the default (`auth::TOKEN_PATH`), the file the keys beat projects
+    // into this container. Not a flag: a tool server that could be pointed at another file is a
+    // tool server whose fence can be argued with.
+    let cfg = kloudlite_ide::Config { bind, root, home, graft_dir, token_path: None };
     kloudlite_ide::guard::preflight(&cfg)?;
     use tracing_subscriber::layer::SubscriberExt as _;
     use tracing_subscriber::util::SubscriberInitExt as _;
