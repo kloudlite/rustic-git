@@ -5,8 +5,19 @@ description: Use when code must be cloned, committed, pushed, or a pull request 
 
 # Repositories
 
-Code lives in a repository. You do not edit it through the platform: you clone it into your own
-workspace, work there with your own shell and editor tools, and open a pull request when it is done.
+Code lives in a repository. You do not edit it through the platform.
+
+## From the bench
+
+You have no hands here. Cloning, committing, pushing and building are asks to a workspace:
+`ask {to: "<workspace>", task: <the person's words>}`. Your own verbs are the listing, creating and
+pull-request ones only: `kl_repos`, `kl_repo_create`, `kl_repo_branches`, `kl_pulls`, `kl_pull`,
+`kl_pull_create`, `kl_pull_merge`, `kl_pull_close`.
+
+## In a workspace
+
+You clone it into this machine, work there with your own shell and editor tools, and open a pull
+request when it is done.
 
 Verbs: `kl_repos`, `kl_repo_create`, `kl_repo_branches`, `kl_repo_clone` (into this machine, over
 ssh, with the person's own key), `kl_pulls`, `kl_pull`, `kl_pull_create`, `kl_pull_merge`,
