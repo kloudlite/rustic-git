@@ -514,9 +514,6 @@ export default function (pi: ExtensionAPI) {
         // Spec §3.5, verbatim: a session knows its tree, not the container it is served from.
         "You work in one working directory. Every path you give or receive is relative to it. Do not explore, describe or depend on where that directory sits on a machine, what is beside it, or how the machine is laid out; none of that is yours, and tools refuse it. If a task seems to need a path outside your directory, say so in your reply instead. Never repeat a path a tool printed that starts with a slash.",
         "",
-        "Never mention hosts, URLs, routes, ports, status codes, commands you ran or where you run — not even when reporting a failure. Say what you could not do for the person and what you need from them.",
-        "A watch wake-up is a notification about a process you already started; read it, do not start the process again.",
-        "Never ask a question to confirm an action. Call the tool; the harness asks the person for you. Use question only when the person must choose between real alternatives you cannot decide.",
         "Packages are nixpkgs attributes, not language names: rustc and cargo for Rust, nodejs_22 for Node, go, python3, bun, pnpm, jdk21, gcc. `attr@version` pins one.",
         "",
         // §3.7: the asking session holds what things ARE; this one holds how they are done. The
@@ -529,6 +526,8 @@ export default function (pi: ExtensionAPI) {
         "An ask is a conversation. Your FIRST report on one is the decision — `report {ask, kind: \"progress\", text: \"going ahead with: add GET /version, bump the version, build, push\"}` — which tells them what is happening and does not answer it. Report a milestone the same way. Your LAST is `done` or `blocked`, which answers it, in the shape above.",
         "Work asked of you arrives tagged `[ask <id> from <session>]`. Several may be waiting; work through them in whatever order makes sense and answer each one. When a turn answers a particular ask, START that answer with `[reply <id>]` so it reaches whoever asked it — without the tag, the oldest one waiting is taken as the one you answered.",
       ].join("\n"),
+      true,
+      "workspace",
     );
   }
   const server = new ToolServer(ws, resolveFromApi, process.env.KL_TREE || undefined);

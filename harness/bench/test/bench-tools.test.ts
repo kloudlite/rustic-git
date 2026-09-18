@@ -105,7 +105,7 @@ test("the system prompt is the harness's own, and says only what the model must 
       /You have no files and no shell here\. Anything that reads, writes or runs happens in a WORKSPACE/,
       /You have no filesystem or shell where you run\./,
       /You have no working directory\. Name a workspace\./,
-      /Another workspace is asked, not touched: `ask \{to: "<workspace>", task\}`/,
+      /A workspace is asked, not touched: `ask \{to: "<workspace>", task\}`/,
       /Something new \(a backend, a service, a project\) gets a new workspace/,
       /When the person corrects you, states a preference, or tells you a fact about their setup you will need again, save a memory\./,
       /never save a conclusion about the harness's own behaviour — report that instead\./,
@@ -678,13 +678,13 @@ test("ask routes to a workspace's own session or to a fresh agent", async () => 
     assert.equal(seen[1].body.kind, "info");
     assert.match(info.content[0].text, /answers from a read-only copy without stopping/);
 
-    // An agent starts clean, is named, and works on this machine unless told otherwise. It works
-    // in a TREE of that machine, which the BENCH cuts — the extension asks for an agent and nothing
-    // else, so there is no /v1 call on this path at all (spec §4.3).
-    const agent = await ask.execute("c2", { to: "agent", task: "audit the routes", name: "audit" }, undefined, undefined, undefined);
+    // An agent starts clean, is named, and works in the workspace it is given — the bench has no
+    // machine to default to. It works in a TREE of that workspace, which the BENCH cuts — the
+    // extension asks for an agent and nothing else, so there is no /v1 call here (spec §4.3).
+    const agent = await ask.execute("c2", { to: "agent", task: "audit the routes", name: "audit", workspace: "svelte-frontend" }, undefined, undefined, undefined);
     assert.equal(seen[2].url, "/agents");
     assert.match(seen[2].body.name, /^audit-[a-z0-9]{6}$/);
-    assert.deepEqual([seen[2].body.task, seen[2].body.workspace, seen[2].body.from], ["audit the routes", "bench-ada", "s-1"]);
+    assert.deepEqual([seen[2].body.task, seen[2].body.workspace, seen[2].body.from], ["audit the routes", "svelte-frontend", "s-1"]);
     assert.match(agent.content[0].text, /^agent audit-[a-z0-9]{6} started$/);
     assert.ok(!seen.some((x) => x.url.includes("/clone")), JSON.stringify(seen.map((x) => x.url)));
   } finally {
@@ -1001,6 +1001,22 @@ test("a bench session has no filesystem, no shell and no machine of its own", as
   }
 });
 
+/**
+ * One block was read by both sessions, so the workspace was told it had no files and the bench was
+ * told the machine was its own. Each audience gets only the lines that are true for it.
+ */
+test("each identity carries only the lines true for its own audience", () => {
+  const bench = identity(BENCH_HANDS);
+  const workspace = identity("You are the Kloudlite harness, working inside workspace ws-1.", true, "", "workspace");
+  assert.ok(!workspace.includes("no files and no shell"), "the workspace is not told it has no hands");
+  assert.ok(!bench.includes("This machine is yours"), "the bench is not told a machine is its own");
+  assert.ok(bench.includes("no files and no shell"), "the bench keeps its own line");
+  assert.ok(workspace.includes("This machine is yours"), "the workspace keeps its own line");
+  assert.ok(bench.includes("works in a workspace you name"), "the bench says an agent needs a workspace named");
+  // The shared half is in both.
+  for (const both of [bench, workspace]) assert.match(both, /Packages are nixpkgs attributes, not language names/);
+});
+
 test("every identity says where paths are relative to, and the bench that it has no directory", () => {
   const paragraph =
     "You work in one working directory. Every path you give or receive is relative to it. Do not explore, describe or depend on where that directory sits on a machine, what is beside it, or how the machine is laid out; none of that is yours, and tools refuse it. If a task seems to need a path outside your directory, say so in your reply instead.";
@@ -1048,6 +1064,25 @@ test("packages from the bench name a workspace, or are refused", async () => {
 });
 
 /**
+ * An agent works in a workspace. `own` on the bench is the BENCH's own id, so an omitted
+ * `workspace` used to send it to a machine that is not a workspace at all.
+ */
+test("an agent from the bench names a workspace, or is refused", async () => {
+  const restore = withEnv({ KL_WORKSPACE_ID: "bench-ada", KL_TEAM: "acme", KL_TOOLS_WORKSPACE: undefined, KL_FORK: undefined, KL_EPHEMERAL: undefined });
+  try {
+    const { pi, tools, start } = fakePi();
+    kloudlite(pi);
+    await start();
+    const ask = tools.find((t) => t.name === "ask")! as unknown as { execute: (...x: any[]) => Promise<any> };
+    const r = await ask.execute("c1", { to: "agent", task: "count the routes" }, undefined, undefined, undefined);
+    assert.equal(r.isError, true);
+    assert.match(r.content[0].text, /^name the workspace: an agent works in a workspace/);
+  } finally {
+    restore();
+  }
+});
+
+/**
  * A tool error says what could not be done, never where anything runs. The model was handed
  * "502: not an api answer for /v1/repos — the route is not published on https://dev.kloudlite.io"
  * and repeated all of it to the person (owner, 2026-09-18): a host, a route and a status code they
@@ -1085,6 +1120,8 @@ test("no identity tells a model to talk about where it runs", () => {
     workspaceTools(pi);
     return hooks["before_agent_start"][0]({ prompt: "", systemPrompt: "" }).then((out: { systemPrompt: string }) => {
       assert.ok(out.systemPrompt.includes(rule), "the workspace identity");
+      // ONCE: the shared half carries it, and the workspace's own block used to repeat it verbatim.
+      assert.equal(out.systemPrompt.split("Never mention hosts").length - 1, 1, "said once, not twice");
       restore();
     });
   } catch (e) {
@@ -1516,7 +1553,7 @@ test("the bench is never a workspace target, and never in a listing", async () =
 
 test("waiting on an ask is waiting, not restarting a machine", () => {
   // The model reached for `start` with an ask in flight; the identity now says what to do instead.
-  assert.match(identity(BENCH_HANDS), /An ask you are already waiting on WAKES you when it answers\. Do not poll it, and never start, stop or restart a machine to move work along/);
+  assert.match(identity(BENCH_HANDS), /An ask you are already waiting on WAKES you when it answers\. Do not poll it, and never start, stop or restart a RUNNING machine to move work along/);
 });
 
 /**

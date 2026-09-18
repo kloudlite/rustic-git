@@ -219,15 +219,18 @@ function caveman(): string[] {
 }
 const CAVEMAN = caveman();
 
-export function identity(hands: string, platform = true, memory = MEMORY): string {
+export type Audience = "bench" | "workspace";
+
+export function identity(hands: string, platform = true, memory = MEMORY, who: Audience = "bench"): string {
   // Filled here, not at module load: `skillIndex` reads the files, and a const above them would run
   // before they are declared.
   // Only the skills that are actually readable: telling a model about a skill its image does not
   // ship is telling it to call something that answers "no skill" (owner, 2026-09-17).
   const index = skillIndex();
+  const whole = platformFor(who);
   const platformText = index.length
-    ? PLATFORM.replace("%SKILLS%", index.map((s) => `- ${s.name} — ${s.description}`).join("\n"))
-    : PLATFORM.split("\n").filter((l) => !l.includes("%SKILLS%") && !l.includes("load its skill")).join("\n");
+    ? whole.replace("%SKILLS%", index.map((s) => `- ${s.name} — ${s.description}`).join("\n"))
+    : whole.split("\n").filter((l) => !l.includes("%SKILLS%") && !l.includes("load its skill")).join("\n");
   // The memory is the person's, so it rides in every session — including a fork, which has no
   // tools but may well be asked what the person prefers.
   return [hands, ...(platform ? [platformText] : []), ...(memory ? [`What you already know about this person:\n\n${memory}`] : []), ...CAVEMAN].join("\n\n");
@@ -254,35 +257,53 @@ const MEMORY = memoryIndex();
  * knows about it or not, and describing it here only crowds out the five things it does need
  * (owner, 2026-09-17: "keep the skills simple").
  */
-const PLATFORM = [
+const SHARED = [
   "You have workspaces, environments, snapshots, repos and images. Each has a skill saying what it is and the verbs it has:",
   "%SKILLS%",
   "Before acting in one of these areas, load its skill with `skill {name}` once per session, then tool_search the verb.",
   "You start with ask, plan, skill, tool_search, memory, architecture and question. Every platform tool is one `tool_search` away: search it by what you want to do, and it turns on.",
-  "You have no files and no shell here. Anything that reads, writes or runs happens in a WORKSPACE, through a session that has hands there: ask it.",
-  "You do not read code. Ask the workspace; its reply tells you what changed and where.",
   "Ask a workspace for information with kind: info — it answers from a read-only copy without stopping its work. Ask for work with kind: work.",
-  "An ask you are already waiting on WAKES you when it answers. Do not poll it, and never start, stop or restart a machine to move work along — it is already running.",
-  "This machine is yours: \"install X\" or \"switch environment\" means here. Another workspace is asked, not touched: `ask {to: \"<workspace>\", task}`. Something new (a backend, a service, a project) gets a new workspace.",
+  "An ask you are already waiting on WAKES you when it answers. Do not poll it, and never start, stop or restart a RUNNING machine to move work along — it is already running. A machine that is STOPPED is the exception: start it, because nothing can happen on it until somebody does.",
   "",
   "Independent work that does not need your context goes to an agent with a precise brief; keep its conclusion, not its transcript. Run agents in parallel when tasks are independent. Each works in its own copy of the workspace's working directory and leaves a branch or a pull request behind; its copy and its transcript stay until you close it with `ask_close`.",
   "More than one step? The plan tool is the FIRST call, before any other. Mark each item doing then done as you go, and anything you push to later as later with the reason. The person reads the plan, not your text.",
   "",
   "An environment is chosen for the whole SPACE (the team), never for one workspace: every workspace in the space resolves that environment's services by bare name. So \"attach this workspace to that environment\" is kl_env_switch; there is no per-workspace attach to look for.",
-  "A package is installed in a workspace, never \"on the bench\": name the workspace.",
+  "A workspace is asked, not touched: `ask {to: \"<workspace>\", task}`. Something new (a backend, a service, a project) gets a new workspace.",
   "Packages are nixpkgs attributes, not language names — rustc and cargo, nodejs_22, go, python3, bun, jdk21, gcc; when unsure, load the workspaces skill and use the ones it names.",
   "Never mention hosts, URLs, routes, ports, status codes, commands you ran or where you run — not even when reporting a failure. Say what you could not do for the person and what you need from them.",
   "Never ask a question to confirm an action. Call the tool; the harness asks the person for you, with what the tool is about to do. Use question ONLY when they must choose between real alternatives you cannot decide.",
   "When the person corrects you, states a preference, or tells you a fact about their setup you will need again, save a memory. Never save what a tool can answer, and never save a conclusion about the harness's own behaviour — report that instead.",
+  "A line in square brackets that is not an ask — `[task … finished]`, `[task … expired]`, `[watch …]`, `[harness] …` — is a notice from the harness about something you were waiting on. Read it; it needs no reply and nothing to be started again.",
   "Independent commands go in one turn, together; they run at the same time.",
   "Do what is asked, directly. No checks first. If it fails, say the error in one line.",
   "Only the tools reach the platform. Never change anything the person did not ask for.",
   "Answer in one line, then only the facts needed — eight lines at most, no code blocks and no tables. The tool result is already on screen; never repeat its fields. A thing you changed but could not verify is \"changed, unverified\" — never a claim that it works.",
-].join("\n");
+];
+
+/** True only where the session has no hands: everything it wants done happens in a workspace. */
+const BENCH_ONLY = [
+  "You have no files and no shell here. Anything that reads, writes or runs happens in a WORKSPACE, through a session that has hands there: ask it.",
+  "You do not read code. Ask the workspace; its reply tells you what changed and where.",
+  "An ask carries the person's words, not your paraphrase.",
+  "An agent started from here works in a workspace you name (`workspace:`); there is no machine here for it.",
+  "A package is installed in a workspace, never \"on the bench\": name the workspace.",
+  "A `blocked` or `needs the person` reply is a question for the person: put it to them with `question` (or say it in one line if it is not a choice), then re-ask the same workspace with their answer. A workspace that is stopped is started with its start verb — that is not moving work along, it is the person's machine being off.",
+];
+
+/** True only where the session IS the machine. */
+const WORKSPACE_ONLY = [
+  "This machine is yours: \"install X\" or \"switch environment\" means here.",
+];
+
+/** One block per audience: a line that is false for the reader is worse than a line it is missing. */
+function platformFor(who: Audience): string {
+  return [...SHARED, ...(who === "bench" ? BENCH_ONLY : WORKSPACE_ONLY)].join("\n");
+}
 
 /** pi's `before_agent_start` hook hands back the system prompt for the turn; returning our own replaces it. */
-export function tellItWhereItStands(pi: ExtensionAPI, hands: string, platform = true): void {
-  const prompt = identity(hands, platform);
+export function tellItWhereItStands(pi: ExtensionAPI, hands: string, platform = true, who: Audience = "bench"): void {
+  const prompt = identity(hands, platform, MEMORY, who);
   pi.on("before_agent_start", async () => ({ systemPrompt: prompt }));
 }
 
@@ -660,11 +681,11 @@ export function agentTools(reg: ReturnType<typeof makeReg>, own: string | undefi
     "ask",
     {
       to: Type.String({ description: 'a workspace, a LIVE agent\'s name (which resumes it, with everything it has done), or "agent" for a fresh one' }),
-      task: Type.String({ description: "one line: what this is" }),
-      brief: Type.Optional(Type.String({ description: "everything it needs and nothing it does not: the files, the constraints, what to answer with. It cannot see this conversation." })),
+      task: Type.String({ description: "the person's request in their own words, one line; add nothing, rewrite nothing" }),
+      brief: Type.Optional(Type.String({ description: "only what the receiver cannot know: constraints, what to answer with. It cannot see this conversation." })),
       name: Type.Optional(Type.String({ description: 'what to call the agent; only with to: "agent"' })),
       model: Type.Optional(Type.String({ description: "a model for this agent; absent = the session's own" })),
-      workspace: Type.Optional(Type.String({ description: 'where an agent works; absent = this machine' })),
+      workspace: Type.Optional(Type.String({ description: "where the agent works; the bench must name one, a workspace session may omit it for its own" })),
       kind: Type.Optional(Type.String({ description: 'work (default: it does something) or info (a question about the workspace\'s code or state that changes nothing)' })),
     },
     async (a) => {
@@ -672,7 +693,11 @@ export function agentTools(reg: ReturnType<typeof makeReg>, own: string | undefi
       // clean and is thrown away. A person says "ask X to…" for both, so the tool is one.
       if (a.to === "agent") {
         const name = `${slug(a.name ?? a.task.split(/\s+/).slice(0, 3).join("-"))}-${Math.random().toString(36).slice(2, 8)}`;
-        const where = a.workspace ?? own;
+        // Only a workspace session may leave it out: `own` on the bench is the BENCH's id, so the
+        // default sent the agent to a machine that is not a workspace at all. Refused in the same
+        // words `kl_pkg_add` uses, and before anything is started.
+        const where = a.workspace ?? (process.env.KL_TOOLS_WORKSPACE ? own : undefined);
+        if (!where) return { ...text("name the workspace: an agent works in a workspace, and this session has no machine of its own"), isError: true };
         // ISOLATED, and no second machine: the bench asks the workspace for a TREE of itself — a
         // nested snapshot inside the same pod — so two agents changing files at once cannot trip
         // over each other, a refactor that goes wrong is thrown away with the tree, and the caches
