@@ -46,8 +46,12 @@ export function App() {
    * the workspace now, not in a clone of it, so its row comes from the bench's own session list
    * rather than from a second `/v1` workspace whose name happened to end in `-eph-`.
    */
+  // Declared before `machine` below reads it: a memo runs at creation, and a `const` read before
+  // its line threw at mount and left the sign-in splash on screen (18 Sep).
+  type Session = SessionRow;
+  const [sessions, setSessions] = createStore<Session[]>([]);
   const machine = createMemo(() => {
-    const agents = agentRows(sessions as unknown as SessionRow[], live.exchanges);
+    const agents = agentRows(sessions, live.exchanges);
     return {
       ...MACHINE,
       owner: who(),
@@ -146,9 +150,7 @@ export function App() {
   // person's bench and every device is a view of it. Nothing here persists the
   // list; the cache for a cold, disconnected start is main's. The first live
   // session is the machine's own row and tab.
-  type Session = SessionRow;
   const ARCHIVE_AFTER = 24 * 60 * 60 * 1000;
-  const [sessions, setSessions] = createStore<Session[]>([]);
   const bench = window.harness.bench;
   const refreshSessions = async () => void setSessions(reconcile(await bench<Session[]>("GET", "/sessions")));
   const live_ = () => benchSessions(sessions).filter((x) => !x.archived);
