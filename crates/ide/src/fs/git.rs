@@ -5,6 +5,7 @@
 use gix::bstr::{BStr, ByteSlice};
 use gix::diff::blob::unified_diff::{ConsumeBinaryHunk, ContextSize};
 use gix::diff::blob::{Algorithm, InternedInput, UnifiedDiff};
+#[cfg(not(unix))]
 use crate::trees::TREES_DIR;
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
@@ -171,16 +172,9 @@ fn worktree_bytes(root: &Path, rel: &str, hide_agents: bool) -> Option<Vec<u8>> 
     resolved.starts_with(&root).then(|| std::fs::read(resolved).ok()).flatten()
 }
 
+#[cfg(not(unix))]
 fn link_bytes(target: &Path) -> Vec<u8> {
-    #[cfg(unix)]
-    {
-        use std::os::unix::ffi::OsStrExt;
-        target.as_os_str().as_bytes().to_vec()
-    }
-    #[cfg(not(unix))]
-    {
-        target.to_string_lossy().into_owned().into_bytes()
-    }
+    target.to_string_lossy().into_owned().into_bytes()
 }
 
 fn is_binary(b: &[u8]) -> bool {

@@ -249,17 +249,20 @@ pub async fn put_manifest(
         }
     }
     // Concurrent, not serial: a 40-layer manifest was up to 80 sequential HEADs before the
-    // write. Bounded at 16 for the same reason `gc` bounds its walk — an index may name
-    // thousands of children, and one push must not open thousands of connections. Each probe is
-    // independent; blob path first because that is where layers live — the manifest path is
-    // only hit for an index's entries.
-    // ponytail: a sweep can still delete an old blob between this head and the put below —
-    // GC is keep-biased and this window is unchanged from the serial version, so it's not new risk.
+    // write. A digest is accepted as a blob only when this publication pinned its active
+    // generation. An unpinned digest may still be a child manifest in an index.
     let probes: Vec<_> = digests
         .iter()
         .map(|bd| async {
-            if blob_state::exists(&app.store.os, &owner, bd).await? {
-                return Ok(true);
+            if pinned.iter().any(|p| p == bd) {
+                let Some(path) = blob_state::resolve(&app.store.os, &owner, bd).await? else {
+                    return Ok(false);
+                };
+                return match app.store.os.head(&path).await {
+                    Ok(_) => Ok(true),
+                    Err(slatedb::object_store::Error::NotFound { .. }) => Ok(false),
+                    Err(e) => Err(e.into()),
+                };
             }
             match app.store.os.head(&manifest_path(&owner, &name, bd)).await {
                 Ok(_) => Ok(true),

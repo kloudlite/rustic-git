@@ -90,10 +90,10 @@ async fn blob_response(
             Err(r) => return r,
         }
     }
-    let Some(path) = match blob_state::resolve(&app.store.os, &owner, &d).await {
+    let Some(path) = (match blob_state::resolve(&app.store.os, &owner, &d).await {
         Ok(path) => path,
         Err(e) => return crate::oci_internal(e),
-    } else {
+    }) else {
         return oci_err(StatusCode::NOT_FOUND, "BLOB_UNKNOWN", "no such blob");
     };
     let hdrs = |size: u64| {

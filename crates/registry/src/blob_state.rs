@@ -60,10 +60,6 @@ pub fn publication_id() -> String {
     nonce()
 }
 
-fn version(meta: &slatedb::object_store::ObjectMeta) -> UpdateVersion {
-    UpdateVersion { e_tag: meta.e_tag.clone(), version: meta.version.clone() }
-}
-
 fn encode(record: &BlobRecord) -> Result<Vec<u8>> {
     Ok(serde_json::to_vec(record)?)
 }
@@ -319,5 +315,17 @@ mod tests {
         unpin(os.as_ref(), "acme", &d, "manifest").await.unwrap();
         assert!(retire_if_unpinned(os.as_ref(), "acme", &d, &snapshot).await.unwrap().is_none());
         assert!(resolve(os.as_ref(), "acme", &d).await.unwrap().is_some());
+    }
+
+    #[tokio::test]
+    async fn a_missed_pin_must_be_retried_after_a_generation_is_installed() {
+        let os = Arc::new(InMemory::new());
+        let d = digest();
+        assert!(!pin(os.as_ref(), "acme", &d, "publication").await.unwrap());
+        let (_, generation) = new_generation("acme", &d);
+        os.put(&generation, PutPayload::from("blob")).await.unwrap();
+        install(os.as_ref(), "acme", &d, &generation.to_string()).await.unwrap().unwrap();
+        assert!(pin(os.as_ref(), "acme", &d, "publication").await.unwrap());
+        assert_eq!(resolve(os.as_ref(), "acme", &d).await.unwrap(), Some(generation));
     }
 }
