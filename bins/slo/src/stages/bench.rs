@@ -578,8 +578,11 @@ async fn own_hands(c: &mut Ctx) {
     .await;
 }
 
-/// The eight tools that act on the bench's own machine, and the two facts that say WHERE they run
-/// — which the names alone cannot show.
+/// The eight tools that would act on the bench's OWN machine. Since slice 2 a bench session must
+/// carry NONE of them: "a bench session has no hands" (spec §3.1) — a workspace change is a
+/// message into that workspace's session, never something driven from the bench container, which
+/// is nobody's machine. This probe used to demand all eight and so failed on a bench that was
+/// working exactly as designed (hourly 08:05, 2026-09-18).
 const OWN_HANDS: [&str; 8] = ["read", "write", "edit", "bash", "grep", "find", "ls", "process"];
 
 /// The rest of the always-on set (spec §13/§14): one way to reach a workspace or an agent, and the
@@ -588,8 +591,7 @@ const OWN_HANDS: [&str; 8] = ["read", "write", "edit", "bash", "grep", "find", "
 /// asserted the old catalogue and failed the id on a bench that was working exactly as designed.
 /// `tool_search` itself is what must be there — it is the door to all of them.
 const ALWAYS_ON: [&str; 5] = ["ask", "plan", "skill", "tool_search", "memory"];
-/// `k8s::BENCH_TOOLS` on the harness side: the workspace container's tool server, same pod.
-const OWN_TOOL_SERVER: &str = "127.0.0.1:7788";
+
 
 fn judge_tools(body: &str) -> Result<()> {
     let doc: Value = serde_json::from_str(body)?;
@@ -599,9 +601,13 @@ fn judge_tools(body: &str) -> Result<()> {
         .iter()
         .map(|t| t.as_str().unwrap_or_default().to_string())
         .collect();
-    for want in OWN_HANDS.iter().chain(ALWAYS_ON.iter()) {
+    // The inversion is the assertion: hands are what a bench must NOT have.
+    if let Some(hand) = OWN_HANDS.iter().find(|h| tools.iter().any(|t| &t == h)) {
+        bail!("a bench session has hands of its own: `{hand}` in {}", tools.join(", "));
+    }
+    for want in ALWAYS_ON.iter() {
         if !tools.iter().any(|t| t == want) {
-            bail!("a bench session has no `{want}`: {}", tools.join(", "));
+            bail!("a bench session cannot steer itself: no `{want}` in {}", tools.join(", "));
         }
     }
     // A direct tool onto ANOTHER workspace's tool server is the shape the owner ruled out: work
@@ -609,11 +615,10 @@ fn judge_tools(body: &str) -> Result<()> {
     if let Some(direct) = tools.iter().find(|t| t.starts_with("kl_ws_")) {
         bail!("a bench session drives another workspace directly through `{direct}`");
     }
-    // Without these two the names above are satisfied by a session running them in the BENCH
-    // container, which is nobody's machine — the very thing `--no-builtin-tools` exists to stop.
-    match doc["toolsAddress"].as_str() {
-        Some(OWN_TOOL_SERVER) => {}
-        other => bail!("a bench session's tools run on {other:?}, not its own workspace's {OWN_TOOL_SERVER}"),
+    // No tool server AT ALL, which is the other half of having no hands: a bench session that was
+    // handed an address could reach a filesystem, whatever its tool list says (spec §3.1).
+    if let Some(at) = doc["toolsAddress"].as_str() {
+        bail!("a bench session was given a tool server at {at}");
     }
     if doc["builtinTools"] != Value::Bool(false) {
         bail!("pi's builtins are on: they would run in the bench container");
@@ -1777,35 +1782,50 @@ mod tests {
     /// builtins off. A list that satisfies the names while running in the bench container is the
     /// regression. No `kl_*` is required: every one of them is deferred until `tool_search`.
     #[test]
-    fn own_hands_wants_the_names_and_where_they_run() {
+    fn own_hands_refuses_a_bench_session_that_has_any() {
+        // What a correct bench session answers since slice 2: no hands, no tool server, no
+        // builtins — only the tools it steers ITSELF with.
         let ok = json!({
-            "tools": ["read", "write", "edit", "bash", "grep", "find", "ls", "process",
-                      "ask", "ask_close", "plan", "skill", "tool_search", "memory", "question"],
-            "toolsAddress": "127.0.0.1:7788",
+            "tools": ["ask", "ask_close", "plan", "skill", "tool_search", "memory", "question"],
             "builtinTools": false,
         });
-        assert!(judge_tools(&ok.to_string()).is_ok());
+        assert!(judge_tools(&ok.to_string()).is_ok(), "a hands-free bench session must pass");
+
+        // Each of the eight is a failure ON ITS OWN: one is enough to run something in the bench
+        // container, which is nobody's machine.
+        for hand in OWN_HANDS {
+            let mut v = ok.clone();
+            let mut tools = ok["tools"].as_array().unwrap().clone();
+            tools.push(json!(hand));
+            v["tools"] = json!(tools);
+            assert!(judge_tools(&v.to_string()).is_err(), "`{hand}` on a bench session passed");
+        }
+
+        // The steering set is still required: without `tool_search` no platform tool can be
+        // reached at all, and without `ask` there is no way to reach a workspace.
         let without = |name: &str| {
             let mut v = ok.clone();
             v["tools"] = json!(ok["tools"].as_array().unwrap().iter().filter(|t| *t != name).collect::<Vec<_>>());
             judge_tools(&v.to_string())
         };
-        assert!(without("bash").is_err(), "a bench session with no hands passed");
-        assert!(without("process").is_err());
         assert!(without("ask").is_err());
         assert!(without("tool_search").is_err(), "without it no platform tool can be reached at all");
         assert!(without("memory").is_err());
-        // A catalogue with no `kl_*` in it at all is CORRECT now: they are registered inactive.
-        assert!(judge_tools(&ok.to_string()).is_ok());
-        let mut elsewhere = ok.clone();
-        elsewhere["toolsAddress"] = json!("10.0.0.7:7788");
-        assert!(judge_tools(&elsewhere.to_string()).is_err(), "another workspace's tool server passed");
+        assert!(without("plan").is_err());
+
+        // An ADDRESS is hands by another name, whatever the tool list says.
+        let mut addressed = ok.clone();
+        addressed["toolsAddress"] = json!("127.0.0.1:7788");
+        assert!(judge_tools(&addressed.to_string()).is_err(), "a bench session with a tool server passed");
+
         let mut builtins = ok.clone();
         builtins["builtinTools"] = json!(true);
-        assert!(judge_tools(&builtins.to_string()).is_err(), "hands in the bench container passed");
+        assert!(judge_tools(&builtins.to_string()).is_err(), "pi's builtins in the bench container passed");
+
         let mut driving = ok.clone();
-        driving["tools"] = json!(["read", "write", "edit", "bash", "grep", "find", "ls", "process",
-                                  "ask", "plan", "skill", "tool_search", "memory", "kl_ws_exec"]);
+        let mut tools = ok["tools"].as_array().unwrap().clone();
+        tools.push(json!("kl_ws_exec"));
+        driving["tools"] = json!(tools);
         assert!(judge_tools(&driving.to_string()).is_err(), "a direct tool onto another workspace passed");
     }
 
