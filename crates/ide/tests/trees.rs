@@ -225,6 +225,17 @@ fn a_bind_failure_is_reported_as_a_sentence_naming_the_holder() {
     assert_eq!(port_conflict(ring, "PORT=3000 node server.js"), Some(3000));
     // A bind failure with no readable port still reports the failure, without inventing a number.
     assert_eq!(port_conflict(ring, "node server.js"), None);
+
+    // Every runtime spells it differently, and a matcher that knew only Node's wording answered
+    // "no conflict" for the rest — which a model reads as a server that died for no reason. These
+    // are the real lines, `ttyd`'s copied from a pod (2026-09-18).
+    let ttyd = b"[2026/09/18 07:15:28] E: [null wsi]: lws_socket_bind: ERROR on binding fd 10 to port 20001 (-1 48)\n";
+    assert_eq!(port_conflict(ttyd, "ttyd -p 20001 -i 127.0.0.1 sleep 600"), Some(20001));
+    assert_eq!(port_conflict(b"listen tcp :8080: bind: address already in use\n", "-p 8080"), Some(8080));
+    assert_eq!(port_conflict(b"nginx: [emerg] bind() to 0.0.0.0:80 failed (98: Address in use)\n", "--port=80"), Some(80));
+    assert_eq!(port_conflict(b"Failed to bind to /0.0.0.0:9090\n", "PORT=9090 java -jar app.jar"), Some(9090));
+    // And nothing that is not a bind failure is read as one, whatever the command line says.
+    assert_eq!(port_conflict(b"compiling, binding the template to the model\n", "-p 3000"), None);
 }
 
 /// A walk DISCOVERS paths rather than being handed them, so it prunes where `confine` refuses.

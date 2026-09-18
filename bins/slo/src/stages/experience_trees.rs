@@ -42,6 +42,10 @@ const PASS: Duration = Duration::from_secs(30);
 /// disk.
 const TREE: &str = "probe";
 
+/// What the holding listener runs as its "shell": a command that simply waits, so `ttyd` stays up
+/// holding the port instead of exiting the moment a client would have disconnected.
+const SLEEP: &str = "sleep 600";
+
 /// The five `ws.tree.*` ids, in one workspace. Written as one walk rather than five because a
 /// tree cannot be probed without a workspace that has one, and creating five would spend four
 /// creates on setup.
@@ -148,26 +152,26 @@ pub async fn trees(c: &mut Ctx) {
             }
             // And the net under it: a listener on a port `main` already holds is reported as a
             // sentence naming the port, never left for the model to read out of a stack trace.
+            //
+            // `ttyd`, not `nc`: the base profile carries no netcat and no python (`WS_BASE_PACKAGES`
+            // — `sh: nc: command not found` on the fleet, 2026-09-18), and this probe must not be
+            // the reason a package is added. `ttyd` is in the profile because the shell sidecar
+            // runs it, it binds a TCP port, and it prints a bind failure and exits — which is all a
+            // holder has to do.
             let held = 20_001;
-            let (code, _) = ws_tool(
-                c,
-                &id,
-                "exec",
-                &json!({ "cmd": format!("nc -l -p {held} >/dev/null 2>&1"), "detach": true }),
-            )
-            .await?;
+            let listener = |port: u16| format!("ttyd -p {port} -i 127.0.0.1 {SLEEP}");
+            let (code, _) =
+                ws_tool(c, &id, "exec", &json!({ "cmd": listener(held), "detach": true })).await?;
             if code != 200 {
-                // No `nc` in the image is a gap in the probe, not a breach of the SLI — say which.
-                return Err(anyhow!("could not start the holding listener (is nc in the image?)"));
+                // A holder that cannot start is a gap in the PROBE, not a breach of the SLI — and
+                // the two must never be reported as the same thing.
+                return Err(anyhow!("could not start the holding listener (is ttyd in the profile?)"));
             }
-            tokio::time::sleep(Duration::from_secs(2)).await;
-            let (_, body) = ws_tool(
-                c,
-                &id,
-                "exec",
-                &json!({ "cmd": format!("nc -l -p {held}"), "detach": true, "tree": TREE }),
-            )
-            .await?;
+            // Long enough for ttyd to have bound before the second one tries: a race here would
+            // report "no conflict" for a fence that is working.
+            tokio::time::sleep(Duration::from_secs(3)).await;
+            let (_, body) =
+                ws_tool(c, &id, "exec", &json!({ "cmd": listener(held), "detach": true, "tree": TREE })).await?;
             let pid = field(&body, "id")?;
             tokio::time::sleep(Duration::from_secs(3)).await;
             let (_, body) =

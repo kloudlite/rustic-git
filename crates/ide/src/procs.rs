@@ -296,11 +296,30 @@ pub(crate) fn rand_u64() -> u64 {
 /// before any number is claimed, and the number comes from the command line's own
 /// `--port`/`-p`/`PORT=` hint. A failure with no readable hint answers `None` — the process is
 /// still reported failed, with no port invented for it.
+/// What a process that could not take its port says. Every runtime spells it differently, and a
+/// matcher that knew only Node's and Vite's wording silently answered "no conflict" for everything
+/// else — which reads to a model as a server that died for no reason (`ttyd`, whose libwebsockets
+/// says only `ERROR on binding ... to port N`, found on the fleet 2026-09-18).
+///
+/// Lowercase, and matched as substrings: these are the phrases, not the whole line.
+const BIND_FAILURES: [&str; 5] = [
+    // Node, and anything on libuv.
+    "eaddrinuse",
+    // Go, Python, Rust's own io::Error, most of libc's strerror.
+    "address already in use",
+    // libwebsockets (ttyd), and several C servers that print their own errno text.
+    "error on binding",
+    // nginx, and the BSD spelling.
+    "bind() to",
+    // Java/Netty.
+    "failed to bind",
+];
+
 pub fn port_conflict(ring: &[u8], cmdline: &str) -> Option<u16> {
     // The first 4 KiB: a bind failure is the first thing a server prints, and scanning a full
     // 4 MiB ring for a string on every exit is work nothing asked for.
     let head = String::from_utf8_lossy(&ring[..ring.len().min(4096)]).to_lowercase();
-    if !head.contains("eaddrinuse") && !head.contains("address already in use") {
+    if !BIND_FAILURES.iter().any(|m| head.contains(m)) {
         return None;
     }
     let words: Vec<&str> = cmdline.split_whitespace().collect();
