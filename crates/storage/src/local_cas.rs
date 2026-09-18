@@ -63,7 +63,7 @@ impl LocalCas {
             .name("local-cas-update".into())
             .spawn(move || {
             let result = (|| {
-            let file = std::fs::OpenOptions::new().create(true).read(true).write(true).open(lock)
+            let file = std::fs::OpenOptions::new().create(true).truncate(false).read(true).write(true).open(lock)
                 .map_err(|e| Error::Generic { store: "local-cas", source: Box::new(e) })?;
             #[cfg(unix)]
             {
@@ -92,7 +92,7 @@ impl LocalCas {
             let _ = sender.send(result);
         })
         .map_err(|e| Error::Generic { store: "local-cas", source: Box::new(e) })?;
-        receiver.await.map_err(|_| Error::Generic { store: "local-cas", source: Box::new(std::io::Error::new(std::io::ErrorKind::Other, "CAS worker exited before publishing")) })?
+        receiver.await.map_err(|_| Error::Generic { store: "local-cas", source: Box::new(std::io::Error::other("CAS worker exited before publishing")) })?
     }
 }
 
@@ -180,7 +180,7 @@ mod tests {
         let version = UpdateVersion { e_tag: created.e_tag, version: created.version };
         let a = store.put_opts(&path, PutPayload::from_static(b"two"), PutOptions { mode: PutMode::Update(version.clone()), ..Default::default() });
         let b = store.put_opts(&path, PutPayload::from_static(b"three"), PutOptions { mode: PutMode::Update(version), ..Default::default() });
-        let (a, b) = tokio::time::timeout(std::time::Duration::from_secs(5), tokio::join!(a, b)).await.unwrap();
+        let (a, b) = tokio::time::timeout(std::time::Duration::from_secs(5), async { tokio::join!(a, b) }).await.unwrap();
         assert!(a.is_ok() ^ b.is_ok());
         assert!(matches!(store.put_opts(&Path::from("state/record"), PutPayload::from_static(b"x"), PutOptions { mode: PutMode::Update(UpdateVersion { e_tag: None, version: None }), ..Default::default() }).await, Err(Error::NotImplemented { .. })));
         assert!(matches!(store.copy_opts(&path, &Path::from("blob-state/acme/sha256/copy"), CopyOptions::default()).await, Err(Error::NotImplemented { .. })));
