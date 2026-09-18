@@ -389,7 +389,7 @@ export async function propose(
 ): Promise<boolean> {
   ctx?.ui?.setWidget?.("harness:proposal", [JSON.stringify({ id, tool, args, summary: summary ?? question(tool, args), preview })]);
   try {
-    const r = await fetch(`${BENCH_URL()}/proposals/${encodeURIComponent(id)}/wait?cap=${PROPOSAL_CAP_MS}`, { signal });
+    const r = await fetch(`${BENCH_URL()}/proposals/${encodeURIComponent(id)}/wait?cap=${PROPOSAL_CAP_MS}${process.env.KL_SESSION ? `&session=${encodeURIComponent(process.env.KL_SESSION)}` : ""}`, { signal });
     return r.ok && ((await r.json()) as { answer?: string }).answer === "yes";
   } catch {
     return false;
@@ -522,7 +522,7 @@ export function questionTool(reg: ReturnType<typeof makeReg>, pi?: ExtensionAPI)
         return { ...text("not needed: call the tool, the harness will ask the person for you. Use question only when they must choose between real alternatives you cannot decide."), isError: true };
       const id = `q-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 6)}`;
       ctx?.ui?.setWidget?.("harness:proposal", [JSON.stringify({ id, tool: "question", args: a, summary: a.question, question: { header: a.header, options: a.options, multi: a.multi } })]);
-      const r = await fetch(`${BENCH_URL()}/proposals/${encodeURIComponent(id)}/wait?cap=${PROPOSAL_CAP_MS}`, { signal }).catch(() => undefined);
+      const r = await fetch(`${BENCH_URL()}/proposals/${encodeURIComponent(id)}/wait?cap=${PROPOSAL_CAP_MS}${process.env.KL_SESSION ? `&session=${encodeURIComponent(process.env.KL_SESSION)}` : ""}`, { signal }).catch(() => undefined);
       const answer = r?.ok ? ((await r.json()) as { answer?: string }).answer : undefined;
       // No answer is an answer: it says stop and ask them properly, not pick one and carry on.
       return answer && answer !== "no" ? text(answer) : { ...text("the person did not answer; ask them in your reply instead of choosing"), isError: true };

@@ -124,9 +124,9 @@ test("a card answer wakes the tool and queues nothing", async () => {
       widgetLines: [JSON.stringify({ id: "q-9", tool: "question", args: {}, summary: "Which language?", question: { header: "Stack", options: [{ label: "TypeScript (Node)", description: "" }] } })],
     });
     // The tool call is awaiting this; the answer is what it returns.
-    const waiting = fetch(`${b.base}/proposals/q-9/wait`).then((r) => r.json() as Promise<{ answer: string }>);
+    const waiting = fetch(`${b.base}/proposals/q-9/wait?session=${encodeURIComponent(session)}`).then((r) => r.json() as Promise<{ answer: string }>);
     await new Promise((r) => setTimeout(r, 30));
-    await post(b, "/proposals/q-9", { answer: "TypeScript (Node)" });
+    await post(b, `/proposals/${session}.q-9`, { answer: "TypeScript (Node)" });
     assert.deepEqual(await waiting, { answer: "TypeScript (Node)" }, "the wake carries the answer");
     await new Promise((r) => setTimeout(r, 150));
     const sent = JSON.parse(fs.readFileSync(log, "utf8")) as { type: string }[];
@@ -160,7 +160,7 @@ test("answering a proposal speaks no prompt to the model", async () => {
       widgetKey: "harness:proposal",
       widgetLines: [JSON.stringify({ id: "p-1", tool: "question", args: {}, summary: "Which database?", question: { header: "Storage", options: [{ label: "postgres", description: "" }] } })],
     });
-    await post(b, "/proposals/p-1", { answer: "postgres" });
+    await post(b, `/proposals/${session}.p-1`, { answer: "postgres" });
     await new Promise((r) => setTimeout(r, 150));
     const sent = JSON.parse(fs.readFileSync(log, "utf8")) as { type: string }[];
     assert.deepEqual(sent.filter((c) => ["prompt", "steer", "follow_up"].includes(c.type)), [], "the answer is the tool's result, not a message");
@@ -301,9 +301,9 @@ test("answering a card twice is a conflict", async () => {
       widgetKey: "harness:proposal",
       widgetLines: [JSON.stringify({ id: "p-twice", tool: "question", args: {}, summary: "Which?", question: { header: "x", options: [{ label: "a", description: "" }] } })],
     });
-    const once = await fetch(`${b.base}/proposals/p-twice`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ answer: "a" }) });
+    const once = await fetch(`${b.base}/proposals/${session}.p-twice`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ answer: "a" }) });
     assert.equal(once.status, 200);
-    const twice = await fetch(`${b.base}/proposals/p-twice`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ answer: "b" }) });
+    const twice = await fetch(`${b.base}/proposals/${session}.p-twice`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ answer: "b" }) });
     assert.equal(twice.status, 409, "the first answer stands");
   } finally {
     await b.down();

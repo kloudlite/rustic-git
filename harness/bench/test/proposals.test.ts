@@ -36,7 +36,10 @@ test("yes runs it, no declines it, and an unanswered question is a no", async ()
   const bench = new Bench({ dir, readOnly: false, model: "fake/m", bin: FAKE });
   const srv = await serve(bench, 0);
   const base = `http://127.0.0.1:${srv.port}`;
-  const wait = (id: string, cap = 600_000) => fetch(`${base}/proposals/${id}/wait?cap=${cap}`).then((r) => r.json() as Promise<{ answer: string }>);
+  // The extension waits on the id it minted AND says which session it is: the same tool-call id can
+  // be open in two sessions, and the bench will not guess between them (R-D27).
+  const wait = (id: string, cap = 600_000, who?: string) =>
+    fetch(`${base}/proposals/${encodeURIComponent(id)}/wait?cap=${cap}${who ? `&session=${encodeURIComponent(who)}` : ""}`).then((r) => r.json() as Promise<{ answer: string }>);
   try {
     await bench.start();
     const session = bench.sessions.all().find((s) => !s.archived)!.id;
@@ -46,31 +49,34 @@ test("yes runs it, no declines it, and an unanswered question is a no", async ()
     bench.onEvent((ev) => ev.type === "proposal" && seen.push(ev.row));
     propose(bench, session, "p-1");
     assert.equal(seen[0].summary, "Delete workspace api; its snapshots stay on the volume");
-    assert.deepEqual((await (await fetch(`${base}/proposals`)).json()).map((p: any) => p.id), ["p-1"]);
+    // A card is addressed by its own key — the session and the child's id — so two sessions raising
+    // the same id are two cards.
+    const keyOf = (raw: string) => `${session}.${raw}`;
+    assert.deepEqual((await (await fetch(`${base}/proposals`)).json()).map((p: any) => p.id), [keyOf("p-1")]);
 
     // Yes.
-    const yes = wait("p-1");
+    const yes = wait(keyOf("p-1"), 600_000, session);
     await until(() => true, 100, "");
-    const answered = await (await fetch(`${base}/proposals/p-1`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ answer: "yes" }) })).json();
-    assert.deepEqual(answered, { id: "p-1", answer: "yes" });
+    const answered = await (await fetch(`${base}/proposals/${keyOf("p-1")}`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ answer: "yes" }) })).json();
+    assert.deepEqual(answered, { id: keyOf("p-1"), answer: "yes" });
     assert.deepEqual(await yes, { answer: "yes" });
     assert.deepEqual(await (await fetch(`${base}/proposals`)).json(), [], "an answered question is not open");
 
     // No.
     propose(bench, session, "p-2");
-    const no = wait("p-2");
-    await fetch(`${base}/proposals/p-2`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ answer: "no" }) });
+    const no = wait(keyOf("p-2"), 600_000, session);
+    await fetch(`${base}/proposals/${keyOf("p-2")}`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ answer: "no" }) });
     assert.deepEqual(await no, { answer: "no" });
 
     // Unanswered at the cap: a no, because a change nobody agreed to must not happen.
     propose(bench, session, "p-3");
-    assert.deepEqual(await wait("p-3", 30), { answer: "no" });
+    assert.deepEqual(await wait(keyOf("p-3"), 30, session), { answer: "no" });
 
     // A question nobody asked.
-    assert.deepEqual(await wait("p-nope"), { answer: "no" });
+    assert.deepEqual(await wait(keyOf("p-nope"), 600_000, session), { answer: "no" });
     // An empty answer is not an answer; a `question` tool's answer is the person's own words, so
     // anything they actually said is taken (§17.6).
-    assert.equal((await fetch(`${base}/proposals/p-2`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ answer: "" }) })).status, 400);
+    assert.equal((await fetch(`${base}/proposals/${keyOf("p-2")}`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ answer: "" }) })).status, 400);
   } finally {
     await srv.close();
     await bench.stop();
@@ -85,13 +91,15 @@ test("a waiting client that goes away stops waiting, and the question stays open
   const base = `http://127.0.0.1:${srv.port}`;
   try {
     await bench.start();
-    propose(bench, bench.sessions.all().find((s) => !s.archived)!.id, "p-9");
+    const only = bench.sessions.all().find((s) => !s.archived)!.id;
+    const keyOf = (raw: string) => `${only}.${raw}`;
+    propose(bench, only, "p-9");
     const ac = new AbortController();
-    const dropped = fetch(`${base}/proposals/p-9/wait`, { signal: ac.signal }).catch((e: Error) => e.name);
+    const dropped = fetch(`${base}/proposals/${keyOf("p-9")}/wait`, { signal: ac.signal }).catch((e: Error) => e.name);
     ac.abort();
     assert.equal(await dropped, "AbortError");
     // Still unanswered: the abort ended one wait, it did not decide anything.
-    assert.deepEqual((await (await fetch(`${base}/proposals`)).json()).map((p: any) => p.id), ["p-9"]);
+    assert.deepEqual((await (await fetch(`${base}/proposals`)).json()).map((p: any) => p.id), [keyOf("p-9")]);
   } finally {
     await srv.close();
     await bench.stop();
@@ -123,9 +131,9 @@ test("a question to the person carries its own options, and the answer is the to
     // question tool's RESULT — never also as a user message. It used to be sent as a prompt too, so
     // pi wrote a `postgres` user row into the session file and every reopen replayed it beneath the
     // card that already said it (owner, on the transcript).
-    const waited = fetch(`${t.base}/proposals/q-1/wait`).then((r) => r.json() as Promise<{ answer: string }>);
+    const waited = fetch(`${t.base}/proposals/q-1/wait?session=${encodeURIComponent(session)}`).then((r) => r.json() as Promise<{ answer: string }>);
     await new Promise((r) => setTimeout(r, 30));
-    await fetch(`${t.base}/proposals/q-1`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ answer: "postgres" }) });
+    await fetch(`${t.base}/proposals/${encodeURIComponent(`${session}.q-1`)}`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ answer: "postgres" }) });
     assert.deepEqual(await waited, { answer: "postgres" });
     await new Promise((r) => setTimeout(r, 100));
     const msgs = (await t.bench.messages(session)).messages as { role?: string; content?: unknown }[];
@@ -226,3 +234,44 @@ test("the whole card is named, not only its first line", async () => {
     fs.rmSync(dir, { recursive: true, force: true });
   }
 });
+
+/**
+ * R-D27. D3 keyed a SECOND session's card by `{session}~{id}` but left the first on the bare id,
+ * and both lookups then fell back to `.find(x => x.raw === id)` — which picks whichever card it
+ * meets first. With several cards open, an unrelated `yes` released someone else's tool call and
+ * the person's own read as "declined". An answer addresses one card: its own key, or nothing.
+ */
+test("an answer never reaches another session's card", async () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "bench-d27-"));
+  const bench = new Bench({ dir, readOnly: false, model: "fake/m", bin: FAKE });
+  try {
+    await bench.start();
+    const a = bench.sessions.create({ model: "fake/m" }).id;
+    const b = bench.sessions.create({ model: "fake/m" }).id;
+    const raise = (session: string) =>
+      (bench as unknown as { foldRow: (id: string, ev: unknown) => void }).foldRow(session, {
+        type: "extension_ui_request",
+        method: "setWidget",
+        widgetKey: "harness:proposal",
+        widgetLines: [JSON.stringify({ id: "call_same", tool: "bash", args: { command: "ls" }, summary: "Run ls" })],
+      });
+    raise(a);
+    raise(b);
+    const open = bench.openProposals();
+    assert.equal(open.length, 2);
+    const cardA = open.find((p) => p.session === a)!;
+    const cardB = open.find((p) => p.session === b)!;
+
+    bench.answerProposal(cardA.id, "yes");
+    const still = bench.openProposals();
+    assert.deepEqual(still.map((p) => p.session), [b], "B's card is still waiting for its own answer");
+    assert.equal(still[0].id, cardB.id);
+
+    // The raw id alone addresses nothing: it cannot name which card is meant.
+    assert.throws(() => bench.answerProposal("call_same", "yes"), /no proposal/);
+  } finally {
+    await bench.stop();
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});
+

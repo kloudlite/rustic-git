@@ -196,7 +196,10 @@ export function serve(
         if (p.length === 3 && p[2] === "wait" && m === "GET") {
           const ac = new AbortController();
           req.on("close", () => ac.abort());
-          return send(res, 200, { answer: await bench.waitProposal(p[1], cap, ac.signal) });
+          // `session` says WHICH card: the same tool-call id can be open in two sessions, and the
+          // bench will not guess between them (R-D27).
+          const who = u.searchParams.get("session") ?? undefined;
+          return send(res, 200, { answer: await bench.waitProposal(p[1], cap, ac.signal, who) });
         }
         if (p.length === 2 && m === "POST") {
           const b = await body(req);

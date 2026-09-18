@@ -20,7 +20,8 @@ export type BenchEvent = { type: string; [k: string]: unknown };
  * A card is identified by the session that raised it AND the id its child minted: two children mint
  * the same tool call id, and one key for both collapsed two cards into one (D3).
  */
-const proposalKey = (session: string, id: string) => `${session}~${id}`;
+// `.` and `-` are what the routes' id charset allows, so a key is a legal path segment.
+const proposalKey = (session: string, id: string) => `${session}.${id}`;
 
 /**
  * Card text reads to a PERSON, so it says names. A card said "Deliver mongodb traffic in
@@ -512,8 +513,10 @@ export class Bench {
               if (typeof o.description === "string") o.description = withNames(o.description, named);
             }
           }
-          const taken = [...this.proposals.entries()].some(([k, x]) => x.raw === p.id && x.session !== id && !x.answer && k === p.id);
-          const key = taken ? proposalKey(id, p.id) : p.id;
+          // ALWAYS scoped, never "scoped only when taken": a conditional key left the first card
+          // on the bare id and the second on the scoped one, and the lookups then guessed between
+          // them — an unrelated `yes` released someone else's tool call (R-D27).
+          const key = proposalKey(id, p.id);
           if (!this.proposals.has(key)) this.proposals.set(key, { session: id, raw: p.id, tool: p.tool, summary: p.summary, preview: p.preview, args: p.args, question: p.question, wake: [] });
           this.emit({ type: "proposal", row: { id: key, session: id, tool: p.tool, args: p.args, summary: p.summary, preview: p.preview, question: p.question } });
           /**
@@ -1265,12 +1268,16 @@ export class Bench {
    * The extension's side of a proposal: wait until a person answers, or until the cap. An unanswered
    * question is a NO — the whole point is that nothing changes without somebody saying yes.
    */
-  waitProposal(id: string, capMs: number, signal?: AbortSignal): Promise<string> {
-    // The extension waits on the id IT minted; the card is keyed by session + that id. An exact key
-    // wins (the desktop answers by key), else the one card holding this raw id.
-    const key = this.proposals.has(id) ? id : [...this.proposals.entries()].find(([, x]) => x.raw === id && !x.answer)?.[0];
-    const p = key ? this.proposals.get(key) : undefined;
-    if (!p || !key) return Promise.resolve("no");
+  waitProposal(id: string, capMs: number, signal?: AbortSignal, session?: string): Promise<string> {
+    // The extension waits on the id IT minted and says which session it is; the desktop answers by
+    // the key it was handed. There is NO search by raw id: with the same id open in two sessions
+    // that can only guess, and a guess here releases the wrong tool call.
+    // The extension waits on the id its child minted and names its session; the desktop waits on
+    // the key it was handed, which already identifies the card. Either addresses ONE card — there
+    // is no search by raw id, because with the same id open twice that can only guess.
+    const key = session && !this.proposals.has(id) ? proposalKey(session, id) : id;
+    const p = this.proposals.get(key);
+    if (!p) return Promise.resolve("no");
     if (p.answer) return Promise.resolve(p.answer);
     return new Promise((resolve) => {
       const done = (a: string) => {
@@ -1301,11 +1308,11 @@ export class Bench {
    * twice returned 200 both times, which reads as though the later answer took (D12).
    */
   answerProposal(id: string, answer: string): { id: string; answer: string } {
-    // The desktop answers by the key it was given; a caller holding the child's own id (an older
-    // window, a script) is resolved to the one unanswered card carrying it.
-    const key = this.proposals.has(id) ? id : [...this.proposals.entries()].find(([, x]) => x.raw === id && !x.answer)?.[0];
-    const p = key ? this.proposals.get(key) : undefined;
-    if (!p || !key) throw new Error(`no proposal ${id}`);
+    // One card, addressed by its own key. A raw tool-call id names nothing: it can be open in two
+    // sessions at once, and answering "whichever" is what declined the person's own card (R-D27).
+    const key = id;
+    const p = this.proposals.get(key);
+    if (!p) throw new Error(`no proposal ${id}`);
     if (p.answer !== undefined) throw new AlreadyAnswered(id, p.answer);
     p.answer = answer;
     // The ask that was waiting on this card is waiting on work again: its idle clock restarts from

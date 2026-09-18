@@ -2222,7 +2222,8 @@ test("answering the card puts the ask back on its ordinary clock", async () => {
     });
 
     const t0 = Date.now();
-    bench.answerProposal("p-d6b", "yes");
+    // A card is addressed by its own key: the session that raised it, and the child's id (R-D27).
+    bench.answerProposal(`${a.session}.p-d6b`, "yes");
     // Well past the window the CARD would have ended on, but the clock restarted at the answer.
     await bench.sweepExchanges(t0 + 11 * 60_000);
     assert.equal(bench.exchanges.bySession(asker).find((e) => e.id === a.exchange)!.state, "running");
