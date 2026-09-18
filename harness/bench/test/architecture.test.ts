@@ -154,3 +154,29 @@ test("what a reply does to the document, and when the line is asked for", () => 
   assert.equal(a.contracts().length, 1);
   assert.equal(a.contracts()[0].shape, "{items, coupon} → {id}");
 });
+
+/**
+ * R-D26. `.bench/architecture.md` did not exist while `memory/` and `plans.json` did, so a bench
+ * restart lost the document. The store put it one directory deeper than every sibling — `dir` IS
+ * the bench folder, and it appended `.bench/` again — so it was written where nothing looked.
+ */
+test("the architecture document survives a restart", () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "arch-persist-"));
+  const a = new Architecture(dir);
+  a.write("# Architecture\n\nthe backend serves the api\n");
+
+  // Beside the other stores, not under a second `.bench/`.
+  assert.equal(a.path_(), path.join(dir, "architecture.md"));
+  assert.ok(fs.existsSync(path.join(dir, "architecture.md")), "the file is where the bench keeps its state");
+
+  // A fresh instance over the same folder reads it back: this is what a restart does.
+  assert.match(new Architecture(dir).read(), /the backend serves the api/);
+  fs.rmSync(dir, { recursive: true, force: true });
+});
+
+test("a section written through the tool is persisted too", () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "arch-persist2-"));
+  new Architecture(dir).setSection("Services", "api on 8080");
+  assert.match(new Architecture(dir).read(), /api on 8080/, "a restart keeps what the tool wrote");
+  fs.rmSync(dir, { recursive: true, force: true });
+});

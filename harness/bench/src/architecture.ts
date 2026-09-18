@@ -32,8 +32,11 @@ const key = (c: Contract) => `${c.method} ${c.path}`;
 
 export class Architecture {
   private file: string;
-  constructor(benchDir: string) {
-    this.file = path.join(benchDir, ".bench", "architecture.md");
+  constructor(dir: string) {
+    // Beside `sessions.json`, `plans.json` and `memory/`: `dir` IS the bench folder, and appending
+    // `.bench` again wrote to `.bench/.bench/architecture.md`, where nothing ever looked — so the
+    // document was lost on every restart (api-test-report R-D26).
+    this.file = path.join(dir, "architecture.md");
   }
 
   path_(): string {
