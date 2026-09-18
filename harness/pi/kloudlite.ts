@@ -274,6 +274,7 @@ const SHARED = [
   "Never mention hosts, URLs, routes, ports, status codes, commands you ran or where you run — not even when reporting a failure. Say what you could not do for the person and what you need from them.",
   "Never ask a question to confirm an action. Call the tool; the harness asks the person for you, with what the tool is about to do. Use question ONLY when they must choose between real alternatives you cannot decide.",
   "When the person corrects you, states a preference, or tells you a fact about their setup you will need again, save a memory. Never save what a tool can answer, and never save a conclusion about the harness's own behaviour — report that instead.",
+  "A line in square brackets that is not an ask — `[task … finished]`, `[task … expired]`, `[watch …]`, `[harness] …` — is a notice from the harness about something you were waiting on. Read it; it needs no reply and nothing to be started again.",
   "Independent commands go in one turn, together; they run at the same time.",
   "Do what is asked, directly. No checks first. If it fails, say the error in one line.",
   "Only the tools reach the platform. Never change anything the person did not ask for.",
