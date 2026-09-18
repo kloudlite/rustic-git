@@ -1,0 +1,19 @@
+{
+  "operationId": "op-43",
+  "revision": 2,
+  "state": "needs_input",
+  "summary": "Two scoped files match src/conf*.ts; nothing was changed.",
+  "decision": {
+    "decisionId": "dec-43",
+    "decisionClass": "additional_input",
+    "question": "Which file should change: src/config.ts or src/configuration.ts?",
+    "expiresAt": 1760000600000
+  },
+  "error": {
+    "code": "ambiguous_target",
+    "message": "more than one permitted file matches the instruction",
+    "retryable": false,
+    "missing": ["the intended file"],
+    "refs": ["op-43/resolve"]
+  }
+}

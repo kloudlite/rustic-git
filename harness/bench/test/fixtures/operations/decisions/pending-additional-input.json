@@ -1,0 +1,10 @@
+{
+  "decisionId": "dec-43",
+  "operationId": "op-43",
+  "stepId": "step-2",
+  "decisionClass": "additional_input",
+  "question": "Which file should change: src/config.ts or src/configuration.ts?",
+  "createdAt": 1760000001500,
+  "expiresAt": 1760000600000,
+  "revision": 2
+}

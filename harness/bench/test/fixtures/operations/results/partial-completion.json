@@ -1,0 +1,13 @@
+{
+  "operationId": "op-45",
+  "revision": 6,
+  "state": "partial",
+  "summary": "Updated the timeout in src/config.ts; the matching test update failed and no rollback was attempted.",
+  "evidenceRefs": ["change-45", "failure-45"],
+  "error": {
+    "code": "execution_failure",
+    "message": "the test file replacement did not match its recorded revision",
+    "retryable": false,
+    "refs": ["op-45/step-2"]
+  }
+}

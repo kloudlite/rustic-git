@@ -1,0 +1,10 @@
+{
+  "action": "resume",
+  "operationId": "op-43",
+  "decisionId": "dec-43",
+  "expectedRevision": 2,
+  "resolution": {
+    "kind": "additional_input",
+    "inputs": { "intendedPath": "src/config.ts", "timeoutMs": 30000 }
+  }
+}

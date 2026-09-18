@@ -1,0 +1,5 @@
+{
+  "instruction": "In src/auth.ts, reject expired tokens before loading the user.",
+  "constraints": ["Preserve the public API.", "Keep the existing error type."],
+  "expectedResults": ["Expired tokens are rejected before the user is loaded."]
+}

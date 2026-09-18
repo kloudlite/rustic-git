@@ -1,0 +1,80 @@
+{
+  "contractVersion": "v1",
+  "operationId": "op-42",
+  "revision": 3,
+  "state": "awaiting_approval",
+  "createdAt": 1760000000000,
+  "updatedAt": 1760000002000,
+  "deadlineAt": 1760000600000,
+  "actor": {
+    "actorId": "user-1",
+    "tenantId": "tenant-1",
+    "sessionId": "s-1",
+    "turnId": "turn-4"
+  },
+  "scope": { "workspaceId": "ws-api" },
+  "request": {
+    "instruction": "In src/config.ts, change the timeout to 30000."
+  },
+  "requestDigest": "sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+  "dedupeKey": "s-1:turn-4:call-9",
+  "budgets": {
+    "maxSteps": 12,
+    "maxSelectionRounds": 3,
+    "maxGenerationCalls": 2,
+    "maxConcurrentReads": 4,
+    "maxConcurrentMutations": 2,
+    "operationDeadlineMs": 600000,
+    "handleWithinMs": 2000,
+    "providerTimeoutMs": 30000,
+    "maxGeneratedPayloadBytes": 65536,
+    "maxTextFileBytes": 1048576,
+    "maxReadSnapshotBytes": 4194304
+  },
+  "steps": [
+    {
+      "stepId": "step-1",
+      "key": "read_config",
+      "state": "succeeded",
+      "capability": "file.read",
+      "capabilityVersion": "1.0.0",
+      "targetRef": "ws-api",
+      "effect": "read",
+      "resourceKeys": ["workspace.file:src/config.ts"],
+      "attempts": 1,
+      "startedAt": 1760000000100,
+      "endedAt": 1760000000200,
+      "evidenceRefs": ["read-42"]
+    },
+    {
+      "stepId": "step-2",
+      "key": "edit_config",
+      "state": "awaiting_approval",
+      "capability": "file.edit",
+      "capabilityVersion": "1.0.0",
+      "targetRef": "ws-api",
+      "effect": "write",
+      "resourceKeys": ["workspace.file:src/config.ts"],
+      "dependencies": ["read_config"],
+      "attempts": 1,
+      "startedAt": 1760000001000,
+      "idempotencyKey": "op-42/step-2/v3",
+      "evidenceRefs": ["diff-42"]
+    }
+  ],
+  "pendingDecisions": [
+    {
+      "decisionId": "dec-42",
+      "operationId": "op-42",
+      "stepId": "step-2",
+      "decisionClass": "user_authorization",
+      "question": "Apply the change to src/config.ts: timeout 9000 -> 30000?",
+      "createdAt": 1760000002000,
+      "expiresAt": 1760000600000,
+      "revision": 3
+    }
+  ],
+  "unknownOutcomes": [],
+  "usage": { "steps": 2, "selectionRounds": 1, "generationCalls": 1, "attempts": 2 },
+  "lastSequence": 6
+}

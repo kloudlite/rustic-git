@@ -1,0 +1,13 @@
+{
+  "operationId": "op-44",
+  "sequence": 9,
+  "at": 1760000031000,
+  "phase": "unknown_outcome",
+  "revision": 5,
+  "stepId": "step-3",
+  "capability": "pkg.update",
+  "summary": "The package update did not return; the outcome is unknown.",
+  "decisionCode": "outcome_unknown",
+  "argDigest": "sha256:fedcba9876543210fedcba9876543210fedcba9876543210fedcba9876543210",
+  "elapsedMs": 30000
+}

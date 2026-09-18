@@ -1,0 +1,84 @@
+{
+  "capability": "file.read",
+  "version": "1.0.0",
+  "title": "Read a file",
+  "summary": "Read one permitted UTF-8 text file inside the scoped workspace.",
+  "guide": "Name the file. The executor reads it and returns the exact text, revision, and digest; pages share one immutable snapshot.",
+  "effect": "read",
+  "scope": "workspace",
+  "group": "code",
+  "inputSchema": {
+    "type": "object",
+    "required": ["path"],
+    "additionalProperties": false,
+    "properties": {
+      "path": { "type": "string", "description": "Relative, confined path inside the workspace." },
+      "cursor": { "type": "string", "description": "Opaque snapshot cursor from a previous page." },
+      "maxBytes": { "type": "integer", "description": "Bounded page size; oversize work returns to the main model." }
+    }
+  },
+  "outputSchema": {
+    "type": "object",
+    "required": ["file"],
+    "properties": {
+      "file": {
+        "type": "object",
+        "required": ["path", "revision", "digest", "text"],
+        "properties": {
+          "path": { "type": "string" },
+          "revision": { "type": "string" },
+          "digest": { "type": "string" },
+          "text": { "type": "string" }
+        }
+      },
+      "nextCursor": { "type": "string" }
+    }
+  },
+  "arguments": [
+    {
+      "name": "path",
+      "presence": "required",
+      "schema": { "type": "string" },
+      "provenance": ["user_value", "resource_candidate"],
+      "clear": "unsupported",
+      "description": "Relative, confined path inside the workspace."
+    },
+    {
+      "name": "cursor",
+      "presence": "optional",
+      "schema": { "type": "string" },
+      "provenance": ["runtime_fact"],
+      "clear": "unsupported"
+    },
+    {
+      "name": "maxBytes",
+      "presence": "defaulted",
+      "schema": { "type": "integer" },
+      "provenance": ["default"],
+      "clear": "unsupported",
+      "defaultJson": 65536
+    }
+  ],
+  "rules": [
+    "relative and confined path; no symlink escape",
+    "exact raw UTF-8 text without inserted line numbers",
+    "one revision binds the full original bytes; pages share one snapshot"
+  ],
+  "limits": { "maxTextFileBytes": 1048576, "maxReadSnapshotBytes": 4194304 },
+  "examples": [{ "instruction": "Read src/config.ts.", "args": { "path": "src/config.ts" } }],
+  "errors": ["no_match", "ambiguous_match", "scope_denied", "snapshot_expired", "payload_too_large"],
+  "retry": { "class": "idempotent", "maxAttempts": 2, "reconciliation": "none" },
+  "approval": {
+    "required": "none",
+    "payloadDigestRequired": false,
+    "binds": ["actor", "tenant", "session", "operation", "step", "payloadDigest", "revision", "policySource", "expiry"]
+  },
+  "evidence": { "success": ["read.revision", "read.digest"], "unknownOutcome": [] },
+  "resourceAccess": {
+    "reads": ["workspace.file"],
+    "writes": [],
+    "conflictKeys": ["workspace.file:path"],
+    "exclusive": false
+  },
+  "contractVersion": "v1"
+}

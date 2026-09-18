@@ -1,0 +1,13 @@
+{
+  "operationId": "op-42",
+  "sequence": 3,
+  "at": 1760000001500,
+  "phase": "queued",
+  "revision": 2,
+  "stepId": "step-2",
+  "capability": "file.read",
+  "summary": "Waiting for step-1 before reading src/config.ts.",
+  "queueReason": "depends on step-1",
+  "dependencies": ["read_config"],
+  "retryCount": 0
+}

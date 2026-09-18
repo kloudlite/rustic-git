@@ -1,0 +1,99 @@
+{
+  "capability": "file.edit",
+  "version": "1.0.0",
+  "title": "Edit a file",
+  "summary": "Apply ordered exact replacements to one permitted UTF-8 text file.",
+  "guide": "Describe the change you want. The executor reads the source, proposes replacements, calculates the diff, and applies the approved result.",
+  "effect": "write",
+  "scope": "workspace",
+  "group": "code",
+  "inputSchema": {
+    "type": "object",
+    "required": ["path", "expectedRevision", "edits"],
+    "additionalProperties": false,
+    "properties": {
+      "path": { "type": "string" },
+      "expectedRevision": { "type": "string" },
+      "edits": {
+        "type": "array",
+        "items": {
+          "type": "object",
+          "required": ["oldText", "newText"],
+          "properties": { "oldText": { "type": "string" }, "newText": { "type": "string" } }
+        }
+      }
+    }
+  },
+  "outputSchema": {
+    "type": "object",
+    "required": ["changed", "revision", "digest"],
+    "properties": {
+      "changed": { "type": "boolean" },
+      "revision": { "type": "string" },
+      "digest": { "type": "string" },
+      "diffRef": { "type": "string" }
+    }
+  },
+  "arguments": [
+    {
+      "name": "path",
+      "presence": "required",
+      "schema": { "type": "string" },
+      "provenance": ["user_value", "resource_candidate"],
+      "clear": "unsupported"
+    },
+    {
+      "name": "expectedRevision",
+      "presence": "required",
+      "schema": { "type": "string" },
+      "provenance": ["runtime_fact"],
+      "clear": "unsupported",
+      "description": "Captured by the executor's own read; never supplied by the model."
+    },
+    {
+      "name": "edits",
+      "presence": "required",
+      "schema": { "type": "array", "items": { "type": "object" } },
+      "provenance": ["generated_content", "user_value"],
+      "clear": "unsupported",
+      "description": "1 to 64 ordered replacements; each old text occurs exactly once at its turn."
+    }
+  ],
+  "rules": [
+    "existing permitted UTF-8 text file; relative confined path; no lossy decoding",
+    "1 to 64 ordered replacements; nonempty old text; empty new text deletes",
+    "exact whitespace and newline matching; no fuzzy matching and no replace-all",
+    "reject the whole edit before writing if any replacement fails",
+    "revalidate revision and approval digest immediately before commit"
+  ],
+  "limits": { "maxTextFileBytes": 1048576, "maxInlineReplacementBytes": 65536, "maxEdits": 64 },
+  "examples": [
+    { "instruction": "In src/config.ts, change the timeout to 30000." },
+    { "instruction": "Delete the unused import in src/auth.ts.", "args": { "path": "src/auth.ts" } }
+  ],
+  "errors": [
+    "revision_conflict",
+    "no_match",
+    "ambiguous_match",
+    "payload_too_large",
+    "scope_denied",
+    "unknown_outcome"
+  ],
+  "retry": { "class": "reconcile_required", "maxAttempts": 2, "reconciliation": "backend_operation_id" },
+  "approval": {
+    "required": "user",
+    "payloadDigestRequired": true,
+    "binds": ["actor", "tenant", "session", "operation", "step", "payloadDigest", "revision", "policySource", "expiry"]
+  },
+  "evidence": {
+    "success": ["edit.diff", "edit.revision", "edit.digest"],
+    "unknownOutcome": ["edit.backendOperationId", "edit.currentRevision"]
+  },
+  "resourceAccess": {
+    "reads": ["workspace.file"],
+    "writes": ["workspace.file"],
+    "conflictKeys": ["workspace.file:path"],
+    "exclusive": false
+  },
+  "contractVersion": "v1"
+}

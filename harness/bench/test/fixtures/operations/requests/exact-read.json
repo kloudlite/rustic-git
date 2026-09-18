@@ -1,0 +1,26 @@
+{
+  "action": "exact",
+  "request": {
+    "objective": "Read the README and then the config file it points at.",
+    "calls": [
+      {
+        "key": "read_readme",
+        "capability": "file.read",
+        "capabilityVersion": "1.0.0",
+        "targetRef": "ws-api",
+        "args": { "path": "README.md" }
+      },
+      {
+        "key": "read_config",
+        "capability": "file.read",
+        "capabilityVersion": "1.0.0",
+        "targetRef": "ws-api",
+        "dependsOn": ["read_readme"],
+        "args": { "path": "src/config.ts" },
+        "argsFrom": {
+          "cursor": { "from": "read_readme", "output": "file", "select": ["revision"] }
+        }
+      }
+    ]
+  }
+}
