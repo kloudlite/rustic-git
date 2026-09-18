@@ -543,6 +543,9 @@ pub const CATALOGUE: &[Slo] = &[
     // the sandbox was on because nothing said it was off. Only a preflight that actually started
     // `bwrap` writes that line (spec §4.7).
     Slo { id: "ide.sandbox.active", feature: "Workspaces", sli: "The workspace's tool server reports `ide.sandbox.active` after the first exec, so execs really are wrapped", target: avail(99.9), suite: Suite::Hourly, stage: "14 · Experience" },
+    // What the sandbox's first working roll broke: `/etc` held only passwd and resolv.conf, so no
+    // CA bundle was reachable and every HTTPS fetch in every workspace failed at once.
+    Slo { id: "ide.exec.https", feature: "Workspaces", sli: "An HTTPS fetch from inside a wrapped exec succeeds, so a sandboxed command can still reach git, npm and cargo", target: avail(99.9), suite: Suite::Hourly, stage: "14 · Experience" },
     // Subagent trees (spec §4.8). All five read through the workspace's own tool server, because
     // the tree only exists as something a session acts on: a subvolume nobody can address is not
     // the thing being probed.

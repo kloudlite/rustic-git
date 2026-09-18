@@ -421,7 +421,66 @@ pub async fn ide_server(c: &mut Ctx) {
     })
     .await;
     sandbox_active(c, &id).await;
+    exec_https(c, &id).await;
     drop_ws(c, &id).await;
+}
+
+/// `ide.exec.https`: a wrapped exec can still fetch over HTTPS.
+///
+/// The wrapper's first working roll took every HTTPS fetch in the fleet with it — inside the
+/// sandbox `/etc` held only `passwd` and `resolv.conf`, so no CA bundle was reachable and
+/// git-over-https, npm, cargo, pip and go mod all failed at once (2026-09-18). The sandbox's own
+/// preflight asks whether a bundle is READABLE; this asks whether a fetch actually works, which is
+/// the thing people lost.
+///
+/// Through the tool server, so it measures what a session gets — a `kubectl exec` runs outside the
+/// wrapper and would pass while every real exec failed, which is exactly the shape of check that
+/// has now missed three of these.
+async fn exec_https(c: &mut Ctx, id: &str) {
+    const ID: &str = "ide.exec.https";
+    if c.kube.is_none() {
+        return c.skip(ID, "no kubeconfig");
+    }
+    let ws = id.to_string();
+    c.step(ID, EXEC, move |c| {
+        let ws = ws.clone();
+        async move {
+            // Our OWN endpoint, not a third party's: a probe that fails when somebody else's
+            // site is down would report our outage for their incident. `web_url` is https in
+            // every deployed region, which is the whole point of the fetch.
+            let url = c.cfg.web_url.clone();
+            if !url.starts_with("https://") {
+                return Err(anyhow!("{url} is not https, so this proves nothing about the trust store"));
+            }
+            let cmd = format!("curl -sS -m 10 -o /dev/null -w '%{{http_code}}' {url}");
+            let (status, body) = ws_tool(c, &ws, "exec", &serde_json::json!({ "cmd": cmd })).await?;
+            if status != 200 {
+                return Err(anyhow!("the tool server answered {status}: {}", body.trim()));
+            }
+            let v: Value = serde_json::from_str(&body).context("parsing the exec answer")?;
+            let (code, out, err) = (
+                v["exit_code"].as_i64().unwrap_or(-1),
+                v["stdout"].as_str().unwrap_or("").trim().to_string(),
+                v["stderr"].as_str().unwrap_or("").trim().to_string(),
+            );
+            if code != 0 {
+                // curl 60 is the certificate failure this id exists for; say so rather than
+                // leaving a number for somebody to look up.
+                let hint = if err.contains("certificate") || code == 60 {
+                    " — the sandbox has no readable CA bundle"
+                } else {
+                    ""
+                };
+                return Err(anyhow!("an HTTPS fetch from inside a wrapped exec failed (curl {code}){hint}: {err}"));
+            }
+            if !out.starts_with('2') && !out.starts_with('3') {
+                return Err(anyhow!("{url} answered {out} from inside the sandbox"));
+            }
+            Ok(())
+        }
+        .boxed()
+    })
+    .await;
 }
 
 /// `ide.sandbox.active`: the tool server says, in its own log, that it wrapped an exec.
