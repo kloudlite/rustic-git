@@ -105,7 +105,7 @@ test("the system prompt is the harness's own, and says only what the model must 
       /You have no files and no shell here\. Anything that reads, writes or runs happens in a WORKSPACE/,
       /You have no filesystem or shell where you run\./,
       /You have no working directory\. Name a workspace\./,
-      /Another workspace is asked, not touched: `ask \{to: "<workspace>", task\}`/,
+      /A workspace is asked, not touched: `ask \{to: "<workspace>", task\}`/,
       /Something new \(a backend, a service, a project\) gets a new workspace/,
       /When the person corrects you, states a preference, or tells you a fact about their setup you will need again, save a memory\./,
       /never save a conclusion about the harness's own behaviour — report that instead\./,
@@ -999,6 +999,21 @@ test("a bench session has no filesystem, no shell and no machine of its own", as
   } finally {
     restore();
   }
+});
+
+/**
+ * One block was read by both sessions, so the workspace was told it had no files and the bench was
+ * told the machine was its own. Each audience gets only the lines that are true for it.
+ */
+test("each identity carries only the lines true for its own audience", () => {
+  const bench = identity(BENCH_HANDS);
+  const workspace = identity("You are the Kloudlite harness, working inside workspace ws-1.", true, "", "workspace");
+  assert.ok(!workspace.includes("no files and no shell"), "the workspace is not told it has no hands");
+  assert.ok(!bench.includes("This machine is yours"), "the bench is not told a machine is its own");
+  assert.ok(bench.includes("no files and no shell"), "the bench keeps its own line");
+  assert.ok(workspace.includes("This machine is yours"), "the workspace keeps its own line");
+  // The shared half is in both.
+  for (const both of [bench, workspace]) assert.match(both, /Packages are nixpkgs attributes, not language names/);
 });
 
 test("every identity says where paths are relative to, and the bench that it has no directory", () => {

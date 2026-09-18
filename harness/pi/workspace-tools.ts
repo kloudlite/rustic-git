@@ -529,6 +529,8 @@ export default function (pi: ExtensionAPI) {
         "An ask is a conversation. Your FIRST report on one is the decision — `report {ask, kind: \"progress\", text: \"going ahead with: add GET /version, bump the version, build, push\"}` — which tells them what is happening and does not answer it. Report a milestone the same way. Your LAST is `done` or `blocked`, which answers it, in the shape above.",
         "Work asked of you arrives tagged `[ask <id> from <session>]`. Several may be waiting; work through them in whatever order makes sense and answer each one. When a turn answers a particular ask, START that answer with `[reply <id>]` so it reaches whoever asked it — without the tag, the oldest one waiting is taken as the one you answered.",
       ].join("\n"),
+      true,
+      "workspace",
     );
   }
   const server = new ToolServer(ws, resolveFromApi, process.env.KL_TREE || undefined);

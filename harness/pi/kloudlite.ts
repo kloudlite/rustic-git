@@ -219,15 +219,18 @@ function caveman(): string[] {
 }
 const CAVEMAN = caveman();
 
-export function identity(hands: string, platform = true, memory = MEMORY): string {
+export type Audience = "bench" | "workspace";
+
+export function identity(hands: string, platform = true, memory = MEMORY, who: Audience = "bench"): string {
   // Filled here, not at module load: `skillIndex` reads the files, and a const above them would run
   // before they are declared.
   // Only the skills that are actually readable: telling a model about a skill its image does not
   // ship is telling it to call something that answers "no skill" (owner, 2026-09-17).
   const index = skillIndex();
+  const whole = platformFor(who);
   const platformText = index.length
-    ? PLATFORM.replace("%SKILLS%", index.map((s) => `- ${s.name} — ${s.description}`).join("\n"))
-    : PLATFORM.split("\n").filter((l) => !l.includes("%SKILLS%") && !l.includes("load its skill")).join("\n");
+    ? whole.replace("%SKILLS%", index.map((s) => `- ${s.name} — ${s.description}`).join("\n"))
+    : whole.split("\n").filter((l) => !l.includes("%SKILLS%") && !l.includes("load its skill")).join("\n");
   // The memory is the person's, so it rides in every session — including a fork, which has no
   // tools but may well be asked what the person prefers.
   return [hands, ...(platform ? [platformText] : []), ...(memory ? [`What you already know about this person:\n\n${memory}`] : []), ...CAVEMAN].join("\n\n");
@@ -254,22 +257,19 @@ const MEMORY = memoryIndex();
  * knows about it or not, and describing it here only crowds out the five things it does need
  * (owner, 2026-09-17: "keep the skills simple").
  */
-const PLATFORM = [
+const SHARED = [
   "You have workspaces, environments, snapshots, repos and images. Each has a skill saying what it is and the verbs it has:",
   "%SKILLS%",
   "Before acting in one of these areas, load its skill with `skill {name}` once per session, then tool_search the verb.",
   "You start with ask, plan, skill, tool_search, memory, architecture and question. Every platform tool is one `tool_search` away: search it by what you want to do, and it turns on.",
-  "You have no files and no shell here. Anything that reads, writes or runs happens in a WORKSPACE, through a session that has hands there: ask it.",
-  "You do not read code. Ask the workspace; its reply tells you what changed and where.",
   "Ask a workspace for information with kind: info — it answers from a read-only copy without stopping its work. Ask for work with kind: work.",
   "An ask you are already waiting on WAKES you when it answers. Do not poll it, and never start, stop or restart a machine to move work along — it is already running.",
-  "This machine is yours: \"install X\" or \"switch environment\" means here. Another workspace is asked, not touched: `ask {to: \"<workspace>\", task}`. Something new (a backend, a service, a project) gets a new workspace.",
   "",
   "Independent work that does not need your context goes to an agent with a precise brief; keep its conclusion, not its transcript. Run agents in parallel when tasks are independent. Each works in its own copy of the workspace's working directory and leaves a branch or a pull request behind; its copy and its transcript stay until you close it with `ask_close`.",
   "More than one step? The plan tool is the FIRST call, before any other. Mark each item doing then done as you go, and anything you push to later as later with the reason. The person reads the plan, not your text.",
   "",
   "An environment is chosen for the whole SPACE (the team), never for one workspace: every workspace in the space resolves that environment's services by bare name. So \"attach this workspace to that environment\" is kl_env_switch; there is no per-workspace attach to look for.",
-  "A package is installed in a workspace, never \"on the bench\": name the workspace.",
+  "A workspace is asked, not touched: `ask {to: \"<workspace>\", task}`. Something new (a backend, a service, a project) gets a new workspace.",
   "Packages are nixpkgs attributes, not language names — rustc and cargo, nodejs_22, go, python3, bun, jdk21, gcc; when unsure, load the workspaces skill and use the ones it names.",
   "Never mention hosts, URLs, routes, ports, status codes, commands you ran or where you run — not even when reporting a failure. Say what you could not do for the person and what you need from them.",
   "Never ask a question to confirm an action. Call the tool; the harness asks the person for you, with what the tool is about to do. Use question ONLY when they must choose between real alternatives you cannot decide.",
@@ -278,11 +278,28 @@ const PLATFORM = [
   "Do what is asked, directly. No checks first. If it fails, say the error in one line.",
   "Only the tools reach the platform. Never change anything the person did not ask for.",
   "Answer in one line, then only the facts needed — eight lines at most, no code blocks and no tables. The tool result is already on screen; never repeat its fields. A thing you changed but could not verify is \"changed, unverified\" — never a claim that it works.",
-].join("\n");
+];
+
+/** True only where the session has no hands: everything it wants done happens in a workspace. */
+const BENCH_ONLY = [
+  "You have no files and no shell here. Anything that reads, writes or runs happens in a WORKSPACE, through a session that has hands there: ask it.",
+  "You do not read code. Ask the workspace; its reply tells you what changed and where.",
+  "A package is installed in a workspace, never \"on the bench\": name the workspace.",
+];
+
+/** True only where the session IS the machine. */
+const WORKSPACE_ONLY = [
+  "This machine is yours: \"install X\" or \"switch environment\" means here. Another workspace is asked, not touched.",
+];
+
+/** One block per audience: a line that is false for the reader is worse than a line it is missing. */
+function platformFor(who: Audience): string {
+  return [...SHARED, ...(who === "bench" ? BENCH_ONLY : WORKSPACE_ONLY)].join("\n");
+}
 
 /** pi's `before_agent_start` hook hands back the system prompt for the turn; returning our own replaces it. */
-export function tellItWhereItStands(pi: ExtensionAPI, hands: string, platform = true): void {
-  const prompt = identity(hands, platform);
+export function tellItWhereItStands(pi: ExtensionAPI, hands: string, platform = true, who: Audience = "bench"): void {
+  const prompt = identity(hands, platform, MEMORY, who);
   pi.on("before_agent_start", async () => ({ systemPrompt: prompt }));
 }
 
