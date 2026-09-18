@@ -2271,3 +2271,43 @@ test("a queued ask does not survive a restart as queued", async () => {
     fs.rmSync(dir, { recursive: true, force: true });
   }
 });
+
+/**
+ * R-D19 round 3 (api-test-report, three samples: a pod delete, a fleet roll, a head-of-queue ask):
+ * an ask left `running` when the bench went down was still running five minutes past boot. A
+ * restart takes the child with it, so nothing is mid-turn on the other side of a boot — `running`
+ * there means a session WAS working on it, and nobody is now.
+ */
+test("a running ask does not survive a restart as running", async () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "bench-rd19b-"));
+  const one = new Bench({ dir, readOnly: false, model: "fake/m", bin: FAKE });
+  let asker = "";
+  try {
+    await one.start();
+    asker = one.sessions.all().find((s) => !s.archived)!.id;
+    await one.openWorkspace("api");
+    // The row as the log holds it when the pod is deleted mid-turn.
+    one.exchanges.record({ id: "ask-r1", session: asker, workspace: "api", dir: "out", text: "build and push backend:latest", state: "running" });
+  } finally {
+    await one.stop();
+  }
+
+  const two = new Bench({ dir, readOnly: false, model: "fake/m", bin: FAKE });
+  try {
+    await two.start();
+    const held = (two as never as { asked: Map<string, { exchange: string }[]> }).asked;
+    assert.ok([...held.values()].some((q) => q.some((x) => x.exchange === "ask-r1")), "somebody owes it again");
+
+    // Its clock starts at BOOT, not at whenever it was first sent: the idle window is a fresh one,
+    // and when it runs out the ask ends rather than sitting there.
+    const t0 = Date.now();
+    await two.sweepExchanges(t0 + 60_000);
+    assert.equal(two.exchanges.bySession(asker).find((e) => e.id === "ask-r1")!.state, "running", "a minute past boot is still work");
+    await two.sweepExchanges(t0 + 10 * 60_000 + 1);
+    await two.sweepExchanges(t0 + 12 * 60_000 + 2);
+    assert.equal(two.exchanges.bySession(asker).find((e) => e.id === "ask-r1")!.state, "expired");
+  } finally {
+    await two.stop();
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});

@@ -165,6 +165,8 @@ export class Bench {
   /** Per workspace session, the asks it has been handed and not yet answered, oldest first. */
   private asked = new Map<string, Ask[]>();
   private askSeq = 0;
+  /** When this process started: an exchange older than it was left behind by a restart. */
+  private readonly bootedAt = Date.now();
   /** Per exchange: when it entered its state, and whether it has already been redelivered or nudged. */
   private clocks = new Map<string, { at: number; redelivered?: true; nudgedAt?: number; card?: string }>();
   private sweeper?: ReturnType<typeof setInterval>;
@@ -275,10 +277,21 @@ export class Bench {
        * forever (api-test-report R-D19), so it is re-delivered here — once, and the deadline takes
        * it from there if that lands nowhere either.
        */
-      if (e.state === "queued") {
-        this.clocks.set(e.id, { at: Date.now() });
-        this.tell(holder.id, `[ask ${e.id} from ${e.session}] ${e.text}`);
-      }
+      /**
+       * A restart takes the CHILD with it, so no exchange is mid-turn on the other side of a boot —
+       * `running` means "a session was working on this", and after a restart nobody is. A pod
+       * delete, a fleet roll and a head-of-queue ask each left one running for five minutes past
+       * boot (api-test-report R-D19, three samples). Every non-terminal exchange is re-delivered
+       * once, with its clock starting HERE, and the ordinary deadline takes it from there.
+       */
+      // Only what predates THIS process: `resumeAsks` also runs for a bench that never went down
+      // (a session opened mid-life), and re-sending a live ask would hand the workspace the same
+      // work twice.
+      this.clocks.set(e.id, { at: Date.now() });
+      if (e.ts >= this.bootedAt) continue;
+      this.tell(holder.id, `[ask ${e.id} from ${e.session}] ${e.text}`);
+      // Re-delivered already: the deadline must not spend its one redelivery on it a second time.
+      this.clocks.set(e.id, { at: Date.now(), redelivered: true });
     }
   }
 
@@ -785,6 +798,9 @@ export class Bench {
           this.settle(e, "blocked", "the workspace session did not pick it up");
           continue;
         }
+        // pi ALREADY HOLDS it when the session is mid-turn on an earlier ask: its queue is the
+        // thing doing the waiting, and re-sending would hand the workspace the same work twice.
+        if (this.turning.has(holder)) continue;
         if (!clock.redelivered) {
           // Once. A session that is simply busy gets its ask again; one that is gone does not
           // answer either way, and the next pass says so rather than waiting again.
