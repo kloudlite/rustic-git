@@ -22,12 +22,7 @@ use std::path::{Component, Path, PathBuf};
 /// never the layout: naming what it may not reach would teach exactly what §3.5 keeps from it.
 pub const RELATIVE_ONLY: &str = "paths are relative to your working directory";
 
-pub fn confine(tree: &TreeCtx, given: &str) -> Result<PathBuf, ToolError> {
-    if Path::new(given).is_absolute() {
-        return Err(ToolError::Invalid(RELATIVE_ONLY.into()));
-    }
-    // Normalise lexically first (`..` never climbs above the root), then resolve every existing
-    // prefix so a symlink cannot point out of the tree either.
+pub fn lexical(tree: &TreeCtx, given: &str) -> PathBuf {
     let mut lexical = PathBuf::new();
     for c in tree.root.join(given).components() {
         match c {
@@ -38,7 +33,14 @@ pub fn confine(tree: &TreeCtx, given: &str) -> Result<PathBuf, ToolError> {
             other => lexical.push(other.as_os_str()),
         }
     }
-    let resolved = resolve_existing_prefix(&lexical);
+    lexical
+}
+
+pub fn confine(tree: &TreeCtx, given: &str) -> Result<PathBuf, ToolError> {
+    if Path::new(given).is_absolute() {
+        return Err(ToolError::Invalid(RELATIVE_ONLY.into()));
+    }
+    let resolved = resolve_existing_prefix(&lexical(tree, given));
     let root = tree.root.canonicalize().unwrap_or_else(|_| tree.root.clone());
     if !resolved.starts_with(&root) {
         return Err(ToolError::Denied(format!("EACCES {given}: outside your working directory")));

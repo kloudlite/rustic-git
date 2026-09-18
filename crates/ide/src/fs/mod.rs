@@ -10,7 +10,7 @@
 pub mod git;
 pub mod tree;
 
-use crate::paths::confine;
+use crate::paths::{confine, lexical};
 use crate::server::App;
 use crate::tools::{status_of, ToolError};
 use axum::extract::{Query, State};
@@ -305,24 +305,18 @@ pub async fn diff(State(app): State<Arc<App>>, headers: HeaderMap, Query(q): Que
     };
     let Some(against) = git::Against::parse(q.against.as_deref()) else { return err(ToolError::Invalid("against: HEAD, index or staged".into())) };
     let rel = match &q.path {
-        Some(p) => match confine(&t, p) {
-            Ok(full) => match full.strip_prefix(&t.root) {
+        Some(p) => {
+            if let Err(e) = confine(&t, p) {
+                return err(e);
+            }
+            match lexical(&t, p).strip_prefix(&t.root) {
                 Ok(r) => Some(r.to_string_lossy().into_owned()),
                 Err(_) => return err(ToolError::Invalid("path: only the workspace directory has a diff".into())),
-            },
-            Err(e) => return err(e),
-        },
+            }
+        }
         None => None,
     };
-    // Untracked is decided from status so a brand-new file diffs against /dev/null.
-    let untracked = match &rel {
-        Some(r) => match git::status(&t.root, false).await {
-            Ok(st) => st.changes.iter().any(|c| c.path == *r && c.worktree == '?'),
-            Err(e) => return failed(e),
-        },
-        None => false,
-    };
-    match git::diff(&t.root, rel.as_deref(), against, untracked).await {
+    match git::diff_for_tree(&t.root, rel.as_deref(), against, t.is_main()).await {
         Ok((mut patch, binary)) => {
             let truncated = patch.len() > MAX_DIFF;
             if truncated {

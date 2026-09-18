@@ -66,7 +66,7 @@ fn present_optional() -> Vec<&'static str> {
 
 /// `bwrap`'s own arguments, up to and including the `--` that ends them. `cmd` is appended whole.
 pub fn bwrap_argv(tree: &TreeCtx, cmd: &[String]) -> Vec<String> {
-    bwrap_argv_with(tree, cmd, &[])
+    bwrap_argv_with_cwd(tree, cmd, &[], &tree.root)
 }
 
 /// The same, with variables the child must see whatever the wrapper does to the environment.
@@ -76,6 +76,10 @@ pub fn bwrap_argv(tree: &TreeCtx, cmd: &[String]) -> Vec<String> {
 /// exec for exactly that reason (R-D22, 2026-09-18). Anything the child is promised has to be in
 /// the argv, which is also the only form a test can read.
 pub fn bwrap_argv_with(tree: &TreeCtx, cmd: &[String], env: &[(String, String)]) -> Vec<String> {
+    bwrap_argv_with_cwd(tree, cmd, env, &tree.root)
+}
+
+pub fn bwrap_argv_with_cwd(tree: &TreeCtx, cmd: &[String], env: &[(String, String)], cwd: &std::path::Path) -> Vec<String> {
     let root = tree.root.to_string_lossy().into_owned();
     let mut a: Vec<String> = vec![
         "--unshare-all".into(),
@@ -89,6 +93,9 @@ pub fn bwrap_argv_with(tree: &TreeCtx, cmd: &[String], env: &[(String, String)])
         root.clone(),
         root.clone(),
     ];
+    if tree.is_main() {
+        a.extend(["--tmpfs".to_string(), format!("{root}/.agents")]);
+    }
     for f in BINDS {
         a.extend(["--ro-bind".to_string(), f.into(), f.into()]);
     }
@@ -109,7 +116,7 @@ pub fn bwrap_argv_with(tree: &TreeCtx, cmd: &[String], env: &[(String, String)])
         "HOME".into(),
         tree.sandbox_home().to_string_lossy().into_owned(),
         "--chdir".into(),
-        root,
+        cwd.to_string_lossy().into_owned(),
     ]);
     // The trust store's own variables, and then the caller's: both explicit, so nothing the child
     // is promised depends on what bwrap chooses to pass through.
@@ -239,6 +246,9 @@ pub fn available() -> bool {
 /// `None` means every exec runs unwrapped, with `paths::confine` and the tree cwd as the fence —
 /// a weaker boundary, and the only honest one available.
 pub fn usable(tree: &TreeCtx) -> Option<&'static str> {
+    if tree.is_main() {
+        let _ = std::fs::create_dir_all(tree.root.join(crate::trees::TREES_DIR));
+    }
     static OK: std::sync::OnceLock<Option<&'static str>> = std::sync::OnceLock::new();
     *OK.get_or_init(|| preflight(binary()?, tree))
 }

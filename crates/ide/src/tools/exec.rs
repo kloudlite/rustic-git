@@ -79,9 +79,7 @@ fn command(t: &TreeCtx, args: &Value) -> Result<(Command, String), ToolError> {
         // The RESOLVED path, never the bare name: this process's PATH does not carry the profile's
         // bin, so `Command::new("bwrap")` found nothing and silently ran every exec unwrapped.
         let mut c = Command::new(bwrap);
-        c.args(sandbox::bwrap_argv_with(t, &words, &tree_env));
-        // bwrap's own --chdir is the tree; a `cwd` deeper in it is set here, where the path is
-        // the same string on both sides of the bind.
+        c.args(sandbox::bwrap_argv_with_cwd(t, &words, &tree_env, &cwd));
         c.current_dir(&cwd);
         c
     } else {
@@ -298,6 +296,21 @@ mod tests {
         assert_eq!(v["stderr"].as_str().unwrap().trim(), "err");
         let v = x.call("exec", json!({ "cmd": ["sh", "-c", "echo $FOO"], "env": { "FOO": "bar" } })).await.unwrap();
         assert_eq!(v["stdout"].as_str().unwrap().trim(), "bar");
+    }
+
+    #[tokio::test]
+    async fn a_nested_cwd_controls_pwd_and_relative_writes() {
+        let (_t, x, trees) = exec_set();
+        let root = trees.resolve(None).unwrap().root;
+        let nested = root.join("nested");
+        std::fs::create_dir_all(&nested).unwrap();
+        let v = x
+            .call("exec", json!({ "cmd": "pwd; printf nested > sentinel", "cwd": "nested" }))
+            .await
+            .unwrap();
+        assert_eq!(v["stdout"].as_str().unwrap().trim(), nested.to_string_lossy());
+        assert_eq!(std::fs::read_to_string(nested.join("sentinel")).unwrap(), "nested");
+        assert!(!root.join("sentinel").exists());
     }
 
     #[tokio::test]

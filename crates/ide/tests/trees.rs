@@ -7,7 +7,7 @@
 //! to correct, not a permission to deny.
 
 use kloudlite_ide::paths::{confine, relative};
-use kloudlite_ide::sandbox::{bwrap_argv, bwrap_argv_with, missing_bind};
+use kloudlite_ide::sandbox::{bwrap_argv, bwrap_argv_with, bwrap_argv_with_cwd, missing_bind};
 use kloudlite_ide::server::App;
 use kloudlite_ide::tools::ToolError;
 use kloudlite_ide::{Config, TreeCtx};
@@ -136,6 +136,58 @@ fn the_sandbox_binds_the_tree_the_store_and_nothing_else() {
     // The token's directory is never inside, whatever else is: reading it is what the wrapper
     // exists to prevent.
     assert!(!sources.iter().any(|s| s.starts_with("/etc/kloudlite")), "{argv:?}");
+}
+
+#[test]
+fn the_main_sandbox_masks_agent_trees() {
+    let (_t, app) = workspace();
+    let main = main_tree(&app);
+    let agent = app.tree(Some("x")).unwrap();
+    let main_argv = bwrap_argv(&main, &["true".into()]);
+    let agent_argv = bwrap_argv(&agent, &["true".into()]);
+    let main_agents = format!("{}/.agents", main.root.to_string_lossy());
+    assert!(main_argv.windows(2).any(|w| w[0] == "--tmpfs" && w[1] == main_agents), "{main_argv:?}");
+    assert!(!agent_argv.iter().any(|arg| arg == &format!("{}/.agents", agent.root.to_string_lossy())), "{agent_argv:?}");
+}
+
+#[test]
+fn the_wrapper_uses_a_nested_working_directory() {
+    let (_t, app) = workspace();
+    let main = main_tree(&app);
+    let cwd = main.root.join("src");
+    let argv = bwrap_argv_with_cwd(&main, &["pwd".into()], &[], &cwd);
+    let chdir = argv.windows(2).find(|w| w[0] == "--chdir").expect("--chdir");
+    assert_eq!(chdir[1], cwd.to_string_lossy());
+}
+
+#[test]
+#[ignore = "requires a functional bubblewrap runtime"]
+fn a_running_main_sandbox_cannot_read_or_write_an_agent_tree() {
+    let (_t, app) = workspace();
+    let main = main_tree(&app);
+    let secret = main.root.join(".agents/x/secret");
+    let created = main.root.join(".agents/x/created");
+    std::fs::write(&secret, "agent secret").unwrap();
+    let bwrap = kloudlite_ide::sandbox::usable(&main).expect("functional bwrap required for this integration test");
+    let script = format!("test ! -r '{}' && printf hidden > '{}'", secret.display(), created.display());
+    let argv = bwrap_argv_with_cwd(&main, &["/nix/profile/current/bin/sh".into(), "-c".into(), script], &[], &main.root);
+    let output = std::process::Command::new(bwrap).args(&argv).output().unwrap();
+    assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stderr));
+    assert!(!created.exists());
+
+    let nested = main.root.join("nested");
+    std::fs::create_dir_all(&nested).unwrap();
+    let argv = bwrap_argv_with_cwd(
+        &main,
+        &["/nix/profile/current/bin/sh".into(), "-c".into(), "pwd; printf wrapped > sentinel".into()],
+        &[],
+        &nested,
+    );
+    let output = std::process::Command::new(bwrap).args(&argv).output().unwrap();
+    assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stderr));
+    assert_eq!(String::from_utf8_lossy(&output.stdout).trim(), nested.to_string_lossy());
+    assert_eq!(std::fs::read_to_string(nested.join("sentinel")).unwrap(), "wrapped");
+    assert!(!main.root.join("sentinel").exists());
 }
 
 /// Every bind source the wrapper names must be one that exists, and the pair that decides this is

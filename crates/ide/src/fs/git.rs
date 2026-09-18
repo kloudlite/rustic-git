@@ -78,7 +78,34 @@ fn blob_at(repo: &gix::Repository, at: &str, rel: &str) -> Option<Vec<u8>> {
 }
 
 fn worktree_bytes(root: &Path, rel: &str) -> Option<Vec<u8>> {
-    std::fs::read(root.join(rel)).ok()
+    let rel_path = Path::new(rel);
+    if rel_path.is_absolute() || rel_path.components().any(|c| matches!(c, std::path::Component::ParentDir)) {
+        return None;
+    }
+    let path = root.join(rel_path);
+    let root = root.canonicalize().ok()?;
+    let parent = path.parent()?.canonicalize().ok()?;
+    if !parent.starts_with(&root) {
+        return None;
+    }
+    let metadata = std::fs::symlink_metadata(&path).ok()?;
+    if metadata.file_type().is_symlink() {
+        return Some(link_bytes(&std::fs::read_link(path).ok()?));
+    }
+    let resolved = path.canonicalize().ok()?;
+    resolved.starts_with(&root).then(|| std::fs::read(resolved).ok()).flatten()
+}
+
+fn link_bytes(target: &Path) -> Vec<u8> {
+    #[cfg(unix)]
+    {
+        use std::os::unix::ffi::OsStrExt;
+        target.as_os_str().as_bytes().to_vec()
+    }
+    #[cfg(not(unix))]
+    {
+        target.to_string_lossy().into_owned().into_bytes()
+    }
 }
 
 fn is_binary(b: &[u8]) -> bool {
@@ -364,6 +391,14 @@ fn unified(path: &str, before: Option<&[u8]>, after: Option<&[u8]>) -> Result<(S
 /// A unified diff of one path, or of every change when `rel` is `None`. `_untracked` is decided
 /// here from the sides themselves and kept only for the caller's signature.
 pub async fn diff(root: &Path, rel: Option<&str>, against: Against, _untracked: bool) -> Result<(String, bool), String> {
+    diff_with_options(root, rel, against, false).await
+}
+
+pub async fn diff_for_tree(root: &Path, rel: Option<&str>, against: Against, hide_agents: bool) -> Result<(String, bool), String> {
+    diff_with_options(root, rel, against, hide_agents).await
+}
+
+async fn diff_with_options(root: &Path, rel: Option<&str>, against: Against, hide_agents: bool) -> Result<(String, bool), String> {
     let rel = rel.map(str::to_string);
     blocking(root, move |root| {
         let Some(repo) = open(&root) else { return Ok((String::new(), false)) };
@@ -384,6 +419,7 @@ pub async fn diff(root: &Path, rel: Option<&str>, against: Against, _untracked: 
                     Against::Index => c.worktree != '.',
                     Against::Staged => c.index != '.' && c.index != '?',
                 })
+                .filter(|c| !hide_agents || (!c.path.starts_with(".agents/") && c.path != ".agents"))
                 .map(|c| c.path)
                 .collect(),
         };
@@ -484,6 +520,33 @@ mod tests {
         assert!(patch.contains("b/a.txt") && patch.contains("b/b.txt"), "{patch}");
         assert_eq!(numstat(&root, &status(&root, false).await.unwrap().changes).await.unwrap(), vec![("a.txt".to_string(), Some((1, 0))), ("b.txt".to_string(), Some((1, 0))), ("renamed.txt".to_string(), Some((0, 0)))]);
         assert_eq!(stash_count(&root).await, 0);
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn an_aggregate_diff_reports_symlink_text_without_following_the_target() {
+        use std::os::unix::fs::symlink;
+
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path().join("repo");
+        std::fs::create_dir_all(&root).unwrap();
+        sh(&root, &["init", "-q", "-b", "main"]);
+        std::fs::write(root.join("tracked.txt"), "tracked\n").unwrap();
+        sh(&root, &["add", "-A"]);
+        sh(&root, &["commit", "-q", "-m", "base"]);
+
+        let outside = tempfile::tempdir().unwrap();
+        std::fs::write(outside.path().join("sentinel"), "PRIVATE_SENTINEL\n").unwrap();
+        symlink(outside.path().join("sentinel"), root.join("link.txt")).unwrap();
+        std::fs::create_dir_all(root.join(".agents/other")).unwrap();
+        std::fs::write(root.join(".agents/other/agent.txt"), "PRIVATE_AGENT\n").unwrap();
+
+        let (patch, binary) = diff_for_tree(&root, None, Against::Head, true).await.unwrap();
+        assert!(!binary, "{patch}");
+        assert!(patch.contains("b/link.txt"), "{patch}");
+        assert!(patch.contains(&format!("+{}", outside.path().join("sentinel").display())), "{patch}");
+        assert!(!patch.contains("PRIVATE_SENTINEL"), "{patch}");
+        assert!(!patch.contains("PRIVATE_AGENT"), "{patch}");
     }
 
     #[tokio::test]
