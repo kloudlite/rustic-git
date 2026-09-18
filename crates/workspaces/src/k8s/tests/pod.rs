@@ -60,6 +60,34 @@ pub(crate) fn a_workspace_pods_host_paths_match_the_agents_layout() {
 }
 
 
+/// A tree's REPORTED path has to be one the pod really has. `status.trees[].path` was built from
+/// the workspace's CR id while the pod mounts its worktree at the DISPLAY NAME, so `ls` on the
+/// reported path answered "No such file or directory" for a tree that was cut and healthy
+/// (R-D21, 2026-09-18).
+///
+/// Held against the pod spec itself, not against a second copy of the rule: this is the mount the
+/// container gets, and the tree is a directory inside it.
+#[test]
+pub(crate) fn a_trees_reported_path_is_inside_the_pods_own_mount() {
+    let spec = ws_spec();
+    let p = workspace_pod(&spec, "ws-1", "ws-1", &ctx(), None, None).unwrap();
+    let c = &p.spec.as_ref().unwrap().containers[0];
+    let live = c
+        .volume_mounts
+        .as_ref()
+        .unwrap()
+        .iter()
+        // The worktree's OWN mount, not the cache subPaths that share the volume name.
+        .find(|m| m.name == "live" && m.sub_path.is_none())
+        .expect("the worktree is mounted");
+    let reported = crate::crd::tree_path(&spec.name, "fix-auth");
+    assert_eq!(reported, format!("{}/.agents/fix-auth", live.mount_path), "{reported}");
+    // And the CR id is NOT what it is built from: the two differ here, which is the bug.
+    assert_ne!(spec.name, "ws-1", "the fixture must distinguish the id from the display name");
+    assert!(!reported.contains("/ws-1/"), "the reported path names the CR id: {reported}");
+}
+
+
 /// The `live` mount is the WORKTREE path, not the old single-subvolume one — and
 /// `id` (volumeRef) vs `ws_id` (this workspace's own id) matter: a shared-volume clone's
 /// worktree lives under the SOURCE volume's `live/`, named by the clone's own id.

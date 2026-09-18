@@ -143,10 +143,19 @@ pub fn tree_name_ok(s: &str) -> bool {
 pub const TREES_DIR: &str = ".agents";
 
 
-/// Where a tree lives inside the pod. One function so `/v1`'s answer, the agent's snapshot
-/// destination and the tool server's root cannot drift.
-pub fn tree_path(ws: &str, name: &str) -> String {
-    format!("{}/{ws}/{TREES_DIR}/{name}", crate::k8s::WORKSPACES_DIR)
+/// Where a tree lives inside the POD, which is the path a caller can act on.
+///
+/// `ws` is the workspace's DISPLAY NAME (`spec.name`), not its CR id: the pod mounts its worktree
+/// at `workspace_dir(spec.name)`, and reporting the id produced a path that simply does not exist
+/// — `ls` on it answered "No such file or directory" for a tree that was cut and healthy (R-D21,
+/// 2026-09-18). Built from `workspace_dir` itself rather than from `WORKSPACES_DIR` and a join,
+/// so the two cannot drift again.
+///
+/// Note this is NOT where the agent cuts the subvolume: that is under the pool
+/// (`Engine::tree_dir`, `{pool}/vol/{volume}/live/{ws-id}/.agents/{name}`). The node writes the
+/// path a person or a tool server would use, never its own.
+pub fn tree_path(ws_name: &str, name: &str) -> String {
+    format!("{}/{TREES_DIR}/{name}", crate::k8s::workspace_dir(ws_name))
 }
 
 
