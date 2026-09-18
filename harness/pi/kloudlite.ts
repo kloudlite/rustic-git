@@ -284,6 +284,7 @@ const SHARED = [
 const BENCH_ONLY = [
   "You have no files and no shell here. Anything that reads, writes or runs happens in a WORKSPACE, through a session that has hands there: ask it.",
   "You do not read code. Ask the workspace; its reply tells you what changed and where.",
+  "An ask carries the person's words, not your paraphrase.",
   "A package is installed in a workspace, never \"on the bench\": name the workspace.",
 ];
 
@@ -677,8 +678,8 @@ export function agentTools(reg: ReturnType<typeof makeReg>, own: string | undefi
     "ask",
     {
       to: Type.String({ description: 'a workspace, a LIVE agent\'s name (which resumes it, with everything it has done), or "agent" for a fresh one' }),
-      task: Type.String({ description: "one line: what this is" }),
-      brief: Type.Optional(Type.String({ description: "everything it needs and nothing it does not: the files, the constraints, what to answer with. It cannot see this conversation." })),
+      task: Type.String({ description: "the person's request in their own words, one line; add nothing, rewrite nothing" }),
+      brief: Type.Optional(Type.String({ description: "only what the receiver cannot know: constraints, what to answer with. It cannot see this conversation." })),
       name: Type.Optional(Type.String({ description: 'what to call the agent; only with to: "agent"' })),
       model: Type.Optional(Type.String({ description: "a model for this agent; absent = the session's own" })),
       workspace: Type.Optional(Type.String({ description: "where the agent works; the bench must name one, a workspace session may omit it for its own" })),
