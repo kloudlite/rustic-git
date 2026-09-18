@@ -321,12 +321,13 @@ async fn deleting_a_manifest_drops_its_rows_but_not_a_shared_blob() {
     assert_eq!(rows("api").await, vec![format!("image/blob/{sd}/upload")], "only the manifest's row goes");
     assert_eq!(rows("nginx").await.len(), 2, "the sibling's rows are untouched");
     assert_eq!(gc::sweep_owner(&e.store, "acme", Duration::ZERO).await.unwrap(), 0);
-    assert!(e.store.os.head(&blob_path("acme", &sd)).await.is_ok(), "nginx still references it");
+    let active = blob_state::resolve(&e.store.os, "acme", &sd).await.unwrap().expect("nginx still references it");
+    assert!(e.store.os.head(&active).await.is_ok(), "nginx still references it");
 
     let r = c.delete(format!("{base}/v2/acme/nginx/manifests/{md}")).basic_auth("acme", Some(&token)).send().await.unwrap();
     assert_eq!(r.status(), axum::http::StatusCode::ACCEPTED);
     assert_eq!(gc::sweep_owner(&e.store, "acme", Duration::ZERO).await.unwrap(), 1);
-    assert!(e.store.os.head(&blob_path("acme", &sd)).await.is_err(), "unreferenced everywhere: swept");
+    assert!(blob_state::resolve(&e.store.os, "acme", &sd).await.unwrap().is_none(), "unreferenced everywhere: swept");
 }
 
 /// The owning node stamps the marker's `updated_ms` from its clock; the worker recomputes it from

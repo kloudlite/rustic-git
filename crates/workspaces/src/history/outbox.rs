@@ -148,6 +148,7 @@ mod tests {
         assert_eq!(paths.first().unwrap().as_ref(), "history-outbox/000.json");
         assert_eq!(paths.last().unwrap().as_ref(), "history-outbox/063.json");
         let cursor = paths.last().cloned();
+        paths.clear();
         retain_candidate(&mut paths, cursor.as_ref(), Path::from("history-outbox/999.json"));
         assert_eq!(paths.last().unwrap().as_ref(), "history-outbox/999.json");
     }

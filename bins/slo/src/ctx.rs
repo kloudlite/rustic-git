@@ -179,6 +179,15 @@ impl Ctx {
     /// `run_id` is `Some` only in the child process, which must report under the SAME id its
     /// parent will file the final report under — the run is one row in `slo_runs`, not two.
     pub async fn new(cfg: Config, suite: Suite, run_id: Option<String>) -> anyhow::Result<Ctx> {
+        Self::build(cfg, suite, run_id, true).await
+    }
+
+    #[cfg(test)]
+    pub(crate) async fn new_for_test(cfg: Config, suite: Suite, run_id: Option<String>) -> anyhow::Result<Ctx> {
+        Self::build(cfg, suite, run_id, false).await
+    }
+
+    async fn build(cfg: Config, suite: Suite, run_id: Option<String>, coordinate: bool) -> anyhow::Result<Ctx> {
         let jwt = Jwt::new(&cfg.jwt_secret).map_err(|e| anyhow::anyhow!("jwt secret: {e}"))?;
         let mint = |email: &str, user: &str| {
             jwt.mint(email, user, Some(user)).map_err(|e| anyhow::anyhow!("mint {user}: {e}"))
@@ -204,8 +213,7 @@ impl Ctx {
             Some(g) => format!("{}-{}-g{g}", suite.as_str(), started.timestamp()),
             None => format!("{}-{}", suite.as_str(), started.timestamp()),
         });
-        let coordination_enabled = std::env::var("KLOUDLITE_SLO_COORDINATION").as_deref() == Ok("1")
-            || std::env::var_os("KUBERNETES_SERVICE_HOST").is_some();
+        let coordination_enabled = coordinate;
         let group_owner = parent_run && suite == Suite::Hourly && group.is_none_or(|index| index == 0);
         let coordination_group = group_owner.then(|| std::env::var("KLOUDLITE_SLO_JOB_NAME").unwrap_or_default()).filter(|name| !name.is_empty());
         let coordination = if parent_run && coordination_enabled && (suite != Suite::Hourly || group_owner) {
@@ -244,12 +252,16 @@ impl Ctx {
             // Reads `KUBECONFIG` (or the in-cluster ServiceAccount) itself, which is why `Config`
             // carries no kubeconfig field. The probe is never the reason a run fails to start:
             // no cluster reachable means the Kubernetes-only steps skip, and HTTP still runs.
-            kube: match kube::Client::try_default().await {
-                Ok(c) => Some(c),
-                Err(e) => {
-                    tracing::warn!(error = %e, "slo.kube.unavailable");
-                    None
+            kube: if coordinate {
+                match kube::Client::try_default().await {
+                    Ok(c) => Some(c),
+                    Err(e) => {
+                        tracing::warn!(error = %e, "slo.kube.unavailable");
+                        None
+                    }
                 }
+            } else {
+                None
             },
             started,
             suite,

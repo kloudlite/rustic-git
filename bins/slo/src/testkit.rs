@@ -33,7 +33,7 @@ pub async fn ctx() -> Ctx {
         probe_user: crate::ctx::PROBE_USER.into(),
         other_user: crate::ctx::OTHER_USER.into(),
     };
-    let mut c = Ctx::new(cfg, Suite::Fast, None).await.expect("ctx");
+    let mut c = Ctx::new_for_test(cfg, Suite::Fast, None).await.expect("ctx");
     c.roll_check = false;
     c
 }

@@ -303,6 +303,28 @@ pub async fn sweep_owner(store: &Store, owner: &str, grace: Duration) -> Result<
         let _ = blob_state::resolve(&store.os, owner, &digest).await?;
     }
     let candidates = blob_state::candidates(&store.os, owner).await?;
+    let mut old_candidates = HashSet::new();
+    for (digest, record, _) in &candidates {
+        let Some(active) = record.active.as_ref().filter(|active| active.pins.is_empty()) else { continue };
+        let meta = match store.os.head(&slatedb::object_store::path::Path::from(active.physical_key.as_str())).await {
+            Ok(meta) => meta,
+            Err(slatedb::object_store::Error::NotFound { .. }) => continue,
+            Err(e) => return Err(e.into()),
+        };
+        let installed_at = chrono::DateTime::<chrono::Utc>::from_timestamp_millis(active.installed_at)
+            .unwrap_or(meta.last_modified);
+        if installed_at <= cutoff {
+            old_candidates.insert(digest.to_string());
+        }
+    }
+    if old_candidates.is_empty() {
+        for (digest, record, _) in &candidates {
+            for retired in &record.retired {
+                blob_state::delete_retired(&store.os, owner, digest, &retired.physical_key).await?;
+            }
+        }
+        return Ok(0);
+    }
     let keep = referenced(store, owner).await?;
     let mut n = 0;
     for (digest, record, version) in candidates {
@@ -310,6 +332,9 @@ pub async fn sweep_owner(store: &Store, owner: &str, grace: Duration) -> Result<
             blob_state::delete_retired(&store.os, owner, &digest, &retired.physical_key).await?;
         }
         if keep.contains(&digest.to_string()) || record.active.as_ref().is_none_or(|a| !a.pins.is_empty()) {
+            continue;
+        }
+        if !old_candidates.contains(&digest.to_string()) {
             continue;
         }
         let Some(active) = record.active.as_ref() else { continue };
