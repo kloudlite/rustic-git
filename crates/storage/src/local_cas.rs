@@ -91,7 +91,7 @@ impl LocalCas {
             })();
             let _ = sender.send(result);
         })
-        .map_err(|e| Error::Generic { store: "local-cas", source: Box::new(e) }))?;
+        .map_err(|e| Error::Generic { store: "local-cas", source: Box::new(e) })?;
         receiver.await.map_err(|_| Error::Generic { store: "local-cas", source: Box::new(std::io::Error::new(std::io::ErrorKind::Other, "CAS worker exited before publishing")) })?
     }
 }

@@ -9,7 +9,7 @@
     "build": "npm run build:main && npm run build:renderer",
     "start": "npm run build && electron .",
     "typecheck": "tsc -p tsconfig.main.json --noEmit && tsc -p tsconfig.renderer.json --noEmit",
-    "bench:test": "node --test 'bench/test/*.test.ts'",
+    "bench:test": "node --test --test-concurrency=1 'bench/test/*.test.ts'",
     "bench:start": "node bench/src/main.ts"
   },
   "dependencies": {
