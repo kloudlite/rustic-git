@@ -968,6 +968,17 @@ export class Bench {
       if (e.dir !== "out" || e.workspace !== workspace || (e.state !== "queued" && e.state !== "running")) continue;
       this.settle(e, "blocked", why);
     }
+    /**
+     * Its PROCESSES went with it. Stopping a workspace with a live detached process left the row
+     * saying `running` and told nobody, so the session went on believing in a dev server that had
+     * been gone for minutes (api-test-report R-D25, spec §3.9 rule 8). Lost, said once, and the row
+     * says so.
+     */
+    for (const p of this.procs.all().filter((x) => x.workspace === workspace && x.ended === undefined)) {
+      const row = this.write(() => this.procs.transitionEnded(p.session, p.id, null, true));
+      if (row) this.emit({ type: "procs", rows: this.procs.all() });
+      this.tell(p.session, `[task ${p.name} lost: ${why}]`);
+    }
     // A watch on a process in that workspace has nothing left to watch.
     for (const [id, w] of this.watching) {
       const row = this.procs.all().find((p) => p.id === id);

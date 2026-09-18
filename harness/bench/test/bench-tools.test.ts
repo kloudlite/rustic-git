@@ -2339,3 +2339,37 @@ test("three asks in quick succession all reach the workspace", async () => {
     fs.rmSync(dir, { recursive: true, force: true });
   }
 });
+
+/**
+ * R-D25 (api-test-report round 3): stopping a workspace with a live detached process never told the
+ * person it had died — the row kept saying `running` about something that was gone.
+ */
+test("stopping a workspace ends its processes and says so", async () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "bench-rd25-"));
+  const bench = new Bench({ dir, readOnly: false, model: "fake/m", bin: FAKE });
+  try {
+    await bench.start();
+    const ws = await bench.openWorkspace("api");
+    (bench as never as { foldRow: (id: string, ev: unknown) => void }).foldRow(ws.id, {
+      type: "extension_ui_request",
+      method: "setWidget",
+      widgetKey: "harness:procs",
+      widgetLines: [JSON.stringify([{ id: "p-live", name: "svelte dev server", command: "npm run dev", started: Date.now() }])],
+    });
+    assert.equal(bench.procs.all().find((p) => p.id === "p-live")!.ended, undefined, "running to begin with");
+
+    bench.workspaceGone("api", "workspace stopped");
+
+    const row = bench.procs.all().find((p) => p.id === "p-live")!;
+    assert.notEqual(row.ended, undefined, "the row stops claiming to be running");
+    assert.equal(row.lost, true, "and says nobody can account for how it ended");
+    const told = (await bench.messages(ws.id)).messages as { content: unknown }[];
+    assert.ok(
+      told.some((m) => String(typeof m.content === "string" ? m.content : JSON.stringify(m.content)).includes("[task svelte dev server lost: workspace stopped]")),
+      "the session that started it is told, once",
+    );
+  } finally {
+    await bench.stop();
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});
