@@ -86,6 +86,16 @@ pub fn missing_bind() -> Option<&'static str> {
 /// a path nobody read (2026-09-18).
 const PROFILE_BWRAP: &str = "/nix/profile/current/bin/bwrap";
 
+/// What the preflight RUNS inside the sandbox. It has to be a path that exists *in there*, and
+/// inside the sandbox only `/nix` is bound — `/bin/true` does not exist, which is what the first
+/// preflight on the fleet actually reported (`execvp /bin/true: No such file or directory`,
+/// 2026-09-18). Coreutils is in the base profile, so the profile's own `true` is the one command
+/// guaranteed to be there whenever `bwrap` itself is.
+///
+/// Its absence would be a real answer too: a sandbox whose profile carries no `true` carries no
+/// shell either, and an exec in it could not run anything.
+const PROFILE_TRUE: &str = "/nix/profile/current/bin/true";
+
 /// The `bwrap` to run: the profile's, else whatever PATH finds. Answered once — which binary
 /// exists is a fact about the image, not a per-exec coin flip.
 ///
@@ -162,7 +172,7 @@ fn preflight(bwrap: &'static str, tree: &TreeCtx) -> Option<&'static str> {
     {
         // The HOME the real argv sets must exist before the real argv is run, preflight included.
         let _ = std::fs::create_dir_all(tree.sandbox_home());
-        let argv = bwrap_argv(tree, &["/bin/true".to_string()]);
+        let argv = bwrap_argv(tree, &[PROFILE_TRUE.to_string()]);
         match std::process::Command::new(bwrap).args(&argv).output() {
             Ok(o) if o.status.success() => {
                 // ONLY here. A passing preflight is the one thing that earns this line, so a log
@@ -293,6 +303,24 @@ mod tests {
 
     /// The candidate really is under the profile the pod mounts, not some other spelling of it:
     /// `packages::PROFILE_LINK` is where the agent points `current`, and `PATH` is built from it.
+    /// The preflight's own command must exist INSIDE the sandbox, which is the one place it runs.
+    ///
+    /// The first preflight on the fleet failed with `execvp /bin/true: No such file or directory`
+    /// — not because the sandbox was broken, but because only `/nix` is bound inside it and `/bin`
+    /// is not (2026-09-18). A preflight that cannot start for a reason of its OWN reports the
+    /// sandbox unusable when it may be fine: the same class of wrong answer as trusting a check
+    /// that never ran, with the sign flipped.
+    #[test]
+    fn the_preflight_command_lives_under_a_path_the_sandbox_binds() {
+        assert!(
+            BINDS.iter().any(|b| PROFILE_TRUE.starts_with(&format!("{b}/"))),
+            "{PROFILE_TRUE} is under none of {BINDS:?}, so it cannot exist inside the sandbox"
+        );
+        // And from the same profile as the wrapper: where `bwrap` is, coreutils is.
+        let dir = |p: &str| p.rsplit_once('/').map(|(d, _)| d.to_string()).unwrap_or_default();
+        assert_eq!(dir(PROFILE_TRUE), dir(PROFILE_BWRAP));
+    }
+
     #[test]
     fn the_candidate_is_under_the_profile_the_pod_mounts() {
         assert_eq!(PROFILE_BWRAP, "/nix/profile/current/bin/bwrap");
