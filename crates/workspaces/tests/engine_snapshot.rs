@@ -415,3 +415,45 @@ fn a_tree_is_a_nested_subvolume_and_the_worktree_drop_takes_it() {
     e.drop_worktree("v1", "ws-1").unwrap();
     assert!(!lb.pool.worktree("v1", "ws-1").exists());
 }
+
+/// A freshly created worktree belongs to the POD's uid, not to the root agent that made it.
+///
+/// `btrfs subvolume create` run by the agent leaves a root-owned tree. An ordinary workspace hid
+/// that because its pod's prelude chowns the workspace dir on every start; a BENCH pod has no
+/// workspace container and so no prelude, so every team bench crash-looped on
+/// `EACCES: mkdir '/home/kl/workspaces/bench/.bench'` (2026-09-18).
+///
+/// A RESTORED worktree is a snapshot and inherits its source's ownership, so only the create path
+/// needs this — which is what the second half asserts.
+#[test]
+#[ignore = "needs root and a btrfs-capable kernel"]
+fn a_created_worktree_belongs_to_the_pods_uid() {
+    use std::os::unix::fs::MetadataExt;
+    assert!(have_btrfs(), "needs root and a btrfs-capable kernel");
+    let uid = kloudlite_workspaces::k8s::SSH_UID as u32;
+    let lb = LoopbackPool::new();
+    let e = engine(lb.pool());
+
+    e.checkout("v1", None, "ws-1").unwrap();
+    let made = std::fs::metadata(lb.pool.worktree("v1", "ws-1")).unwrap();
+    assert_eq!((made.uid(), made.gid()), (uid, uid), "a fresh worktree must be the tenant's");
+
+    // A restore carries the source's ownership through the snapshot, with no chown of its own.
+    e.snapshot_worktree("v1", "ws-1", "cut-1").unwrap();
+    e.checkout("v1", Some("cut-1"), "ws-2").unwrap();
+    let restored = std::fs::metadata(lb.pool.worktree("v1", "ws-2")).unwrap();
+    assert_eq!((restored.uid(), restored.gid()), (uid, uid), "a restored worktree keeps the tenant");
+}
+
+/// The chown is skipped when this process cannot give a file away, so `checkout` still succeeds
+/// unprivileged — a dev run and `cargo test` are not root, and a hard failure there would make
+/// the engine untestable off a node. Runs everywhere, unlike the btrfs test above.
+#[test]
+fn an_unprivileged_checkout_is_not_refused_for_want_of_a_chown() {
+    let tmp = tempfile::tempdir().unwrap();
+    let e = engine(Pool::new(tmp.path()));
+    // No btrfs here, so the `btrfs` call itself fails — what is asserted is that the failure is
+    // that one, never a permission error from the chown path.
+    let err = e.checkout("v1", None, "ws-1").unwrap_err().0;
+    assert!(!err.to_lowercase().contains("operation not permitted"), "{err}");
+}

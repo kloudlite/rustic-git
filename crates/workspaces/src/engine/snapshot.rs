@@ -73,10 +73,41 @@ impl Engine {
         match name {
             Some(name) => {
                 let src = self.pool.snap(volume, name);
-                run(&["btrfs", "subvolume", "snapshot", src.to_str().unwrap(), dst.to_str().unwrap()])
+                run(&["btrfs", "subvolume", "snapshot", src.to_str().unwrap(), dst.to_str().unwrap()])?;
+                // A snapshot inherits the source's ownership, so a restored worktree is already
+                // the person's. Nothing to do.
+                Ok(())
             }
-            None => run(&["btrfs", "subvolume", "create", dst.to_str().unwrap()]),
+            None => {
+                run(&["btrfs", "subvolume", "create", dst.to_str().unwrap()])?;
+                // `btrfs subvolume create` run by the ROOT agent makes a root-owned tree, and the
+                // pod runs as uid 1000. An ordinary workspace survived that because its pod's
+                // prelude chowns the workspace dir on every start — but a BENCH pod has no
+                // workspace container and so no prelude (spec §2.2), so its worktree stayed
+                // root-owned and `harness-bench` died on
+                // `EACCES: mkdir '/home/kl/workspaces/bench/.bench'`, crash-looping every team
+                // bench on the fleet (2026-09-18).
+                //
+                // Fixed HERE rather than by giving the bench a prelude of its own: a worktree the
+                // tenant cannot write is wrong for every reader of it, and the prelude's `chown -R`
+                // on every start is a walk of the whole volume that this makes unnecessary.
+                Self::chown_tenant(&dst)
+            }
         }
+    }
+
+    /// Hand a freshly created subvolume to the pod's uid.
+    ///
+    /// Only the subvolume ROOT: what is inside a fresh one is nothing, and a `-R` walk here would
+    /// be the prelude's own cost moved rather than removed. A non-root process cannot give a file
+    /// away, so a dev or test run that is not root leaves it alone — the same rule
+    /// `ensure_homecache` and the keys writer already follow.
+    fn chown_tenant(dst: &std::path::Path) -> Result<(), EngErr> {
+        if unsafe { libc::geteuid() } != 0 {
+            return Ok(());
+        }
+        let uid = crate::k8s::SSH_UID as u32;
+        std::os::unix::fs::chown(dst, Some(uid), Some(uid)).map_err(EngErr::io)
     }
 
     /// Restore-in-place, reinterpreted as a checkout: replace worktree `ws` of `volume` with a

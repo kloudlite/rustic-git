@@ -39,6 +39,46 @@ fn bench_ws_spec() -> WorkspaceSpec {
 }
 
 
+/// NOTHING in a bench pod chowns its worktree, so the worktree must arrive owned by the tenant.
+///
+/// An ordinary workspace pod gets away with a root-owned one because its `workspace` container's
+/// prelude runs `chown -Rh 1000 {workspace_dir}` on every start. A bench pod has no workspace
+/// container — `sessions` + `shell` since spec §2.2 — so that prelude never runs, and the worktree
+/// `btrfs subvolume create` left owned by root stayed that way: `harness-bench` died on
+/// `EACCES: mkdir '/home/kl/workspaces/bench/.bench'` and every team bench crash-looped
+/// (2026-09-18). `Engine::checkout` hands a fresh subvolume to uid 1000 now.
+///
+/// This test is the guard on the ASSUMPTION rather than on the chown itself: if a prelude ever
+/// comes back to a bench pod, or the containers change again, whoever does it should see why the
+/// engine-side chown exists.
+#[test]
+fn a_bench_pod_has_no_prelude_to_chown_its_worktree() {
+    let spec = bench_ws_spec();
+    let p = workspace_pod(&spec, "ws-1", "bench-1", &ctx(), None, Some(("cr.example/bench:v9", 420))).unwrap();
+    let pod = p.spec.unwrap();
+    // The bench's own container runs the binary directly — no shell, so no seeding of any kind.
+    let sessions = pod.containers.iter().find(|c| c.name == "sessions").expect("the sessions container");
+    assert_eq!(sessions.command.as_ref().unwrap()[0], "harness-bench");
+    // And no container on this pod chowns anything, nor is there an init container that could.
+    for c in pod.containers.iter().chain(pod.init_containers.iter().flatten()) {
+        let argv = c.command.clone().unwrap_or_default().join(" ") + " " + &c.args.clone().unwrap_or_default().join(" ");
+        assert!(!argv.contains("chown"), "{} chowns something; the engine-side chown may be redundant", c.name);
+    }
+    // The worktree it must be able to write is the `live` mount, at the workspace dir.
+    let dir = crate::k8s::workspace_dir(&spec.name);
+    let live = sessions
+        .volume_mounts
+        .as_ref()
+        .unwrap()
+        .iter()
+        .find(|m| m.name == "live")
+        .expect("the bench holds its own worktree");
+    assert_eq!(live.mount_path, dir);
+    // `.bench` is made INSIDE it by the harness, as uid 1000 — the mkdir that was refused.
+    assert_eq!(sessions.command.as_ref().unwrap()[2], format!("{dir}/{}", crate::k8s::BENCH_SUBDIR));
+}
+
+
 #[test]
 fn a_bench_pod_carries_both_containers_and_the_tool_secret_optional() {
     let p = workspace_pod(&bench_ws_spec(), "ws-1", "bench-1", &ctx(), None, Some(("cr.example/bench:v9", 420))).unwrap();
