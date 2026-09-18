@@ -10,7 +10,8 @@
     "start": "npm run build && electron .",
     "typecheck": "tsc -p tsconfig.main.json --noEmit && tsc -p tsconfig.renderer.json --noEmit",
     "bench:test": "node --test --test-concurrency=4 'bench/test/*.test.ts'",
-    "bench:start": "node bench/src/main.ts"
+    "bench:start": "node bench/src/main.ts",
+    "evaluation:operations": "node bench/src/operations/run-evaluation.ts"
   },
   "dependencies": {
     "@earendil-works/pi-agent-core": "^0.85.1",

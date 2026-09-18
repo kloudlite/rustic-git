@@ -4,6 +4,8 @@
 # just the root one. Anchored as `/.local` it was not ignored, and a `git add -A` committed two
 # SlateDB .sst files into the repo.
 .local/
+# Explicit custody marker for reviewer-only evaluation bundles (also covered by `.local/`).
+/.local/evaluation-oracles/
 # Personal ops runbook with cluster-specific commands; not for the repo.
 /RUNBOOK.local.md
 # Older runs wrote these at the root; keep ignoring strays — at the root only.

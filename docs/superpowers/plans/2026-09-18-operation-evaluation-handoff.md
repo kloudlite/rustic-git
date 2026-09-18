@@ -165,6 +165,32 @@ Also run the O01 strict type lane over the two new TypeScript files (the shared
 `operations-contracts.test.ts` to confirm nothing shared regressed. Record the job IDs,
 exit codes, and node version in the task record; PM2 status alone is not evidence.
 
+## Reviewer/CI invocation
+
+Reviewer or CI supplies the private oracle bundle at runtime. Put it under
+`.local/evaluation-oracles/` (git-ignored) or outside the repository; never commit the
+bundle or copy it into a source, test, or fixture directory. The trusted bootstrap module
+is injected separately and exports `createEvaluationBootstrap()`, which returns the
+TypeSafe configuration and runner-private fault scenarios. Neither dependency is exposed
+to evaluation subjects or printed. The bootstrap is trusted executable code: reviewer/CI
+must control it like a credential, keep it outside the repository, and make it owner-only
+writable before passing it to the runner.
+
+```bash
+cd harness
+npm run evaluation:operations -- \
+  --corpus bench/test/fixtures/operations-evaluation/corpus.json \
+  --oracles ../.local/evaluation-oracles/reviewer-oracles.json \
+  --bootstrap /run/secrets/operation-evaluation/bootstrap.mjs \
+  --output ../.local/operation-evaluation/report.json \
+  --run-id "$RUN_ID"
+```
+
+`--corpus`, `--oracles`, `--bootstrap`, and `--output` are mandatory. The runner resolves
+the oracle's real path and refuses committed source/fixture custody, including symlink
+bypasses. CI should materialize both private inputs immediately before the run and remove
+them with the job workspace or secret mount afterward.
+
 ## Remaining gates
 
 1. Pod verification of the two files above, then a commit.
