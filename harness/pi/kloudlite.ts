@@ -681,7 +681,7 @@ export function agentTools(reg: ReturnType<typeof makeReg>, own: string | undefi
       brief: Type.Optional(Type.String({ description: "everything it needs and nothing it does not: the files, the constraints, what to answer with. It cannot see this conversation." })),
       name: Type.Optional(Type.String({ description: 'what to call the agent; only with to: "agent"' })),
       model: Type.Optional(Type.String({ description: "a model for this agent; absent = the session's own" })),
-      workspace: Type.Optional(Type.String({ description: 'where an agent works; absent = this machine' })),
+      workspace: Type.Optional(Type.String({ description: "where the agent works; the bench must name one, a workspace session may omit it for its own" })),
       kind: Type.Optional(Type.String({ description: 'work (default: it does something) or info (a question about the workspace\'s code or state that changes nothing)' })),
     },
     async (a) => {
@@ -689,7 +689,11 @@ export function agentTools(reg: ReturnType<typeof makeReg>, own: string | undefi
       // clean and is thrown away. A person says "ask X to…" for both, so the tool is one.
       if (a.to === "agent") {
         const name = `${slug(a.name ?? a.task.split(/\s+/).slice(0, 3).join("-"))}-${Math.random().toString(36).slice(2, 8)}`;
-        const where = a.workspace ?? own;
+        // Only a workspace session may leave it out: `own` on the bench is the BENCH's id, so the
+        // default sent the agent to a machine that is not a workspace at all. Refused in the same
+        // words `kl_pkg_add` uses, and before anything is started.
+        const where = a.workspace ?? (process.env.KL_TOOLS_WORKSPACE ? own : undefined);
+        if (!where) return { ...text("name the workspace: an agent works in a workspace, and this session has no machine of its own"), isError: true };
         // ISOLATED, and no second machine: the bench asks the workspace for a TREE of itself — a
         // nested snapshot inside the same pod — so two agents changing files at once cannot trip
         // over each other, a refactor that goes wrong is thrown away with the tree, and the caches

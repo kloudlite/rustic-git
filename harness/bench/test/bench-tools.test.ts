@@ -678,13 +678,13 @@ test("ask routes to a workspace's own session or to a fresh agent", async () => 
     assert.equal(seen[1].body.kind, "info");
     assert.match(info.content[0].text, /answers from a read-only copy without stopping/);
 
-    // An agent starts clean, is named, and works on this machine unless told otherwise. It works
-    // in a TREE of that machine, which the BENCH cuts — the extension asks for an agent and nothing
-    // else, so there is no /v1 call on this path at all (spec §4.3).
-    const agent = await ask.execute("c2", { to: "agent", task: "audit the routes", name: "audit" }, undefined, undefined, undefined);
+    // An agent starts clean, is named, and works in the workspace it is given — the bench has no
+    // machine to default to. It works in a TREE of that workspace, which the BENCH cuts — the
+    // extension asks for an agent and nothing else, so there is no /v1 call here (spec §4.3).
+    const agent = await ask.execute("c2", { to: "agent", task: "audit the routes", name: "audit", workspace: "svelte-frontend" }, undefined, undefined, undefined);
     assert.equal(seen[2].url, "/agents");
     assert.match(seen[2].body.name, /^audit-[a-z0-9]{6}$/);
-    assert.deepEqual([seen[2].body.task, seen[2].body.workspace, seen[2].body.from], ["audit the routes", "bench-ada", "s-1"]);
+    assert.deepEqual([seen[2].body.task, seen[2].body.workspace, seen[2].body.from], ["audit the routes", "svelte-frontend", "s-1"]);
     assert.match(agent.content[0].text, /^agent audit-[a-z0-9]{6} started$/);
     assert.ok(!seen.some((x) => x.url.includes("/clone")), JSON.stringify(seen.map((x) => x.url)));
   } finally {
@@ -1057,6 +1057,25 @@ test("packages from the bench name a workspace, or are refused", async () => {
       assert.equal(r.isError, true, tool);
       assert.match(r.content[0].text, /^name the workspace: packages are installed in a workspace/, tool);
     }
+  } finally {
+    restore();
+  }
+});
+
+/**
+ * An agent works in a workspace. `own` on the bench is the BENCH's own id, so an omitted
+ * `workspace` used to send it to a machine that is not a workspace at all.
+ */
+test("an agent from the bench names a workspace, or is refused", async () => {
+  const restore = withEnv({ KL_WORKSPACE_ID: "bench-ada", KL_TEAM: "acme", KL_TOOLS_WORKSPACE: undefined, KL_FORK: undefined, KL_EPHEMERAL: undefined });
+  try {
+    const { pi, tools, start } = fakePi();
+    kloudlite(pi);
+    await start();
+    const ask = tools.find((t) => t.name === "ask")! as unknown as { execute: (...x: any[]) => Promise<any> };
+    const r = await ask.execute("c1", { to: "agent", task: "count the routes" }, undefined, undefined, undefined);
+    assert.equal(r.isError, true);
+    assert.match(r.content[0].text, /^name the workspace: an agent works in a workspace/);
   } finally {
     restore();
   }
