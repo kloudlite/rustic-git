@@ -306,6 +306,7 @@ test("a recorded decision binds actor, session, payload, revision, and expiry", 
     payloadDigest: DIGEST,
     revision: 3,
     now: 1760000001000,
+    expiryBound: 1760000600000,
   };
   const granted = checkResumeAgainstRecord(record, expectation);
   assert.equal(granted.ok, true);
@@ -321,6 +322,9 @@ test("a recorded decision binds actor, session, payload, revision, and expiry", 
     assert.equal(denied.value.dispatchAuthorized, false, "a recorded denial is never permission to run");
     assert.equal(denied.value.requiredAction, "refuse_step");
   }
+  assert.ok(codesOf(validateRecordedDecision({ ...record, expiresAt: undefined })).includes("missing_field"));
+  assert.ok(codesOf(validateRecordedDecision({ ...record, expiresAt: record.recordedAt })).includes("out_of_range"));
+  assert.ok(codesOf(validateRecordedDecision({ ...record, expiresAt: record.recordedAt - 1 })).includes("out_of_range"));
   const mismatches: Array<[Partial<ResumeExpectation>, string]> = [
     [{ sessionId: "s-2" }, "decision_mismatch"],
     [{ actorId: "user-2" }, "decision_mismatch"],
@@ -332,6 +336,8 @@ test("a recorded decision binds actor, session, payload, revision, and expiry", 
     [{ decisionClass: "additional_input" }, "decision_mismatch"],
     [{ payloadDigest: OTHER_DIGEST }, "validation_failure"],
     [{ revision: 4 }, "invalid_revision"],
+    [{ expiryBound: 1760000300000 }, "permission_denied"],
+    [{ now: record.expiresAt }, "decision_expired"],
   ];
   for (const [patch, code] of mismatches) {
     const result = checkResumeAgainstRecord(record, { ...expectation, ...patch });
@@ -526,6 +532,7 @@ test("snapshots carry trusted scope, and partial is terminal and honest", () => 
     decisionClass: "additional_input",
     question: "Which file should change?",
     createdAt: 1,
+    expiresAt: 5_000,
     revision: 3,
   };
   const unknownOutcome = { stepId: "step-2", capability: "file.edit", since: 3 };
@@ -569,6 +576,13 @@ test("snapshots carry trusted scope, and partial is terminal and honest", () => 
   );
   assert.equal(validatePendingDecision(pendingDecision).ok, true);
   assert.equal(validatePendingDecision({ ...pendingDecision, decisionClass: "approval" }).ok, false);
+  assert.ok(codesOf(validatePendingDecision({ ...pendingDecision, expiresAt: undefined })).includes("missing_field"));
+  assert.ok(codesOf(validatePendingDecision({ ...pendingDecision, expiresAt: pendingDecision.createdAt })).includes("out_of_range"));
+  assert.equal(
+    validatePendingDecision({ ...pendingDecision, decisionClass: "user_authorization", expiresAt: 9_000 }).ok,
+    true,
+    "a pending user decision is finite like every other pending decision",
+  );
 });
 
 test("budgets narrow the policy ceiling but never raise it", () => {

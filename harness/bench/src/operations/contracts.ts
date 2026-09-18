@@ -1073,7 +1073,8 @@ export type PendingDecision = {
   decisionClass: DecisionClass;
   question: string;
   createdAt: number;
-  expiresAt?: number;
+  /** A waiting operation is always finite; O05 releases workers at this deadline. */
+  expiresAt: number;
   revision: number;
 };
 
@@ -1086,13 +1087,21 @@ const PENDING_DECISION_NODE: Node = {
     decisionClass: { t: "enum", values: ["user_authorization", "user_preference", "additional_input"] },
     question: { t: "string", min: 1, max: 2_000 },
     createdAt: { t: "int", min: 0, max: Number.MAX_SAFE_INTEGER },
-    expiresAt: { t: "int", min: 0, max: Number.MAX_SAFE_INTEGER, optional: true },
+    expiresAt: { t: "int", min: 0, max: Number.MAX_SAFE_INTEGER },
     revision: { t: "int", min: 1, max: Number.MAX_SAFE_INTEGER },
   },
 };
 
 export function validatePendingDecision(value: unknown, path = "$"): Validation<PendingDecision> {
-  return runValidation<PendingDecision>(PENDING_DECISION_NODE, value, path);
+  const result = runValidation<PendingDecision>(PENDING_DECISION_NODE, value, path);
+  if (!result.ok) return result;
+  if (result.value.expiresAt <= result.value.createdAt) {
+    return {
+      ok: false,
+      issues: [issue(field(path, "expiresAt"), "out_of_range", "expiresAt must be after createdAt")],
+    };
+  }
+  return result;
 }
 
 /**
@@ -1114,7 +1123,8 @@ export type RecordedDecision = {
   policySource: "user_ui" | "trusted_policy";
   outcome: "granted" | "denied";
   recordedAt: number;
-  expiresAt?: number;
+  /** Mandatory: a recorded decision is finite and never outlives the policy bound. */
+  expiresAt: number;
   usedAt?: number;
 };
 
@@ -1134,13 +1144,21 @@ const RECORDED_DECISION_NODE: Node = {
     policySource: { t: "enum", values: ["user_ui", "trusted_policy"] },
     outcome: { t: "enum", values: ["granted", "denied"] },
     recordedAt: { t: "int", min: 0, max: Number.MAX_SAFE_INTEGER },
-    expiresAt: { t: "int", min: 0, max: Number.MAX_SAFE_INTEGER, optional: true },
+    expiresAt: { t: "int", min: 0, max: Number.MAX_SAFE_INTEGER },
     usedAt: { t: "int", min: 0, max: Number.MAX_SAFE_INTEGER, optional: true },
   },
 };
 
 export function validateRecordedDecision(value: unknown, path = "$"): Validation<RecordedDecision> {
-  return runValidation<RecordedDecision>(RECORDED_DECISION_NODE, value, path);
+  const result = runValidation<RecordedDecision>(RECORDED_DECISION_NODE, value, path);
+  if (!result.ok) return result;
+  if (result.value.expiresAt <= result.value.recordedAt) {
+    return {
+      ok: false,
+      issues: [issue(field(path, "expiresAt"), "out_of_range", "expiresAt must be after recordedAt")],
+    };
+  }
+  return result;
 }
 
 export type ResumeExpectation = {
@@ -1155,6 +1173,8 @@ export type ResumeExpectation = {
   payloadDigest: string;
   revision: number;
   now: number;
+  /** Trusted deadline policy for this decision; a record claiming a longer life is refused. */
+  expiryBound: number;
 };
 
 /**
@@ -1197,8 +1217,9 @@ export function checkResumeAgainstRecord(
   }
   if (record.revision !== expectation.revision) mismatch("invalid_revision", "decision was recorded against another revision");
   if (record.usedAt !== undefined) mismatch("decision_replayed", "decision has already been consumed");
-  if (record.expiresAt !== undefined && record.expiresAt <= expectation.now) {
-    mismatch("decision_expired", "decision has expired");
+  if (record.expiresAt <= expectation.now) mismatch("decision_expired", "decision has expired");
+  if (record.expiresAt > expectation.expiryBound) {
+    mismatch("permission_denied", "decision expiry exceeds the trusted deadline policy");
   }
   if (issues.length) return { ok: false, issues };
   const dispatchAuthorized = record.outcome === "granted";
@@ -1415,7 +1436,8 @@ export type CompactOperationResult = {
   summary: string;
   evidenceRefs?: string[];
   changed?: boolean;
-  decision?: { decisionId: string; decisionClass: DecisionClass; question: string; expiresAt?: number };
+  /** Mirrors the pending decision's mandatory deadline. */
+  decision?: { decisionId: string; decisionClass: DecisionClass; question: string; expiresAt: number };
   error?: OperationError;
   unknownOutcomes?: string[];
 };
@@ -1441,7 +1463,7 @@ const COMPACT_RESULT_NODE: Node = {
         decisionId: id(REQUEST_LIMITS.decisionIdChars),
         decisionClass: { t: "enum", values: ["user_authorization", "user_preference", "additional_input"] },
         question: { t: "string", min: 1, max: 2_000 },
-        expiresAt: { t: "int", min: 0, max: Number.MAX_SAFE_INTEGER, optional: true },
+        expiresAt: { t: "int", min: 0, max: Number.MAX_SAFE_INTEGER },
       },
       optional: true,
     },
