@@ -56,6 +56,22 @@ fn command(t: &TreeCtx, args: &Value) -> Result<(Command, String), ToolError> {
     // `usable`, not `available`: a bwrap that EXISTS is not a bwrap that runs. The real argv is
     // tried once, at the first exec, and only a preflight that actually started earns the wrapper
     // — three outages have come from trusting a check weaker than the thing it stood for.
+    // Built once and handed to BOTH paths: the wrapper needs them as `--setenv` in its argv, and
+    // the unwrapped path as ordinary `Command::env`. Setting them only on the parent left `PORT`
+    // empty inside a wrapped exec, which is the whole of R-D22's second half.
+    let mut tree_env: Vec<(String, String)> = vec![("KL_TREE".to_string(), t.name.clone())];
+    if let Some((lo, hi)) = t.port_block {
+        tree_env.push(("PORT".to_string(), lo.to_string()));
+        tree_env.push(("KL_PORT_RANGE".to_string(), format!("{lo}-{hi}")));
+    }
+    // The caller's own env last, so a command that means to set PORT itself still can.
+    if let Some(env) = args.get("env").and_then(Value::as_object) {
+        for (k, v) in env {
+            if let Some(v) = v.as_str() {
+                tree_env.push((k.clone(), v.to_string()));
+            }
+        }
+    }
     let mut cmd = if let Some(bwrap) = sandbox::usable(t) {
         // The sandbox's HOME must exist before bwrap sets it, or every tool that writes a dotfile
         // fails inside an empty namespace.
@@ -63,7 +79,7 @@ fn command(t: &TreeCtx, args: &Value) -> Result<(Command, String), ToolError> {
         // The RESOLVED path, never the bare name: this process's PATH does not carry the profile's
         // bin, so `Command::new("bwrap")` found nothing and silently ran every exec unwrapped.
         let mut c = Command::new(bwrap);
-        c.args(sandbox::bwrap_argv(t, &words));
+        c.args(sandbox::bwrap_argv_with(t, &words, &tree_env));
         // bwrap's own --chdir is the tree; a `cwd` deeper in it is set here, where the path is
         // the same string on both sides of the bind.
         c.current_dir(&cwd);
@@ -74,19 +90,12 @@ fn command(t: &TreeCtx, args: &Value) -> Result<(Command, String), ToolError> {
         c.current_dir(&cwd);
         c
     };
+    // `KL_WORKSPACE` names the pod's layout, which §3.5 keeps from a model. Removed from the
+    // parent for the unwrapped path; the wrapper never passes it, since its argv is the only
+    // source of the child's environment.
     cmd.env_remove("KL_WORKSPACE");
-    cmd.env("KL_TREE", &t.name);
-    if let Some((lo, hi)) = t.port_block {
-        cmd.env("PORT", lo.to_string());
-        cmd.env("KL_PORT_RANGE", format!("{lo}-{hi}"));
-    }
-    // The caller's own env last, so a command that means to set PORT itself still can.
-    if let Some(env) = args.get("env").and_then(Value::as_object) {
-        for (k, v) in env {
-            if let Some(v) = v.as_str() {
-                cmd.env(k, v);
-            }
-        }
+    for (k, v) in &tree_env {
+        cmd.env(k, v);
     }
     cmd.process_group(0);
     cmd.kill_on_drop(true);

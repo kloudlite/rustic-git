@@ -7,7 +7,7 @@
 //! to correct, not a permission to deny.
 
 use kloudlite_ide::paths::{confine, relative};
-use kloudlite_ide::sandbox::{bwrap_argv, missing_bind};
+use kloudlite_ide::sandbox::{bwrap_argv, bwrap_argv_with, missing_bind};
 use kloudlite_ide::server::App;
 use kloudlite_ide::tools::ToolError;
 use kloudlite_ide::{Config, TreeCtx};
@@ -178,6 +178,34 @@ async fn an_exec_in_a_tree_carries_its_port_block_and_no_pod_layout() {
     let out = v["stdout"].as_str().unwrap();
     assert!(out.starts_with("x 20100 20100-20199"), "{out}");
     assert!(out.contains("[]"), "KL_WORKSPACE is not in the environment: {out}");
+}
+
+/// A wrapped exec is promised `KL_TREE`, `PORT` and `KL_PORT_RANGE`, so they have to be IN THE
+/// ARGV: `Command::env` sets a variable on bwrap, and what bwrap hands the child is its own
+/// business — `PORT` came out empty inside a tree's exec for exactly that reason (R-D22).
+///
+/// Checked on the argv rather than by running one, because CI cannot run a wrapped exec at all —
+/// which is how every one of these got out.
+#[test]
+fn the_wrapper_passes_the_tree_env_to_the_child() {
+    let (_t, app) = workspace();
+    let x = app.tree(Some("x")).unwrap();
+    let env = vec![
+        ("KL_TREE".to_string(), "x".to_string()),
+        ("PORT".to_string(), "20100".to_string()),
+        ("KL_PORT_RANGE".to_string(), "20100-20199".to_string()),
+    ];
+    let argv = bwrap_argv_with(&x, &["true".into()], &env);
+    let set: Vec<(&str, &str)> = argv
+        .windows(3)
+        .filter(|w| w[0] == "--setenv")
+        .map(|w| (w[1].as_str(), w[2].as_str()))
+        .collect();
+    for (k, v) in [("KL_TREE", "x"), ("PORT", "20100"), ("KL_PORT_RANGE", "20100-20199")] {
+        assert!(set.contains(&(k, v)), "{k}={v} is not passed to the child: {set:?}");
+    }
+    // And never the pod's layout, which §3.5 keeps from a model.
+    assert!(!set.iter().any(|(k, _)| *k == "KL_WORKSPACE"), "{set:?}");
 }
 
 /// The main tree owns the ordinary range and gets no block at all — it is the workspace, and the

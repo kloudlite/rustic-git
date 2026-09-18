@@ -66,6 +66,16 @@ fn present_optional() -> Vec<&'static str> {
 
 /// `bwrap`'s own arguments, up to and including the `--` that ends them. `cmd` is appended whole.
 pub fn bwrap_argv(tree: &TreeCtx, cmd: &[String]) -> Vec<String> {
+    bwrap_argv_with(tree, cmd, &[])
+}
+
+/// The same, with variables the child must see whatever the wrapper does to the environment.
+///
+/// `--setenv`, not the parent's `Command::env`: that sets a variable on BWRAP, and what bwrap
+/// hands the child is its own business — `PORT` and `KL_PORT_RANGE` came out empty inside a tree's
+/// exec for exactly that reason (R-D22, 2026-09-18). Anything the child is promised has to be in
+/// the argv, which is also the only form a test can read.
+pub fn bwrap_argv_with(tree: &TreeCtx, cmd: &[String], env: &[(String, String)]) -> Vec<String> {
     let root = tree.root.to_string_lossy().into_owned();
     let mut a: Vec<String> = vec![
         "--unshare-all".into(),
@@ -101,12 +111,15 @@ pub fn bwrap_argv(tree: &TreeCtx, cmd: &[String]) -> Vec<String> {
         "--chdir".into(),
         root,
     ]);
-    // `--unshare-all` keeps the environment, but a caller that clears it would still want these:
-    // pass them explicitly so the sandbox's view of the trust store never depends on inheritance.
+    // The trust store's own variables, and then the caller's: both explicit, so nothing the child
+    // is promised depends on what bwrap chooses to pass through.
     for k in CERT_VARS {
         if let Ok(v) = std::env::var(k) {
             a.extend(["--setenv".to_string(), k.into(), v]);
         }
+    }
+    for (k, v) in env {
+        a.extend(["--setenv".to_string(), k.clone(), v.clone()]);
     }
     a.push("--".into());
     a.extend(cmd.iter().cloned());

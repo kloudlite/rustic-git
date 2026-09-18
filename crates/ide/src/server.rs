@@ -183,6 +183,71 @@ mod tests {
     /// The tool server carries NO terminal (spec §2.3, 2026-09-17): a terminal is the shell
     /// sidecar's ttyd on 7790, in a container with the home and no code, no token and no tools.
     /// The three PTY routes and their named-session table are gone, and this is what keeps a
+/// `?tree=` on the URL must name the tree exactly as `{"tree": …}` in the body does.
+///
+/// It did not: `call` handed the body to the registry and discarded the query string, so
+/// `exec?tree=T` ran in MAIN and — worse — `write?tree=T` WROTE into main. A caller that believed
+/// the query form was doing anything got silent cross-tree writes, and only the agents' own calls
+/// (which pass `tree` in the body) were confined at all (R-D22, 2026-09-18).
+///
+/// Every tool, not just the ones that were noticed: the merge is one place, so a tool added later
+/// cannot be the next one to ignore it.
+    #[tokio::test]
+    async fn the_query_string_names_a_tree_for_every_tool() {
+        let (tmp, app) = traced_app();
+        let root = tmp.path().canonicalize().unwrap().join("workspaces/api");
+        std::fs::create_dir_all(root.join(".agents/t/sub")).unwrap();
+        std::fs::write(root.join(".agents/t/in-tree.txt"), "tree\n").unwrap();
+        std::fs::write(root.join("in-main.txt"), "main\n").unwrap();
+
+        let q = |uri: &'static str, body: &'static str| {
+            let app = app.clone();
+            async move {
+                let req = axum::http::Request::post(uri)
+                    .header("content-type", "application/json")
+                    .header("authorization", format!("Bearer {TOKEN}"));
+                let r = router(app).oneshot(req.body(axum::body::Body::from(body)).unwrap()).await.unwrap();
+                let status = r.status().as_u16();
+                let v: serde_json::Value = serde_json::from_slice(&axum::body::to_bytes(r.into_body(), 1 << 20).await.unwrap()).unwrap();
+                (status, v)
+            }
+        };
+
+        // read: the tree's own file, and main's is NOT visible from the tree.
+        let (st, v) = q("/tools/read?tree=t", r#"{"path":"in-tree.txt"}"#).await;
+        assert_eq!((st, v["content"].as_str()), (200, Some("     1\ttree")), "{v}");
+        let (st, _) = q("/tools/read?tree=t", r#"{"path":"in-main.txt"}"#).await;
+        assert_ne!(st, 200, "the tree can see main's file through the query form");
+
+        // exec: the cwd is the TREE's root, which is what reported main's pwd before.
+        let (st, v) = q("/tools/exec?tree=t", r#"{"cmd":"pwd"}"#).await;
+        assert_eq!(st, 200, "{v}");
+        assert!(v["stdout"].as_str().unwrap().trim().ends_with("/.agents/t"), "exec ran in main: {v}");
+
+        // write: the file lands in the TREE and main is untouched — the isolation hole itself.
+        let (st, v) = q("/tools/write?tree=t", r#"{"path":"written.txt","content":"x"}"#).await;
+        assert_eq!(st, 200, "{v}");
+        assert!(root.join(".agents/t/written.txt").exists(), "the write did not land in the tree");
+        assert!(!root.join("written.txt").exists(), "the write landed in MAIN: the isolation hole");
+
+        // glob: walks the tree, and never main.
+        let (st, v) = q("/tools/glob?tree=t", r#"{"pattern":"*.txt"}"#).await;
+        assert_eq!(st, 200, "{v}");
+        let hits: Vec<&str> = v["paths"].as_array().unwrap().iter().map(|p| p.as_str().unwrap()).collect();
+        assert!(hits.contains(&"in-tree.txt"), "{hits:?}");
+        assert!(!hits.contains(&"in-main.txt"), "the glob reached into main: {hits:?}");
+
+        // The BODY still wins when both are given: a caller that pins per session sends the body,
+        // and a URL a person happened to type must not override it.
+        let (st, v) = q("/tools/exec?tree=main", r#"{"cmd":"pwd","tree":"t"}"#).await;
+        assert_eq!(st, 200, "{v}");
+        assert!(v["stdout"].as_str().unwrap().trim().ends_with("/.agents/t"), "the query overrode the body: {v}");
+
+        // An unknown tree in the query is named, never silently main.
+        let (st, v) = q("/tools/read?tree=nope", r#"{"path":"in-main.txt"}"#).await;
+        assert_eq!(st, 400, "{v}");
+    }
+
     /// The shell sidecar shares this pod's network namespace, so it reaches the tool server on
     /// LOOPBACK, where no NetworkPolicy applies. A `curl` from a person's terminal ran a command
     /// as the workspace user (2026-09-18, ws-632cf9f23d9f2fbf). The fence is the credential now,
