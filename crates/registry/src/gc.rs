@@ -320,7 +320,7 @@ pub async fn sweep_owner(store: &Store, owner: &str, grace: Duration) -> Result<
         };
         let installed_at = chrono::DateTime::<chrono::Utc>::from_timestamp_millis(active.installed_at)
             .unwrap_or(meta.last_modified);
-        if installed_at.is_some_and(|installed_at| installed_at > cutoff) {
+        if installed_at > cutoff {
             continue;
         }
         let Some(retired) = blob_state::retire_if_unpinned(&store.os, owner, &digest, &version).await? else { continue };

@@ -259,7 +259,7 @@ async fn child(cfg: Config, kind: Suite, run_id: Option<String>, budget: Duratio
 /// Claims every suite's usernames. A name already claimed by this probe answers a 4xx, which is a success
 /// here — `bootstrap` is re-run on every deploy and must never fail on the second one.
 async fn bootstrap(cfg: Config) -> i32 {
-    let c = match Ctx::new(cfg, Suite::Fast, None).await {
+    let mut c = match Ctx::new(cfg, Suite::Fast, None).await {
         Ok(c) => c,
         Err(e) => {
             tracing::error!(error = %format!("{e:#}"), "slo.bootstrap.failed");
@@ -305,6 +305,10 @@ async fn bootstrap(cfg: Config) -> i32 {
             tracing::error!(kind = "canary", error = %format!("{e:#}"), "slo.bootstrap.failed");
             code = EXIT_FAILED;
         }
+    }
+    if let Err(e) = c.release_coordination().await {
+        tracing::error!(error = %format!("{e:#}"), "slo.bootstrap.coordination.release.failed");
+        code = EXIT_FAILED;
     }
     code
 }

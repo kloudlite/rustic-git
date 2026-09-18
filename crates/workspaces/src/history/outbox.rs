@@ -7,6 +7,17 @@ use std::sync::Arc;
 const OUTBOX_PREFIX: &str = "history-outbox/";
 const DRAIN_BATCH: usize = 64;
 
+fn retain_candidate(paths: &mut Vec<Path>, cursor: Option<&Path>, path: Path) {
+    if cursor.is_some_and(|current| path.as_ref() <= current.as_ref()) {
+        return;
+    }
+    paths.push(path);
+    paths.sort_by(|left, right| left.as_ref().cmp(right.as_ref()));
+    if paths.len() > DRAIN_BATCH {
+        paths.pop();
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct OutboxStatus { pub count: usize, pub oldest: Option<chrono::DateTime<chrono::Utc>> }
 
@@ -53,14 +64,13 @@ pub async fn drain_outbox_once(h: &History) -> Result<usize, HistoryError> {
     let mut paths = Vec::with_capacity(DRAIN_BATCH);
     let prefix = Path::from(OUTBOX_PREFIX);
     let cursor = h.outbox_cursor().lock().unwrap_or_else(|poisoned| poisoned.into_inner()).clone();
-    let mut listing = match cursor.as_ref() {
-        Some(cursor) => os.list_with_offset(Some(&prefix), cursor),
-        None => os.list(Some(&prefix)),
-    };
-    while paths.len() < DRAIN_BATCH {
-        let Some(meta) = listing.next().await else { break };
-        paths.push(meta.map_err(|e| HistoryError::Outbox(e.to_string()))?.location);
+    let mut listing = os.list(Some(&prefix));
+    while let Some(meta) = listing.next().await {
+        let path = meta.map_err(|e| HistoryError::Outbox(e.to_string()))?.location;
+        retain_candidate(&mut paths, cursor.as_ref(), path);
     }
+    paths.sort_by(|left, right| left.as_ref().cmp(right.as_ref()));
+    let last_path = paths.last().cloned();
     let mut rows = Vec::with_capacity(paths.len());
     let mut first_error = None;
     for path in paths {
@@ -73,7 +83,7 @@ pub async fn drain_outbox_once(h: &History) -> Result<usize, HistoryError> {
         }
         rows.push((path, row));
     }
-    if let Some(last) = paths.last() {
+    if let Some(last) = last_path {
         *h.outbox_cursor().lock().unwrap_or_else(|poisoned| poisoned.into_inner()) = Some(last.clone());
     } else {
         *h.outbox_cursor().lock().unwrap_or_else(|poisoned| poisoned.into_inner()) = None;
@@ -121,5 +131,24 @@ pub async fn drain_outbox_forever(history: Arc<History>) {
             Ok(_) => {}
             Err(e) => { tracing::warn!(error = %e, "history.outbox.drain.failed"); tokio::time::sleep(IDLE).await; }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn unordered_listing_keeps_smallest_candidates_after_cursor() {
+        let mut paths = Vec::new();
+        for index in (0..65).rev() {
+            retain_candidate(&mut paths, None, Path::from(format!("{OUTBOX_PREFIX}{index:03}.json")));
+        }
+        assert_eq!(paths.len(), DRAIN_BATCH);
+        assert_eq!(paths.first().unwrap().as_ref(), "history-outbox/000.json");
+        assert_eq!(paths.last().unwrap().as_ref(), "history-outbox/063.json");
+        let cursor = paths.last().cloned();
+        retain_candidate(&mut paths, cursor.as_ref(), Path::from("history-outbox/999.json"));
+        assert_eq!(paths.last().unwrap().as_ref(), "history-outbox/999.json");
     }
 }

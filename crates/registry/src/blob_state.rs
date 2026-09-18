@@ -66,10 +66,6 @@ pub fn manifest_publication(owner: &str, name: &str, d: &Digest) -> String {
     format!("manifest/{owner}/{name}/{d}#{}", nonce())
 }
 
-fn manifest_publication_prefix(owner: &str, name: &str, d: &Digest) -> String {
-    format!("manifest/{owner}/{name}/{d}#")
-}
-
 fn encode(record: &BlobRecord) -> Result<Vec<u8>> {
     Ok(serde_json::to_vec(record)?)
 }
@@ -194,30 +190,6 @@ pub async fn unpin(os: &dyn ObjectStore, owner: &str, d: &Digest, publication: &
         if update(os, &path, &loaded.record, &loaded.version).await? { return Ok(()) }
     }
     Err(crate::err("blob unpin CAS retries exhausted"))
-}
-
-pub async fn release_durable_manifest_pins(
-    os: &dyn ObjectStore,
-    owner: &str,
-    name: &str,
-    manifest: &Digest,
-    blob: &Digest,
-) -> Result<()> {
-    match os.head(&crate::store::manifest_path(owner, name, manifest)).await {
-        Ok(_) => {}
-        Err(slatedb::object_store::Error::NotFound { .. }) => return Ok(()),
-        Err(e) => return Err(e.into()),
-    }
-    let prefix = manifest_publication_prefix(owner, name, manifest);
-    let path = state_path(owner, blob);
-    for _ in 0..8 {
-        let Some(mut loaded) = read(os, &path).await? else { return Ok(()) };
-        let Some(active) = loaded.record.active.as_mut() else { return Ok(()) };
-        active.pins.retain(|pin| !pin.starts_with(&prefix));
-        loaded.record.nonce = nonce();
-        if update(os, &path, &loaded.record, &loaded.version).await? { return Ok(()) }
-    }
-    Err(crate::err("durable manifest pin cleanup CAS retries exhausted"))
 }
 
 pub async fn retire(os: &dyn ObjectStore, owner: &str, d: &Digest) -> Result<Option<String>> {
@@ -369,19 +341,4 @@ mod tests {
         assert_eq!(resolve(os.as_ref(), "acme", &d).await.unwrap(), Some(generation));
     }
 
-    #[tokio::test]
-    async fn durable_manifest_releases_only_its_manifest_pins() {
-        let os = Arc::new(InMemory::new());
-        let blob = digest();
-        let manifest = Digest::of(b"manifest");
-        let (_, generation) = new_generation("acme", &blob);
-        os.put(&generation, PutPayload::from("blob")).await.unwrap();
-        install(os.as_ref(), "acme", &blob, &generation.to_string()).await.unwrap().unwrap();
-        let stale = manifest_publication("acme", "image", &manifest);
-        pin(os.as_ref(), "acme", &blob, &stale).await.unwrap();
-        os.put(&crate::store::manifest_path("acme", "image", &manifest), PutPayload::from("manifest")).await.unwrap();
-        release_durable_manifest_pins(os.as_ref(), "acme", "image", &manifest, &blob).await.unwrap();
-        let record = read(os.as_ref(), &state_path("acme", &blob)).await.unwrap().unwrap();
-        assert!(record.record.active.unwrap().pins.is_empty());
-    }
 }

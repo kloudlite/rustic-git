@@ -4561,6 +4561,7 @@ dependencies = [
  "gix-hash",
  "gix-odb",
  "kloudlite-core",
+ "libc",
  "rand 0.8.7",
  "redis",
  "rustls",

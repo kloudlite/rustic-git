@@ -260,7 +260,7 @@ pub async fn put_manifest(
             let pinned = pinned.clone();
             let bd = bd.clone();
             async move {
-            if pinned.iter().any(|p| p == bd) {
+            if pinned.iter().any(|p| p == &bd) {
                 let Some(path) = blob_state::resolve(&app.store.os, &owner, &bd).await? else {
                     return Ok(false);
                 };
@@ -303,9 +303,6 @@ pub async fn put_manifest(
         return crate::oci_internal(e.into());
     }
     for bd in &pinned {
-        if let Err(e) = blob_state::release_durable_manifest_pins(&app.store.os, &owner, &name, &d, bd).await {
-            return crate::oci_internal(e);
-        }
         if let Err(e) = blob_state::unpin(&app.store.os, &owner, bd, &publication).await {
             tracing::warn!(owner = %owner, digest = %bd, error = %e, "registry.blob.unpin.failed");
         }

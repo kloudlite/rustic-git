@@ -45,10 +45,12 @@ kubectl -n kloudlite create configmap kloudlite-roll-coordination \
   echo "roll coordination is held by another operation" >&2
   exit 3
 }
+LOCK_UID=$(kubectl -n kloudlite get configmap kloudlite-roll-coordination -o jsonpath='{.metadata.uid}')
+LOCK_RV=$(kubectl -n kloudlite get configmap kloudlite-roll-coordination -o jsonpath='{.metadata.resourceVersion}')
 release_roll_lock() {
-  kubectl -n kloudlite get configmap kloudlite-roll-coordination -o json \
-    | jq '{apiVersion,kind,metadata:{name:.metadata.name,namespace:.metadata.namespace,uid:.metadata.uid,resourceVersion:.metadata.resourceVersion}}' \
-    | kubectl delete -f - >/dev/null 2>&1 || true
+  CURRENT_UID=$(kubectl -n kloudlite get configmap kloudlite-roll-coordination -o jsonpath='{.metadata.uid}' 2>/dev/null || true)
+  [ "$CURRENT_UID" = "$LOCK_UID" ] || return 0
+  kubectl -n kloudlite delete configmap kloudlite-roll-coordination --resource-version="$LOCK_RV" --ignore-not-found >/dev/null 2>&1 || true
 }
 trap release_roll_lock EXIT
 # A schedule suspended by hand stays suspended across the roll. The manifest says `suspend: false`

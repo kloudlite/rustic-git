@@ -1984,6 +1984,8 @@ spec:
               env:
                 - name: KLOUDLITE_POD_UID
                   valueFrom: { fieldRef: { fieldPath: metadata.uid } }
+                - name: KLOUDLITE_SLO_JOB_NAME
+                  valueFrom: { fieldRef: { fieldPath: "metadata.labels['job-name']" } }
                 # The probe holds no password: it MINTS its own user and admin tokens with the
                 # same key the server tier signs with — mounted as a file in the `secrets` volume
                 # below, never env (2026-09-12 review #70).
@@ -2137,6 +2139,8 @@ spec:
               env:
                 - name: KLOUDLITE_POD_UID
                   valueFrom: { fieldRef: { fieldPath: metadata.uid } }
+                - name: KLOUDLITE_SLO_JOB_NAME
+                  valueFrom: { fieldRef: { fieldPath: "metadata.labels['job-name']" } }
                 # The probe holds no password: it MINTS its own user and admin tokens with the
                 # same key the server tier signs with — mounted as a file in the `secrets` volume
                 # below, never env (2026-09-12 review #70).
@@ -2279,6 +2283,8 @@ spec:
               env:
                 - name: KLOUDLITE_POD_UID
                   valueFrom: { fieldRef: { fieldPath: metadata.uid } }
+                - name: KLOUDLITE_SLO_JOB_NAME
+                  valueFrom: { fieldRef: { fieldPath: "metadata.labels['job-name']" } }
                 # The run's WALL-CLOCK budget. The child stops starting stages once it is spent
                 # and the parent kills it a minute later, so teardown and the final report still
                 # happen inside `activeDeadlineSeconds` — a deadline that kills the pod costs the
@@ -2400,6 +2406,8 @@ spec:
               env:
                 - name: KLOUDLITE_POD_UID
                   valueFrom: { fieldRef: { fieldPath: metadata.uid } }
+                - name: KLOUDLITE_SLO_JOB_NAME
+                  valueFrom: { fieldRef: { fieldPath: "metadata.labels['job-name']" } }
                 # The run's WALL-CLOCK budget. The child stops starting stages once it is spent
                 # and the parent kills it a minute later, so teardown and the final report still
                 # happen inside `activeDeadlineSeconds` — a deadline that kills the pod costs the

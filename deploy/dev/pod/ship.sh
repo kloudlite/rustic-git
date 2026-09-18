@@ -24,6 +24,12 @@ export RUSTFLAGS="--cfg tokio_unstable"
 FEATURES="--features kloudlite-agent-bin/stall-dump"
 git diff --quiet && git diff --cached --quiet || { echo "the tree is dirty; commit first" >&2; exit 2; }
 SHA=$(git rev-parse HEAD)
+GATE_RECORD_DIR=${KL_GATE_RECORD_DIR:-/work/gate-records}
+GATE_RECORD="$GATE_RECORD_DIR/$SHA"
+case "${1:-}" in
+  ""|--no-gate) ;;
+  *) echo "unknown option: $1" >&2; exit 2 ;;
+esac
 # Any origin OR platform branch, not only master: a feature branch is verified on the fleet BEFORE
 # it merges (fixed means verified on the carrying build), and during the platform-first loop the
 # code only lives on `platform` until verification passes. Tolerate one remote being unreachable —
@@ -36,6 +42,7 @@ git branch -r --contains "$SHA" | grep -qE '^ *(origin|platform)/' \
   || { echo "HEAD is on no origin or platform branch; push first" >&2; exit 2; }
 
 if [ "${1:-}" != "--no-gate" ]; then
+  rm -f "$GATE_RECORD"
   echo "==> gate: clippy + tests (CI's exact commands)"
   # Old test binaries are never collected by cargo; see prune-deps.py for the day they filled the disk.
   /work/src/deploy/dev/pod/prune-deps.py
@@ -68,7 +75,9 @@ if [ "${1:-}" != "--no-gate" ]; then
   done
   wait $NX || { grep -E 'FAIL|panicked|^error|Summary' /tmp/ship-test.log | head -20; exit 1; }
   echo "==> harness: typecheck + bench + renderer boot"
-  ( cd harness && npm ci > /tmp/ship-harness.log 2>&1 && npm run typecheck >> /tmp/ship-harness.log 2>&1 && npm run bench:test >> /tmp/ship-harness.log 2>&1 && xvfb-run -a node --test 'bench/test/renderer-boot.test.ts' >> /tmp/ship-harness.log 2>&1 ) \
+  KL_NODE24_BIN=${KL_NODE24_BIN:-/work/review-node24/node_modules/node/bin} \
+  KL_HARNESS_GATE_RECORD=/tmp/harness-gate-$SHA \
+    ./deploy/dev/pod/harness-gate.sh > /tmp/ship-harness.log 2>&1 \
     || { tail -40 /tmp/ship-harness.log; exit 1; }
   # The web's own gate (web.yml's exact steps), since the web image ships from here too.
   ( cd web && export PATH=/work/node/bin:/work/bun/bin:$PATH \
@@ -77,7 +86,14 @@ if [ "${1:-}" != "--no-gate" ]; then
     || { tail -30 /tmp/ship-web.log; exit 1; }
   # A retried-then-passed test (.config/nextest.toml) must not vanish into the log.
   grep -E '^\s*FLAKY' /tmp/ship-test.log || true
+  mkdir -p "$GATE_RECORD_DIR"
+  printf '%s\n' "$SHA" > "$GATE_RECORD.tmp"
+  mv "$GATE_RECORD.tmp" "$GATE_RECORD"
   echo "gate passed: $(grep -oE 'Summary.*' /tmp/ship-test.log | tail -1)"
+else
+  [ -f "$GATE_RECORD" ] || { echo "no gate record for $SHA at $GATE_RECORD; run without --no-gate first" >&2; exit 2; }
+  [ "$(tr -d '\n' < "$GATE_RECORD")" = "$SHA" ] || { echo "gate record does not match $SHA: $GATE_RECORD" >&2; exit 2; }
+  echo "verified gate record for $SHA"
 fi
 
 # `dev-image`, not `release`: this fleet is the dev fleet, and thin LTO + one codegen unit cost

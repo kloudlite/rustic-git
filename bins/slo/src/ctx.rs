@@ -152,6 +152,7 @@ pub struct Ctx {
     /// re-PUT between stages so a live pod's row never reads as stale.
     pub beat: std::sync::Arc<std::sync::Mutex<Option<kloudlite_workspaces::history::slo::RunReport>>>,
     pub coordination: Option<crate::coordination::RollLock>,
+    coordination_group: Option<String>,
 }
 
 /// How long the run's single downgrade window stays open. One srv roll is minutes; this is
@@ -205,7 +206,9 @@ impl Ctx {
         });
         let coordination_enabled = std::env::var("KLOUDLITE_SLO_COORDINATION").as_deref() == Ok("1")
             || std::env::var_os("KUBERNETES_SERVICE_HOST").is_some();
-        let coordination = if parent_run && coordination_enabled {
+        let group_owner = parent_run && suite == Suite::Hourly && group.map_or(true, |index| index == 0);
+        let coordination_group = group_owner.then(|| std::env::var("KLOUDLITE_SLO_JOB_NAME").unwrap_or_default()).filter(|name| !name.is_empty());
+        let coordination = if parent_run && coordination_enabled && (suite != Suite::Hourly || group_owner) {
             Some(crate::coordination::acquire(crate::drill::incluster()?, &effective_run_id).await?)
         } else {
             None
@@ -261,6 +264,7 @@ impl Ctx {
             roll_window: None,
             cfg,
             coordination,
+            coordination_group,
         })
     }
 
@@ -345,7 +349,14 @@ impl Ctx {
     }
 
     pub async fn release_coordination(&mut self) -> anyhow::Result<()> {
-        if let Some(lock) = self.coordination.take() { lock.release().await?; }
+        if let Some(lock) = self.coordination.take() {
+            if let Some(job_name) = self.coordination_group.take() {
+                let client = crate::drill::incluster()?;
+                let pod_uid = std::env::var("KLOUDLITE_POD_UID").unwrap_or_default();
+                crate::coordination::wait_for_group(client, &job_name, &pod_uid, Duration::from_secs(120)).await?;
+            }
+            lock.release().await?;
+        }
         Ok(())
     }
 }

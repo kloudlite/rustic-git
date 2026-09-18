@@ -52,13 +52,9 @@ pub(crate) async fn decommission(c: &mut Ctx) {
             // go back on every path out, in the order that leaves the node usable.
             let undo = || async {
                 use crate::drill::Cluster;
-                let uncordon = k.cordon(&node, false).await.context("the node was left CORDONED");
                 let undrained = verb(c, &base, "undrain", &jwt, &reason).await.context("the node was left DRAINING");
-                // Last, so a mark is only dropped once both mutations are back: the sweep reads
-                // the label to find a cordon a killed run left, and a label removed first would
-                // make the cordon invisible to it (2026-09-12).
-                let unmarked = k.mark(&node, None).await.context("the drill mark was left on the node");
-                uncordon.and(undrained).and(unmarked)
+                let restored = k.restore_marked(&node, &run).await.context("the node's drill-owned state was not restored");
+                undrained.and(restored)
             };
             let body = async {
                 // Before the drain: nothing has stamped `drained`, so this must be refused.

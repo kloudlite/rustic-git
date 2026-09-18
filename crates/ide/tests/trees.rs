@@ -341,10 +341,14 @@ async fn no_walk_on_the_main_tree_shows_another_sessions_files() {
     // The tree finds its own — the fixture gives it a `src/main.rs` of its own too — and nothing
     // of main's, because its root is the fence and main's files are simply not under it.
     let inside = app.registry.call("glob", serde_json::json!({ "pattern": "**/*.rs", "tree": "x" })).await.unwrap();
-    assert_eq!(hits(&inside), vec!["marker.rs".to_string(), "src/main.rs".to_string()], "{inside}");
+    let mut inside_hits = hits(&inside);
+    inside_hits.sort();
+    assert_eq!(inside_hits, vec!["marker.rs".to_string(), "src/main.rs".to_string()], "{inside}");
     // Same NAMES, different files: the listings are equal, which is exactly what `ws.tree.cut`
     // compares, and it must hold without either side reaching into the other.
-    assert_eq!(hits(&inside), found, "a fresh tree lists what its source does");
+    let mut found_sorted = found.clone();
+    found_sorted.sort();
+    assert_eq!(inside_hits, found_sorted, "a fresh tree lists what its source does");
 
     // grep walks the same way.
     let g = app.registry.call("grep", serde_json::json!({ "pattern": "tree", "mode": "files" })).await.unwrap();

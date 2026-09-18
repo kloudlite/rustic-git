@@ -152,13 +152,22 @@ jobs:
     needs: [test]
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version: 24
+          cache: npm
+          cache-dependency-path: harness/package-lock.json
       - name: harness checks
-        working-directory: harness
         run: |
-          npm ci
-          npm run typecheck
-          npm run bench:test
-          xvfb-run -a node --test 'bench/test/renderer-boot.test.ts'
+          ./deploy/dev/pod/harness-gate.sh
+        env:
+          KL_HARNESS_GATE_RECORD: ${{ runner.temp }}/harness-gate/${{ github.sha }}
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: harness-gate-${{ github.sha }}
+          path: ${{ runner.temp }}/harness-gate/${{ github.sha }}
+          if-no-files-found: error
+          retention-days: 1
 
   image:
     # Docker on the plain runner: buildx and the ghcr login have no business inside the rust

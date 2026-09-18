@@ -26,7 +26,7 @@ async fn outbox_survives_clickhouse_failure_and_replays_after_restart() {
             move || {
                 let attempts = attempts.clone();
                 async move {
-                    if attempts.fetch_add(1, Ordering::SeqCst) == 0 {
+                    if attempts.fetch_add(1, Ordering::SeqCst) < 2 {
                         axum::http::StatusCode::INTERNAL_SERVER_ERROR
                     } else {
                         axum::http::StatusCode::OK

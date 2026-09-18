@@ -24,10 +24,18 @@ test("the desktop's renderer loads with no uncaught exception", { timeout: 60_00
 
   const args = [".", "--remote-debugging-port=0"];
   if (typeof process.getuid === "function" && process.getuid() === 0) args.push("--no-sandbox");
-  const child = spawn(electron, args, { env: { ...process.env, NODE_ENV: "production", KL_BOOT_TEST: "1", KL_BOOT_TEST_PROFILE: profile } });
+  const child = spawn(electron, args, { detached: true, env: { ...process.env, NODE_ENV: "production", KL_BOOT_TEST: "1", KL_BOOT_TEST_PROFILE: profile } });
   child.stdout.on("data", (d) => output.push(String(d)));
   child.stderr.on("data", (d) => output.push(String(d)));
-  const stop = () => child.kill("SIGKILL");
+  let ws: WebSocket | undefined;
+  const stop = () => {
+    if (!child.pid) return;
+    try {
+      process.kill(-child.pid, "SIGKILL");
+    } catch {
+      child.kill("SIGKILL");
+    }
+  };
   try {
     let page: { webSocketDebuggerUrl: string } | undefined;
     let port: number | undefined;
@@ -45,7 +53,7 @@ test("the desktop's renderer loads with no uncaught exception", { timeout: 60_00
     assert.ok(page, `Electron did not open a window:\n${output.join("")}`);
 
     const thrown: string[] = [];
-    const ws = new WebSocket(page.webSocketDebuggerUrl);
+    ws = new WebSocket(page.webSocketDebuggerUrl);
     let id = 0;
     const send = (method: string, params: unknown = {}) => ws.send(JSON.stringify({ id: ++id, method, params }));
     await new Promise((r) => ws.once("open", r));
@@ -106,6 +114,7 @@ test("the desktop's renderer loads with no uncaught exception", { timeout: 60_00
     ws.close();
     assert.deepEqual(thrown, [], `the renderer threw while loading:\n${thrown.join("\n---\n")}`);
   } finally {
+    ws?.terminate();
     stop();
     fs.rmSync(profile, { recursive: true, force: true });
   }

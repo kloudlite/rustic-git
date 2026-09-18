@@ -45,6 +45,19 @@ pub struct Mark {
     pub original_decommission_status: Option<String>,
 }
 
+#[derive(Debug, PartialEq, Eq)]
+struct RestorePlan {
+    cordon: Option<bool>,
+    decommission: Option<Option<String>>,
+}
+
+fn restore_plan(current_cordon: bool, current_decommission: Option<&str>, original_cordon: bool, original_decommission: Option<&str>) -> RestorePlan {
+    RestorePlan {
+        cordon: current_cordon.then_some(original_cordon),
+        decommission: (current_decommission == Some("true")).then(|| original_decommission.map(str::to_owned)),
+    }
+}
+
 /// The fleet mutations a drill makes, and nothing else. Each takes the run that is making it —
 /// `Some(run)` sets, `None` clears — so the undo is the same call with the run dropped and a
 /// separate `untaint` method is not a second place to get wrong.
@@ -384,7 +397,7 @@ impl Cluster for kube::Client {
     }
 
     async fn restore_marked(&self, node: &str, run: &str) -> Result<()> {
-        use kloudlite_workspaces::crd::{DECOMMISSION_LABEL, DECOMMISSION_STATUS};
+        use kloudlite_workspaces::crd::DECOMMISSION_LABEL;
         let api: kube::Api<k8s_openapi::api::core::v1::Node> = kube::Api::all(self.clone());
         let current = api.get(node).await?;
         let labels = current.metadata.labels.as_ref();
@@ -399,18 +412,47 @@ impl Cluster for kube::Client {
             .and_then(|value| serde_json::from_str::<Value>(value).ok())
             .filter(|value| value.get("run").and_then(Value::as_str) == Some(run))
             .ok_or_else(|| anyhow!("node {node} has no original drill state for {run}"))?;
-        let cordon_was = originals.as_ref().and_then(|value| value.get("cordon")).and_then(Value::as_bool).unwrap_or(false);
-        let decommission_was = originals.as_ref().and_then(|value| value.get("decommission")).and_then(Value::as_str).map(|value| Value::String(value.to_owned())).unwrap_or(Value::Null);
-        let status_was = originals.as_ref().and_then(|value| value.get("decommission_status")).and_then(Value::as_str).map(|value| Value::String(value.to_owned())).unwrap_or(Value::Null);
-        let decommission_is_owned = labels.and_then(|values| values.get(DECOMMISSION_LABEL)).map(String::as_str) == Some("true");
-        let patch = json!({
-            "metadata": {
-                "labels": { DRILL_TAINT: Value::Null, DECOMMISSION_LABEL: if decommission_is_owned { decommission_was } else { labels.and_then(|values| values.get(DECOMMISSION_LABEL)).map(|value| Value::String(value.clone())).unwrap_or(Value::Null) } },
-                "annotations": { DRILL_ORIGINALS: Value::Null, DECOMMISSION_STATUS: if decommission_is_owned { status_was } else { current.metadata.annotations.as_ref().and_then(|values| values.get(DECOMMISSION_STATUS)).map(|value| Value::String(value.clone())).unwrap_or(Value::Null) } },
-            },
-            "spec": { "unschedulable": if current.spec.as_ref().and_then(|spec| spec.unschedulable).unwrap_or(false) { cordon_was } else { current.spec.as_ref().and_then(|spec| spec.unschedulable).unwrap_or(false) } },
-        });
-        api.patch(node, &kube::api::PatchParams::default(), &kube::api::Patch::Merge(&patch)).await?;
+        let cordon_was = originals.get("cordon").and_then(Value::as_bool).unwrap_or(false);
+        let decommission_was = originals.get("decommission").and_then(Value::as_str).map(str::to_owned);
+        let current_cordon = current.spec.as_ref().and_then(|spec| spec.unschedulable).unwrap_or(false);
+        let current_decommission = labels.and_then(|values| values.get(DECOMMISSION_LABEL)).map(String::as_str);
+        let plan = restore_plan(current_cordon, current_decommission, cordon_was, decommission_was.as_deref());
+        let mut first_error: Option<anyhow::Error> = None;
+        if let Some(cordon) = plan.cordon {
+            let patch = json!([
+                { "op": "test", "path": "/spec/unschedulable", "value": true },
+                { "op": "replace", "path": "/spec/unschedulable", "value": cordon },
+            ]);
+            if let Err(error) = api.patch(node, &kube::api::PatchParams::default(), &kube::api::Patch::Json::<()>(serde_json::from_value(patch)?)).await {
+                first_error = Some(error.into());
+            }
+        }
+        if let Some(decommission) = plan.decommission {
+            let patch = match decommission {
+                Some(value) => json!([
+                    { "op": "test", "path": "/metadata/labels/kloudlite.io~1decommission", "value": "true" },
+                    { "op": "replace", "path": "/metadata/labels/kloudlite.io~1decommission", "value": value },
+                ]),
+                None => json!([
+                    { "op": "test", "path": "/metadata/labels/kloudlite.io~1decommission", "value": "true" },
+                    { "op": "remove", "path": "/metadata/labels/kloudlite.io~1decommission" },
+                ]),
+            };
+            if let Err(error) = api.patch(node, &kube::api::PatchParams::default(), &kube::api::Patch::Json::<()>(serde_json::from_value(patch)?)).await {
+                first_error.get_or_insert(error.into());
+            }
+        }
+        if let Some(error) = first_error {
+            return Err(error);
+        }
+        let marker_path = "/metadata/labels/kloudlite.io~1slo-drill";
+        let originals_path = "/metadata/annotations/kloudlite.io~1slo-drill-originals";
+        let patch = json!([
+            { "op": "test", "path": marker_path, "value": run },
+            { "op": "remove", "path": marker_path },
+            { "op": "remove", "path": originals_path },
+        ]);
+        api.patch(node, &kube::api::PatchParams::default(), &kube::api::Patch::Json::<()>(serde_json::from_value(patch)?)).await?;
         Ok(())
     }
 
@@ -545,6 +587,18 @@ pub(crate) mod tests {
     }
 
     const RUN: &str = "run-monthly-1000";
+
+    #[test]
+    fn restore_plan_preserves_operator_changes_per_field() {
+        assert_eq!(
+            restore_plan(false, Some("operator"), false, Some("true")),
+            RestorePlan { cordon: None, decommission: None },
+        );
+        assert_eq!(
+            restore_plan(true, Some("true"), false, None),
+            RestorePlan { cordon: Some(false), decommission: Some(None) },
+        );
+    }
 
     /// The whole contract of this module, and the reason it exists as one: a drill whose middle
     /// step FAILS still leaves the fleet as it found it. Written against a failing body on purpose
