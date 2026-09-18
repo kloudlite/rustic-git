@@ -34,6 +34,14 @@ const STAMP_DELTA_BYTES: u64 = 1 << 20;
 /// `(referenced, exclusive)` out of `btrfs qgroup show -f -re --raw <path>`: the first row whose
 /// first column is a `level/id` qgroup id. `None` on anything unparsable — a zero here would read
 /// as an empty volume and hand out allocation nobody has.
+///
+/// A `referenced` of ZERO is treated as unparsable for that same reason. It is not a size a live
+/// subvolume can have — the metadata alone is 16 KiB — and it is exactly what btrfs reports after
+/// its accounting is invalidated (`WARNING: qgroup data inconsistent, rescan recommended`, on
+/// stderr, exit 0). Two of the fleet's three nodes were in that state and every volume on them
+/// stamped as empty, which is how a workspace holding 200 MB read back 16384 bytes (2026-09-18).
+///
+/// `None` means UNKNOWN, and the caller keeps the last good stamp rather than publishing a zero.
 pub fn parse_qgroup(text: &str) -> Option<(u64, u64)> {
     text.lines().find_map(|line| {
         let mut f = line.split_whitespace();
@@ -41,7 +49,8 @@ pub fn parse_qgroup(text: &str) -> Option<(u64, u64)> {
         let (lvl, qid) = id.split_once('/')?;
         lvl.parse::<u64>().ok()?;
         qid.parse::<u64>().ok()?;
-        Some((f.next()?.parse().ok()?, f.next()?.parse().ok()?))
+        let (referenced, exclusive) = (f.next()?.parse::<u64>().ok()?, f.next()?.parse().ok()?);
+        (referenced > 0).then_some((referenced, exclusive))
     })
 }
 
@@ -51,7 +60,17 @@ fn qgroup_of(path: &Path) -> Option<(u64, u64)> {
         .arg(path)
         .output()
         .ok()?;
-    parse_qgroup(&String::from_utf8_lossy(&out.stdout))
+    let row = parse_qgroup(&String::from_utf8_lossy(&out.stdout));
+    if row.is_none() {
+        // Said once per unreadable subvolume per pass, with btrfs's own words: an operator who
+        // sees every volume stamping as unknown needs to be told `btrfs quota rescan` rather than
+        // left to find it. The rescan is deliberately NOT run from here — it walks the whole
+        // filesystem and is an operator's decision, not a reconcile's.
+        let why = String::from_utf8_lossy(&out.stderr);
+        let why = why.lines().find(|l| !l.trim().is_empty()).unwrap_or("no measurement in the output");
+        tracing::warn!(path = %path.display(), reason = %why.trim(), "usage.unreadable");
+    }
+    row
 }
 
 /// What the volume occupies: the largest `referenced` among its subvolumes (live worktrees and
@@ -144,6 +163,26 @@ mod tests {
     use kloudlite_workspaces::kube_test::Route;
 
     const SHOW: &str = "qgroupid         rfer         excl \n--------         ----         ---- \n0/257      2147483648      1048576 \n";
+
+    /// btrfs prints this on STDERR and still exits 0, with every counter reading zero, after an
+    /// operation that invalidated its accounting — a subvolume delete is the common one. Two of
+    /// the fleet's three nodes were in this state, so every volume on them stamped as empty and
+    /// `vol.usage.stamped` read 16384 bytes for a workspace holding 200 MB (2026-09-18).
+    const INCONSISTENT: &str = "0/58177              0        16384     21474836480           none   vol/x/live/x\n";
+
+    /// A qgroup that has not been rescanned reports ZERO, and zero is the one answer that must
+    /// never be published: it reads as an empty volume, which is what hands out allocation nobody
+    /// has. `None` keeps the last good stamp instead.
+    #[test]
+    fn a_zero_referenced_row_is_unknown_rather_than_empty() {
+        assert_eq!(parse_qgroup(INCONSISTENT), None, "a zero reading must not pass as a measurement");
+        // A real measurement still parses, including a genuinely small one.
+        assert_eq!(parse_qgroup(SHOW), Some((2147483648, 1048576)));
+        assert_eq!(
+            parse_qgroup("0/52501        7733248        36864     53687091200           none   vol/b/live/b\n"),
+            Some((7733248, 36864))
+        );
+    }
 
     #[test]
     fn the_first_qgroup_row_is_the_subvolumes_own() {
