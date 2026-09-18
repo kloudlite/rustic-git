@@ -270,3 +270,34 @@ test("the server outlives the client's idle", async () => {
     await t.down();
   }
 });
+
+/**
+ * D2, regressed (api-test-report Round 2). The desktop's socket calls `bench.rpc()` directly, which
+ * had no mid-turn handling, so a plain `prompt` 0.8 s after another was refused by pi and dropped —
+ * on a WARM child too, and this socket is the only prompt path there is.
+ */
+test("two prompts close together over the socket both land", async () => {
+  const t = await up();
+  try {
+    const a = t.ws("/sessions/s-1/rpc");
+    await opened(a);
+    const frames: Record<string, unknown>[] = [];
+    a.on("message", (d) => frames.push(JSON.parse(d.toString())));
+
+    // The first turn does not end (the stand-in answers "…hang" with silence), so the second
+    // prompt arrives while a turn is genuinely in flight — the case that was dropped. A fast
+    // stand-in would finish before the gap and prove nothing.
+    a.send(JSON.stringify({ id: "1", type: "prompt", message: "ONE hang" }));
+    await until(() => frames.some((f) => f.type === "agent_start"), 5_000, "the first turn to start");
+    await new Promise((r) => setTimeout(r, 800));
+    a.send(JSON.stringify({ id: "2", type: "prompt", message: "TWO" }));
+
+    await until(() => frames.filter((f) => f.type === "response" && f.id === "2").length > 0, 8_000, "the second prompt to be answered");
+    const second = frames.find((f) => f.type === "response" && f.id === "2")!;
+    assert.notEqual(second.success, false, `the second prompt was refused: ${JSON.stringify(second)}`);
+    assert.equal(second.command, "follow_up", "it is held as a follow-up, which is the queue pi owns");
+    a.close();
+  } finally {
+    await t.down();
+  }
+});

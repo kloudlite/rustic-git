@@ -1511,6 +1511,18 @@ Your working directory is the tree ${tree} of this workspace; the main tree owns
     }
     const c = this.open(s);
     if (!c) throw new Error(`session ${id} has no file to open`);
+    /**
+     * A plain `prompt` while a turn is in flight is refused by pi, and the desktop's socket
+     * (`WS /sessions/{id}/rpc`) sends exactly that — it is the ONLY prompt path, so a second line
+     * 0.8 s after the first was simply dropped, on a warm child as well as a cold one
+     * (api-test-report D2, regressed). Held as a follow-up instead, the way `send()` does it, so
+     * the queue pi already owns takes it and nothing is lost.
+     */
+    if (cmd.type === "prompt" && this.turning.has(id)) {
+      const r = await c.send({ ...cmd, type: "follow_up" });
+      this.triageSoon(id);
+      return r;
+    }
     return c.send(cmd);
   }
 
