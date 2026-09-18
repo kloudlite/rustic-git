@@ -286,13 +286,14 @@ const BENCH_ONLY = [
   "You have no files and no shell here. Anything that reads, writes or runs happens in a WORKSPACE, through a session that has hands there: ask it.",
   "You do not read code. Ask the workspace; its reply tells you what changed and where.",
   "An ask carries the person's words, not your paraphrase.",
+  "An agent started from here works in a workspace you name (`workspace:`); there is no machine here for it.",
   "A package is installed in a workspace, never \"on the bench\": name the workspace.",
   "A `blocked` or `needs the person` reply is a question for the person: put it to them with `question` (or say it in one line if it is not a choice), then re-ask the same workspace with their answer. A workspace that is stopped is started with its start verb — that is not moving work along, it is the person's machine being off.",
 ];
 
 /** True only where the session IS the machine. */
 const WORKSPACE_ONLY = [
-  "This machine is yours: \"install X\" or \"switch environment\" means here. Another workspace is asked, not touched.",
+  "This machine is yours: \"install X\" or \"switch environment\" means here.",
 ];
 
 /** One block per audience: a line that is false for the reader is worse than a line it is missing. */

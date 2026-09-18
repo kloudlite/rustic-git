@@ -1012,6 +1012,7 @@ test("each identity carries only the lines true for its own audience", () => {
   assert.ok(!bench.includes("This machine is yours"), "the bench is not told a machine is its own");
   assert.ok(bench.includes("no files and no shell"), "the bench keeps its own line");
   assert.ok(workspace.includes("This machine is yours"), "the workspace keeps its own line");
+  assert.ok(bench.includes("works in a workspace you name"), "the bench says an agent needs a workspace named");
   // The shared half is in both.
   for (const both of [bench, workspace]) assert.match(both, /Packages are nixpkgs attributes, not language names/);
 });
@@ -1119,6 +1120,8 @@ test("no identity tells a model to talk about where it runs", () => {
     workspaceTools(pi);
     return hooks["before_agent_start"][0]({ prompt: "", systemPrompt: "" }).then((out: { systemPrompt: string }) => {
       assert.ok(out.systemPrompt.includes(rule), "the workspace identity");
+      // ONCE: the shared half carries it, and the workspace's own block used to repeat it verbatim.
+      assert.equal(out.systemPrompt.split("Never mention hosts").length - 1, 1, "said once, not twice");
       restore();
     });
   } catch (e) {
