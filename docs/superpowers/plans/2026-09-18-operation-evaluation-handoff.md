@@ -62,7 +62,6 @@ runEvaluation(corpus, {
   splits?,                  // default: tuning + held_out
   pricing?,                 // validated before use; absent => every cost stays unknown
   clock?, runId?,           // injectable for deterministic reports
-  dispatchTripwire?,        // must never be called; tests pass a counter/thrower
 }): Promise<EvaluationReport>
 ```
 

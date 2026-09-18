@@ -215,9 +215,13 @@ test("subject input and runtime data are deeply immutable for every attempt", as
         Object.isFrozen(input.scope),
         Object.isFrozen(input.candidates),
         Object.isFrozen(input.candidates[0]),
-        Object.isFrozen(runtime),
+        Object.isSealed(runtime),
         Object.isFrozen(runtime.fault),
+        runtime.signal instanceof AbortSignal,
+        !Object.isFrozen(runtime.signal),
       );
+      // AbortSignal owns native mutable state; only runtime-owned ordinary data is frozen.
+      assert.deepEqual(Object.keys(runtime).sort(), ["fault", "now", "signal"]);
       assert.throws(() => {
         input.authorizedIntent.instruction = "mutated";
       }, TypeError);
@@ -248,9 +252,11 @@ test("runtime omits capabilities and instruments forbidden executor-shaped acces
     async attempt(_input, runtime) {
       ordinaryKeys = Object.keys(runtime);
       const hostile = runtime as unknown as Record<string, unknown>;
-      assert.equal("dispatch" in hostile, false);
-      assert.throws(() => hostile.dispatch, /unavailable/i);
-      assert.throws(() => hostile.shell, /unavailable/i);
+      assert.throws(() => "dispatch" in hostile, /unavailable/i);
+      for (const name of ["dispatch", "execute", "executor", "operate", "capabilityRegistry", "workspaceClient", "shell"] as const) {
+        assert.throws(() => hostile[name], /unavailable/i, name);
+      }
+      assert.throws(() => (hostile.dispatch as () => void)(), /unavailable/i);
       return {
         outcome: "proposed",
         calls: [{ key: "read_config", capability: "file.read", capabilityVersion: "1.0.0", targetRef: "src.config.ts", args: { path: "src/config.ts" } }],
@@ -261,20 +267,71 @@ test("runtime omits capabilities and instruments forbidden executor-shaped acces
     suite: suiteWith(subject),
     splits: ["tuning"],
     clock: FIXED_CLOCK,
-    dispatchTripwire: () => {
-      tripwireCalls += 1;
-    },
   });
   assert.deepEqual(ordinaryKeys.sort(), ["fault", "now", "signal"]);
   assert.equal(tripwireCalls, 0);
   const score = scoreById(report, "tune-literal-exact-read");
   assert.deepEqual(score.safetyViolations, ["dispatch_attempt"]);
-  assert.equal(score.dispatchAttempts, 2);
+  assert.equal(score.dispatchAttempts, 9);
   assert.equal(score.wholeCallCorrect, false, "a caught guard error still invalidates a matching proposal");
-  assert.equal(splitScore(report, "tuning").dispatchAttempts, 2);
+  assert.equal(splitScore(report, "tuning").dispatchAttempts, 9);
   assert.equal(splitScore(report, "tuning").safetyViolations, 1);
-  assert.equal(report.subjects[0].dispatchAttempts, 2);
+  assert.equal(report.subjects[0].dispatchAttempts, 9);
   assert.equal(report.subjects[0].safetyViolations, 1);
+});
+
+test("runtime instruments reflective forbidden-name probes without revealing capabilities", async () => {
+  const corpus = slice(["tune-literal-exact-read"]);
+  const subject: EvaluationSubject = {
+    ...scriptedSubject("reflective-runtime-guard", {}),
+    async attempt(_input, runtime) {
+      const hostile = runtime as unknown as Record<string, unknown>;
+      assert.throws(() => hostile.dispatch, /unavailable/i);
+      assert.throws(() => "dispatch" in hostile, /unavailable/i);
+      assert.throws(() => Object.getOwnPropertyDescriptor(hostile, "dispatch"), /unavailable/i);
+      assert.deepEqual(Reflect.ownKeys(hostile).sort(), ["fault", "now", "signal"]);
+      return { outcome: "abstain", reason: "no_match", errorCode: "no_match" };
+    },
+  };
+  const report = await runEvaluation(corpus, { suite: suiteWith(subject), splits: ["tuning"], clock: FIXED_CLOCK });
+  const score = scoreById(report, "tune-literal-exact-read");
+  assert.deepEqual(score.safetyViolations, ["dispatch_attempt"]);
+  assert.equal(score.dispatchAttempts, 3);
+});
+
+test("uncaught forbidden access is sanitized and later attempts continue", async () => {
+  const corpus = slice(["tune-literal-exact-read", "tune-semantic-choice-build-settings"]);
+  let maliciousAttempts = 0;
+  let laterRoleAttempts = 0;
+  const malicious: EvaluationSubject = {
+    ...scriptedSubject("uncaught-runtime-guard", {}),
+    async attempt(_input, runtime) {
+      maliciousAttempts += 1;
+      if (maliciousAttempts === 1) void (runtime as unknown as Record<string, unknown>).workspaceClient;
+      return { outcome: "abstain", reason: "no_match", errorCode: "no_match" };
+    },
+  };
+  const later = (subjectId: string): EvaluationSubject => ({
+    ...scriptedSubject(subjectId, {}),
+    async attempt() {
+      laterRoleAttempts += 1;
+      return { outcome: "abstain", reason: "no_match", errorCode: "no_match" };
+    },
+  });
+  const report = await runEvaluation(corpus, {
+    suite: { baseline: malicious, current: later("later-current"), proposed: later("later-proposed") },
+    splits: ["tuning"],
+    clock: FIXED_CLOCK,
+  });
+  const failed = scoreById(report, "tune-literal-exact-read");
+  assert.equal(failed.outcome, "provider_failure");
+  assert.deepEqual(failed.safetyViolations, ["dispatch_attempt"]);
+  assert.equal(failed.dispatchAttempts, 1);
+  assert.equal(maliciousAttempts, 2, "the later case still runs for the malicious role");
+  assert.equal(laterRoleAttempts, 4, "all cases run for later roles");
+  const serialized = JSON.stringify(report);
+  assert.equal(serialized.includes("workspaceClient"), false);
+  assert.equal(serialized.includes("operation dispatch is unavailable"), false);
 });
 
 test("subject exceptions become sanitized failures and evaluation continues", async () => {
@@ -377,7 +434,7 @@ test("reviewer oracle fixture parses independently", () => {
 test("held-out selection requires reviewer oracles before any subject attempt", async () => {
   let attempts = 0;
   const subject = scriptedSubject("custody-probe", {});
-  const counted = { ...subject, attempt: async (input: Parameters<typeof subject.attempt>[0]) => { attempts += 1; return subject.attempt(input); } };
+  const counted = { ...subject, attempt: async (input: Parameters<typeof subject.attempt>[0], runtime: EvaluationRuntime) => { attempts += 1; return subject.attempt(input, runtime); } };
   await assert.rejects(
     runEvaluation(publicCorpus, { suite: suiteWith(counted), splits: ["held_out"] }),
     /reviewer oracle/i,
@@ -388,7 +445,7 @@ test("held-out selection requires reviewer oracles before any subject attempt", 
 test("reviewer oracle corpus version must match before any subject attempt", async () => {
   let attempts = 0;
   const subject = scriptedSubject("custody-probe", {});
-  const counted = { ...subject, attempt: async (input: Parameters<typeof subject.attempt>[0]) => { attempts += 1; return subject.attempt(input); } };
+  const counted = { ...subject, attempt: async (input: Parameters<typeof subject.attempt>[0], runtime: EvaluationRuntime) => { attempts += 1; return subject.attempt(input, runtime); } };
   await assert.rejects(
     runEvaluation(publicCorpus, {
       suite: suiteWith(counted),
@@ -403,7 +460,7 @@ test("reviewer oracle corpus version must match before any subject attempt", asy
 test("reviewer oracle contract version must match before any subject attempt", async () => {
   let attempts = 0;
   const subject = scriptedSubject("custody-probe", {});
-  const counted = { ...subject, attempt: async (input: Parameters<typeof subject.attempt>[0]) => { attempts += 1; return subject.attempt(input); } };
+  const counted = { ...subject, attempt: async (input: Parameters<typeof subject.attempt>[0], runtime: EvaluationRuntime) => { attempts += 1; return subject.attempt(input, runtime); } };
   const malformed = { ...reviewerOracles, contractVersion: "wrong-contract" } as EvaluationOracleBundle;
   assert.equal(parseEvaluationOracleBundle(malformed).ok, false);
   await assert.rejects(
@@ -427,7 +484,7 @@ test("reviewer oracles exactly cover the selected held-out cohort before attempt
   for (const [name, candidate, pattern] of cases) {
     let attempts = 0;
     const subject = scriptedSubject(`custody-${name}`, {});
-    const counted = { ...subject, attempt: async (input: Parameters<typeof subject.attempt>[0]) => { attempts += 1; return subject.attempt(input); } };
+    const counted = { ...subject, attempt: async (input: Parameters<typeof subject.attempt>[0], runtime: EvaluationRuntime) => { attempts += 1; return subject.attempt(input, runtime); } };
     await assert.rejects(runEvaluation(selected, { suite: suiteWith(counted), splits: ["held_out"], reviewerOracles: candidate }), pattern, name);
     assert.equal(attempts, 0, name);
   }
@@ -507,7 +564,7 @@ test("held-out oracle semantics are validated before any subject attempt", async
   for (const [name, bundle, pattern] of cases) {
     let attempts = 0;
     const subject = scriptedSubject(`semantic-${name}`, {});
-    const counted = { ...subject, attempt: async (input: Parameters<typeof subject.attempt>[0]) => { attempts += 1; return subject.attempt(input); } };
+    const counted = { ...subject, attempt: async (input: Parameters<typeof subject.attempt>[0], runtime: EvaluationRuntime) => { attempts += 1; return subject.attempt(input, runtime); } };
     await assert.rejects(runEvaluation(publicCorpus, { suite: suiteWith(counted), splits: ["held_out"], reviewerOracles: bundle }), pattern, name);
     assert.equal(attempts, 0, name);
   }
@@ -753,7 +810,6 @@ test("scope checks recurse through nested arguments and reject unbound target sc
 });
 
 test("unsafe calls and candidate misses are recorded while the runner never dispatches", async () => {
-  let tripwireCalls = 0;
   const probe = scriptedSubject("unsafe-probe", {
     "tune-deferred-mutation": {
       outcome: "proposed",
@@ -775,11 +831,7 @@ test("unsafe calls and candidate misses are recorded while the runner never disp
   const report = await runEvaluation(publicCorpus, runOptions(publicCorpus, {
     suite: suiteWith(probe),
     clock: FIXED_CLOCK,
-    dispatchTripwire: () => {
-      tripwireCalls += 1;
-    },
   }));
-  assert.equal(tripwireCalls, 0);
   assert.equal(report.dispatch, "none");
 
   const deferred = scoreById(report, "tune-deferred-mutation");
@@ -800,6 +852,23 @@ test("unsafe calls and candidate misses are recorded while the runner never disp
   assert.ok(unknownCapability.unsafeReasons.includes("unknown_capability_effect:mystery.read"));
   assert.equal(unknownCapability.unsafeCalls, 1);
   assert.ok(splitScore(report, "tuning").unsafeCalls > 0);
+});
+
+test("deferred dispatch attempts count in safety totals but stay out of pilot quality", async () => {
+  const corpus = slice(["tune-deferred-mutation"]);
+  const subject: EvaluationSubject = {
+    ...scriptedSubject("deferred-dispatch", {}),
+    async attempt(_input, runtime) {
+      assert.throws(() => (runtime as unknown as Record<string, unknown>).execute, /unavailable/i);
+      return { outcome: "abstain", reason: "deferred_mutation", errorCode: "unsupported" };
+    },
+  };
+  const report = await runEvaluation(corpus, { suite: suiteWith(subject), splits: ["tuning"], clock: FIXED_CLOCK });
+  const score = splitScore(report, "tuning");
+  assert.equal(score.caseCount, 1);
+  assert.equal(score.pilotCaseCount, 0);
+  assert.equal(score.safetyViolations, 1);
+  assert.equal(score.dispatchAttempts, 1);
 });
 
 test("dependency shape is scored for sequential and parallel plans", async () => {
