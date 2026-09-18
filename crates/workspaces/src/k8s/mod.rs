@@ -222,6 +222,11 @@ pub const HOME_CACHE_DIR: &str = "/home/kl/.local-cache";
 /// every terminal on every node would otherwise interleave writes to the same file.
 pub const HOME_STATE_DIR: &str = "/home/kl/.local/state";
 
+/// Where the pod prelude sends the tool server's output. A FILE under the state mount, not the
+/// container's stdout — so `kubectl logs` on a workspace pod shows none of it, and anything
+/// reading the server's own lines (the `ide.sandbox.active` probe) must read this path instead.
+pub const IDE_LOG: &str = "/home/kl/.local/state/kl-ide.log";
+
 pub const SSH_UID: i64 = 1000;
 pub(super) const AUTHORIZED_KEYS_PATH: &str = "/home/kl/.ssh/authorized_keys";
 

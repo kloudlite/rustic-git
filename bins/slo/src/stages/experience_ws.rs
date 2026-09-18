@@ -447,23 +447,24 @@ async fn sandbox_active(c: &mut Ctx, id: &str) {
     c.step(ID, EXEC, move |c| {
         let ws = ws.clone();
         async move {
-            let Some(k) = c.kube.clone() else { return Err(anyhow!("no kubeconfig")) };
-            let ns = kloudlite_workspaces::crd::ws_namespace(&c.cfg.probe_user, "");
-            let pods: kube::Api<k8s_openapi::api::core::v1::Pod> = kube::Api::namespaced(k, &ns);
-            let text = pods
-                .logs(&ws, &kube::api::LogParams { container: Some("workspace".into()), tail_lines: Some(500), ..Default::default() })
-                .await
-                .context("could not read the workspace container's log")?;
-            if text.contains("ide.sandbox.active") {
+            // The FILE, not `kubectl logs`: the pod prelude starts the server with its output
+            // redirected to this path, so the container's stdout carries none of it and a probe
+            // reading the container log finds nothing whatever the sandbox did (2026-09-18).
+            let script = format!("cat {IDE_LOG} 2>&1 || true");
+            let (code, out, _) = ws_exec(c, &ws, &script, EXEC).await?;
+            if code != 0 {
+                return Err(anyhow!("could not read {IDE_LOG}: exit {code}"));
+            }
+            if out.contains("ide.sandbox.active") {
                 return Ok(());
             }
             // The server's own reason if it gave one, so a failure is a sentence rather than an
             // absence somebody has to go and look up.
-            let why = text
+            let why = out
                 .lines()
                 .rev()
                 .find(|l| l.contains("ide.sandbox.unavailable"))
-                .map(|l| l.chars().take(200).collect::<String>())
+                .map(|l| l.trim().chars().take(200).collect::<String>())
                 .unwrap_or_else(|| "the server said nothing about the sandbox at all".to_string());
             Err(anyhow!("execs are not sandboxed: {why}"))
         }
@@ -471,6 +472,10 @@ async fn sandbox_active(c: &mut Ctx, id: &str) {
     })
     .await;
 }
+
+/// Where the pod prelude sends the tool server's output — the crate that WRITES the prelude owns
+/// the path, so the two cannot drift into a probe reading an empty file and calling it a failure.
+use kloudlite_workspaces::k8s::IDE_LOG;
 
 /// One `POST /tools/{name}` against the workspace's own tool server, from INSIDE the pod over
 /// loopback. Answers the HTTP status and the body, both, because a tree probe cares which refusal

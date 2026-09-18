@@ -533,33 +533,52 @@ asserts under 50 ms).
 `bubblewrap` joins `WS_BASE_PACKAGES` so it comes from the pin like everything else. The shell
 sidecar (§2) does **not** use it: the shell is the person's, and its boundary is the container.
 
-**As built (2026-09-18): the sandbox is OFF on the fleet, and `paths::confine` plus the tree `cwd`
-are the fence.** This is a statement of fact, not a plan — nothing wrapped by `bwrap` runs in a
-workspace pod today.
+**As built (2026-09-18): whether the sandbox works is OPEN, and until a pod says otherwise assume
+it is off.** Two runs of `bwrap` in a workspace pod disagree, and the disagreement is the finding.
 
-`bwrap` needs `CLONE_NEWUSER`, and the workspace pods' runtime (gVisor, `runtimeClass`) refuses an
-unprivileged user namespace to uid 1000. Run by hand inside `ws-632cf9f23d9f2fbf` with the real
-argv, it answers:
+Run by hand from a `kubectl exec` shell inside `ws-632cf9f23d9f2fbf`, the real argv dies at the
+user namespace:
 
 ```
 bwrap: setting up uid map: Operation not permitted
 ```
 
-This cost three outages in two rolls, each from a check weaker than the thing it stood for: the
+Run by the SERVER process in `ws-ce63ce4079301bd9`, the same argv got *past* that step and died
+later, on the command:
+
+```
+ide.sandbox.unavailable reason="preflight:bwrap: execvp /bin/true: No such file or directory"
+```
+
+That second failure was the preflight's own bug — inside the sandbox only `/nix` is bound, so
+`/bin/true` does not exist; the command is `/nix/profile/current/bin/true` now, from the same
+profile the wrapper itself comes from, and a test holds it under a path `BINDS` actually carries.
+But reaching `execvp` at all means the uid map was already set up. **So `CLONE_NEWUSER` is
+apparently available to the server and not to a `kubectl exec` shell** — plausibly a difference in
+session, controlling terminal or inherited capabilities between the two, and not yet explained.
+
+The next roll decides it. If the preflight passes, `ide.sandbox.active` appears in
+`~/.local/state/kl-ide.log` and execs are wrapped for real — at which point `ide.exec` is the thing
+to watch, because a wrapped exec must still see its tree, find its toolchain under the profile, and
+resolve DNS through the bound `/etc/resolv.conf`. If it fails, the reason is on the same line.
+
+This has cost three outages in two rolls, each from a check weaker than the thing it stood for: the
 argv was asserted against itself but never executed (`--ro-bind /home/kl/.nix-profile`, a path no
 pod has, failed every exec); then the binary was looked for on a PATH that does not carry the
-profile (`available()` answered false and every exec ran unwrapped, silently); and the third would
-have been this one, had the runtime not been tested by hand before the roll. The standing lesson:
-**a sandbox is not trusted until it has started.** `sandbox::usable` now runs the real flags with
-`/bin/true` once per process and logs `ide.sandbox.unavailable reason=preflight:<first stderr
-line>`; only a preflight that passed logs `ide.sandbox.active`.
+profile (`available()` answered false and every exec ran unwrapped, silently); and the third was
+caught by hand before it shipped. The standing lesson: **a sandbox is not trusted until it has
+started.** `sandbox::usable` runs the real flags once per process and logs
+`ide.sandbox.unavailable reason=preflight:<first stderr line>`; only a preflight that passed logs
+`ide.sandbox.active`.
 
-The fleet signal is therefore POSITIVE and must be read that way: `ide.sandbox.active` in a
-workspace pod's log means execs are wrapped. An absence proves nothing — it is equally what a
-server that has run no execs looks like, which is exactly how "bwrap is on" was believed while
-nothing was wrapped at all. (An earlier revision of this note said the opposite; it was wrong.)
+The fleet signal is POSITIVE and must be read that way: `ide.sandbox.active` means execs are
+wrapped. An absence proves nothing — it is equally what a server that has run no execs looks like,
+which is exactly how "bwrap is on" was believed while nothing was wrapped at all. (An earlier
+revision of this note said the opposite; it was wrong.) The server logs to a FILE, not the
+container's stdout, so `kubectl logs` shows none of this: read `~/.local/state/kl-ide.log`
+(`k8s::IDE_LOG`), which is what the probe does.
 
-What guards an exec today, with the wrapper off:
+What guards an exec while the wrapper is off:
 
 - `paths::confine` on every path a tool NAMES, and `walk_allows` on every path a walk discovers;
 - the exec's `cwd`, which is the tree root;

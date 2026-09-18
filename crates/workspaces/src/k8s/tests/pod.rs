@@ -504,7 +504,10 @@ pub(crate) fn the_prelude_starts_kl_ide_serve_as_kl_before_sshd() {
     // log redirect then fails before `exec` — which is how build fb3673f1 shipped a server that
     // never started. Everything the inner shell needs is rendered, not referenced.
     assert!(!line.contains("$H"), "no prelude variable survives into su -c: {line}");
-    assert!(line.contains(">> /home/kl/.local/state/kl-ide.log"), "{line}");
+    // The CONSTANT, not a literal: the `ide.sandbox.active` probe reads this same path, and a
+    // literal here would let the two drift into a probe reading a file nothing writes.
+    assert!(line.contains(&format!(">> {}", crate::k8s::IDE_LOG)), "{line}");
+    assert!(crate::k8s::IDE_LOG.starts_with(&format!("{}/", crate::k8s::HOME_STATE_DIR)), "the log must be on the state MOUNT, or it dies with the pod");
     // The bench dials the tool server on the pod IP (the bench spec's What runs where); the ssh tunnel still reaches it on loopback.
     assert!(line.contains("exec kl ide serve --bind 0.0.0.0:7788 "), "{line}");
     // Traced to the node collector; on the serve line only, so a person's own shells never inherit `OTEL_SERVICE_NAME`.

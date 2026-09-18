@@ -210,7 +210,7 @@ pub(super) fn prelude(name: &str) -> String {
          chown -Rh {SSH_UID}:{SSH_UID} {workspace_dir}\n\
          echo prelude.chown.done\n\
          su {SSH_USER} -s /bin/sh -c 'mkdir -p {workspace_dir}/.cache/zsh {workspace_dir}/.cache/shell'\n\
-         su {SSH_USER} -s /bin/sh -c 'cd {workspace_dir} && KL_WORKSPACE={workspace_dir} KLOUDLITE_OTLP_URL={OTLP_URL} OTEL_SERVICE_NAME=kl-ide exec kl ide serve --bind 0.0.0.0:{IDE_PORT} >> /home/{SSH_USER}/.local/state/kl-ide.log 2>&1' &\n\
+         su {SSH_USER} -s /bin/sh -c 'cd {workspace_dir} && KL_WORKSPACE={workspace_dir} KLOUDLITE_OTLP_URL={OTLP_URL} OTEL_SERVICE_NAME=kl-ide exec kl ide serve --bind 0.0.0.0:{IDE_PORT} >> {IDE_LOG} 2>&1' &\n\
          echo prelude.sshd.start\n\
          exec {profile}/bin/sshd -D -e -f {SSHD_DIR}/sshd_config\n"
     )
