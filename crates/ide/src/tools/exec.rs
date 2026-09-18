@@ -301,7 +301,7 @@ mod tests {
     #[tokio::test]
     async fn a_nested_cwd_controls_pwd_and_relative_writes() {
         let (_t, x, trees) = exec_set();
-        let root = trees.resolve(None).unwrap().root;
+        let root = trees.resolve(None).unwrap().root.clone();
         let nested = root.join("nested");
         std::fs::create_dir_all(&nested).unwrap();
         let v = x

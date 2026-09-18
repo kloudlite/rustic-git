@@ -15,7 +15,10 @@ use std::sync::Arc;
 
 /// A workspace with one tree, `x`, laid out the way the node agent leaves it.
 fn workspace() -> (tempfile::TempDir, Arc<App>) {
-    let tmp = tempfile::tempdir().unwrap();
+    let tmp = match std::env::var_os("KL_IDE_BWRAP_TEST_TMPDIR") {
+        Some(dir) => tempfile::Builder::new().prefix("ide-").tempdir_in(dir).unwrap(),
+        None => tempfile::tempdir().unwrap(),
+    };
     let home = tmp.path().canonicalize().unwrap();
     let root = home.join("workspaces/ws-1");
     std::fs::create_dir_all(root.join("src")).unwrap();
@@ -169,11 +172,12 @@ fn a_running_main_sandbox_cannot_read_or_write_an_agent_tree() {
     let created = main.root.join(".agents/x/created");
     std::fs::write(&secret, "agent secret").unwrap();
     let bwrap = kloudlite_ide::sandbox::usable(&main).expect("functional bwrap required for this integration test");
-    let script = format!("test ! -r '{}' && printf hidden > '{}'", secret.display(), created.display());
+    let script = format!("mkdir -p '{}/x' && test ! -r '{}' && printf hidden > '{}'", main.root.join(".agents").display(), secret.display(), created.display());
     let argv = bwrap_argv_with_cwd(&main, &["/nix/profile/current/bin/sh".into(), "-c".into(), script], &[], &main.root);
     let output = std::process::Command::new(bwrap).args(&argv).output().unwrap();
     assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stderr));
     assert!(!created.exists());
+    assert_eq!(std::fs::read_to_string(&secret).unwrap(), "agent secret");
 
     let nested = main.root.join("nested");
     std::fs::create_dir_all(&nested).unwrap();

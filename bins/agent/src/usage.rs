@@ -60,7 +60,7 @@ fn qgroup_of(path: &Path) -> Option<(u64, u64)> {
         .arg(path)
         .output()
         .ok()?;
-    let row = parse_qgroup(&String::from_utf8_lossy(&out.stdout));
+    let row = out.status.success().then(|| parse_qgroup(&String::from_utf8_lossy(&out.stdout))).flatten();
     if row.is_none() {
         // Said once per unreadable subvolume per pass, with btrfs's own words: an operator who
         // sees every volume stamping as unknown needs to be told `btrfs quota rescan` rather than
@@ -82,24 +82,40 @@ fn qgroup_of(path: &Path) -> Option<(u64, u64)> {
 /// snapshot time; do that if the number is ever billed rather than merely capped. Blocking: shells
 /// out once per subvolume, so callers run it on a blocking thread.
 pub fn volume_usage(pool_root: &Path, id: &str) -> Option<u64> {
+    volume_usage_with(pool_root, id, qgroup_of)
+}
+
+fn volume_usage_with(
+    pool_root: &Path,
+    id: &str,
+    mut measure: impl FnMut(&Path) -> Option<(u64, u64)>,
+) -> Option<u64> {
     let voldir = pool_root.join("vol").join(id);
-    let mut rows: Vec<(u64, u64)> = Vec::new();
+    let mut rows = Vec::new();
     for sub in ["live", "snap"] {
-        let Ok(rd) = std::fs::read_dir(voldir.join(sub)) else { continue };
-        for e in rd.flatten() {
-            if e.file_name().to_str().is_some_and(|n| n.starts_with('.')) {
+        let rd = match std::fs::read_dir(voldir.join(sub)) {
+            Ok(rd) => rd,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => continue,
+            Err(_) => return None,
+        };
+        for entry in rd {
+            let entry = entry.ok()?;
+            if entry.file_name().to_str().is_some_and(|n| n.starts_with('.')) {
                 continue;
             }
-            if let Some(row) = qgroup_of(&e.path()) {
-                rows.push(row);
-            }
+            rows.push(measure(&entry.path())?);
         }
     }
-    // A volume whose subvolumes could not be read at all is UNKNOWN, not empty: stamp nothing and
-    // let the previous reading stand.
-    let biggest = rows.iter().map(|(r, _)| *r).max()?;
-    let pos = rows.iter().position(|(r, _)| *r == biggest).expect("the max came from this list");
-    Some(biggest + rows.iter().enumerate().filter(|(i, _)| *i != pos).map(|(_, (_, x))| *x).sum::<u64>())
+    aggregate_usage(&rows)
+}
+
+fn aggregate_usage(rows: &[(u64, u64)]) -> Option<u64> {
+    let (pos, &(biggest, _)) = rows
+        .iter()
+        .enumerate()
+        .max_by(|(_, (r1, e1)), (_, (r2, e2))| r1.cmp(r2).then_with(|| e2.cmp(e1)))?;
+    rows.iter().enumerate().filter(|(i, _)| *i != pos)
+        .try_fold(biggest, |total, (_, (_, exclusive))| total.checked_add(*exclusive))
 }
 
 /// The whole no-echo-storm rule, pure so it has a test: write only when the number moved by a
@@ -191,6 +207,27 @@ mod tests {
         assert_eq!(parse_qgroup(""), None);
     }
 
+    #[test]
+    fn incomplete_measurements_never_publish_partial_usage() {
+        let tmp = tempfile::tempdir().unwrap();
+        let live = tmp.path().join("vol/v/live");
+        std::fs::create_dir_all(live.join("small")).unwrap();
+        std::fs::create_dir_all(live.join("large")).unwrap();
+        let read = |path: &Path| (path.file_name().unwrap() == "small").then_some((16384, 16384));
+        assert_eq!(volume_usage_with(tmp.path(), "v", read), None);
+        assert_eq!(volume_usage_with(tmp.path(), "v", |_| Some((16384, 8192))), Some(24576));
+        std::fs::write(tmp.path().join("vol/v/snap"), "not a directory").unwrap();
+        assert_eq!(volume_usage_with(tmp.path(), "v", |_| Some((16384, 8192))), None);
+    }
+
+    #[test]
+    fn empty_and_overflowing_usage_are_unknown() {
+        assert_eq!(aggregate_usage(&[]), None);
+        assert_eq!(aggregate_usage(&[(u64::MAX, 0), (1, 1)]), None);
+        assert_eq!(aggregate_usage(&[(100, 50), (200, 60), (100, 20)]), Some(270));
+        assert_eq!(aggregate_usage(&[(100, 50), (100, 20)]), Some(150));
+    }
+
     fn status(used: Option<u64>, at: Option<&str>) -> crd::VolumeStatus {
         crd::VolumeStatus { used_bytes: used, used_at: at.map(str::to_string), ..Default::default() }
     }
@@ -232,6 +269,16 @@ mod tests {
         let routes = vec![volume_route(serde_json::json!({"phase": "ready", "usedBytes": 5_000_000_000u64, "usedAt": at}))];
         let (ctx, rec) = test_ctx(tmp.path(), "node-a", routes);
         stamp_usage(&ctx, "vol-1", 5_000_100_000).await;
+        assert_eq!(rec.calls(), vec!["GET /apis/kloudlite.io/v1alpha1/volumes/vol-1".to_string()]);
+    }
+
+    #[tokio::test]
+    async fn an_unknown_volume_read_does_not_refresh_its_stamp() {
+        let tmp = tempfile::tempdir().unwrap();
+        let at = "2026-09-17T00:00:00Z";
+        let routes = vec![volume_route(serde_json::json!({"phase": "ready", "usedBytes": 5_000_000_000u64, "usedAt": at}))];
+        let (ctx, rec) = test_ctx(tmp.path(), "node-a", routes);
+        read_and_stamp(&ctx, "vol-1").await;
         assert_eq!(rec.calls(), vec!["GET /apis/kloudlite.io/v1alpha1/volumes/vol-1".to_string()]);
     }
 

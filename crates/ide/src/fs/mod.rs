@@ -272,7 +272,7 @@ pub async fn changes(State(app): State<Arc<App>>, headers: HeaderMap, Query(q): 
     if !st.repo {
         return conditional_json(&headers, &json!({ "repo": false, "changes": [] }));
     }
-    let counts = match git::numstat(&t.root, &st.changes).await {
+    let counts = match git::numstat_for_tree(&t.root, &st.changes, t.is_main()).await {
         Ok(c) => c,
         Err(e) => return failed(e),
     };

@@ -5,6 +5,7 @@
 use gix::bstr::{BStr, ByteSlice};
 use gix::diff::blob::unified_diff::{ConsumeBinaryHunk, ContextSize};
 use gix::diff::blob::{Algorithm, InternedInput, UnifiedDiff};
+use crate::trees::TREES_DIR;
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
@@ -77,7 +78,71 @@ fn blob_at(repo: &gix::Repository, at: &str, rel: &str) -> Option<Vec<u8>> {
     repo.find_object(id).ok().filter(|o| o.kind == gix::object::Kind::Blob).map(|o| o.data.clone())
 }
 
-fn worktree_bytes(root: &Path, rel: &str) -> Option<Vec<u8>> {
+#[cfg(unix)]
+fn worktree_bytes(root: &Path, rel: &str, hide_agents: bool) -> Option<Vec<u8>> {
+    use std::ffi::CString;
+    use std::io::Read;
+    use std::os::fd::FromRawFd;
+    use std::os::unix::ffi::OsStrExt;
+
+    let parts: Vec<CString> = Path::new(rel)
+        .components()
+        .filter_map(|component| match component {
+            std::path::Component::Normal(name) => CString::new(name.as_bytes()).ok(),
+            std::path::Component::CurDir => None,
+            _ => Some(CString::new(Vec::new()).ok()?),
+        })
+        .collect();
+    if parts.is_empty() || parts.iter().any(|part| part.as_bytes().is_empty()) {
+        return None;
+    }
+    if hide_agents && parts.first().is_some_and(|part| part.as_bytes() == b".agents") {
+        return None;
+    }
+    let root = root.canonicalize().ok()?;
+    let root_name = CString::new(root.as_os_str().as_bytes()).ok()?;
+    let mut dir = unsafe { libc::open(root_name.as_ptr(), libc::O_RDONLY | libc::O_DIRECTORY | libc::O_CLOEXEC) };
+    if dir < 0 {
+        return None;
+    }
+    for part in &parts[..parts.len() - 1] {
+        let child = unsafe {
+            libc::openat(
+                dir,
+                part.as_ptr(),
+                libc::O_RDONLY | libc::O_DIRECTORY | libc::O_CLOEXEC | libc::O_NOFOLLOW,
+            )
+        };
+        unsafe { libc::close(dir) };
+        if child < 0 {
+            return None;
+        }
+        dir = child;
+    }
+    let leaf = parts.last().unwrap();
+    let file = unsafe { libc::openat(dir, leaf.as_ptr(), libc::O_RDONLY | libc::O_CLOEXEC | libc::O_NOFOLLOW) };
+    if file >= 0 {
+        unsafe { libc::close(dir) };
+        let mut bytes = Vec::new();
+        return unsafe { std::fs::File::from_raw_fd(file) }.read_to_end(&mut bytes).ok().map(|_| bytes);
+    }
+    let is_symlink = std::io::Error::last_os_error().raw_os_error() == Some(libc::ELOOP);
+    if is_symlink {
+        let mut target = vec![0u8; 4096];
+        let n = unsafe { libc::readlinkat(dir, leaf.as_ptr(), target.as_mut_ptr().cast(), target.len()) };
+        unsafe { libc::close(dir) };
+        if n < 0 {
+            return None;
+        }
+        target.truncate(n as usize);
+        return Some(target);
+    }
+    unsafe { libc::close(dir) };
+    None
+}
+
+#[cfg(not(unix))]
+fn worktree_bytes(root: &Path, rel: &str, hide_agents: bool) -> Option<Vec<u8>> {
     let rel_path = Path::new(rel);
     if rel_path.is_absolute() || rel_path.components().any(|c| matches!(c, std::path::Component::ParentDir)) {
         return None;
@@ -88,11 +153,21 @@ fn worktree_bytes(root: &Path, rel: &str) -> Option<Vec<u8>> {
     if !parent.starts_with(&root) {
         return None;
     }
+    let hidden = hide_agents.then(|| root.join(TREES_DIR).canonicalize().ok()).flatten();
+    if hidden.as_ref().is_some_and(|hidden| parent.starts_with(hidden)) {
+        return None;
+    }
     let metadata = std::fs::symlink_metadata(&path).ok()?;
     if metadata.file_type().is_symlink() {
+        if hidden.as_ref().is_some_and(|hidden| path.canonicalize().ok().is_some_and(|resolved| resolved.starts_with(hidden))) {
+            return None;
+        }
         return Some(link_bytes(&std::fs::read_link(path).ok()?));
     }
     let resolved = path.canonicalize().ok()?;
+    if hidden.as_ref().is_some_and(|hidden| resolved.starts_with(hidden)) {
+        return None;
+    }
     resolved.starts_with(&root).then(|| std::fs::read(resolved).ok()).flatten()
 }
 
@@ -325,6 +400,10 @@ fn commit_files(repo: &gix::Repository, commit: &gix::Commit<'_>) -> Result<Vec<
 /// The caller's `changes` (from its own `status` call): `/fs/changes` walked status TWICE for one
 /// answer, and a large tree pays that walk twice (2026-09-12).
 pub async fn numstat(root: &Path, changes: &[Change]) -> Result<Vec<(String, Option<(u32, u32)>)>, String> {
+    numstat_for_tree(root, changes, false).await
+}
+
+pub async fn numstat_for_tree(root: &Path, changes: &[Change], hide_agents: bool) -> Result<Vec<(String, Option<(u32, u32)>)>, String> {
     let changes = changes.to_vec();
     blocking(root, move |root| {
         let Some(repo) = open(&root) else { return Ok(Vec::new()) };
@@ -332,7 +411,7 @@ pub async fn numstat(root: &Path, changes: &[Change]) -> Result<Vec<(String, Opt
             .iter()
             .map(|c| {
                 let before = blob_at(&repo, "HEAD", c.renamed_from.as_deref().unwrap_or(&c.path)).unwrap_or_default();
-                let after = worktree_bytes(&root, &c.path).unwrap_or_default();
+                let after = worktree_bytes(&root, &c.path, hide_agents).unwrap_or_default();
                 if is_binary(&before) || is_binary(&after) {
                     return (c.path.clone(), None);
                 }
@@ -404,8 +483,8 @@ async fn diff_with_options(root: &Path, rel: Option<&str>, against: Against, hid
         let Some(repo) = open(&root) else { return Ok((String::new(), false)) };
         let sides = |path: &str| -> (Option<Vec<u8>>, Option<Vec<u8>>) {
             match against {
-                Against::Head => (blob_at(&repo, "HEAD", path), worktree_bytes(&root, path)),
-                Against::Index => (blob_at(&repo, "index", path), worktree_bytes(&root, path)),
+                Against::Head => (blob_at(&repo, "HEAD", path), worktree_bytes(&root, path, hide_agents)),
+                Against::Index => (blob_at(&repo, "index", path), worktree_bytes(&root, path, hide_agents)),
                 Against::Staged => (blob_at(&repo, "HEAD", path), blob_at(&repo, "index", path)),
             }
         };
@@ -540,6 +619,7 @@ mod tests {
         symlink(outside.path().join("sentinel"), root.join("link.txt")).unwrap();
         std::fs::create_dir_all(root.join(".agents/other")).unwrap();
         std::fs::write(root.join(".agents/other/agent.txt"), "PRIVATE_AGENT\n").unwrap();
+        symlink(root.join(".agents/other"), root.join("agent-alias")).unwrap();
 
         let (patch, binary) = diff_for_tree(&root, None, Against::Head, true).await.unwrap();
         assert!(!binary, "{patch}");

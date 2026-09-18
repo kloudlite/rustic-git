@@ -137,7 +137,11 @@ pub(crate) async fn worktree_gate(
     // Timed: the btrfs snapshot under `ws_lock` is the one step of a start or restore that waits
     // on another holder of the volume's lock, and until 2026-09-11 the one nobody timed.
     let result = super::timed("checkout", parent_name, tokio::task::spawn_blocking(move || {
-        engine.checkout(&vol_id, head.as_deref(), &wt_id)?;
+        match engine.checkout(&vol_id, head.as_deref(), &wt_id) {
+            Ok(()) => {}
+            Err(e) if e.0 == kloudlite_workspaces::engine::snapshot::WORKTREE_EXISTS => {}
+            Err(e) => return Err(e),
+        }
         // Quota the worktree the instant it exists — waiting for the volume's next reconcile pass
         // would leave a freshly checked-out worktree briefly unquota'd.
         engine.set_quota_worktree(&vol_id, &wt_id, quota_gb)?;
@@ -147,7 +151,6 @@ pub(crate) async fn worktree_gate(
     .map_err(|e| ReconcileErr(e.to_string()))?;
     match result {
         Ok(()) => {}
-        Err(e) if e.0 == kloudlite_workspaces::engine::snapshot::WORKTREE_EXISTS => {}
         Err(e) => return Err(ReconcileErr(e.0)),
     }
     Ok(WorktreeGate::Ready)

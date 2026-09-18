@@ -60,8 +60,11 @@ impl Engine {
         let dst = self.pool.worktree(volume, ws);
         // Checked and validated BEFORE any directory is created, so a refused checkout — existing
         // worktree, or (below) a missing snapshot — truly creates nothing.
-        if dst.exists() {
-            return Err(EngErr::other(WORKTREE_EXISTS));
+        match std::fs::symlink_metadata(&dst) {
+            Ok(meta) if meta.file_type().is_dir() && is_subvolume(&dst) => return Err(EngErr::other(WORKTREE_EXISTS)),
+            Ok(_) => return Err(EngErr::other("worktree path is not a subvolume")),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+            Err(e) => return Err(EngErr::io(e)),
         }
         if let Some(name) = name {
             let src = self.pool.snap(volume, name);
@@ -78,22 +81,26 @@ impl Engine {
                 // the person's. Nothing to do.
                 Ok(())
             }
-            None => {
-                run(&["btrfs", "subvolume", "create", dst.to_str().unwrap()])?;
-                // `btrfs subvolume create` run by the ROOT agent makes a root-owned tree, and the
-                // pod runs as uid 1000. An ordinary workspace survived that because its pod's
-                // prelude chowns the workspace dir on every start — but a BENCH pod has no
-                // workspace container and so no prelude (spec §2.2), so its worktree stayed
-                // root-owned and `harness-bench` died on
-                // `EACCES: mkdir '/home/kl/workspaces/bench/.bench'`, crash-looping every team
-                // bench on the fleet (2026-09-18).
-                //
-                // Fixed HERE rather than by giving the bench a prelude of its own: a worktree the
-                // tenant cannot write is wrong for every reader of it, and the prelude's `chown -R`
-                // on every start is a walk of the whole volume that this makes unnecessary.
-                Self::chown_tenant(&dst)
-            }
+            None => Self::create_tenant_worktree(&dst),
         }
+    }
+
+    fn create_tenant_worktree(dst: &std::path::Path) -> Result<(), EngErr> {
+        let name = dst.file_name().ok_or_else(|| EngErr::other("worktree has no name"))?;
+        let staging = dst.with_file_name(format!(".creating-{}", name.to_string_lossy()));
+        match std::fs::symlink_metadata(&staging) {
+            Ok(meta) if meta.file_type().is_dir() && is_subvolume(&staging) => {}
+            Ok(_) => return Err(EngErr::other("worktree staging path is not a subvolume")),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+                run(&["btrfs", "subvolume", "create", path_str(&staging)?])?;
+            }
+            Err(e) => return Err(EngErr::io(e)),
+        }
+        if !is_subvolume(&staging) {
+            return Err(EngErr::other("worktree staging path is not a subvolume"));
+        }
+        Self::chown_tenant(&staging)?;
+        std::fs::rename(staging, dst).map_err(EngErr::io)
     }
 
     /// Hand a freshly created subvolume to the pod's uid.
@@ -339,5 +346,45 @@ impl Engine {
         std::fs::create_dir_all(&live).map_err(EngErr::io)?;
         std::fs::rename(&staging, &dst).map_err(EngErr::io)?;
         Ok(true)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[cfg(unix)]
+    #[test]
+    fn checkout_refuses_a_symlink_destination_without_touching_its_target() {
+        let tmp = tempfile::tempdir().unwrap();
+        let pool = crate::engine::Pool::new(tmp.path());
+        let dst = pool.worktree("v", "ws");
+        let target = tmp.path().join("target");
+        std::fs::create_dir_all(&target).unwrap();
+        std::fs::create_dir_all(dst.parent().unwrap()).unwrap();
+        std::os::unix::fs::symlink(&target, &dst).unwrap();
+
+        let engine = Engine::new(pool);
+        let err = engine.checkout("v", None, "ws").unwrap_err();
+        assert!(err.0.contains("not a subvolume"));
+        assert!(target.is_dir());
+        assert!(std::fs::symlink_metadata(&dst).unwrap().file_type().is_symlink());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn tenant_checkout_rejects_a_symlink_staging_path() {
+        let tmp = tempfile::tempdir().unwrap();
+        let dst = tmp.path().join("live/ws");
+        std::fs::create_dir_all(dst.parent().unwrap()).unwrap();
+        let target = tmp.path().join("target");
+        std::fs::create_dir_all(&target).unwrap();
+        let staging = dst.with_file_name(".creating-ws");
+        std::os::unix::fs::symlink(&target, &staging).unwrap();
+
+        let err = Engine::create_tenant_worktree(&dst).unwrap_err();
+        assert!(err.0.contains("staging path is not a subvolume"));
+        assert!(target.is_dir());
+        assert!(!dst.exists());
     }
 }
