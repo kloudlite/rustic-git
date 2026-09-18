@@ -89,6 +89,45 @@ fn bench_ready(pod: &Pod) -> Option<bool> {
     pod.status.as_ref()?.container_statuses.as_ref()?.iter().find(|c| c.name == kloudlite_workspaces::k8s::BENCH_CONTAINER).map(|c| c.ready)
 }
 
+/// The SHELL container's readiness, the same way.
+fn shell_ready(pod: &Pod) -> Option<bool> {
+    pod.status.as_ref()?.container_statuses.as_ref()?.iter().find(|c| c.name == kloudlite_workspaces::k8s::SHELL_CONTAINER).map(|c| c.ready)
+}
+
+/// How long a shell may take to come up before its probes give up. The shell waits on the Nix
+/// profile — an evaluation and a fetch on a cold node — and since it no longer GATES the pod's
+/// readiness (2026-09-18) the pod is `Ready` well before ttyd is listening. So the probes wait for
+/// the shell container itself rather than dialling into a port nothing holds yet.
+const SHELL_WAIT: Duration = Duration::from_secs(150);
+
+/// Block until the bench pod's shell container reports ready, or say why it did not.
+///
+/// A pod with no shell container at all is an ERROR, not a wait: that is the sidecar missing from
+/// the pod spec, which is exactly what these ids exist to catch.
+async fn await_shell(c: &Ctx) -> Result<()> {
+    let Some(k) = c.kube.clone() else { return Ok(()) };
+    let owner = c.cfg.probe_user.clone();
+    let pods: Api<Pod> = Api::namespaced(k, &crd::ws_namespace(&owner, &owner));
+    let name = super::bench_pod(c, None).await?;
+    let start = Instant::now();
+    loop {
+        // Read on every pass and reported only on the way out, so the message names what the pod
+        // last said rather than a guess: `None` is no pod, `Some(None)` a pod with no shell
+        // container status yet, `Some(Some(false))` a shell still waiting on the profile.
+        let seen = match pods.get_opt(&name).await? {
+            Some(pod) => match shell_ready(&pod) {
+                Some(true) => return Ok(()),
+                other => Some(other),
+            },
+            None => None,
+        };
+        if start.elapsed() >= SHELL_WAIT {
+            bail!("the shell container was not ready after {} s (readiness {seen:?})", SHELL_WAIT.as_secs());
+        }
+        tokio::time::sleep(Duration::from_secs(2)).await;
+    }
+}
+
 /// One `POST /v1/bench/session`, polled to 201: 202 is the wake being asked for, not a failure.
 async fn wake(c: &Ctx) -> Result<()> {
     let url = bench_url(c, "/session");
@@ -445,6 +484,16 @@ pub async fn tool_only(c: &mut Ctx) {
 /// The session journeys on a real harness-bench. One prompt feeds two ids: the round trip is timed
 /// and judged from the transcript, and the two sockets that watched it are compared afterwards.
 async fn sessions(c: &mut Ctx) {
+    // ONCE, before the first dial and outside every step: the shell waits on the Nix profile and
+    // no longer gates the pod's readiness (2026-09-18), so the pod is `Ready` while ttyd is still
+    // being fetched and `shell.up` and `bench.shell.roundtrip` timed out at 20 s and 45 s on a
+    // cold node. Waiting here keeps each ceiling measuring the DIAL, which is what they are the
+    // target for, rather than the profile build, which is `ws.packages.*`'s to measure.
+    if c.walks("bench.shell.roundtrip") || c.walks("shell.up") || c.walks("shell.fenced") || c.walks("shell.no_tools") {
+        if let Err(e) = await_shell(c).await {
+            tracing::warn!(error = %format!("{e:#}"), "slo.bench.shell.not_ready");
+        }
+    }
     if c.walks("bench.shell.roundtrip") {
         shell_roundtrip(c).await;
     }
