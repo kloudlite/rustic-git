@@ -119,7 +119,7 @@ async fn load(os: &dyn ObjectStore, owner: &str, d: &Digest) -> Result<Option<Lo
     };
     let record = BlobRecord { nonce: nonce(), active: Some(BlobGeneration { physical_key: canonical_path(owner, d).to_string(), pins: Vec::new(), installed_at }), retired: Vec::new() };
     if create(os, &path, &record).await? {
-        return Ok(read(os, &path).await?);
+        return read(os, &path).await;
     }
     read(os, &path).await
 }
@@ -336,7 +336,7 @@ mod tests {
         assert!(!pin(os.as_ref(), "acme", &d, "publication").await.unwrap());
         let (_, generation) = new_generation("acme", &d);
         os.put(&generation, PutPayload::from("blob")).await.unwrap();
-        install(os.as_ref(), "acme", &d, &generation.to_string()).await.unwrap().unwrap();
+        install(os.as_ref(), "acme", &d, generation.as_ref()).await.unwrap().unwrap();
         assert!(pin(os.as_ref(), "acme", &d, "publication").await.unwrap());
         assert_eq!(resolve(os.as_ref(), "acme", &d).await.unwrap(), Some(generation));
     }

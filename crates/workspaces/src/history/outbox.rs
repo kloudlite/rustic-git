@@ -49,7 +49,7 @@ pub async fn enqueue_events(h: &History, rows: &[EventRow]) -> Result<(), Histor
 pub async fn outbox_status(h: &History) -> Result<OutboxStatus, HistoryError> {
     let Some(os) = h.outbox() else { return Ok(OutboxStatus { count: 0, oldest: None }) };
     let mut count = 0;
-    let mut oldest = None;
+    let mut oldest: Option<chrono::DateTime<chrono::Utc>> = None;
     let mut listing = os.list(Some(&Path::from(OUTBOX_PREFIX)));
     while let Some(meta) = listing.next().await {
         let meta = meta.map_err(|e| HistoryError::Outbox(e.to_string()))?;
