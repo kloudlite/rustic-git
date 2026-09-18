@@ -534,8 +534,11 @@ export class Bench {
              */
             const clock = this.clocks.get(a.exchange) ?? { at: Date.now() };
             this.clocks.set(a.exchange, { ...clock, card: key });
-            this.tell(a.from, `[${a.name ?? a.workspace} ${a.exchange}] ${a.name ?? a.workspace} is waiting for your approval — open it: ${p.summary}`);
-            const row = this.write(() => this.exchanges.record({ id: `${a.exchange}-card-${Date.now().toString(36)}`, session: a.from, workspace: a.workspace, dir: "in", text: `waiting for approval: ${p.summary}`, state: "note", ref: a.exchange }));
+            // The ask card is read by a PERSON: it says the workspace's name, and its summary has
+            // already had every id resolved above (R-D15).
+            const who = this.callIt(a.workspace, a.name);
+            this.tell(a.from, `[${who} ${a.exchange}] ${who} is waiting for your approval — open it: ${withNames(p.summary, this.knownNames())}`);
+            const row = this.write(() => this.exchanges.record({ id: `${a.exchange}-card-${Date.now().toString(36)}`, session: a.from, workspace: a.workspace, dir: "in", text: `waiting for approval: ${withNames(p.summary, this.knownNames())}`, state: "note", ref: a.exchange }));
             this.emit({ type: "exchange", row });
           }
         }
@@ -600,10 +603,11 @@ export class Bench {
       // Progress is part of the lifecycle (§3.9 rule 4): it resets the idle clock, so a workspace
       // that says what it is doing is never nudged or expired for going quiet.
       this.clocks.set(a.exchange, { at: Date.now() });
-      const row = this.exchanges.record({ id: `${a.exchange}-note-${Date.now().toString(36)}`, session: a.from, workspace: a.workspace, dir: "in", text: said.slice(0, 2000), state: "note", ref: a.exchange });
+      // What a person reads in the Queue, so ids become names here too (R-D15).
+      const row = this.exchanges.record({ id: `${a.exchange}-note-${Date.now().toString(36)}`, session: a.from, workspace: a.workspace, dir: "in", text: withNames(said, this.knownNames()).slice(0, 2000), state: "note", ref: a.exchange });
       this.write(() => row);
       this.emit({ type: "exchange", row });
-      if (this.sessions.get(a.from)) await this.send(a.from, `[${a.workspace} ${a.exchange}] ${brief(said, a.name ?? a.workspace)}`).catch(() => undefined);
+      if (this.sessions.get(a.from)) await this.send(a.from, `[${this.callIt(a.workspace, a.name)} ${a.exchange}] ${brief(said, this.callIt(a.workspace, a.name))}`).catch(() => undefined);
       return { ask: a.exchange, kind, settled: false };
     }
     // `done` and `blocked` settle it exactly as a tagged reply does, through the one path that
@@ -1684,6 +1688,13 @@ Your working directory is the tree ${tree} of this workspace; the main tree owns
   private workspaces?: { at: number; rows: { id: string; name?: string }[] };
 
   /** Every id → name the bench already holds: the workspace list it caches, and its own sessions. */
+  /** What to call a workspace in something a person reads: its name, else the id resolved, else the id. */
+  private callIt(id: string | undefined, name?: string): string {
+    if (name) return name;
+    if (!id) return "that workspace";
+    return this.knownNames()[id] ?? id;
+  }
+
   private knownNames(): Record<string, string> {
     const out: Record<string, string> = {};
     for (const w of this.workspaces?.rows ?? []) if (w.name) out[w.id] = w.name;

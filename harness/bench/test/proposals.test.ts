@@ -275,3 +275,39 @@ test("an answer never reaches another session's card", async () => {
   }
 });
 
+/**
+ * R-D15, the ask path. Create/write/stop cards said names, but an ask's own card still read
+ * "waiting for approval: Run in ws-dd6b76bc889bf35f: ls -1 *.go" — the same id, in the one line a
+ * person is asked to act on.
+ */
+test("the ask card and its progress notes say names", async () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "bench-d15b-"));
+  const bench = new Bench({
+    dir,
+    readOnly: false,
+    model: "fake/m",
+    bin: FAKE,
+    listWorkspaces: async () => [{ id: "ws-dd6b76bc889bf35f", name: "backend" }],
+  });
+  try {
+    await bench.start();
+    const asker = bench.sessions.all().find((s) => !s.archived)!.id;
+    const a = await bench.ask("ws-dd6b76bc889bf35f", "list the go files", asker);
+    await until(() => bench.exchanges.bySession(asker).some((e) => e.id === a.exchange), 5_000, "the ask recorded");
+
+    (bench as unknown as { foldRow: (id: string, ev: unknown) => void }).foldRow(a.session, {
+      type: "extension_ui_request",
+      method: "setWidget",
+      widgetKey: "harness:proposal",
+      widgetLines: [JSON.stringify({ id: "p-ask", tool: "bash", args: { command: "ls -1 *.go" }, summary: "Run in ws-dd6b76bc889bf35f: ls -1 *.go" })],
+    });
+
+    await until(() => bench.exchanges.bySession(asker).some((e) => e.text.startsWith("waiting for approval")), 5_000, "the card note");
+    const note = bench.exchanges.bySession(asker).find((e) => e.text.startsWith("waiting for approval"))!;
+    assert.match(note.text, /backend/, "the ask card says the workspace's name");
+    assert.ok(!/ws-dd6b/.test(note.text), `no raw id in what the person reads: ${note.text}`);
+  } finally {
+    await bench.stop();
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});
