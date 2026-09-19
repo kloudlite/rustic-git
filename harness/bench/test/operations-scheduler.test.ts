@@ -74,6 +74,10 @@ test("plan validation rejects undeclared and mistyped output bindings", () => {
     call("bound", "read.bound", { dependsOn: ["source"], argsFrom: { id: { from: "source", output: "missing" } } }),
   ], (name) => capabilities.get(name));
   assert.equal(missing.ok, false);
+  if (!missing.ok) {
+    assert.equal(missing.issues[0]?.path, "1calls[1].argsFrom.id");
+    assert.equal(missing.issues[0]?.message, "source has no declared output missing");
+  }
 
   const typed = validateSchedulePlan([
     call("source"),
