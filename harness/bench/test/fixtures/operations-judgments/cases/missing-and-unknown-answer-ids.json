@@ -1,0 +1,30 @@
+{
+  "name": "answers keyed to ids we did not ask are reported without losing the valid ones",
+  "state": { "source": "session_context", "state": "Is this urgent, and should we page someone?" },
+  "questions": [
+    { "id": "urgent", "request": { "question": "Does this convey urgency?", "questionVersion": "v1" } },
+    { "id": "page", "request": { "question": "Should a human be paged right now?", "questionVersion": "v1" } }
+  ],
+  "transports": [
+    {
+      "status": 200,
+      "body": {
+        "model": "jev-1.13.0",
+        "answers": {
+          "page": { "type": "noul", "noul": 0.9 },
+          "not_a_question": { "type": "noul", "noul": 0.1 }
+        },
+        "usage": { "input_tokens": 60, "output_tokens": 8 }
+      }
+    }
+  ],
+  "expect": {
+    "ok": true,
+    "calls": 1,
+    "issueCodes": ["missing_field", "unknown_field"],
+    "results": {
+      "urgent": { "outcome": "provider_failure", "retryable": false, "messageIncludes": ["missing_answer"] },
+      "page": { "outcome": "yes", "modelVersion": "jev-1.13.0" }
+    }
+  }
+}

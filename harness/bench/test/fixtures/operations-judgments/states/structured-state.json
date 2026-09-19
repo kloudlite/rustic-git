@@ -1,0 +1,11 @@
+{
+  "input": {
+    "source": "session_context",
+    "state": {
+      "last_user_message": "Help! My payouts have been failing for 3 days.",
+      "workspace": "payments-api",
+      "recent_events": [{ "kind": "error", "text": "payout rejected: insufficient balance" }]
+    }
+  },
+  "expect": { "ok": true }
+}

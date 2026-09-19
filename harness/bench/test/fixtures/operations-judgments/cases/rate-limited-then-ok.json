@@ -1,0 +1,24 @@
+{
+  "name": "a rate limit is retried within the deadline and the batch still resolves",
+  "config": { "backoffMs": 0, "maxAttempts": 2 },
+  "state": { "source": "session_context", "state": "Is this urgent?" },
+  "questions": [{ "id": "urgent", "request": { "question": "Does this convey urgency?", "questionVersion": "v1" } }],
+  "transports": [
+    { "status": 429, "headers": { "retry-after": "0" } },
+    {
+      "status": 200,
+      "body": {
+        "model": "jev-1.13.0",
+        "answers": { "urgent": { "type": "noul", "noul": 0.88 } },
+        "usage": { "input_tokens": 30, "output_tokens": 3 }
+      }
+    }
+  ],
+  "expect": {
+    "ok": true,
+    "calls": 2,
+    "sleeps": [0],
+    "usage": { "calls": 2, "inputTokens": 30, "outputTokens": 3 },
+    "results": { "urgent": { "outcome": "yes", "modelVersion": "jev-1.13.0" } }
+  }
+}

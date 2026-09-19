@@ -1,0 +1,14 @@
+{
+  "name": "an overload that outlives the attempt ceiling reports a retryable failure",
+  "config": { "backoffMs": 0, "maxAttempts": 2 },
+  "state": { "source": "session_context", "state": "Is this urgent?" },
+  "questions": [{ "id": "urgent", "request": { "question": "Does this convey urgency?", "questionVersion": "v1" } }],
+  "transports": [{ "status": 529 }, { "status": 529 }],
+  "expect": {
+    "ok": true,
+    "calls": 2,
+    "sleeps": [0],
+    "results": { "urgent": { "outcome": "provider_failure", "retryable": true, "messageIncludes": ["http_529"] } },
+    "records": [{ "questionId": "urgent", "decision": "provider_failure", "attempts": 2 }]
+  }
+}

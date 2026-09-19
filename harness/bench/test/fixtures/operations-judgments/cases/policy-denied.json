@@ -1,0 +1,19 @@
+{
+  "name": "a trusted policy denial fails closed before any provider call",
+  "policy": "deny",
+  "state": { "source": "session_context", "state": "Help! My payouts have been failing for 3 days." },
+  "questions": [{ "id": "urgent", "request": { "question": "Does this convey urgency?", "questionVersion": "v1" } }],
+  "transports": [],
+  "expect": {
+    "ok": true,
+    "calls": 0,
+    "results": {
+      "urgent": {
+        "outcome": "provider_failure",
+        "retryable": false,
+        "messageIncludes": ["provider_input_denied", "tenant_policy_denied"]
+      }
+    },
+    "records": [{ "questionId": "urgent", "decision": "provider_failure", "modelObserved": false, "versionChanged": false }]
+  }
+}
