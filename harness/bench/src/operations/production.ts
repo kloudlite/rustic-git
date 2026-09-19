@@ -79,7 +79,7 @@ export async function loadOperationControl(options: {
     try {
       const url = new URL("/v1/bench", base);
       url.searchParams.set("team", options.team!);
-      response = await request(url, { headers: { authorization: match[1] }, redirect: "error", signal: AbortSignal.timeout(5000) });
+      response = await request(url, { headers: { authorization: authorization! }, redirect: "error", signal: AbortSignal.timeout(5000) });
     } catch {
       return undefined;
     }
