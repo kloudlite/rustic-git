@@ -681,6 +681,7 @@ function replayProblem(previous: OperationSnapshot, next: OperationSnapshot, rec
     if (event.stepId && !next.steps.some((step) => step.stepId === event.stepId)) return `event names unknown step ${event.stepId}`;
     if (event.stepId && event.capability !== stepOf(next, event.stepId).capability) return "event capability disagrees with its step";
   }
+  if (revisionOnlyCommit && record.at > next.updatedAt && !record.events.every((event) => event.phase === "decision_recorded")) return "same-revision commit is not decision evidence";
   if (next.state !== previous.state && !record.events.some((event) => event.phase === next.state || (next.state === "running" && (event.phase === "dispatched" || event.phase === "decision_recorded")) || (next.state === "resolving" && event.phase === "decision_recorded") || (next.state === "reconciling" && event.phase === "unknown_outcome") || (next.state === "cancel_requested" && event.phase === "cancelled" && event.decisionCode === "cancel_requested") || (next.state === "awaiting_approval" && event.phase === "approval_required") || (next.state === "needs_input" && event.phase === "needs_input"))) {
     return "operation state change has no corresponding event";
   }

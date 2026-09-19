@@ -1690,6 +1690,24 @@ test("replay rejects same-revision facts and event phases that imply the wrong t
   }
 });
 
+test("replay rejects delayed same-revision commits that are not decision evidence", () => {
+  const { store, root, clock } = openStore();
+  const operationId = store.accept({ request: instruction(), context: context() }).snapshot.operationId;
+  queueEdit(store, operationId);
+  const file = logFile(root, operationId);
+  const records = readStoredRecords(file);
+  const forged = structuredClone(records[records.length - 1]);
+  forged.at += 1;
+  forged.snapshot.lastSequence += 1;
+  forged.events[0].sequence = forged.snapshot.lastSequence;
+  forged.events[0].at = forged.at;
+  appendStoredRecord(file, forged);
+  assert.throws(
+    () => reopened(root, clock),
+    (error) => error instanceof OperationLogCorruptError && /same-revision commit is not decision evidence/.test(error.message),
+  );
+});
+
 test("replay rejects duplicate or mutated decisions and mutable unknown outcomes", () => {
   const decisionWorld = openStore();
   const decisionId = decisionWorld.store.accept({ request: instruction(), context: context() }).snapshot.operationId;
