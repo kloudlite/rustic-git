@@ -1,0 +1,13 @@
+{
+  "id": "chatcmpl-fixture-edit",
+  "model": "deepseek-v4-flash",
+  "choices": [
+    {
+      "index": 0,
+      "message": {
+        "role": "assistant",
+        "content": "{\"edits\":[{\"oldText\":\"timeoutMs: 10000\",\"newText\":\"timeoutMs: 30000\"}],\"note\":\"raised the default timeout\"}"
+      }
+    }
+  ]
+}

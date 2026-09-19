@@ -1,0 +1,5 @@
+{
+  "id": "chatcmpl-fixture-not-json",
+  "model": "deepseek-v4-flash",
+  "choices": [{ "index": 0, "message": { "role": "assistant", "content": "Sure! Here is the query: timeoutMs." } }]
+}

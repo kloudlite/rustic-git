@@ -1,0 +1,5 @@
+{
+  "id": "chatcmpl-fixture-premium",
+  "model": "deepseek-reasoner",
+  "choices": [{ "index": 0, "message": { "role": "assistant", "content": "{\"query\":\"escalated\"}" } }]
+}
