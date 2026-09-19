@@ -1,7 +1,9 @@
 import { Type } from "typebox";
 import { StringEnum } from "@earendil-works/pi-ai";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
-import { call, propose, tellItWhereItStands } from "./kloudlite.ts";
+import { processActionIssues } from "../bench/src/operations/arguments.ts";
+import type { JsonValue } from "../bench/src/operations/shape.ts";
+import { call, dispatchWithPolicy, propose, tellItWhereItStands, toolResultOf } from "./kloudlite.ts";
 
 /**
  * A session's hands on ONE machine. The agent runs in the bench pod; these seven
@@ -539,45 +541,59 @@ export default function (pi: ExtensionAPI) {
       parameters,
       async execute(toolCallId, params, signal, _update, ctx) {
         const p = params as Record<string, any>;
-        // Before the call, not after: a refused read must never reach the tool server at all.
-        for (const r of reaches(name, p)) {
-          const no = forbidden(r);
-          if (no) return text(no, true);
-        }
-        // The same rule a platform write follows: the person is asked, and only then does it run.
-        // In accept-edits the desktop answers the file tools for them; a command still asks.
-        if (mutates(name, p)) {
-          const ok = await propose(`p-${toolCallId}`, name, p, ctx, signal, askLine(ws, name, p), askPreview(name, p));
-          if (!ok) return text("declined by the person", true);
-        }
-        try {
-          // A watch is the harness's own: nothing to run in the workspace, only a standing request.
-          if (name === "process" && p.action === "watch") {
-            const w = await fetch(`${process.env.KL_BENCH_URL ?? "http://127.0.0.1:7789"}/procs/${encodeURIComponent(String(p.id))}/watch`, {
-              method: "POST",
-              headers: { "content-type": "application/json" },
-              body: JSON.stringify({ pattern: p.pattern ?? ".", from: process.env.KL_SESSION }),
-            });
-            return w.ok ? text(`watching ${p.id} for /${p.pattern ?? "."}/; matching lines arrive as messages`) : text(`the bench would not watch ${p.id}`, true);
-          }
-          const c = toIde(name, p);
-          const r = await server.call(c, signal);
-          // The title belongs to the id the tool server just minted.
-          if (c.args.detach && r.body?.id) titles.set(String(r.body.id), procTitle(String(p.command ?? ""), p.title));
-          // A CLI verb that a tool covers: the work is done, and the model is told where the tool is.
-          const note = name === "bash" || (name === "process" && p.action === "start") ? shellNote(String(p.command ?? "")) : undefined;
-          // The harness's own table of what is running: mirrored from the tool server after every
-          // call that could have changed it, because nothing else tells the bench a process exists.
-          if (PROCESS_TOOLS.has(c.tool) || c.args.detach) await publishProcs(server, ctx, signal);
-          const out = fromIde(name, r.status, r.body, p.limit);
-          // Only the model sees this. A person watching reads the ROW, not the 400 lines behind it,
-          // so an answer that says "as you can see above" is an answer to nobody (§17.5).
-          const long = out.content.map((c) => c.text).join("\n").split("\n").length > LONG_OUTPUT_LINES;
-          const trailers = [note, long ? "only you see this output; relay what the person needs" : undefined].filter(Boolean) as string[];
-          return trailers.length ? { ...out, content: [...out.content, ...trailers.map((t) => ({ type: "text" as const, text: t }))] } : out;
-        } catch (e) {
-          return text((e as Error).message, true);
-        }
+        // The same policy-bearing dispatch a platform tool uses: argument/scope checks first, then
+        // the person's asynchronous answer, and only then the tool server. A refusal never runs.
+        const outcome = await dispatchWithPolicy({
+          capability: name,
+          effect: mutates(name, p) ? "write" : "read",
+          approval: mutates(name, p)
+            ? { required: "user", obtain: () => propose(`p-${toolCallId}`, name, p, ctx, signal, askLine(ws, name, p), askPreview(name, p)) }
+            : { required: "none" },
+          inspect: () => {
+            // An action and its required fields are one argument: `start` without a command and
+            // `logs`/`stop` without an id are refused here, before the card and before the server.
+            if (name === "process") {
+              const issues = processActionIssues(p as Record<string, JsonValue>);
+              if (issues.length) return { code: "invalid_args", reason: issues.map((issue) => issue.message).join("; ") };
+            }
+            // Before the call, not after: a refused read must never reach the tool server at all.
+            for (const r of reaches(name, p)) {
+              const no = forbidden(r);
+              if (no) return { code: "scope_denied", reason: no };
+            }
+            return undefined;
+          },
+          run: async () => {
+            // A watch is the harness's own: nothing to run in the workspace, only a standing request.
+            if (name === "process" && p.action === "watch") {
+              const w = await fetch(`${process.env.KL_BENCH_URL ?? "http://127.0.0.1:7789"}/procs/${encodeURIComponent(String(p.id))}/watch`, {
+                method: "POST",
+                headers: { "content-type": "application/json" },
+                body: JSON.stringify({ pattern: p.pattern ?? ".", from: process.env.KL_SESSION }),
+              });
+              return w.ok ? text(`watching ${p.id} for /${p.pattern ?? "."}/; matching lines arrive as messages`) : text(`the bench would not watch ${p.id}`, true);
+            }
+            const c = toIde(name, p);
+            const r = await server.call(c, signal);
+            // The title belongs to the id the tool server just minted.
+            if (c.args.detach && r.body?.id) titles.set(String(r.body.id), procTitle(String(p.command ?? ""), p.title));
+            // A CLI verb that a tool covers: the work is done, and the model is told where the tool is.
+            const note = name === "bash" || (name === "process" && p.action === "start") ? shellNote(String(p.command ?? "")) : undefined;
+            // The harness's own table of what is running: mirrored from the tool server after every
+            // call that could have changed it, because nothing else tells the bench a process exists.
+            if (PROCESS_TOOLS.has(c.tool) || c.args.detach) await publishProcs(server, ctx, signal);
+            const out = fromIde(name, r.status, r.body, p.limit);
+            // Only the model sees this. A person watching reads the ROW, not the 400 lines behind it,
+            // so an answer that says "as you can see above" is an answer to nobody (§17.5).
+            const long = out.content.map((c) => c.text).join("\n").split("\n").length > LONG_OUTPUT_LINES;
+            const trailers = [note, long ? "only you see this output; relay what the person needs" : undefined].filter(Boolean) as string[];
+            return trailers.length ? { ...out, content: [...out.content, ...trailers.map((t) => ({ type: "text" as const, text: t }))] } : out;
+          },
+          error: (e) => text((e as Error).message, true),
+        });
+        // pi's `AgentToolResult` carries a required `details` slot; these tools have no structured
+        // details to add, and a JSON envelope drops an undefined one, so nothing else changes.
+        return { ...toolResultOf(outcome), details: undefined };
       },
     });
   reg("read", "Read", "Read a text file with line numbers. offset (1-based line) and limit page it.", Type.Object({ path: Type.String(), offset: Type.Optional(Type.Number()), limit: Type.Optional(Type.Number()) }));

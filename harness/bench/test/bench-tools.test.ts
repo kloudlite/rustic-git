@@ -370,6 +370,8 @@ test("kl_capabilities answers this session's own catalogue, and says what is not
 
 test("kl_workspace_progress reads the bench's own routes and says what that workspace is up to", async () => {
   const seen: string[] = [];
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "kl-progress-"));
+  fs.writeFileSync(path.join(dir, "token"), "t");
   const srv = http.createServer((req, res) => {
     seen.push(req.url!);
     res.writeHead(200, { "content-type": "application/json" });
@@ -380,12 +382,12 @@ test("kl_workspace_progress reads the bench's own routes and says what that work
     ));
   });
   await new Promise<void>((r) => srv.listen(0, "127.0.0.1", r));
-  const restore = withEnv({ KL_BENCH_URL: `http://127.0.0.1:${(srv.address() as { port: number }).port}`, KL_WORKSPACE_ID: "bench-ada", KL_TEAM: "acme", KL_TOOLS_WORKSPACE: undefined });
+  const restore = withEnv({ KL_BENCH_URL: `http://127.0.0.1:${(srv.address() as { port: number }).port}`, KL_API_URL: `http://127.0.0.1:${(srv.address() as { port: number }).port}`, KL_TOOL_TOKEN_FILE: path.join(dir, "token"), KL_WORKSPACE_ID: "bench-ada", KL_TEAM: "acme", KL_TOOLS_WORKSPACE: undefined });
   try {
     const { pi, tools } = fakePi();
     kloudlite(pi);
     const out = (await (tools.find((t) => t.name === "kl_workspace_progress") as any).execute("c1", { id: "api" }, undefined, undefined, undefined)).content[0].text as string;
-    assert.deepEqual(seen.sort(), ["/exchanges?workspace=api", "/procs", "/workspaces/api/messages?limit=10"]);
+    assert.deepEqual(seen.sort(), ["/exchanges?workspace=api", "/procs", "/v1/workspaces", "/workspaces/api/messages?limit=10"]);
     assert.equal(
       out,
       [
@@ -403,6 +405,7 @@ test("kl_workspace_progress reads the bench's own routes and says what that work
     );
   } finally {
     restore();
+    fs.rmSync(dir, { recursive: true, force: true });
     srv.close();
   }
 });
@@ -1055,8 +1058,12 @@ test("packages from the bench name a workspace, or are refused", async () => {
     const run = (n: string, a: any) => (tools.find((t) => t.name === n)! as unknown as { execute: (...x: any[]) => Promise<any> }).execute("c1", a, undefined, undefined, undefined);
     for (const tool of ["kl_pkg_list", "kl_pkg_add", "kl_pkg_rm"]) {
       const r = await run(tool, { packages: ["ripgrep"] });
-      assert.equal(r.isError, true, tool);
-      assert.match(r.content[0].text, /^name the workspace: packages are installed in a workspace/, tool);
+      if (tool === "kl_pkg_list") {
+        assert.equal(r.isError, true, tool);
+        assert.match(r.content[0].text, /^name the workspace: packages are installed in a workspace/, tool);
+      } else {
+        assert.match(r.content[0].text, /declined by the person/, tool);
+      }
     }
   } finally {
     restore();
@@ -1493,6 +1500,29 @@ test("an intercept's port remap is named the way /v1 names it", async () => {
     // And what goes on the wire is exactly what was given.
     await (t as any).execute("c1", { id: "env-1", service: "api", workspace: "ws-1", ports: [{ service: 8080, workspace: 3000 }] }, undefined, undefined, undefined);
     assert.deepEqual(api.seen.find((x) => x.m === "POST")!.body.ports, [{ service: 8080, workspace: 3000 }]);
+  } finally {
+    restore();
+    api.srv.close();
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("an intercept is cleared only by explicit null, never omission", async () => {
+  const api = fakeApi(() => ({ ok: true }));
+  const base = await api.listen();
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "kl-intercept-clear-"));
+  fs.writeFileSync(path.join(dir, "token"), "t");
+  const restore = withEnv({ KL_TOOL_TOKEN_FILE: path.join(dir, "token"), KL_API_URL: base, KL_BENCH_URL: base, KL_WORKSPACE_ID: "bench-ada", KL_TOOLS_WORKSPACE: undefined, KL_FORK: undefined });
+  try {
+    const { pi, tools } = fakePi();
+    kloudlite(pi);
+    const intercept = tools.find((tool) => tool.name === "kl_intercept")!;
+    const omitted = await intercept.execute("c1", { id: "env-1", service: "api" }, undefined, undefined, undefined);
+    assert.equal(omitted.isError, true);
+    assert.match(omitted.content[0].text, /explicit null/);
+    assert.equal(api.seen.filter((call) => !call.url.startsWith("/proposals/")).length, 0, "omission is refused before approval or platform transport");
+    await intercept.execute("c2", { id: "env-1", service: "api", workspace: null }, undefined, undefined, undefined);
+    assert.equal(api.seen.some((call) => call.m === "DELETE" && call.url.includes("/v1/environments/env-1/intercepts/api")), true, JSON.stringify(api.seen));
   } finally {
     restore();
     api.srv.close();
