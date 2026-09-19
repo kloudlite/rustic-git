@@ -304,7 +304,7 @@ test("retries idempotent failures only after O05 retryStep authorizes the exact 
   assert.ok(store.log.indexOf("retry:read") < store.log.lastIndexOf("dispatch:read.item:same"));
 });
 
-test("executes O05 recovery actions under exclusive ownership", async () => {
+test("recovery executes reconciliation and expiry but defers dispatch and retry", async () => {
   const store = new MemoryStore();
   store.steps.set("recover", { state: "outcome_unknown", effect: "write" });
   store.steps.set("retry", { state: "failed", effect: "read", error: { code: "provider_failure", message: "temporary", retryable: true } });
@@ -325,8 +325,9 @@ test("executes O05 recovery actions under exclusive ownership", async () => {
     recover: callForRecovery("recover", "write.item"), retry: callForRecovery("retry"), queued: callForRecovery("queued"),
   } });
   assert.deepEqual(reconciled, ["recover"]);
-  assert.ok(store.log.includes("retry:retry"));
-  assert.ok(store.log.includes("intent:queued"));
+  assert.equal(store.log.includes("retry:retry"), false);
+  assert.equal(store.log.includes("intent:queued"), false);
+  assert.equal(store.log.some((entry) => entry.startsWith("dispatch:")), false);
   assert.ok(store.log.includes("expire"));
   assert.ok(store.log.filter((entry) => entry === "ownership").length >= actions.length);
 });

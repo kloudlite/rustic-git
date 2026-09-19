@@ -181,7 +181,7 @@ export class OperationExecutor {
     for (const action of input.actions) {
       this.#store.assertOwnership();
       if (action.operationId !== input.operationId) throw new Error(`recovery action belongs to ${action.operationId}`);
-      if (action.kind === "await_decision") continue;
+      if (action.kind === "await_decision" || action.kind === "dispatch_step" || action.kind === "retry_candidate" || action.kind === "resume_abort") continue;
       if (action.kind === "expire_decision" || action.kind === "expire_operation") {
         this.#store.expire(input.operationId);
         continue;
@@ -195,10 +195,6 @@ export class OperationExecutor {
         if (!this.#reconcile) continue;
         const conclusion = await this.#reconcile({ operationId: input.operationId, stepId: action.stepId, call, args, context: input.context, signal });
         if (conclusion.conclusion !== "unknown") this.#store.reconcileStep(input.operationId, action.stepId, conclusion);
-        continue;
-      }
-      if (action.kind === "resume_abort") {
-        // Ordinary dispatch would replay the mutation; keep the abort intent pending until an abort adapter can prove no effect.
         continue;
       }
       const digest = action.kind === "retry_candidate" ? action.argDigest : canonicalDigest(args);
