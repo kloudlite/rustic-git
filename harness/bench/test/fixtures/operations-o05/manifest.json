@@ -1,0 +1,10 @@
+{
+  "fixtures": [
+    { "file": "interior-corruption.json", "kind": "legacy-v1" },
+    { "file": "torn-tail-write.json", "kind": "legacy-v1" },
+    { "file": "v2-valid.fixture", "kind": "v2-log" },
+    { "file": "tombstone-valid.fixture", "kind": "tombstones" },
+    { "file": "tombstone-incomplete-final.fixture", "kind": "tombstones" },
+    { "file": "tombstone-bad-checksum.fixture", "kind": "tombstones" }
+  ]
+}

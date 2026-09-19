@@ -1,0 +1,55 @@
+{
+  "operationId": "op-o05fixture-torn",
+  "description": "A crash in the middle of an append: one complete commit record, then the partial bytes of the next write with no trailing newline. The store must load the complete record, report the torn tail, and repair it before the next append.",
+  "records": [
+    {
+      "v": 1,
+      "kind": "commit",
+      "at": 1760000000000,
+      "turnRevision": 1,
+      "snapshot": {
+        "contractVersion": "v1",
+        "operationId": "op-o05fixture-torn",
+        "revision": 1,
+        "state": "accepted",
+        "createdAt": 1760000000000,
+        "updatedAt": 1760000000000,
+        "deadlineAt": 1760000600000,
+        "actor": { "actorId": "user-1", "tenantId": "tenant-1", "sessionId": "s-1", "turnId": "turn-1" },
+        "scope": { "workspaceId": "ws-api" },
+        "request": { "instruction": "In src/config.ts, change the timeout to 30000." },
+        "requestDigest": "sha256:38c0157b3640f8db8cf7157b4959fdcd7c3583109bea45e65bf95b1793c177f1",
+        "dedupeKey": "sha256:0000000000000000000000000000000000000000000000000000000000000001",
+        "budgets": {
+          "maxSteps": 12,
+          "maxSelectionRounds": 3,
+          "maxGenerationCalls": 2,
+          "maxConcurrentReads": 4,
+          "maxConcurrentMutations": 2,
+          "operationDeadlineMs": 600000,
+          "handleWithinMs": 2000,
+          "providerTimeoutMs": 30000,
+          "maxGeneratedPayloadBytes": 65536,
+          "maxTextFileBytes": 1048576,
+          "maxReadSnapshotBytes": 4194304
+        },
+        "steps": [],
+        "pendingDecisions": [],
+        "unknownOutcomes": [],
+        "usage": { "steps": 0, "selectionRounds": 0, "generationCalls": 0, "attempts": 0 },
+        "lastSequence": 1
+      },
+      "events": [
+        {
+          "operationId": "op-o05fixture-torn",
+          "sequence": 1,
+          "at": 1760000000000,
+          "phase": "accepted",
+          "revision": 1,
+          "summary": "Operation accepted."
+        }
+      ]
+    }
+  ],
+  "tornFragment": "{\"v\":1,\"kind\":\"commit\",\"at\":1760000001000,\"snapshot\":{\"contractVersion\":\"v1\",\"operationId\":\"op-o05fixture-torn\",\"revision\":2,\"state\":\"resolv"
+}

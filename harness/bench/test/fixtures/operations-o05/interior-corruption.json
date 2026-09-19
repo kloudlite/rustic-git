@@ -1,0 +1,115 @@
+{
+  "operationId": "op-o05fixture-corrupt",
+  "description": "A malformed LF-terminated line between two valid commit records. The store must refuse to load this operation instead of skipping the bad record and continuing with partial history.",
+  "records": [
+    {
+      "v": 1,
+      "kind": "commit",
+      "at": 1760000000000,
+      "turnRevision": 1,
+      "snapshot": {
+        "contractVersion": "v1",
+        "operationId": "op-o05fixture-corrupt",
+        "revision": 1,
+        "state": "accepted",
+        "createdAt": 1760000000000,
+        "updatedAt": 1760000000000,
+        "deadlineAt": 1760000600000,
+        "actor": { "actorId": "user-1", "tenantId": "tenant-1", "sessionId": "s-1", "turnId": "turn-1" },
+        "scope": { "workspaceId": "ws-api" },
+        "request": { "instruction": "In src/config.ts, change the timeout to 30000." },
+        "requestDigest": "sha256:38c0157b3640f8db8cf7157b4959fdcd7c3583109bea45e65bf95b1793c177f1",
+        "dedupeKey": "sha256:0000000000000000000000000000000000000000000000000000000000000002",
+        "budgets": {
+          "maxSteps": 12,
+          "maxSelectionRounds": 3,
+          "maxGenerationCalls": 2,
+          "maxConcurrentReads": 4,
+          "maxConcurrentMutations": 2,
+          "operationDeadlineMs": 600000,
+          "handleWithinMs": 2000,
+          "providerTimeoutMs": 30000,
+          "maxGeneratedPayloadBytes": 65536,
+          "maxTextFileBytes": 1048576,
+          "maxReadSnapshotBytes": 4194304
+        },
+        "steps": [],
+        "pendingDecisions": [],
+        "unknownOutcomes": [],
+        "usage": { "steps": 0, "selectionRounds": 0, "generationCalls": 0, "attempts": 0 },
+        "lastSequence": 1
+      },
+      "events": [
+        {
+          "operationId": "op-o05fixture-corrupt",
+          "sequence": 1,
+          "at": 1760000000000,
+          "phase": "accepted",
+          "revision": 1,
+          "summary": "Operation accepted."
+        }
+      ]
+    },
+    "{\"v\":1,\"kind\":\"commit\",",
+    {
+      "v": 1,
+      "kind": "commit",
+      "at": 1760000001000,
+      "turnRevision": 1,
+      "snapshot": {
+        "contractVersion": "v1",
+        "operationId": "op-o05fixture-corrupt",
+        "revision": 2,
+        "state": "resolving",
+        "createdAt": 1760000000000,
+        "updatedAt": 1760000001000,
+        "deadlineAt": 1760000600000,
+        "actor": { "actorId": "user-1", "tenantId": "tenant-1", "sessionId": "s-1", "turnId": "turn-1" },
+        "scope": { "workspaceId": "ws-api" },
+        "request": { "instruction": "In src/config.ts, change the timeout to 30000." },
+        "requestDigest": "sha256:38c0157b3640f8db8cf7157b4959fdcd7c3583109bea45e65bf95b1793c177f1",
+        "dedupeKey": "sha256:0000000000000000000000000000000000000000000000000000000000000002",
+        "budgets": {
+          "maxSteps": 12,
+          "maxSelectionRounds": 3,
+          "maxGenerationCalls": 2,
+          "maxConcurrentReads": 4,
+          "maxConcurrentMutations": 2,
+          "operationDeadlineMs": 600000,
+          "handleWithinMs": 2000,
+          "providerTimeoutMs": 30000,
+          "maxGeneratedPayloadBytes": 65536,
+          "maxTextFileBytes": 1048576,
+          "maxReadSnapshotBytes": 4194304
+        },
+        "steps": [
+          {
+            "stepId": "step-1",
+            "key": "read_config",
+            "state": "queued",
+            "capability": "file.read",
+            "capabilityVersion": "1.0.0",
+            "targetRef": "ws-api",
+            "effect": "read",
+            "resourceKeys": ["workspace.file:src/config.ts"],
+            "attempts": 0
+          }
+        ],
+        "pendingDecisions": [],
+        "unknownOutcomes": [],
+        "usage": { "steps": 1, "selectionRounds": 0, "generationCalls": 0, "attempts": 0 },
+        "lastSequence": 2
+      },
+      "events": [
+        {
+          "operationId": "op-o05fixture-corrupt",
+          "sequence": 2,
+          "at": 1760000001000,
+          "phase": "resolving",
+          "revision": 2,
+          "summary": "Resolving the request against permitted capabilities."
+        }
+      ]
+    }
+  ]
+}

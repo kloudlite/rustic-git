@@ -1,0 +1,3 @@
+O05v2
+575 sha256:c9075618c65dd091a8f2ab2ddd0957d7ba4eca801be012f9a4ce1f553291a97a
+{"v":1,"kind":"tombstone","dedupeKey":"sha256:6daa1d8eb88834168d5e8df4c920cad8e47382c26564132765bd76c779365df6","operationId":"op-v2-fixture","requestDigest":"sha256:5e5835a07a1ff7ee56a414691551dce32d0ec2532ea1ff4e27ca3cc5b20c8b35","retained":{"operationId":"op-v2-fixture","revision":5,"state":"completed","createdAt":1760000000000,"updatedAt":1760000000000,"lastSequence":6,"result":{"operationId":"op-v2-fixture","revision":5,"state":"completed","summary":"1 of 1 steps completed; no failure was recorded.","evidenceRefs":["fixture"],"changed":true}},"earliestSequence":6}
