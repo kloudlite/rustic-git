@@ -102,11 +102,11 @@ function validResponseOwner(snapshot: OperationSnapshot, operationId: string, wh
 }
 
 function eventPage(value: unknown): Validation<OperationEventPage> {
-  if (typeof value !== "object" || value === null || Array.isArray(value)) return { ok: false, issues: [{ path: "$", code: "type_mismatch", message: "must be an event page" }] };
+  if (typeof value !== "object" || value === null || Array.isArray(value)) return { ok: false, issues: [{ path: "$", code: "wrong_type", message: "must be an event page" }] };
   const page = value as Record<string, unknown>;
   const keys = Object.keys(page);
   if (keys.some((key) => !["events", "nextCursor", "hasMore"].includes(key)) || !Array.isArray(page.events) || typeof page.hasMore !== "boolean" || (page.nextCursor !== undefined && (typeof page.nextCursor !== "string" || !page.nextCursor))) {
-    return { ok: false, issues: [{ path: "$", code: "type_mismatch", message: "must contain events, hasMore, and optional nextCursor" }] };
+    return { ok: false, issues: [{ path: "$", code: "wrong_type", message: "must contain events, hasMore, and optional nextCursor" }] };
   }
   const events: OperationEvent[] = [];
   for (let index = 0; index < page.events.length; index++) {

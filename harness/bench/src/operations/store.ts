@@ -2120,7 +2120,7 @@ export class OperationStore {
     if (input.decisions?.length) record.decisions = input.decisions;
     if (input.resolutions?.length) record.resolutions = input.resolutions;
     if (input.abortRequestedStepIds?.length) record.abortRequestedStepIds = input.abortRequestedStepIds;
-    if (operation.format === "v1") this.#rewriteV2(operation);
+    if (operation.format === "v1" && operation.snapshot !== undefined) this.#rewriteV2(operation);
     this.#append(operationId, record);
     this.#fold(operationId, record, operation.file);
     return { snapshot: result.snapshot, changed: true };
