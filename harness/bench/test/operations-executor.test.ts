@@ -40,7 +40,7 @@ const dispatchFor = () => ({});
 class MemoryStore implements ExecutorStore {
   log: string[] = [];
   owned = true;
-  steps = new Map<string, { state: string; effect: string; evidenceRefs?: string[]; error?: OperationError }>();
+  steps = new Map<string, { state: string; effect: string; evidenceRefs?: string[]; error?: OperationError; attempts?: number }>();
   state: OperationSnapshot["state"] = "accepted";
   revision = 1;
   pendingDecisions: OperationSnapshot["pendingDecisions"] = [];
@@ -48,8 +48,8 @@ class MemoryStore implements ExecutorStore {
   settledState?: OperationSnapshot["state"];
   assertOwnership(): void { this.log.push("ownership"); if (!this.owned) throw new Error("not owned"); }
   queueStep(_operationId: string, input: { key?: string; capability: string }): OperationSnapshot { this.log.push(`queue:${input.key}`); this.steps.set(input.key!, { state: "queued", effect: input.capability.startsWith("write") ? "write" : "read" }); return this.snapshot(); }
-  startStep(_operationId: string, stepId: string): OperationSnapshot { this.log.push(`intent:${stepId}`); this.steps.get(stepId)!.state = "running"; return this.snapshot(); }
-  retryStep(_operationId: string, stepId: string): OperationSnapshot { this.log.push(`retry:${stepId}`); this.steps.get(stepId)!.state = "running"; return this.snapshot(); }
+  startStep(_operationId: string, stepId: string): OperationSnapshot { this.log.push("intent:" + stepId); const step = this.steps.get(stepId)!; step.state = "running"; step.attempts = (step.attempts ?? 0) + 1; return this.snapshot(); }
+  retryStep(_operationId: string, stepId: string): OperationSnapshot { this.log.push("retry:" + stepId); const step = this.steps.get(stepId)!; step.state = "running"; step.attempts = (step.attempts ?? 0) + 1; return this.snapshot(); }
   recordStepOutcome(_operationId: string, stepId: string, input: { outcome: "succeeded" | "failed"; evidenceRefs?: string[]; error?: OperationError }): OperationSnapshot { this.log.push(`outcome:${stepId}:${input.outcome}`); Object.assign(this.steps.get(stepId)!, { state: input.outcome, evidenceRefs: input.evidenceRefs, error: input.error }); return this.snapshot(); }
   markOutcomeUnknown(_operationId: string, stepId: string): OperationSnapshot { this.log.push(`unknown:${stepId}`); this.steps.get(stepId)!.state = "outcome_unknown"; this.state = "reconciling"; return this.snapshot(); }
   reconcileStep(_operationId: string, stepId: string, input: { conclusion: "succeeded" | "failed"; evidenceRefs?: string[]; error?: OperationError }): OperationSnapshot { this.log.push(`reconcile:${stepId}:${input.conclusion}`); Object.assign(this.steps.get(stepId)!, { state: input.conclusion, evidenceRefs: input.evidenceRefs, error: input.error }); this.state = "running"; return this.snapshot(); }
@@ -68,7 +68,7 @@ class MemoryStore implements ExecutorStore {
       actor: { actorId: context.actorId, tenantId: context.tenantId, sessionId: context.sessionId, turnId: context.turnId }, scope: context.scope,
       request: { instruction: "test" }, requestDigest: "sha256:" + "0".repeat(64), dedupeKey: "key",
       budgets: { maxSteps: 12, maxSelectionRounds: 3, maxGenerationCalls: 2, maxConcurrentReads: 4, maxConcurrentMutations: 2, operationDeadlineMs: 60_000, handleWithinMs: 2_000, providerTimeoutMs: 1_000, maxGeneratedPayloadBytes: 1, maxTextFileBytes: 1, maxReadSnapshotBytes: 1 },
-      steps: [...this.steps.entries()].map(([key, step]) => ({ stepId: key, key, state: step.state as any, capability: step.effect === "write" ? "write.item" : "read.item", capabilityVersion: "1.0.0", effect: step.effect as any, attempts: step.state === "queued" ? 0 : 1, ...(step.evidenceRefs ? { evidenceRefs: step.evidenceRefs } : {}), ...(step.error ? { error: step.error } : {}) })),
+      steps: [...this.steps.entries()].map(([key, step]) => ({ stepId: key, key, state: step.state as any, capability: step.effect === "write" ? "write.item" : "read.item", capabilityVersion: "1.0.0", effect: step.effect as any, attempts: step.attempts ?? (step.state === "queued" ? 0 : 1), ...(step.evidenceRefs ? { evidenceRefs: step.evidenceRefs } : {}), ...(step.error ? { error: step.error } : {}) })),
       pendingDecisions: this.pendingDecisions, unknownOutcomes: [], usage: { steps: this.steps.size, selectionRounds: 0, generationCalls: 0, attempts: 0 }, lastSequence: this.log.length,
     };
   }
@@ -302,6 +302,21 @@ test("retries idempotent failures only after O05 retryStep authorizes the exact 
   assert.equal(store.log.filter((entry) => entry.startsWith("dispatch:read.item")).length, 2);
   assert.ok(store.log.indexOf("outcome:read:failed") < store.log.indexOf("retry:read"));
   assert.ok(store.log.indexOf("retry:read") < store.log.lastIndexOf("dispatch:read.item:same"));
+});
+
+
+test("settles the final retryable failure at the trusted attempt limit", async () => {
+  const store = new MemoryStore();
+  const reg = registry(store, [
+    { outcome: "failed", capability: "read.item", version: "1.0.0", code: "provider_failure", error: { code: "provider_failure", message: "temporary one", retryable: true } },
+    { outcome: "failed", capability: "read.item", version: "1.0.0", code: "provider_failure", error: { code: "provider_failure", message: "temporary two", retryable: true } },
+  ]);
+  const executor = new OperationExecutor({ store, registry: reg, scheduler: new OperationScheduler({ maxConcurrent: 1 }), dispatchFor });
+  const result = await executor.execute({ operationId: "op-1", context, calls: calls({ key: "read" }) });
+  assert.equal(result.state, "failed");
+  assert.equal(store.log.filter((entry) => entry.startsWith("dispatch:read.item")).length, 2);
+  assert.equal(store.log.filter((entry) => entry === "retry:read").length, 1);
+  assert.equal(store.steps.get("read")?.state, "failed");
 });
 
 test("recovery executes reconciliation and expiry but defers dispatch and retry", async () => {

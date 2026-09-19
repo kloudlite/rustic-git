@@ -157,6 +157,8 @@ export class OperationExecutor {
           }
           while (outcome.outcome === "failed" && outcome.error.retryable && descriptor.retry.class === "idempotent") {
             this.#store.recordStepOutcome(input.operationId, stepId, { outcome: "failed", error: outcome.error });
+            const step = this.#store.load(input.operationId).steps.find((entry) => entry.stepId === stepId);
+            if (!step || step.attempts >= descriptor.retry.maxAttempts) break;
             this.#store.retryStep(input.operationId, stepId, { retry: descriptor.retry, argDigest, idempotencyKey: `${input.operationId}/${stepId}` }, input.context);
             outcome = await this.#registry.dispatch(call.capability, args, dispatchDeps, call.capabilityVersion);
           }
