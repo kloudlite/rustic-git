@@ -13,6 +13,9 @@ import { SessionList, type SessionRow } from "./sessions.ts";
 import { Defaults, type Triple } from "./defaults.ts";
 import { allProviders } from "./providers.ts";
 import { readJson, replaceJson } from "./log.ts";
+import { createBenchCapabilityRuntime } from "./operations/capabilities.ts";
+import type { CapabilityAdapter, CapabilityRuntime } from "./operations/capabilities.ts";
+import { createSharedAdapters, resolveWorkspaceProgress } from "./operations/adapters.ts";
 
 export type BenchEvent = { type: string; [k: string]: unknown };
 
@@ -150,6 +153,7 @@ export class Bench {
   readonly exchanges: ExchangeLog;
   readonly tasks: Tasks;
   readonly procs: Procs;
+  readonly capabilityRuntime: CapabilityRuntime;
   readonly plans: Plans;
   readonly memories: Memories;
   readonly defaults: Defaults;
@@ -197,11 +201,32 @@ export class Bench {
     this.exchanges = new ExchangeLog(opts.dir);
     this.tasks = new Tasks(opts.dir);
     this.procs = new Procs(opts.dir);
+    this.capabilityRuntime = createBenchCapabilityRuntime(this.procs, this.platformCapabilityAdapters());
     this.plans = new Plans(opts.dir);
     this.memories = new Memories(opts.dir);
     this.defaults = new Defaults(opts.dir);
     this.architecture = new Architecture(opts.dir);
     this.writable = new Writable(opts.dir, (ok, reason) => this.emit({ type: "writable", ok, reason }));
+  }
+
+  private platformCapabilityAdapters(): Readonly<Record<string, CapabilityAdapter>> {
+    const platform = (method: string, route: string, body?: unknown) => this.v1(method, route, body);
+    const bench = async (method: string, route: string, body?: unknown) => {
+      if (method !== "GET" || body !== undefined) return { ok: false, data: { error: "unsupported bench read" } };
+      if (route === "/procs") return { ok: true, data: this.procs.all() };
+      const match = /^\/workspaces\/([^/]+)\/messages\?limit=10$/.exec(route);
+      if (match) {
+        const workspace = decodeURIComponent(match[1]);
+        const session = this.sessions.all().find((row) => row.workspace === workspace || row.target === workspace || row.id === `w-${workspace}`);
+        return session ? { ok: true, data: await this.messages(session.id, undefined, 10) } : { ok: true, data: { messages: [] } };
+      }
+      if (route.startsWith("/exchanges?workspace=")) return { ok: true, data: this.exchanges.byWorkspace(decodeURIComponent(route.split("=")[1])) };
+      return { ok: false, data: { error: "unsupported bench read" } };
+    };
+    return {
+      ...createSharedAdapters({ platform, bench }),
+      "workspace.progress": resolveWorkspaceProgress(platform, bench),
+    };
   }
 
   get readOnly(): boolean {

@@ -3,6 +3,11 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { Type } from "typebox";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
+import type { OperationErrorCode } from "../bench/src/operations/contracts.ts";
+import type { JsonValue } from "../bench/src/operations/shape.ts";
+import { workspaceCreateSourceIssues } from "../bench/src/operations/arguments.ts";
+import type { ArgumentStates } from "../bench/src/operations/arguments.ts";
+import { createSharedAdapters, resolveUnique, resolveWorkspaceProgress, toolResult as adapterToolResult } from "../bench/src/operations/adapters.ts";
 import { TOOLS, gated, question } from "./catalog.ts";
 
 /**
@@ -50,7 +55,81 @@ export async function call(method: string, p: string, body?: unknown): Promise<{
   return { status: r.status, data };
 }
 
-const text = (v: unknown) => ({ content: [{ type: "text" as const, text: typeof v === "string" ? v : JSON.stringify(v, null, 2) }] });
+/** What every tool answers with, here and in `workspace-tools.ts`. */
+export type ToolResult = { content: { type: "text"; text: string }[]; isError?: boolean };
+
+const text = (v: unknown): ToolResult => ({ content: [{ type: "text" as const, text: typeof v === "string" ? v : JSON.stringify(v, null, 2) }] });
+
+/**
+ * How a dispatch ended. `refused` means policy stopped the call before the
+ * handler ran, so no effect exists to reconcile and the executor must not read
+ * it as success. A handler that ran and answered with an error is `failed`.
+ */
+export type DispatchOutcome<T = ToolResult> =
+  | { outcome: "completed"; result: T }
+  | { outcome: "failed"; code: OperationErrorCode; result: T }
+  | { outcome: "refused"; code: OperationErrorCode; reason: string };
+
+export type ApprovalRequirement = "none" | "user" | "policy";
+
+export const DECLINED = "declined by the person";
+const NO_APPROVAL_CHANNEL = "that change needs approval and no approval channel is available; nothing ran";
+
+/**
+ * One policy-bearing dispatch for every caller: the registered tools (a person
+ * is asked asynchronously through `propose`) and the operation executor's
+ * capabilities. Scope/path/argument refusals run first, then approval, then the
+ * handler — in that order, so a call that cannot be authorized never reaches it,
+ * and a mutating plan with no approval channel is refused rather than run.
+ */
+export type PolicyPlan<T = ToolResult> = {
+  capability: string;
+  effect: "read" | "write" | "destroy";
+  approval: { required: ApprovalRequirement; obtain?: () => Promise<boolean> };
+  inspect?: () => { code: OperationErrorCode; reason: string } | undefined;
+  run: () => Promise<T>;
+  failed?: (result: T) => OperationErrorCode | undefined;
+  /** The answer a thrown handler error becomes; the registered tools keep `thrown`'s sentence. */
+  error?: (e: unknown) => ToolResult;
+};
+
+export async function dispatchWithPolicy<T = ToolResult>(plan: PolicyPlan<T>): Promise<DispatchOutcome<T>> {
+  const blocked = plan.inspect?.();
+  if (blocked) return { outcome: "refused", code: blocked.code, reason: blocked.reason };
+  if (plan.approval.required !== "none") {
+    const obtain = plan.approval.obtain;
+    if (!obtain) return { outcome: "refused", code: "permission_denied", reason: NO_APPROVAL_CHANNEL };
+    const granted = await obtain().catch((error) => {
+      if (plan.capability.includes(".")) throw error;
+      return false;
+    });
+    if (!granted) return { outcome: "refused", code: "permission_denied", reason: DECLINED };
+  }
+  try {
+    const result = await plan.run();
+    const code = plan.failed?.(result) ?? ((result as ToolResult)?.isError ? "execution_failure" : undefined);
+    return code ? { outcome: "failed", code, result } : { outcome: "completed", result };
+  } catch (e) {
+    if (!plan.error) throw e;
+    const answer = plan.error(e);
+    return { outcome: "failed", code: "execution_failure", result: { ...answer, isError: true } as T };
+  }
+}
+
+/**
+ * The registered tool surface keeps the words the model already reads: a
+ * decline is its own sentence, a scope/argument refusal is an error, and an
+ * error the handler answered with is unchanged. The executor reads the
+ * `DispatchOutcome` itself, where a denial is never "completed".
+ */
+export function toolResultOf(outcome: DispatchOutcome<ToolResult>, declined: "error" | "plain" = "error"): ToolResult {
+  if (outcome.outcome === "completed") return outcome.result;
+  if (outcome.outcome === "failed") return { ...outcome.result, isError: true };
+  if (declined === "plain" && outcome.code === "permission_denied" && outcome.reason === DECLINED) {
+    return { content: [{ type: "text", text: outcome.reason }] };
+  }
+  return { content: [{ type: "text", text: outcome.reason }], isError: true };
+}
 
 /**
  * What a failed platform call SAYS to the model: one sentence about the person's intent, and
@@ -201,6 +280,8 @@ const q = (o: Record<string, string | undefined>) => {
  */
 function caveman(): string[] {
   try {
+    // @ts-expect-error The extension loader executes this file as ESM; the focused contract
+    // typecheck follows the desktop's CommonJS package boundary even though pi is not built by it.
     const at = path.join(path.dirname(fileURLToPath(import.meta.url)), "caveman.md");
     const body = fs.readFileSync(at, "utf8").trim();
     return body
@@ -328,6 +409,18 @@ export const BENCH_HANDS = [
 export function makeReg(pi: ExtensionAPI) {
   const spec = (name: string) => TOOLS.find((t) => t.name === name)!;
   const names: string[] = [];
+  /**
+   * Argument combinations a tool refuses before the card is drawn. A call that
+   * cannot be executed must not ask a person to approve it; the handler keeps
+   * the same check, so a call that reaches it is still refused.
+   */
+  const inspect: Record<string, (args: Record<string, JsonValue>) => { code: OperationErrorCode; reason: string } | undefined> = {
+    kl_workspace_create: (args) => {
+      const issues = workspaceCreateSourceIssues(args);
+      return issues.length ? { code: "invalid_args", reason: issues.map((issue) => issue.message).join("; ") } : undefined;
+    },
+    kl_intercept: (args) => Object.prototype.hasOwnProperty.call(args, "workspace") ? undefined : { code: "invalid_args", reason: "workspace must name a target or be explicit null to clear the intercept" },
+  };
   const reg = <P extends Parameters<typeof Type.Object>[0]>(name: string, params: P, run: (a: Record<string, any>, signal?: AbortSignal, ctx?: any) => Promise<{ content: { type: "text"; text: string }[]; isError?: boolean }>) => {
     const s = spec(name);
     names.push(name);
@@ -338,13 +431,6 @@ export function makeReg(pi: ExtensionAPI) {
       parameters: Type.Object(params),
       async execute(toolCallId, a, signal, _update, ctx) {
         const args = a as Record<string, any>;
-        // Changing somebody's platform is asked first (owner, 2026-09-17): the desktop draws the
-        // question, the person answers it, and only then does this run. A message to another
-        // session and this machine's own packages are not that, and are never gated.
-        if (gated(name)) {
-          const ok = await propose(`p-${toolCallId}`, name, args, ctx, signal);
-          if (!ok) return text("declined by the person");
-        }
         // An EXCHANGE is one session handing work to another — an ask, an info ask, an agent.
         // A platform call is not one: publishing every `kl_workspace_create` here put
         // `kl_workspace_create {"name":"backend-rust","packages":["rust"]}` in the queue as though
@@ -354,11 +440,22 @@ export function makeReg(pi: ExtensionAPI) {
         // is: a thrown error can carry a URL too (owner, 2026-09-18).
         // A SYNCHRONOUS throw — an argument refused while the call is still being built — escaped
         // this catch and surfaced as a stack (owner, 2026-09-18); both kinds answer the sentence.
-        try {
-          return await run(args, signal, ctx);
-        } catch (e) {
-          return { ...text(thrown(name, e as Error)), isError: true };
-        }
+        //
+        // Changing somebody's platform is asked first (owner, 2026-09-17): the desktop draws the
+        // question, the person answers it, and only then does this run. A message to another
+        // session and this machine's own packages are not that, and are never gated. The gate and
+        // the handler call are one adapter, shared with the operation executor.
+        const outcome = await dispatchWithPolicy({
+          capability: name,
+          effect: s.effect,
+          approval: gated(name) ? { required: "user", obtain: () => propose(`p-${toolCallId}`, name, args, ctx, signal) } : { required: "none" },
+          inspect: () => inspect[name]?.(args as Record<string, JsonValue>),
+          run: () => run(args, signal, ctx),
+          error: (e) => ({ ...text(thrown(name, e as Error)), isError: true }),
+        });
+        // pi's `AgentToolResult` carries a required `details` slot; these tools have no structured
+        // details to add, and a JSON envelope drops an undefined one, so nothing else changes.
+        return { ...toolResultOf(outcome, "plain"), details: undefined };
       },
     });
   };
@@ -444,10 +541,18 @@ export const BENCH_ALWAYS_ON = ["ask", "ask_close", "plan", "skill", "tool_searc
 export const PLAN_TOOLS = ["read", "grep", "find", "ls", "plan", "skill", "tool_search", "memory", "architecture", "kl_capabilities", "kl_workspace_progress"];
 
 /** The six skills, read from beside the extension: product words, not tool lists. */
-const SKILLS = ["workspaces", "environments", "snapshots", "repos", "images", "agents"];
+export const SKILLS = ["workspaces", "environments", "snapshots", "repos", "images", "agents"];
 /** Where the skills live beside the extension. Named in the error, because a missing directory in
  *  an image is the usual reason a skill "does not exist" (owner, 2026-09-17). */
+// @ts-expect-error See caveman(): pi loads this source as ESM outside the desktop CommonJS build.
 export const skillDir = () => path.join(path.dirname(fileURLToPath(import.meta.url)), "..", "skills");
+
+const sharedAdapters = () => createSharedAdapters({ platform: call, bench: benchCall, ownBench: process.env.KL_WORKSPACE_ID });
+const shared = async (capability: string, args: Record<string, JsonValue>, states: ArgumentStates = {}) => {
+  const adapter = sharedAdapters()[capability];
+  if (!adapter) return { ...text(`no trusted adapter for ${capability}`), isError: true };
+  return adapterToolResult(await adapter({ args, states }));
+};
 /**
  * A skill is asked for the way a person says it: `workspaces`, `Workspaces`, ` workspaces `, or the
  * file's own `workspaces.md`. Ten calls in the transcripts were answered `no skill workspaces;
@@ -479,7 +584,8 @@ export const skillIndex = (): { name: string; description: string }[] =>
 /** One line per match, as the catalogue describes it: what it is called, what it does, what it takes. */
 function describeTool(pi: ExtensionAPI, name: string): string {
   const t = TOOLS.find((x) => x.name === name);
-  const params = Object.keys((pi.getAllTools?.() ?? []).find((x: { name: string }) => x.name === name)?.parameters?.properties ?? {});
+  const registered = (pi.getAllTools?.() ?? []).find((x: { name: string }) => x.name === name) as { parameters?: { properties?: Record<string, unknown> } } | undefined;
+  const params = Object.keys(registered?.parameters?.properties ?? {});
   return `${name} — ${t?.summary ?? ""} [${t?.effect ?? "read"}]${params.length ? `; params: ${params.join(", ")}` : ""}`;
 }
 
@@ -511,12 +617,8 @@ export function lookAround(reg: ReturnType<typeof makeReg>) {
     const p = Object.entries(o).filter(([, v]) => v).map(([k, v]) => `${k}=${encodeURIComponent(v!)}`);
     return p.length ? `?${p.join("&")}` : "";
   };
-  reg("kl_workspaces", { team: O(S("team slug; absent = personal")) }, async (a) => {
-    const r = await call("GET", `/v1/workspaces${q({ team: a.team })}`);
-    if (r.status >= 400) return { ...text(sanitizeError("kl_workspaces", r.status, r.data)), isError: true };
-    return text(withoutBenches(r.data));
-  });
-  reg("kl_workspace", { id: S("workspace id or name") }, (a) => answer("GET", `/v1/workspaces/${encodeURIComponent(refuseOwnBench(String(a.id)))}`));
+  reg("kl_workspaces", { team: O(S("team slug; absent = personal")) }, (a) => shared("workspace.list", a));
+  reg("kl_workspace", { id: S("workspace id or name") }, (a) => shared("workspace.inspect", a));
   reg("kl_workspace_snapshots", { id: S("workspace id") }, (a) => answer("GET", `/v1/workspaces/${a.id}/snapshots`));
   reg("kl_environments", { team: O(S("team slug; absent = personal")) }, (a) => answer("GET", `/v1/environments${q({ team: a.team })}`));
   reg("kl_environment", { id: S("environment id") }, (a) => answer("GET", `/v1/environments/${a.id}`));
@@ -613,7 +715,7 @@ export function architectureTools(reg: ReturnType<typeof makeReg>) {
 export function modeCommand(pi: ExtensionAPI, planTools: string[]) {
   pi.registerCommand?.("mode", {
     description: "build (everything) or plan (read-only, plus the plan tool)",
-    handler: async (args: string, ctx: { ui?: { notify?: (m: string, k?: string) => void } }) => {
+    handler: async (args, ctx) => {
       const plan = String(args ?? "").trim().toLowerCase() === "plan";
       pi.setActiveTools?.(plan ? planTools.filter((n) => (pi.getAllTools?.() ?? []).some((t: { name: string }) => t.name === n)) : ALWAYS_ON);
       ctx.ui?.notify?.(plan ? "plan mode: nothing changes until you switch back" : "build mode", "info");
@@ -623,22 +725,10 @@ export function modeCommand(pi: ExtensionAPI, planTools: string[]) {
 
 export function searchTools(reg: ReturnType<typeof makeReg>, pi: ExtensionAPI) {
   reg("skill", { name: Type.Optional(Type.String({ description: `${SKILLS.join(", ")}; absent lists them` })) }, async (a) => {
-    if (!a.name) {
-      const index = skillIndex();
-      return index.length ? text(index.map((s) => `${s.name} — ${s.description}`).join("\n")) : { ...text(`no skills are installed — nothing readable in ${skillDir()}`), isError: true };
-    }
-    const body = skillText(String(a.name));
-    if (body) return text(body);
-    const here = skillIndex().map((x) => x.name);
-    // A name this session lists but cannot read is a fact about the IMAGE, said as one — never
-    // "no skill workspaces; there are workspaces".
-    if (here.includes(skillName(String(a.name)) ?? "")) return { ...text(`${a.name} is installed but could not be read; say so to the person`), isError: true };
-    // Loud, and with the path: "no skill workspaces" on a bench whose image ships no skills folder
-    // is a fact about the image, not about the skill.
-    return {
-      ...text(here.length ? `no skill ${a.name}; there are ${here.join(", ")}` : `no skills are installed — nothing readable in ${skillDir()}`),
-      isError: true,
-    };
+    const result = await shared("skill.read", a);
+    if (a.name || result.isError) return result;
+    const rows = JSON.parse(result.content[0].text) as { name: string; description: string }[];
+    return text(rows.map((row) => `${row.name} — ${row.description}`).join("\n"));
   });
   reg("tool_search", { query: Type.String({ description: "what you want to do, in a word or two" }) }, async (a) => {
     const words = String(a.query).toLowerCase().split(/[^a-z0-9_]+/).filter((w) => w.length > 2);
@@ -825,15 +915,15 @@ export function progressTool(reg: ReturnType<typeof makeReg>) {
     // which is what a person says and what this tool now takes — both reads answered nothing, so a
     // workspace mid-task reported "nothing outstanding / nothing yet" (transcripts, 2026-09-18).
     refuseOwnBench(String(a.id));
-    const id = encodeURIComponent(await resolveNamed("workspaces", String(a.id)).catch(() => String(a.id)));
-    const [x, m, procs] = await Promise.all([
-      benchCall("GET", `/exchanges?workspace=${id}`),
-      benchCall("GET", `/workspaces/${id}/messages?limit=10`),
-      // What is RUNNING there. Without this the bench asked "is the build done?", could not see the
-      // workspace's own `kl container build`, and set about building it again (owner, 2026-09-18).
-      benchCall("GET", "/procs").catch(() => ({ ok: false, data: [] })),
-    ]);
-    if (!x.ok || !m.ok) return { ...text(String((x.ok ? m.data : x.data)?.error ?? "the bench could not be asked"), true), isError: true };
+    const progress = resolveWorkspaceProgress(call, benchCall, process.env.KL_WORKSPACE_ID);
+    let raw = await progress({ args: a, states: {} });
+    if (!raw.ok && raw.error.code === "no_match") raw = await sharedAdapters()["workspace.progress"]({ args: a, states: {} });
+    const result = adapterToolResult(raw);
+    if (result.isError) return result;
+    const data = JSON.parse(result.content[0].text) as { asks: any[]; messages: any[]; processes: any[] };
+    const x = { ok: true, data: data.asks };
+    const m = { ok: true, data: { messages: data.messages } };
+    const procs = { ok: true, data: data.processes };
     // ONE line per ask — state, how long, its first line — never the ask's body: the bench holds
     // what things ARE, the workspace holds how they are done (owner, 2026-09-18). And an ask that is
     // running WAKES this session when it answers, so polling it is six calls that learn nothing.
@@ -852,7 +942,7 @@ export function progressTool(reg: ReturnType<typeof makeReg>) {
       // A tool call is what it is DOING; the prose is what it thinks about it. Both, briefly.
       return (c as any[] ?? []).map((b) => (b.type === "toolCall" ? `  ran ${b.name}` : b.text ? `  said: ${String(b.text).slice(0, 160)}` : "")).filter(Boolean);
     });
-    const ws = decodeURIComponent(id);
+    const ws = String((data.processes as any[])[0]?.workspace ?? a.id);
     const running = (procs.ok && Array.isArray(procs.data) ? (procs.data as { workspace?: string; name: string; command: string; started: number; ended?: number }[]) : [])
       .filter((r) => r.workspace === ws && r.ended === undefined)
       .map((r) => `  ${r.name}: ${String(r.command).slice(0, 120)} (since ${new Date(r.started).toISOString().slice(11, 16)})`);
@@ -879,15 +969,12 @@ export function progressTool(reg: ReturnType<typeof makeReg>) {
  * environment tool takes either, and `kl_env_switch` taking only an id is why `{"environment":
  * "devstack"}` answered 404 and had to be retried by id (transcripts, 2026-09-18).
  */
-async function resolveNamed(kind: "workspaces" | "environments", idOrName: string): Promise<string> {
+export async function resolveNamed(kind: "workspaces" | "environments", idOrName: string): Promise<string> {
   const r = await call("GET", `/v1/${kind}`);
   const rows = (Array.isArray(r.data) ? r.data : []) as { id?: string; name?: string }[];
-  if (rows.some((x) => x.id === idOrName)) return idOrName;
-  const hit = rows.filter((x) => x.name === idOrName);
-  if (hit.length === 1) return hit[0].id!;
-  if (hit.length > 1) throw new Error(`${hit.length} ${kind} are called ${idOrName}; name it by id (${hit.map((x) => x.id).join(", ")})`);
-  // Not in the listing: hand it on as given, so /v1's own 404 is the answer rather than ours.
-  return idOrName;
+  const resolved = resolveUnique(rows as JsonValue[], idOrName, kind.slice(0, -1));
+  if (!resolved.ok) throw new Error(resolved.message);
+  return resolved.id;
 }
 
 /**
@@ -909,34 +996,22 @@ export function spaceTools(reg: ReturnType<typeof makeReg>, space: string | unde
 export function packageTools(reg: ReturnType<typeof makeReg>) {
   const P = Type.Array(Type.String(), { description: "nixpkgs ATTRIBUTE names, not language names: rustc cargo (Rust), nodejs_22, go, python3, bun, pnpm, jdk21, gcc, gnumake; `attr@version` pins one" });
   const WS = Type.Optional(Type.String({ description: "the workspace to act on, by name or id — required: this session has no machine of its own" }));
-  const attr = (e: string) => e.split("@")[0];
   const NAME_IT = { ...text("name the workspace: packages are installed in a workspace, and this session has no machine of its own"), isError: true };
   const named = (workspace: unknown) => (typeof workspace === "string" && workspace.trim() ? refuseOwnBench(workspace.trim()) : undefined);
-  const have = async (id: string): Promise<string[]> => {
-    const { status, data } = await call("GET", `/v1/workspaces/${encodeURIComponent(id)}`);
-    if (status >= 400) throw new Error(`${status}: ${typeof data === "string" ? data : JSON.stringify(data)}`);
-    return ((data as { packages?: string[] } | null)?.packages ?? []).slice();
-  };
 
   reg("kl_pkg_list", { workspace: WS }, async (a) => {
     const id = named(a.workspace);
-    return id ? text(await have(id)) : NAME_IT;
+    return id ? answer("GET", `/v1/workspaces/${encodeURIComponent(id)}`) : NAME_IT;
   });
   reg("kl_pkg_add", { workspace: WS, packages: P }, async (a) => {
     const id = named(a.workspace);
     if (!id) return NAME_IT;
-    const now = await have(id);
-    // A re-pin replaces the entry it pins rather than sitting beside it.
-    const next = [...now.filter((e) => !a.packages.some((x: string) => attr(x) === attr(e))), ...a.packages];
-    return answer("PATCH", `/v1/workspaces/${encodeURIComponent(id)}`, { packages: next });
+    return shared("workspace.packages.add", { workspace: id, packages: a.packages });
   });
   reg("kl_pkg_rm", { workspace: WS, packages: P }, async (a) => {
     const id = named(a.workspace);
     if (!id) return NAME_IT;
-    const now = await have(id);
-    const next = now.filter((e) => !a.packages.some((x: string) => attr(x) === attr(e)));
-    if (next.length === now.length) return { ...text(`none of ${a.packages.join(", ")} is installed in ${id}`), isError: true };
-    return answer("PATCH", `/v1/workspaces/${encodeURIComponent(id)}`, { packages: next });
+    return shared("workspace.packages.rm", { workspace: id, packages: a.packages });
   });
 }
 
@@ -1034,28 +1109,21 @@ function environmentTools(reg: ReturnType<typeof makeReg>) {
     {
       id: S("environment id"),
       service: S("service name in the environment"),
-      workspace: O(S("workspace id to deliver to; absent = clear the intercept")),
+      workspace: O(Type.Union([S("workspace id to deliver to"), Type.Null({ description: "explicitly clear the intercept" })])),
       // `/v1`'s own shape (`crd::PortMap`): the service's port and the workspace's. The tool
       // declared `{from, to}`, so every call was a 422 naming a field the model could not see, and
       // it guessed three shapes in a row (transcripts, 2026-09-18).
       ports: O(Type.Array(Type.Object({ service: Type.Number({ description: "the port callers already dial on the service" }), workspace: Type.Number({ description: "the port the workspace listens on" }) }), { description: "port remaps, as {service, workspace}; absent forwards every port 1:1" })),
     },
-    (a) => (a.workspace ? answer("POST", `/v1/environments/${a.id}/intercepts`, { service: a.service, workspace: a.workspace, ports: a.ports }) : answer("DELETE", `/v1/environments/${a.id}/intercepts/${a.service}`)),
+    (a) => shared("environment.intercept", { id: a.id, service: a.service, ...(a.workspace === null ? {} : { workspace: a.workspace }), ...(a.ports === undefined ? {} : { ports: a.ports }) }, { workspace: a.workspace === null ? { kind: "explicitly_clear" } : a.workspace === undefined ? { kind: "unspecified" } : { kind: "known", value: a.workspace } }),
   );
   // PATCH takes the WHOLE list, so both of these read the environment first and pass every service
   // they are not changing through VERBATIM. A tool that took "the list" and rebuilt each row from
   // a narrower schema would silently drop a service's command, env or mounts — the model cannot
   // see what it did not ask for. Removals take their StatefulSet with them; bytes stay on the volume.
-  const services = async (id: string): Promise<Record<string, any>[]> => {
-    const { status, data } = await call("GET", `/v1/environments/${encodeURIComponent(id)}`);
-    if (status >= 400) throw new Error(`${status}: ${typeof data === "string" ? data : JSON.stringify(data)}`);
-    return ((data as { services?: Record<string, any>[] } | null)?.services ?? []).slice();
-  };
-  const withServices = (id: string, next: Record<string, any>[]) => answer("PATCH", `/v1/environments/${encodeURIComponent(id)}`, { services: next });
   reg("kl_environment_service_add", { id: S("environment id"), service: SERVICE }, async (a, signal) => {
-    const have = await services(a.id);
     const one = service(a.service);
-    const r = await withServices(a.id, [...have.filter((s) => s.name !== one.name), one]);
+    const r = await shared("environment.service.put", { id: a.id, service: one });
     if (r.isError) return r;
     // The service has to actually come up: waiting here is why nobody sleeps in a shell.
     const w = await settle(
@@ -1067,10 +1135,7 @@ function environmentTools(reg: ReturnType<typeof makeReg>) {
     return text(w.settled ? w.data : `${one.name} not ready after ${Math.round(w.waitedMs / 1000)}s\n${JSON.stringify(w.data, null, 2)}`);
   });
   reg("kl_environment_service_rm", { id: S("environment id"), name: S("the service to remove") }, async (a) => {
-    const have = await services(a.id);
-    const next = have.filter((s) => s.name !== a.name);
-    if (next.length === have.length) return { ...text(`${a.id} has no service ${a.name}`), isError: true };
-    return withServices(a.id, next);
+    return shared("environment.service.rm", a);
   });
 }
 
@@ -1178,18 +1243,8 @@ export function tools(pi: ExtensionAPI) {
    * GET and saves the model a lookup it would otherwise do out loud. Ambiguity is refused rather
    * than guessed — two workspaces called "api" is exactly when picking one is wrong.
    */
-  const resolve = async (kind: "workspaces" | "environments", idOrName: string): Promise<string> => {
-    const r = await call("GET", `/v1/${kind}`);
-    const rows = (Array.isArray(r.data) ? r.data : []) as { id?: string; name?: string }[];
-    if (rows.some((x) => x.id === idOrName)) return idOrName;
-    const hit = rows.filter((x) => x.name === idOrName);
-    if (hit.length === 1) return hit[0].id!;
-    if (hit.length > 1) throw new Error(`${hit.length} ${kind} are called ${idOrName}; name it by id (${hit.map((x) => x.id).join(", ")})`);
-    // Not in the listing: hand it on as given, so /v1's own 404 is the answer rather than ours.
-    return idOrName;
-  };
-  const ws = async (a: Record<string, any>) => refuseOwnBench(await resolve("workspaces", refuseOwnBench(String(a.id))));
-  const env = (a: Record<string, any>) => resolve("environments", String(a.id));
+  const ws = async (a: Record<string, any>) => refuseOwnBench(await resolveNamed("workspaces", refuseOwnBench(String(a.id))));
+  const env = (a: Record<string, any>) => resolveNamed("environments", String(a.id));
 
   /** The id a create answered with, or the one it was given. */
   const idOf = (started: { data: unknown }, fallback = "") => String((started.data as any)?.id ?? fallback);
@@ -1212,12 +1267,8 @@ export function tools(pi: ExtensionAPI) {
   const O = <T>(t: T) => Type.Optional(t as any);
 
   // workspaces
-  reg("kl_workspaces", { team: O(S("team slug; absent = personal")) }, async (a) => {
-    const r = await call("GET", `/v1/workspaces${q({ team: a.team })}`);
-    if (r.status >= 400) return { ...text(sanitizeError("kl_workspaces", r.status, r.data)), isError: true };
-    return text(withoutBenches(r.data));
-  });
-  reg("kl_workspace", { id: S("workspace id or name") }, (a) => answer("GET", `/v1/workspaces/${encodeURIComponent(refuseOwnBench(String(a.id)))}`));
+  reg("kl_workspaces", { team: O(S("team slug; absent = personal")) }, (a) => shared("workspace.list", a));
+  reg("kl_workspace", { id: S("workspace id or name") }, (a) => shared("workspace.inspect", a));
   reg(
     "kl_workspace_create",
     {
@@ -1229,10 +1280,14 @@ export function tools(pi: ExtensionAPI) {
     },
     async (a, signal) => {
       // One verb for a person: "make me a workspace", from nothing or from a snapshot they named.
-      const started = a.from_snapshot
-        ? await call("POST", "/v1/workspaces/restore", { name: a.name, snapshot_id: a.from_snapshot, packages: a.packages })
-        : await call("POST", "/v1/workspaces", { name: a.name, region: await region(), team: owner(), repo: a.repo, branch: a.branch, quota_gb: 20, packages: a.packages });
-      return after("workspaces", started, idOf(started), CAP.create, signal);
+      // A repo+branch and a snapshot in the same call is two sources for one workspace: the
+      // snapshot silently won, and the repository the person named was never cloned. Refused
+      // here, before the platform is called, in the same words the capability contract states.
+      const sources = workspaceCreateSourceIssues(a as Record<string, JsonValue>);
+      if (sources.length) return { ...text(sources.map((issue) => issue.message).join("; ")), isError: true };
+      const result = await shared("workspace.create", a.from_snapshot ? a : { ...a, region: await region(), team: owner(), quota_gb: 20 });
+      if (result.isError) return result;
+      return after("workspaces", { status: 200, data: JSON.parse(result.content[0].text) }, idOf({ data: JSON.parse(result.content[0].text) }), CAP.create, signal);
     },
   );
   reg("kl_workspace_start", { id: WS }, async (a, signal) => { const id = await ws(a); return after("workspaces", await call("POST", `/v1/workspaces/${id}/start`), id, CAP.start, signal); });
@@ -1251,10 +1306,12 @@ export function tools(pi: ExtensionAPI) {
     "kl_environment_create",
     { name: S("environment name"), services: O(Type.Array(SERVICE, { description: "services to run" })), from_snapshot: O(S("a snapshot id to start from instead of a services list")) },
     async (a, signal) => {
-      const started = a.from_snapshot
-        ? await call("POST", "/v1/environments/restore", { name: a.name, snapshot_id: a.from_snapshot, owner: owner(), region: await region(), services: a.services?.map(service) })
-        : await call("POST", "/v1/environments", { name: a.name, region: await region(), owner: owner(), services: (a.services ?? []).map(service) });
-      return after("environments", started, idOf(started), CAP.create, signal);
+      const environmentOwner = owner();
+      const environmentRegion = await region();
+      const result = await shared("environment.create", { ...a, ...(environmentOwner ? { owner: environmentOwner } : {}), ...(environmentRegion ? { region: environmentRegion } : {}), ...(a.services ? { services: a.services.map(service) } : {}) });
+      if (result.isError) return result;
+      const data = JSON.parse(result.content[0].text);
+      return after("environments", { status: 200, data }, idOf({ data }), CAP.create, signal);
     },
   );
   reg("kl_environment_start", { id: ENV }, async (a, signal) => { const id = await env(a); return after("environments", await call("POST", `/v1/environments/${id}/start`), id, CAP.start, signal); });
@@ -1268,7 +1325,9 @@ export function tools(pi: ExtensionAPI) {
   // Restore means "put it back": into the environment the person named, not into a new one.
   reg("kl_environment_restore", { id: ENV, snapshot: S("snapshot id to go back to") }, async (a, signal) => {
     const id = await env(a);
-    return after("environments", await call("POST", `/v1/environments/${id}/restore-in-place`, { snapshot_id: a.snapshot }), id, CAP.restore, signal);
+    const result = await shared("environment.restore", { id, snapshot: a.snapshot });
+    if (result.isError) return result;
+    return after("environments", { status: 200, data: JSON.parse(result.content[0].text) }, id, CAP.restore, signal);
   });
   reg("kl_environment_delete", { id: ENV }, async (a) => answer("DELETE", `/v1/environments/${await env(a)}`));
 

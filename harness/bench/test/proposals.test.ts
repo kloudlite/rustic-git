@@ -23,8 +23,9 @@ const propose = (bench: Bench, session: string, id: string, tool = "kl_workspace
 
 test("the catalogue says which calls are asked about first", () => {
   for (const yes of ["kl_workspace_create", "kl_workspace_delete", "kl_environment_service_rm", "kl_intercept", "kl_pull_merge", "kl_repo_create"]) assert.equal(gated(yes), true, yes);
-  // A message to another session is not a change, and this machine's own packages are its own.
-  for (const no of ["kl_workspace_ask", "kl_pkg_add", "kl_pkg_rm", "kl_workspaces", "kl_capabilities", "kl_workspace_snapshots"]) assert.equal(gated(no), false, no);
+  // A message is not a platform change; package mutations are changing a workspace and are gated.
+  for (const no of ["kl_workspace_ask", "kl_workspaces", "kl_capabilities", "kl_workspace_snapshots"]) assert.equal(gated(no), false, no);
+  for (const yes of ["kl_pkg_add", "kl_pkg_rm"]) assert.equal(gated(yes), true, yes);
   // No region and no owner: a person types neither, so the question does not print them either.
   assert.equal(question("kl_workspace_create", { name: "svelte-backend", packages: ["nodejs", "go"] }), "Create workspace svelte-backend with nodejs, go");
   assert.equal(question("kl_intercept", { id: "dev", service: "api", workspace: "w1" }), "Deliver api traffic in dev to workspace w1");

@@ -20,8 +20,8 @@ export type ToolSpec = {
   ask?: (a: Record<string, any>) => string;
 };
 
-/** Which tools never ask: a message to another session, and this machine's own packages. */
-const UNGATED = new Set(["ask", "plan", "skill", "tool_search", "memory", "question", "report", "kl_pkg_list", "kl_pkg_add", "kl_pkg_rm"]);
+/** Which tools never ask: reads and messages that do not change platform state. */
+const UNGATED = new Set(["ask", "plan", "skill", "tool_search", "memory", "question", "report", "kl_pkg_list"]);
 
 /** Whether a call has to be asked about first: it changes somebody's platform state (spec §9). */
 export function gated(name: string): boolean {
@@ -49,8 +49,8 @@ export const TOOLS: ToolSpec[] = [
   { name: "kl_workspace_progress", group: "workspace", summary: "What a workspace's session is doing: what has been asked of it, and the last of what it said.", effect: "read" },
 
   { name: "kl_pkg_list", group: "workspace", summary: "The packages a workspace has, and whether they are ready.", effect: "read" },
-  { name: "kl_pkg_add", group: "workspace", summary: "Add packages to a workspace — nixpkgs attributes (rustc, cargo, nodejs_22, go, python3), not language names; `attr@version` pins.", effect: "write" },
-  { name: "kl_pkg_rm", group: "workspace", summary: "Remove packages from a workspace.", effect: "write" },
+  { name: "kl_pkg_add", group: "workspace", summary: "Add packages to a workspace — nixpkgs attributes (rustc, cargo, nodejs_22, go, python3), not language names; `attr@version` pins. Every other installed package stays as it is.", effect: "write" },
+  { name: "kl_pkg_rm", group: "workspace", summary: "Remove packages from a workspace. Every other installed package stays as it is.", effect: "write" },
 
   { name: "kl_repos", group: "code", summary: "Repositories you can see — yours, or an owner's with `owner`.", effect: "read" },
   { name: "kl_repo_create", group: "code", summary: "Create a repository under you or a team.", effect: "write", ask: (a) => `Create repository ${a.owner ?? "you"}/${a.name}${a.visibility ? ` (${a.visibility})` : ""}` },
@@ -68,7 +68,7 @@ export const TOOLS: ToolSpec[] = [
 
   { name: "kl_workspaces", group: "workspace", summary: "List workspaces — yours, or a team's with `team`.", effect: "read" },
   { name: "kl_workspace", group: "workspace", summary: "One workspace in full: state, node, packages, its space's environment.", effect: "read" },
-  { name: "kl_workspace_create", group: "workspace", summary: "Create a workspace — empty, from a repo and branch, or from a snapshot. `packages` are nixpkgs attributes (rustc, cargo, nodejs_22, go, python3), never language names.", effect: "write", ask: (a) => `Create workspace ${a.name}${a.repo ? ` from ${a.repo}${a.branch ? `#${a.branch}` : ""}` : ""}${withList("", a.packages)}` },
+  { name: "kl_workspace_create", group: "workspace", summary: "Create a workspace — empty, from a repo and branch, or from a snapshot, never two of those in one call. `packages` are nixpkgs attributes (rustc, cargo, nodejs_22, go, python3), never language names.", effect: "write", ask: (a) => `Create workspace ${a.name}${a.repo ? ` from ${a.repo}${a.branch ? `#${a.branch}` : ""}` : a.from_snapshot ? ` from snapshot ${a.from_snapshot}` : ""}${withList("", a.packages)}` },
   { name: "kl_workspace_start", group: "workspace", summary: "Start a stopped workspace.", effect: "write", ask: (a) => `Start workspace ${a.id}` },
   { name: "kl_workspace_stop", group: "workspace", summary: "Stop a running workspace (cuts a sync point first).", effect: "write", ask: (a) => `Stop workspace ${a.id}` },
   { name: "kl_workspace_snapshot", group: "workspace", summary: "Take a snapshot of a workspace, with a message.", effect: "write", ask: (a) => `Snapshot workspace ${a.id}${a.message ? `: ${a.message}` : ""}` },
@@ -81,16 +81,16 @@ export const TOOLS: ToolSpec[] = [
   { name: "kl_env_clear", group: "environment", summary: "Stop using an environment in this space — for every workspace in it, since the choice is the space's and not one workspace's.", effect: "write", ask: () => `Stop using an environment in this space` },
   { name: "kl_environments", group: "environment", summary: "List environments you can see.", effect: "read" },
   { name: "kl_environment", group: "environment", summary: "One environment in full: services, ports, intercepts.", effect: "read" },
-  { name: "kl_environment_create", group: "environment", summary: "Create an environment from a services list, or from a snapshot.", effect: "write", ask: (a) => `Create environment ${a.name} with ${(a.services ?? []).map((s: any) => s.name).join(", ") || "no services"}` },
+  { name: "kl_environment_create", group: "environment", summary: "Create a NEW environment from a services list, or from a snapshot.", effect: "write", ask: (a) => `Create environment ${a.name}${a.from_snapshot ? ` from snapshot ${a.from_snapshot}` : ` with ${(a.services ?? []).map((s: any) => s.name).join(", ") || "no services"}`}` },
   { name: "kl_environment_start", group: "environment", summary: "Start a stopped environment.", effect: "write", ask: (a) => `Start environment ${a.id}` },
   { name: "kl_environment_stop", group: "environment", summary: "Stop an environment.", effect: "write", ask: (a) => `Stop environment ${a.id}` },
   { name: "kl_environment_snapshot", group: "environment", summary: "Take a snapshot of an environment, with a message.", effect: "write", ask: (a) => `Snapshot environment ${a.id}${a.message ? `: ${a.message}` : ""}` },
   { name: "kl_environment_snapshots", group: "environment", summary: "An environment's snapshots: what they say and when they were taken.", effect: "read" },
   { name: "kl_environment_clone", group: "environment", summary: "Clone an environment into a new one.", effect: "write", ask: (a) => `Clone environment ${a.id} into ${a.name}` },
-  { name: "kl_intercept", group: "environment", summary: "Deliver a service's traffic to a workspace, or clear it. A port remap is {service, workspace}: the port callers already dial, and the port the workspace listens on.", effect: "write", ask: (a) => (a.workspace ? `Deliver ${a.service} traffic in ${a.id} to workspace ${a.workspace}` : `Stop intercepting ${a.service} in ${a.id}`) },
-  { name: "kl_environment_service_add", group: "environment", summary: "Add a service to an environment, or replace one of the same name; every other service is kept as it is.", effect: "write", ask: (a) => `Add service ${a.service?.name} (${a.service?.image}) to environment ${a.id}` },
+  { name: "kl_intercept", group: "environment", summary: "Deliver a service's traffic to a workspace, or clear it with explicit null. Omission is refused; an omitted port map forwards every port one to one. A port remap is {service, workspace}: the port callers already dial, and the port the workspace listens on.", effect: "write", ask: (a) => (a.workspace === null ? `Stop intercepting ${a.service} in ${a.id}` : `Deliver ${a.service} traffic in ${a.id} to workspace ${a.workspace}${a.ports?.length ? ` (${a.ports.map((p: any) => `${p.service}→${p.workspace}`).join(", ")})` : ""}`) },
+  { name: "kl_environment_service_add", group: "environment", summary: "Add a service to an environment, or replace one of the same name whole; every other service is kept as it is, and a replaced service does not inherit the fields you leave out.", effect: "write", ask: (a) => `Add service ${a.service?.name} (${a.service?.image}) to environment ${a.id}` },
   { name: "kl_environment_service_rm", group: "environment", summary: "Remove a service from an environment; its workload goes, its files stay on the volume.", effect: "destroy", ask: (a) => `Remove service ${a.name} from environment ${a.id}; its files stay on the volume` },
-  { name: "kl_environment_restore", group: "environment", summary: "Restore a snapshot into a new environment.", effect: "write", ask: (a) => `Restore snapshot ${a.snapshot_id} into a new environment ${a.name}` },
+  { name: "kl_environment_restore", group: "environment", summary: "Put an environment back to one of its own snapshots, in place. It does not create an environment.", effect: "write", ask: (a) => `Restore snapshot ${a.snapshot} into environment ${a.id}, in place` },
   { name: "kl_environment_delete", group: "environment", summary: "Delete an environment.", effect: "destroy", ask: (a) => `Delete environment ${a.id}` },
 
   { name: "ask_close", group: "workspace", summary: "Close an agent, its transcript, and the working directory it was given.", effect: "write", ask: (a) => `Close agent ${a.name} and delete its working directory` },
