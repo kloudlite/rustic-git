@@ -93,10 +93,19 @@ export class OperationExecutor {
       if (!queued) throw new Error(`the durable store did not record step ${call.key}`);
       stepIds.set(call.key, queued.stepId);
     }
-    const cancellation = () => this.#store.requestCancel(input.operationId, { reason: "executor abort" });
+    const controller = new AbortController();
+    let cancellationRecorded = false;
+    const cancellation = () => {
+      if (!cancellationRecorded) {
+        cancellationRecorded = true;
+        this.#store.requestCancel(input.operationId, { reason: "executor abort" });
+      }
+      controller.abort();
+    };
     input.signal?.addEventListener("abort", cancellation, { once: true });
+    const deadlineAt = this.#store.load(input.operationId).deadlineAt;
+    const deadline = deadlineAt !== undefined && deadlineAt > Date.now() ? setTimeout(cancellation, deadlineAt - Date.now()) : undefined;
     try {
-      const deadlineAt = this.#store.load(input.operationId).deadlineAt;
       let scheduled: ScheduledOperationResult;
       try {
         scheduled = await this.#scheduler.submit({
@@ -105,7 +114,7 @@ export class OperationExecutor {
         descriptor: (name) => this.#registry.get(name),
         maxConcurrentReads: this.#store.load(input.operationId).budgets.maxConcurrentReads,
         maxConcurrentMutations: this.#store.load(input.operationId).budgets.maxConcurrentMutations,
-        ...(input.signal ? { signal: input.signal } : {}),
+        signal: controller.signal,
         ...(deadlineAt !== undefined ? { deadlineAt } : {}),
         run: async ({ call, descriptor, args, signal }) => {
           this.#store.assertOwnership();
@@ -174,6 +183,7 @@ export class OperationExecutor {
       const settled = deadlineAt !== undefined && Date.now() >= deadlineAt ? this.#store.expire(input.operationId) : this.#store.settle(input.operationId).snapshot;
       return this.#aggregate(settled, scheduled);
     } finally {
+      if (deadline) clearTimeout(deadline);
       input.signal?.removeEventListener("abort", cancellation);
     }
   }

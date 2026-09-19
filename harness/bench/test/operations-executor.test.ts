@@ -282,6 +282,21 @@ test("uses the durable deadline and persists expiry", async () => {
   assert.ok(store.log.includes("expire"));
 });
 
+
+test("a running durable deadline records cancellation intent before aborting work", async () => {
+  const store = new MemoryStore();
+  store.deadlineAt = Date.now() + 20;
+  const reg = registry(store, []);
+  reg.dispatch = async (name, _args, deps) => {
+    await new Promise<void>((resolve) => deps.signal?.addEventListener("abort", () => resolve(), { once: true }));
+    return { outcome: "failed", capability: name, version: "1.0.0", code: "provider_failure", error: { code: "provider_failure", message: "connection closed", retryable: true } };
+  };
+  const executor = new OperationExecutor({ store, registry: reg, scheduler: new OperationScheduler({ maxConcurrent: 1 }), dispatchFor, reconcile: async () => ({ conclusion: "unknown" }) });
+  await executor.execute({ operationId: "op-1", context, calls: calls({ key: "write", capability: "write.item" }) });
+  assert.ok(store.log.includes("cancel-requested"));
+  assert.ok(store.log.indexOf("cancel-requested") < store.log.indexOf("unknown:write"));
+});
+
 test("returns the authoritative durable settlement instead of scheduler-local state", async () => {
   const store = new MemoryStore();
   store.settledState = "failed";
