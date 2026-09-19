@@ -5,6 +5,7 @@ import { Idle } from "./idle.ts";
 import { listProviders, removeProvider, setProvider } from "./providers.ts";
 import { holdFrames, spliceShell } from "./pty.ts";
 import { spliceWatch } from "./watch.ts";
+import { handleOperationControl, operationControlError, type OperationControlOptions } from "./operations/control.ts";
 
 /**
  * harness-bench's surface. Where it listens is main's choice: the pod IP
@@ -54,7 +55,7 @@ export function serve(
   idle = new Idle(() => bench.busy()),
   maxBody = MAX_BODY,
   // Tests pass a fake; the real one is loaded lazily so the bench's own routes never pull pi's SDK in.
-  opts: { resolveTools?: (ws: string) => Promise<string> } = {},
+  opts: { resolveTools?: (ws: string) => Promise<string> } & OperationControlOptions = {},
 ): Promise<{ port: number; close(): Promise<void>; server: http.Server; sweepOnce(): void }> {
   const resolveTools = opts.resolveTools ?? ((ws: string) => import("../../pi/workspace-tools.ts").then((m) => m.resolveFromApi(ws)));
   /**
@@ -102,6 +103,7 @@ export function serve(
     const m = req.method ?? "GET";
     try {
       const p = segments(u.pathname);
+      if (await handleOperationControl(req, res, u, p, () => body(req), opts)) return;
       // `model` is the bench's DEFAULT model. A window that opens before any session row has loaded
       // still has to name what will answer; without it the composer said "no model" (owner, 2026-09-17).
       if (m === "GET" && u.pathname === "/healthz") return send(res, 200, { ok: true, model: bench.model, readOnly: bench.readOnly, writable: bench.writable.ok(), reason: bench.writable.reason(), ...idle.state() });
@@ -407,6 +409,7 @@ export function serve(
       }
       send(res, 404, { error: `no route ${m} ${u.pathname}` });
     } catch (e) {
+      if (operationControlError(res, e)) return;
       const msg = (e as Error).message;
       if (msg === TOO_LARGE) {
         // The rest of the upload is never read; closing is the only way to stop it.

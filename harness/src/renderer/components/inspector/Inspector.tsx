@@ -10,6 +10,7 @@ import { FileDiff } from "../results/FileDiff";
 import { patchFiles } from "../results/diff";
 import { MachineView } from "./MachineView";
 import { Tasks } from "./Tasks";
+import { operationStore, type OperationProjection } from "../../operations/index.ts";
 import { Processes } from "./Processes";
 import { WorkView, totals } from "./WorkView";
 import type { Ephemeral, Exchange, Machine, Workspace } from "../../model";
@@ -20,6 +21,7 @@ export function Inspector(props: {
   selected: string;
   onOpenShell: (scope: string) => void;
   onOpenTask: (id: string) => void;
+  onOpenOperation?: (projection: OperationProjection) => void;
   onOpenFile: (path: string, status?: string) => void;
   /** Which tree an agent session works in, by session id — the bench's answer, not a guess. */
   treeOf?: (session: string) => string | undefined;
@@ -49,7 +51,10 @@ export function Inspector(props: {
           under a workspace tab (owner, 2026-09-17). Same session, same rule. */}
       {/* Both belong to the WORKSPACE this thread's work runs in: every bench session shares the
           bench's machine, a workspace's sessions share its own (owner, 2026-09-17). */}
-      <Tasks onOpen={props.onOpenTask} session={procSession()} workspace={procWorkspace()} />
+      <Tasks onOpen={props.onOpenTask} onOpenOperation={props.onOpenOperation} session={procSession()} workspace={procWorkspace()} operations={() => {
+        operationStore()?.entries();
+        return operationStore()?.taskRows(procSession(), procWorkspace()) ?? [];
+      }} />
       <Processes onOpen={props.onOpenTask} session={procSession()} workspace={procWorkspace()} />
       <Show when={!found().ws}>
         <MachineView machine={props.machine} session={session()} onOpenShell={props.onOpenShell} />

@@ -11,7 +11,6 @@
  * (`TrustedActorContext`), never from the request. A well-formed reference is not a
  * permission grant — validation here is shape only; the store and dispatch adapter decide.
  */
-import { createHash } from "node:crypto";
 import {
   ContractViolation,
   DEFAULT_MAX_BYTES,
@@ -27,6 +26,8 @@ import {
   validateJsonSchemaLike,
   withDefinitions,
 } from "./shape.ts";
+export { canonicalDigest, stableStringify } from "./canonical.ts";
+import { canonicalDigest } from "./canonical.ts";
 import type { IssueCode, JsonSchemaLike, JsonValue, Node, Validation, ValidationIssue } from "./shape.ts";
 
 export { ContractViolation, JSON_LIMITS, KEY_MAX_CHARS, validateJsonSchemaLike, validateJsonValue } from "./shape.ts";
@@ -1983,19 +1984,6 @@ export interface GenerationAdapter {
 // ---------------------------------------------------------------------------
 // Canonical identity (O05)
 // ---------------------------------------------------------------------------
-
-/** Deterministic JSON with sorted keys; string contents are preserved exactly. */
-export function stableStringify(value: JsonValue): string {
-  if (value === null || typeof value !== "object") return JSON.stringify(value);
-  if (Array.isArray(value)) return `[${value.map(stableStringify).join(",")}]`;
-  const keys = Object.keys(value).sort();
-  return `{${keys.map((key) => `${JSON.stringify(key)}:${stableStringify(value[key])}`).join(",")}}`;
-}
-
-/** sha256 over the canonical form; key order and formatting never change the digest. */
-export function canonicalDigest(value: JsonValue): string {
-  return `sha256:${createHash("sha256").update(stableStringify(value), "utf8").digest("hex")}`;
-}
 
 /** Digest of a validated request; O05 stores it beside the deduplication key. */
 export function requestDigest(request: OperateRequest): string {

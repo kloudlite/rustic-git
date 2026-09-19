@@ -27,7 +27,27 @@ const FULL_UNDER = 2000;
 const KEEP_MESSAGES = 200;
 const KEEP_EXCHANGES = 500;
 export type PtySession = { name: string; windows: number; attached: number; created: number };
+export type BenchAuthHeaders = { authorization: string; "x-kl-owner": string; "x-kl-login": string };
 const OFFLINE = "not connected to the bench; nothing was sent";
+
+export class BenchResponseError extends Error {
+  readonly status: number;
+  readonly code?: string;
+  readonly expectedRevision?: number;
+  readonly actualRevision?: number;
+  readonly details?: Record<string, unknown>;
+  constructor(status: number, body: unknown) {
+    const detail = body && typeof body === "object" && !Array.isArray(body) && "error" in body ? (body as { error?: unknown }).error : undefined;
+    const structured = detail && typeof detail === "object" && !Array.isArray(detail) ? detail as Record<string, unknown> : undefined;
+    super(typeof structured?.message === "string" ? structured.message : typeof detail === "string" ? detail : `bench answered ${status}`);
+    this.name = "BenchResponseError";
+    this.status = status;
+    this.code = typeof structured?.code === "string" ? structured.code : undefined;
+    this.expectedRevision = typeof structured?.expectedRevision === "number" ? structured.expectedRevision : undefined;
+    this.actualRevision = typeof structured?.actualRevision === "number" ? structured.actualRevision : undefined;
+    this.details = structured ? Object.fromEntries(Object.entries(structured).filter(([key]) => !["code", "message"].includes(key))) : undefined;
+  }
+}
 
 /**
  * One connection, many requests. Each accepted TCP connection to the tunnel opens its OWN gateway
@@ -100,7 +120,7 @@ export class BenchClient {
     this.emit({ type: "bench", connected: v });
   }
   /** One request over a pooled connection; the agent is per-scheme and made once. */
-  private send(method: string, p: string, body?: unknown): Promise<{ status: number; body: string }> {
+  private send(method: string, p: string, body?: unknown, headers: Record<string, string> = {}): Promise<{ status: number; body: string }> {
     const url = new URL(this.base + p);
     const mod = url.protocol === "https:" ? https : http;
     this.agents[url.protocol] ??= url.protocol === "https:" ? new https.Agent(KEEP_ALIVE) : new http.Agent(KEEP_ALIVE);
@@ -120,7 +140,7 @@ export class BenchClient {
         {
           method,
           agent: this.agents[url.protocol],
-          headers: { ...this.tunnel(), ...(payload ? { "content-type": "application/json", "content-length": String(payload.length) } : {}) },
+          headers: { ...this.tunnel(), ...headers, ...(payload ? { "content-type": "application/json", "content-length": String(payload.length) } : {}) },
         },
         (res) => {
           let text = "";
@@ -258,7 +278,11 @@ export class BenchClient {
   }
 
   async rest<T = unknown>(method: string, p: string, body?: unknown): Promise<T> {
-    const text = await this.send(method, p, body);
+    return this.request(method, p, body);
+  }
+
+  private async request<T = unknown>(method: string, p: string, body?: unknown, headers?: Record<string, string>): Promise<T> {
+    const text = await this.send(method, p, body, headers);
     let data: unknown = null;
     try {
       data = text.body ? JSON.parse(text.body) : null;
@@ -267,13 +291,43 @@ export class BenchClient {
     }
     // Every 401 names its route (never a token): the desktop log had no 401 line at all, so the
     // source of a sign-out loop could not be read off it (coordinator, 2026-09-18).
-    if (text.status === 401) console.error(`auth: 401 from bench ${method} ${p}`);
-    if (text.status >= 400) throw new Error((data as { error?: string } | null)?.error ?? `bench answered ${text.status}`);
+    if (text.status === 401) {
+      console.error(`auth: 401 from bench ${method} ${p}`);
+      const error = new Error("your login has expired or was revoked") as Error & { route: string };
+      error.name = "Expired";
+      error.route = `${method} ${p}`;
+      throw error;
+    }
+    if (text.status >= 400) throw new BenchResponseError(text.status, data);
     if (method === "GET" && p === "/sessions") {
       this.cache.sessions = data as unknown[];
       this.save();
     }
     return data as T;
+  }
+
+  operationSnapshot<T>(operationId: string, auth: BenchAuthHeaders): Promise<T> {
+    return this.request("GET", `/operations/${encodeURIComponent(operationId)}`, undefined, auth);
+  }
+
+  operationEvents<T>(operationId: string, after: string | undefined, limit: number | undefined, auth: BenchAuthHeaders): Promise<T> {
+    const query = new URLSearchParams();
+    if (after !== undefined) query.set("after", after);
+    if (limit !== undefined) query.set("limit", String(limit));
+    const suffix = query.size ? `?${query}` : "";
+    return this.request("GET", `/operations/${encodeURIComponent(operationId)}/events${suffix}`, undefined, auth);
+  }
+
+  cancelOperation<T>(operationId: string, expectedRevision: number, auth: BenchAuthHeaders): Promise<T> {
+    return this.request("POST", `/operations/${encodeURIComponent(operationId)}/cancel`, { expectedRevision }, auth);
+  }
+
+  recordOperationDecision<T>(operationId: string, decisionId: string, body: unknown, auth: BenchAuthHeaders): Promise<T> {
+    return this.request("POST", `/operations/${encodeURIComponent(operationId)}/decisions/${encodeURIComponent(decisionId)}`, body, auth);
+  }
+
+  provideOperationInput<T>(operationId: string, decisionId: string, expectedRevision: number, inputs: Record<string, unknown>, auth: BenchAuthHeaders): Promise<T> {
+    return this.request("POST", `/operations/${encodeURIComponent(operationId)}/input`, { decisionId, expectedRevision, inputs }, auth);
   }
 
   private socket(session: string): Promise<WebSocket> {

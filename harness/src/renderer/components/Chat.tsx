@@ -8,7 +8,7 @@ import { Kbd } from "../ui/parts";
 import { EnvironmentPage } from "./EnvironmentPage";
 import { SettingsPage } from "./SettingsPage";
 import { FileView } from "./FileView";
-import { TaskView } from "./TaskView";
+import { OperationTaskView, TaskView } from "./TaskView";
 import { ToolCall } from "./ToolCall";
 import { report } from "./results/toolline";
 import { elapsed, segments, timing, verb } from "./results/group";
@@ -23,6 +23,7 @@ import { Scanner, Ticker } from "./Motion";
 import { BoxCursor } from "./BoxCursor";
 import * as live from "../live";
 import type { Environment, Machine, Message, Snapshot, Thread, Workspace } from "../model";
+import type { OperationProjection } from "../operations/index.ts";
 
 type Action = Extract<Message, { role: "action" }>;
 type QuestionRow = Extract<Message, { role: "question" }>;
@@ -64,6 +65,7 @@ export function Chat(props: {
   file?: { path: string; status?: string; scope?: string };
   onCloseFile: () => void;
   task?: live.Task;          // a task's log, open in place like a file
+  operation?: OperationProjection;
   onCloseTask: () => void;
   /** The shell, likewise: it runs in this machine, so it opens under the
       conversation inside the same container rather than across the window. */
@@ -363,6 +365,9 @@ export function Chat(props: {
         <Show when={!props.file && props.task}>
           {(t) => <TaskView task={t()} onClose={props.onCloseTask} />}
         </Show>
+        <Show when={!props.file && !props.task && props.operation}>
+          {(operation) => <OperationTaskView operation={operation()} onClose={props.onCloseTask} />}
+        </Show>
         {/* A reversed flex column: the end is the scroll origin, so the browser
             keeps the view pinned there as content grows and leaves it alone
             once a person scrolls up — the terminal's behaviour, no script. */}
@@ -426,7 +431,7 @@ export function Chat(props: {
                 <Show when={seg.kind === "one"} fallback={
                   seg.kind === "context"
                     ? <ContextGroup rows={(seg as { rows: Action[] }).rows} />
-                    : <ToolGroup rows={(seg as { rows: Action[] }).rows} />
+                    : <ToolGroup rows={(seg as { rows: Action[] }).rows} sessionId={thread()?.pi ?? thread()?.id} workspaceId={props.threadId} />
                 }>
                 {(() => { const b = (seg as { row: Message }).row; return (
                 <Show when={b.role !== "divider"} fallback={<Divider text={(b as { text: string }).text} />}>
@@ -434,7 +439,7 @@ export function Chat(props: {
                     place, the way Claude Code does it (owner, 2026-09-17). What stays here is the
                     record of what was asked and what was said. */}
                 <Show when={b.role !== "question"} fallback={<Answered q={b as QuestionRow} />}>
-                <Show when={b.role !== "action"} fallback={<div class="[contain:layout_style]"><Show when={(b as Action).tool} fallback={<Step a={b as Action} />}><ToolCall a={b as Action} /></Show></div>}>
+                <Show when={b.role !== "action"} fallback={<div class="[contain:layout_style]"><Show when={(b as Action).tool} fallback={<Step a={b as Action} />}><ToolCall a={b as Action} sessionId={thread()?.pi ?? thread()?.id} workspaceId={props.threadId} /></Show></div>}>
                   {/* A prompt is a command and reads like one — an accent rail and a `>` — and an
                       answer is plain text beside it; the two turns are told apart by shape. */}
                   <Show
@@ -1159,7 +1164,7 @@ export function fit(t: HTMLTextAreaElement) {
  * and they are read together: the group says what is happening and for how long, each sub-row says
  * where it got to, and a finished group is one line again.
  */
-function ToolGroup(props: { rows: Action[] }) {
+function ToolGroup(props: { rows: Action[]; sessionId?: string; workspaceId?: string }) {
   const [now, setNow] = createSignal(Date.now());
   const t = setInterval(() => setNow(Date.now()), 500);
   onCleanup(() => clearInterval(t));
@@ -1193,7 +1198,7 @@ function ToolGroup(props: { rows: Action[] }) {
             {(r) => (
               <div class="flex min-w-0 items-baseline gap-1">
                 <span class="shrink-0 text-subtle">└</span>
-                <span class="min-w-0 flex-1"><ToolCall a={r} /></span>
+                <span class="min-w-0 flex-1"><ToolCall a={r} sessionId={props.sessionId} workspaceId={props.workspaceId} /></span>
               </div>
             )}
           </For>
@@ -1360,4 +1365,3 @@ const render = (text: string) => {
   PARSED.set(text, html);
   return html;
 };
-

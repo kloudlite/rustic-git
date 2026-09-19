@@ -173,3 +173,23 @@ test("a stalled REST body is bounded by the request deadline", async () => {
     await new Promise<void>((resolve) => srv.close(() => resolve()));
   }
 });
+
+test("structured operation errors preserve code, status, and revisions", async () => {
+  const http = await import("node:http");
+  const srv = http.createServer((_req, res) => {
+    res.writeHead(409, { "content-type": "application/json" });
+    res.end(JSON.stringify({ error: { code: "stale_revision", message: "revision changed", expectedRevision: 3, actualRevision: 4 } }));
+  });
+  await new Promise<void>((resolve) => srv.listen(0, "127.0.0.1", resolve));
+  const base = `http://127.0.0.1:${(srv.address() as { port: number }).port}`;
+  const client = new BenchClient(base, () => undefined, path.join(os.tmpdir(), `bench-errors-${process.pid}.json`));
+  try {
+    await assert.rejects(
+      client.cancelOperation("op-1", 3, { authorization: "Bearer person", "x-kl-owner": "alice", "x-kl-login": "alice" }),
+      (error: Error & { code?: string; expectedRevision?: number; actualRevision?: number; status?: number }) => error.message === "revision changed" && error.code === "stale_revision" && error.expectedRevision === 3 && error.actualRevision === 4 && error.status === 409,
+    );
+  } finally {
+    client.close();
+    await new Promise<void>((resolve) => srv.close(() => resolve()));
+  }
+});

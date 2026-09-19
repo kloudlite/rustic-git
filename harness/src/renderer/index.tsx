@@ -4,7 +4,7 @@ import "./fonts.css";
 import "./styles/app.css";
 import { App } from "./App";
 import { LoginScreen } from "./components/LoginScreen";
-import type { Harness } from "../preload";
+import type { Harness } from "./harness.ts";
 import type { AuthState } from "../auth/controller";
 
 declare global {

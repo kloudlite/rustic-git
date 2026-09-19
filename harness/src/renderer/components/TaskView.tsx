@@ -3,6 +3,7 @@ import { Button } from "../ui/Button";
 import { Badge } from "../ui/Badge";
 import * as live from "../live";
 import { plainBlock } from "./results/code";
+import { OperationPanel, operationTaskRow, type OperationProjection } from "../operations/index.ts";
 
 const TONE: Record<live.Task["state"], "success" | "accent" | "neutral" | "danger" | "warning"> = { running: "success", background: "accent", done: "neutral", failed: "danger", cancelled: "warning", lost: "warning" };
 
@@ -59,6 +60,20 @@ export function TaskView(props: { task: live.Task; onClose: () => void }) {
       <pre class="m-0 min-h-0 flex-1 overflow-auto px-6 py-4 font-mono text-sm leading-6 whitespace-pre-wrap text-muted select-text [tab-size:4]">
         {plainBlock(props.task.tool === "Process" ? log() : props.task.output).lines.map((l) => l.text).join("\n") || (active() ? "waiting for output…" : "(no output)")}
       </pre>
+    </div>
+  );
+}
+
+export function OperationTaskView(props: { operation: OperationProjection; onClose: () => void }) {
+  const row = () => operationTaskRow(props.operation.view(), props.operation);
+  return (
+    <div class="flex min-h-0 min-w-0 flex-col overflow-hidden">
+      <header class="flex items-center gap-3 border-b border-line-subtle px-4 py-2">
+        <Button variant="ghost" size="sm" icon="chevronLeft" onClick={props.onClose}>Back</Button>
+        <span class="min-w-0 flex-1 truncate font-mono text-sm">{row().title}</span>
+        <Badge tone={row().state === "failed" ? "danger" : row().ended ? "neutral" : "accent"}>{row().state}</Badge>
+      </header>
+      <div class="min-h-0 flex-1 overflow-auto"><OperationPanel view={props.operation.view()} onResync={props.operation.resync} onDecision={props.operation.controls.decide} onAdditionalInput={props.operation.controls.answer} onCancel={props.operation.controls.cancel} loadError={props.operation.error()} onRetry={props.operation.reload} expanded /></div>
     </div>
   );
 }

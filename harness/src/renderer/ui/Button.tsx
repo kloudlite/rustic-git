@@ -24,6 +24,8 @@ export function Button(props: {
   disabled?: boolean;
   title?: string;
   "aria-pressed"?: boolean;
+  "aria-label"?: string;
+  type?: "button" | "submit" | "reset";
   onClick?: (e: MouseEvent) => void;
   onPointerDown?: (e: PointerEvent) => void;
   class?: string;
@@ -34,6 +36,7 @@ export function Button(props: {
   const lg = () => props.size === "lg";
   return (
     <button
+      type={props.type ?? "button"}
       class={cx(
         BASE,
         VARIANT[v()],
@@ -45,6 +48,7 @@ export function Button(props: {
       disabled={props.disabled}
       title={props.title}
       aria-pressed={props["aria-pressed"]}
+      aria-label={props["aria-label"]}
       onClick={(e) => props.onClick?.(e)}
       onPointerDown={(e) => props.onPointerDown?.(e)}
     >

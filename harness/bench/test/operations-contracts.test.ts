@@ -711,6 +711,10 @@ test("durable identity is canonical and collision-free", () => {
   assert.ok(TRUSTED_CONTEXT_SOURCES.turnRevision.includes("turn"));
 });
 
+test("canonical digest is deterministic without mutable runtime installation", () => {
+  assert.equal(canonicalDigest({ b: 1, a: 2 }), "sha256:d3626ac30a87e6f7a6428233b3c68299976865fa5508e4267c5415c76af7a772");
+});
+
 test("describe, inspect, cancel, and resume are the control surface", () => {
   assert.equal(validateOperateRequest({ action: "describe" }).ok, true);
   assert.equal(validateOperateRequest({ action: "describe", capability: "file.edit", detail: "schema" }).ok, true);

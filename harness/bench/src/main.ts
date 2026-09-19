@@ -75,7 +75,7 @@ if (process.env.KLOUDLITE_OTLP_URL) {
   startTracing(process.env.OTEL_SERVICE_NAME ?? "harness-bench", process.env.KLOUDLITE_OTLP_URL);
 }
 
-const [{ Bench }, { Idle }, { serve }] = await Promise.all([import("./bench.ts"), import("./idle.ts"), import("./server.ts")]);
+const [{ Bench }, { Idle }, { serve }, { loadOperationControl }] = await Promise.all([import("./bench.ts"), import("./idle.ts"), import("./server.ts"), import("./operations/production.ts")]);
 const bench = new Bench({ dir, readOnly, model: a.model });
 await bench.start();
 if (!readOnly) {
@@ -86,7 +86,15 @@ if (!readOnly) {
 // the instant the last client leaves". Unreachable through admin settings (range 60-86400), but
 // `WS_BENCH_IDLE_SECS=0` reaches it.
 const idle = new Idle(() => bench.busy(), readOnly ? undefined : dir, idleMs === 0 ? Infinity : idleMs);
-const srv = await serve(bench, Number(a.port), a.host, idle);
+const operationControl = await loadOperationControl({
+  api: process.env.KL_API_URL,
+  owner: process.env.KL_OWNER,
+  team: process.env.KL_TEAM,
+  bench: process.env.KL_BENCH ?? process.env.KL_WORKSPACE_ID,
+  module: process.env.KL_OPERATION_CONTROL_MODULE,
+  log: (message) => console.error(`harness-bench: ${message}`),
+});
+const srv = await serve(bench, Number(a.port), a.host, idle, undefined, operationControl);
 console.log(`harness-bench listening on ${a.host}:${srv.port} (${readOnly ? "read-only" : "running"}) dir=${dir}`);
 
 const beat = readOnly ? undefined : setInterval(() => bench.writable.probe(), 10_000).unref();
