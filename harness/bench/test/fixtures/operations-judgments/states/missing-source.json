@@ -1,0 +1,4 @@
+{
+  "input": { "state": "Help! My payouts are failing." },
+  "expect": { "ok": false, "issues": ["bad_syntax"] }
+}

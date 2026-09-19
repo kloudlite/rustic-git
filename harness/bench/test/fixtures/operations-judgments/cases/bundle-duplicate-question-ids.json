@@ -1,0 +1,10 @@
+{
+  "name": "a batch with duplicate question ids is rejected before dispatch",
+  "state": { "source": "session_context", "state": "Is this urgent?" },
+  "questions": [
+    { "id": "urgent", "request": { "question": "Does this convey urgency?", "questionVersion": "v1" } },
+    { "id": "urgent", "request": { "question": "Should a human be paged?", "questionVersion": "v1" } }
+  ],
+  "transports": [],
+  "expect": { "ok": false, "issues": ["duplicate_key"] }
+}

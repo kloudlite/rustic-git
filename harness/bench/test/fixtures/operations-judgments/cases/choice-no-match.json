@@ -1,0 +1,45 @@
+{
+  "name": "a choice that matches nothing is a first-class no_match",
+  "state": { "source": "session_context", "state": "Please rebalance the router." },
+  "questions": [
+    {
+      "id": "target",
+      "request": {
+        "question": "Which workspace should receive this?",
+        "questionVersion": "v1",
+        "options": [
+          { "id": "billing-api", "label": "Billing API service" },
+          { "id": "billing-web", "label": "Billing web app" }
+        ]
+      }
+    }
+  ],
+  "transports": [
+    {
+      "status": 200,
+      "body": {
+        "model": "jev-1.13.0",
+        "answers": {
+          "target": {
+            "type": "choice",
+            "choice": "none_of_the_listed_options",
+            "probabilities": {
+              "billing-api": 0.05,
+              "billing-web": 0.05,
+              "none_of_the_listed_options": 0.88,
+              "cannot_tell_between_options": 0.02
+            },
+            "confidence": 0.9
+          }
+        },
+        "usage": { "input_tokens": 90, "output_tokens": 12 }
+      }
+    }
+  ],
+  "expect": {
+    "ok": true,
+    "calls": 1,
+    "results": { "target": { "outcome": "no_match" } },
+    "records": [{ "questionId": "target", "decision": "no_match", "confidence": 0.9 }]
+  }
+}

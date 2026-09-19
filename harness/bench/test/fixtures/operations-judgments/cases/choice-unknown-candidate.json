@@ -1,0 +1,42 @@
+{
+  "name": "a probability for an option we never sent invalidates that answer",
+  "state": { "source": "session_context", "state": "Route this to sales." },
+  "questions": [
+    {
+      "id": "dept",
+      "request": {
+        "question": "Which team should handle this?",
+        "questionVersion": "v1",
+        "options": [
+          { "id": "billing", "label": "Payments, invoicing, refunds" },
+          { "id": "technical", "label": "Bugs, outages, integrations" }
+        ]
+      }
+    }
+  ],
+  "transports": [
+    {
+      "status": 200,
+      "body": {
+        "model": "jev-1.13.0",
+        "answers": {
+          "dept": {
+            "type": "choice",
+            "choice": "sales",
+            "probabilities": { "billing": 0.1, "technical": 0.2, "sales": 0.7 },
+            "confidence": 0.7
+          }
+        },
+        "usage": { "input_tokens": 70, "output_tokens": 9 }
+      }
+    }
+  ],
+  "expect": {
+    "ok": true,
+    "calls": 1,
+    "results": {
+      "dept": { "outcome": "provider_failure", "retryable": false, "messageIncludes": ["unknown_field", "missing_field"] }
+    },
+    "records": [{ "questionId": "dept", "decision": "provider_failure" }]
+  }
+}

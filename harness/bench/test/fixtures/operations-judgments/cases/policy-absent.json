@@ -1,0 +1,18 @@
+{
+  "name": "absent trusted policy is a denial, not an implicit approval",
+  "policy": "absent",
+  "state": { "source": "session_context", "state": "Help! My payouts have been failing for 3 days." },
+  "questions": [{ "id": "urgent", "request": { "question": "Does this convey urgency?", "questionVersion": "v1" } }],
+  "transports": [],
+  "expect": {
+    "ok": true,
+    "calls": 0,
+    "results": {
+      "urgent": {
+        "outcome": "provider_failure",
+        "retryable": false,
+        "messageIncludes": ["provider_input_unattested"]
+      }
+    }
+  }
+}

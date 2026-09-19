@@ -1,0 +1,11 @@
+{
+  "name": "a rejected key is never retried",
+  "state": { "source": "session_context", "state": "Is this urgent?" },
+  "questions": [{ "id": "urgent", "request": { "question": "Does this convey urgency?", "questionVersion": "v1" } }],
+  "transports": [{ "status": 401, "rawBody": "{\"error\":\"missing or invalid api key\"}" }],
+  "expect": {
+    "ok": true,
+    "calls": 1,
+    "results": { "urgent": { "outcome": "provider_failure", "retryable": false, "messageIncludes": ["http_401"] } }
+  }
+}

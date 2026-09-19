@@ -1,0 +1,45 @@
+{
+  "name": "an exact tie between candidates is ambiguous rather than a guess",
+  "state": { "source": "session_context", "state": "Ship the fix to the tree you meant." },
+  "questions": [
+    {
+      "id": "tree",
+      "request": {
+        "question": "Which tree should receive this?",
+        "questionVersion": "v1",
+        "options": [
+          { "id": "tree-a", "label": "The first feature tree" },
+          { "id": "tree-b", "label": "The second feature tree" }
+        ]
+      }
+    }
+  ],
+  "transports": [
+    {
+      "status": 200,
+      "body": {
+        "model": "jev-1.13.0",
+        "answers": {
+          "tree": {
+            "type": "choice",
+            "choice": "tree-a",
+            "probabilities": {
+              "tree-a": 0.5,
+              "tree-b": 0.5,
+              "none_of_the_listed_options": 0,
+              "cannot_tell_between_options": 0
+            },
+            "confidence": 0.5
+          }
+        },
+        "usage": { "input_tokens": 60, "output_tokens": 8 }
+      }
+    }
+  ],
+  "expect": {
+    "ok": true,
+    "calls": 1,
+    "results": { "tree": { "outcome": "ambiguous" } },
+    "records": [{ "questionId": "tree", "decision": "ambiguous", "confidence": 0.5 }]
+  }
+}
