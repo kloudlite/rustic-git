@@ -1,0 +1,10 @@
+{
+  "id": "chatcmpl-fixture-query",
+  "model": "deepseek-v4-flash",
+  "choices": [
+    {
+      "index": 0,
+      "message": { "role": "assistant", "content": "{\"query\":\"timeoutMs default config\"}" }
+    }
+  ]
+}
