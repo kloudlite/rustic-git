@@ -229,7 +229,7 @@ export class OperationExecutor {
     const error: OperationError = outcome.outcome === "failed"
       ? outcome.error
       : { code: outcome.code, message: outcome.reason, retryable: false };
-    if (error.code === "cancelled" || signal.aborted) {
+    if (error.code === "cancelled" || (signal.aborted && effect !== "read")) {
       if (effect !== "read" && !(error.code === "cancelled" && error.refs?.length)) {
         this.#store.markOutcomeUnknown(input.operationId, stepId);
         if (!this.#reconcile) return { outcome: "unknown" };

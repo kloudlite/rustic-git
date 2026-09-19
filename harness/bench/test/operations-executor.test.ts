@@ -250,6 +250,25 @@ test("an abort race never turns a mutation failure into fabricated cancellation 
   assert.equal(store.log.some((entry) => entry.startsWith("cancel:write")), false);
 });
 
+
+test("a read failure racing with abort remains the authoritative failure", async () => {
+  const store = new MemoryStore();
+  const controller = new AbortController();
+  const reg = registry(store, []);
+  reg.dispatch = async (name, _args, deps) => {
+    await new Promise<void>((resolve) => deps.signal?.addEventListener("abort", () => resolve(), { once: true }));
+    return { outcome: "failed", capability: name, version: "1.0.0", code: "provider_failure", error: { code: "provider_failure", message: "connection closed", retryable: false } };
+  };
+  const executor = new OperationExecutor({ store, registry: reg, scheduler: new OperationScheduler({ maxConcurrent: 1 }), dispatchFor });
+  const running = executor.execute({ operationId: "op-1", context, signal: controller.signal, calls: calls({ key: "read" }) });
+  while (!store.log.includes("intent:read")) await new Promise((resolve) => setTimeout(resolve, 0));
+  controller.abort();
+  const result = await running;
+  assert.equal(result.state, "failed");
+  assert.equal(store.steps.get("read")?.error?.code, "provider_failure");
+  assert.equal(store.log.some((entry) => entry.startsWith("cancel:read")), false);
+});
+
 test("exclusive bench ownership is checked before queueing and every dispatch", async () => {
   const store = new MemoryStore();
   store.owned = false;
