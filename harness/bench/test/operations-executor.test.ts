@@ -49,14 +49,14 @@ class MemoryStore implements ExecutorStore {
   assertOwnership(): void { this.log.push("ownership"); if (!this.owned) throw new Error("not owned"); }
   queueStep(_operationId: string, input: { key?: string; capability: string }): OperationSnapshot { this.log.push(`queue:${input.key}`); this.steps.set(input.key!, { state: "queued", effect: input.capability.startsWith("write") ? "write" : "read" }); return this.snapshot(); }
   startStep(_operationId: string, stepId: string): OperationSnapshot { this.log.push("intent:" + stepId); const step = this.steps.get(stepId)!; step.state = "running"; step.attempts = (step.attempts ?? 0) + 1; return this.snapshot(); }
-  retryStep(_operationId: string, stepId: string): OperationSnapshot { this.log.push("retry:" + stepId); const step = this.steps.get(stepId)!; step.state = "running"; step.attempts = (step.attempts ?? 0) + 1; return this.snapshot(); }
+  retryStep(_operationId: string, stepId: string): { snapshot: OperationSnapshot; authorizeDispatch: () => boolean } { this.log.push("retry:" + stepId); const step = this.steps.get(stepId)!; step.state = "running"; step.attempts = (step.attempts ?? 0) + 1; return { snapshot: this.snapshot(), authorizeDispatch: () => true }; }
   recordStepOutcome(_operationId: string, stepId: string, input: { outcome: "succeeded" | "failed"; evidenceRefs?: string[]; error?: OperationError }): OperationSnapshot { this.log.push(`outcome:${stepId}:${input.outcome}`); Object.assign(this.steps.get(stepId)!, { state: input.outcome, evidenceRefs: input.evidenceRefs, error: input.error }); return this.snapshot(); }
   markOutcomeUnknown(_operationId: string, stepId: string): OperationSnapshot { this.log.push(`unknown:${stepId}`); this.steps.get(stepId)!.state = "outcome_unknown"; this.state = "reconciling"; return this.snapshot(); }
   reconcileStep(_operationId: string, stepId: string, input: { conclusion: "succeeded" | "failed"; evidenceRefs?: string[]; error?: OperationError }): OperationSnapshot { this.log.push(`reconcile:${stepId}:${input.conclusion}`); Object.assign(this.steps.get(stepId)!, { state: input.conclusion, evidenceRefs: input.evidenceRefs, error: input.error }); this.state = "running"; return this.snapshot(); }
   cancelStep(_operationId: string, stepId: string, input: { evidenceRefs: string[] }): OperationSnapshot { this.log.push(`cancel:${stepId}`); Object.assign(this.steps.get(stepId)!, { state: "cancelled", evidenceRefs: input.evidenceRefs }); return this.snapshot(); }
   requireDecision(operationId: string, stepId: string, input: { decisionId: string; decisionClass: "user_authorization" | "user_preference"; question: string }): OperationSnapshot { this.log.push(`decision:${stepId}`); this.revision += 1; this.steps.get(stepId)!.state = "awaiting_approval"; this.pendingDecisions = [{ decisionId: input.decisionId, operationId, stepId, decisionClass: input.decisionClass, question: input.question, createdAt: 1, expiresAt: 100_000, revision: this.revision }]; return this.snapshot(); }
   recordDecision(_record: RecordedDecision): OperationSnapshot { this.log.push("decision-recorded"); return this.snapshot(); }
-  resume(input: { request: { decisionId: string; resolution: { recordId: string } } }): { outcome: "dispatch"; snapshot: OperationSnapshot } { const pending = this.pendingDecisions.find((entry) => entry.decisionId === input.request.decisionId)!; this.log.push(`resume:${pending.stepId}`); this.pendingDecisions = []; this.steps.get(pending.stepId)!.state = "running"; return { outcome: "dispatch", snapshot: this.snapshot() }; }
+  resume(input: { request: { decisionId: string; resolution: { recordId: string } } }): { outcome: "dispatch"; snapshot: OperationSnapshot; authorizeDispatch: () => boolean } { const pending = this.pendingDecisions.find((entry) => entry.decisionId === input.request.decisionId)!; this.log.push(`resume:${pending.stepId}`); this.pendingDecisions = []; this.steps.get(pending.stepId)!.state = "running"; return { outcome: "dispatch", snapshot: this.snapshot(), authorizeDispatch: () => true }; }
   requestCancel(_operationId: string): OperationSnapshot { this.log.push("cancel-requested"); for (const step of this.steps.values()) if (step.state === "queued") step.state = "cancelled"; return this.snapshot(); }
   expire(): OperationSnapshot { this.log.push("expire"); this.state = "expired"; return this.snapshot(); }
   settle(): { snapshot: OperationSnapshot } { if (this.settledState) this.state = this.settledState; return { snapshot: this.snapshot() }; }
@@ -114,7 +114,8 @@ test("approval-required mutations enter running only through the recorded O05 re
       },
     }),
     dispatch: async (name, _args, deps) => {
-      assert.ok(deps.approval);
+      assert.ok(deps.authorizeDispatch);
+      assert.equal(deps.authorizeDispatch!({ capability: name, version: "1.0.0", payloadDigest: "sha256:" + "1".repeat(64) }), true);
       store.log.push(`dispatch:${name}`);
       return { outcome: "completed", capability: name, version: "1.0.0", result: {} };
     },
@@ -365,7 +366,7 @@ test("settles the final retryable failure at the trusted attempt limit", async (
   assert.equal(store.steps.get("read")?.state, "failed");
 });
 
-test("recovery executes reconciliation and expiry but defers dispatch and retry", async () => {
+test("recovery expires operations but defers actions that need authoritative arguments or authorization", async () => {
   const store = new MemoryStore();
   store.steps.set("recover", { state: "outcome_unknown", effect: "write" });
   store.steps.set("retry", { state: "failed", effect: "read", error: { code: "provider_failure", message: "temporary", retryable: true } });
@@ -385,7 +386,7 @@ test("recovery executes reconciliation and expiry but defers dispatch and retry"
   await executor.recover({ operationId: "op-1", context, actions, calls: {
     recover: callForRecovery("recover", "write.item"), retry: callForRecovery("retry"), queued: callForRecovery("queued"),
   } });
-  assert.deepEqual(reconciled, ["recover"]);
+  assert.deepEqual(reconciled, []);
   assert.equal(store.log.includes("retry:retry"), false);
   assert.equal(store.log.includes("intent:queued"), false);
   assert.equal(store.log.some((entry) => entry.startsWith("dispatch:")), false);

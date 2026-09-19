@@ -9,13 +9,13 @@ export interface ExecutorStore {
   queueStep(operationId: string, input: { key?: string; capability: string; targetRef?: string; dependencies?: string[] }): OperationSnapshot;
   startStep(operationId: string, stepId: string, input: { argDigest: string; idempotencyKey?: string }): OperationSnapshot;
   recordStepOutcome(operationId: string, stepId: string, input: { outcome: "succeeded" | "failed"; evidenceRefs?: string[]; error?: OperationError }): OperationSnapshot;
-  retryStep(operationId: string, stepId: string, input: { retry: { class: "none" | "idempotent" | "reconcile_required"; maxAttempts: number }; argDigest: string; idempotencyKey?: string }, currentContext: TrustedActorContext): OperationSnapshot;
+  retryStep(operationId: string, stepId: string, input: { retry: { class: "none" | "idempotent" | "reconcile_required"; maxAttempts: number }; argDigest: string; idempotencyKey?: string }, currentContext: TrustedActorContext): { snapshot: OperationSnapshot; authorizeDispatch: (claims: { capability: string; version: string; payloadDigest: string }) => boolean };
   markOutcomeUnknown(operationId: string, stepId: string, input?: { summary?: string }): OperationSnapshot;
   reconcileStep(operationId: string, stepId: string, input: { conclusion: "succeeded" | "failed"; evidenceRefs?: string[]; error?: OperationError }): OperationSnapshot;
   cancelStep(operationId: string, stepId: string, input: { evidenceRefs: string[] }): OperationSnapshot;
   requireDecision(operationId: string, stepId: string, input: { decisionId: string; decisionClass: "user_authorization" | "user_preference"; question: string; payloadDigest: string }): OperationSnapshot;
   recordDecision(record: RecordedDecision, currentContext: TrustedActorContext): OperationSnapshot;
-  resume(input: { request: { action: "resume"; operationId: string; decisionId: string; expectedRevision: number; resolution: { kind: "recorded_user_decision"; recordId: string } }; context: TrustedActorContext }): { outcome: "dispatch" | "refuse_step" | "supply_input"; snapshot: OperationSnapshot };
+  resume(input: { request: { action: "resume"; operationId: string; decisionId: string; expectedRevision: number; resolution: { kind: "recorded_user_decision"; recordId: string } }; context: TrustedActorContext }): { outcome: "dispatch" | "refuse_step" | "supply_input"; snapshot: OperationSnapshot; authorizeDispatch?: (claims: { capability: string; version: string; payloadDigest: string }) => boolean };
   requestCancel(operationId: string, input?: { reason?: string }): OperationSnapshot;
   expire(operationId: string): OperationSnapshot;
   settle(operationId: string): { snapshot: OperationSnapshot };
@@ -157,14 +157,16 @@ export class OperationExecutor {
               context: input.context,
             });
             if (resumed.outcome !== "dispatch") return { outcome: "skipped" };
-            dispatchDeps = { ...deps, signal, approval: { record, expectation: prepared.approval.expectation } };
+            if (!resumed.authorizeDispatch) throw new Error("dispatch authorization unavailable");
+            dispatchDeps = { ...deps, signal, authorizeDispatch: resumed.authorizeDispatch };
           }
           let outcome = await this.#registry.dispatch(call.capability, args, dispatchDeps, call.capabilityVersion);
           while (outcome.outcome === "failed" && outcome.error.retryable && descriptor.retry.class === "idempotent") {
             this.#store.recordStepOutcome(input.operationId, stepId, { outcome: "failed", error: outcome.error });
             const step = this.#store.load(input.operationId).steps.find((entry) => entry.stepId === stepId);
             if (!step || step.attempts >= descriptor.retry.maxAttempts) break;
-            this.#store.retryStep(input.operationId, stepId, { retry: descriptor.retry, argDigest, idempotencyKey: `${input.operationId}/${stepId}` }, input.context);
+            const retried = this.#store.retryStep(input.operationId, stepId, { retry: descriptor.retry, argDigest, idempotencyKey: `${input.operationId}/${stepId}` }, input.context);
+            dispatchDeps = { ...deps, signal, authorizeDispatch: retried.authorizeDispatch };
             outcome = await this.#registry.dispatch(call.capability, args, dispatchDeps, call.capabilityVersion);
           }
           return this.#record(input, call, stepId, descriptor.effect, args, signal, outcome);
@@ -185,24 +187,11 @@ export class OperationExecutor {
   }
 
   async recover(input: RecoverInput): Promise<void> {
-    const signal = input.signal ?? new AbortController().signal;
     for (const action of input.actions) {
       this.#store.assertOwnership();
       if (action.operationId !== input.operationId) throw new Error(`recovery action belongs to ${action.operationId}`);
-      if (action.kind === "await_decision" || action.kind === "dispatch_step" || action.kind === "retry_candidate" || action.kind === "resume_abort") continue;
       if (action.kind === "expire_decision" || action.kind === "expire_operation") {
         this.#store.expire(input.operationId);
-        continue;
-      }
-      const call = input.calls[action.stepId];
-      if (!call) throw new Error(`missing trusted recovery call for ${action.stepId}`);
-      const descriptor = this.#registry.get(action.capability);
-      if (!descriptor || descriptor.version !== action.capabilityVersion) throw new Error(`stale recovery capability ${action.capability}@${action.capabilityVersion}`);
-      const args = call.args ?? {};
-      if (action.kind === "reconcile_step") {
-        if (!this.#reconcile) continue;
-        const conclusion = await this.#reconcile({ operationId: input.operationId, stepId: action.stepId, call, args, context: input.context, signal });
-        if (conclusion.conclusion !== "unknown") this.#store.reconcileStep(input.operationId, action.stepId, conclusion);
       }
     }
   }

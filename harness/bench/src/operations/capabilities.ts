@@ -18,13 +18,11 @@ import {
   CONTRACT_VERSION,
   buildDescriptionIndex,
   canonicalDigest,
-  checkResumeAgainstRecord,
   describeCapability,
   freezeCapabilityDescriptor,
   validateCapabilityDescriptor,
   validateJsonSchemaLike,
   validateJsonValue,
-  validateRecordedDecision,
 } from "./contracts.ts";
 import type {
   CapabilityApproval,
@@ -98,8 +96,8 @@ export type CapabilityDispatchDeps = {
   /** The executor owns obtaining and persisting this record. */
   approve?: (request: CapabilityApprovalRequest) => Promise<RecordedDecision>;
   decision?: Omit<ResumeExpectation, "payloadDigest" | "now"> & { now?: number };
-  /** O05 consumed this exact decision before O02 dispatch began. */
-  approval?: { record: RecordedDecision; expectation: ResumeExpectation };
+  /** O05-issued, one-shot authorization for this exact dispatch attempt. */
+  authorizeDispatch?: (claims: { capability: string; version: string; payloadDigest: string }) => boolean;
   /** Trusted dispatch policy, never model input. An unlisted source cannot authorize this call. */
   allowedPolicySources?: readonly RecordedDecision["policySource"][];
   signal?: AbortSignal;
@@ -928,8 +926,8 @@ export class CapabilityRegistry {
 
   /**
    * The only way a capability reaches its handler. Arguments are validated and
-   * the capability's scope is checked before approval, approval is awaited, and a
-   * handler that cannot be reached or authorized is a refusal — never a success.
+   * the capability's scope is checked before an approval-required dispatch consumes
+   * its one-shot authorization. An unauthorized handler is never invoked.
    */
   async dispatch(capability: string, args: unknown, deps: CapabilityDispatchDeps = {}, version?: string): Promise<CapabilityDispatchResult> {
     const definition = this.byName.get(capability);
@@ -975,7 +973,7 @@ export class CapabilityRegistry {
       outcome = await dispatchWithPolicy({
       capability,
       effect: descriptor.effect,
-      approval: { required: approvalRequired, ...(approvalRequired === "none" ? {} : { obtain: async () => this.approvalGranted(deps) }) },
+      approval: { required: approvalRequired, ...(approvalRequired === "none" ? {} : { obtain: async () => deps.authorizeDispatch?.({ capability, version: descriptor.version, payloadDigest: canonicalDigest(valid.value.args) }) ?? false }) },
       inspect: () => definition.scopeCheck?.(valid.value.args),
       run: async () => handler({ args: executionArgs, states: cloneStates(valid.value.states), signal: deps.signal }),
       failed: (result) => result.ok ? undefined : result.error.code,
@@ -994,16 +992,6 @@ export class CapabilityRegistry {
     return { ...outcome, capability, version: descriptor.version };
   }
 
-  private approvalGranted(deps: CapabilityDispatchDeps): boolean {
-    if (!deps.approval) return false;
-    const shaped = validateRecordedDecision(deps.approval.record);
-    if (!shaped.ok) throw new Error("forged_approval");
-    const allowed = deps.allowedPolicySources ?? ["user_ui"];
-    if (!allowed.includes(shaped.value.policySource)) throw new Error("forged_approval");
-    const checked = checkResumeAgainstRecord(shaped.value, deps.approval.expectation);
-    if (!checked.ok) throw new Error(checked.issues[0]?.code ?? "decision_mismatch");
-    return checked.value.dispatchAuthorized;
-  }
 }
 
 /** The bench pilot's registry. Nothing may enable a capability that is not a read yet. */

@@ -797,6 +797,10 @@ test("a recorded decision is bound, consumed once, and never replayed", () => {
   assert.equal(outcome.snapshot.usage.attempts, 1);
   assert.equal(store.events(operationId).filter((event) => event.phase === "dispatched").length, 1);
   assert.equal(store.recordedDecisions(operationId)[0].usedAt, clock.now());
+  if (outcome.outcome !== "dispatch") assert.fail("expected dispatch authorization");
+  assert.equal(outcome.authorizeDispatch({ capability: "file.edit", version: "1.0.0", payloadDigest: PAYLOAD_B }), false);
+  assert.equal(outcome.authorizeDispatch({ capability: "file.edit", version: "1.0.0", payloadDigest: PAYLOAD_A }), true);
+  assert.equal(outcome.authorizeDispatch({ capability: "file.edit", version: "1.0.0", payloadDigest: PAYLOAD_A }), false);
 
   // Replaying the same resolution after it was consumed is refused.
   assert.throws(
@@ -1251,10 +1255,28 @@ test("a failed step restarts within its trusted idempotent retry ceiling", () =>
   assert.equal(failed.state, "running");
 
   const retried = store.retryStep(operationId, "step-1", { argDigest: PAYLOAD_B, retry }, context());
-  assert.equal(retried.steps[0].state, "running");
-  assert.equal(retried.steps[0].attempts, 2);
-  assert.equal(retried.usage.attempts, 2);
+  assert.equal(retried.snapshot.steps[0].state, "running");
+  assert.equal(retried.snapshot.steps[0].attempts, 2);
+  assert.equal(retried.snapshot.usage.attempts, 2);
   assert.equal(store.events(operationId).filter((event) => event.decisionCode === "retry_allowed").length, 1);
+});
+
+test("retry authorization is fresh and invalidates the previous attempt", () => {
+  const retry: RetryStepInput["retry"] = { class: "idempotent", maxAttempts: 2 };
+  const { store } = openStore({ capabilityMetadata: (capability) => ({ ...(testMetadata(capability)!), approval: "user", retry }) });
+  const operationId = store.accept({ request: instruction(), context: context() }).snapshot.operationId;
+  queueEdit(store, operationId);
+  const waiting = store.requireDecision(operationId, "step-1", { decisionId: "dec-attempt", decisionClass: "user_authorization", question: "Apply?", payloadDigest: PAYLOAD_A });
+  store.recordDecision(recordedDecision(waiting, { decisionId: "dec-attempt", payloadDigest: PAYLOAD_A }), context());
+  const first = store.resume({ request: resumeRequest(operationId, "dec-attempt", waiting.revision, "rec-1"), context: context() });
+  if (first.outcome !== "dispatch") assert.fail("expected first dispatch");
+  store.recordStepOutcome(operationId, "step-1", { outcome: "failed", error: { code: "execution_failure", message: "retry", retryable: true } });
+  const second = store.retryStep(operationId, "step-1", { argDigest: PAYLOAD_A, retry }, context());
+  const claims = { capability: "file.edit", version: "1.0.0", payloadDigest: PAYLOAD_A };
+  assert.equal(first.authorizeDispatch(claims), false);
+  assert.equal(second.authorizeDispatch({ ...claims, capability: "file.write" }), false);
+  assert.equal(second.authorizeDispatch(claims), true);
+  assert.equal(second.authorizeDispatch(claims), false);
 });
 
 test("retry starts without stale attempt-specific backend fields", () => {
@@ -1269,9 +1291,9 @@ test("retry starts without stale attempt-specific backend fields", () => {
   });
 
   const retried = store.retryStep(operationId, "step-1", { argDigest: PAYLOAD_B, retry }, context());
-  assert.equal(retried.steps[0].backendOperationId, undefined);
-  assert.equal(retried.steps[0].error, undefined);
-  assert.equal(retried.steps[0].endedAt, undefined);
+  assert.equal(retried.snapshot.steps[0].backendOperationId, undefined);
+  assert.equal(retried.snapshot.steps[0].error, undefined);
+  assert.equal(retried.snapshot.steps[0].endedAt, undefined);
 });
 
 test("policy-required mutations dispatch and retry only with trusted policy evidence", () => {
@@ -1311,7 +1333,7 @@ test("policy-required mutations dispatch and retry only with trusted policy evid
     error: { code: "execution_failure", message: "the write did not complete", retryable: true },
   });
   const retried = store.retryStep(operationId, "step-1", { argDigest: PAYLOAD_A, retry }, context());
-  assert.equal(retried.steps[0].state, "running");
+  assert.equal(retried.snapshot.steps[0].state, "running");
 
   approval = "none";
   const unapprovedId = store.accept({ request: instruction(), context: context({ toolCallId: "call-policy-retry" }) }).snapshot.operationId;
@@ -1948,8 +1970,8 @@ test("retry records a fresh startedAt", () => {
   });
   clock.advance(500);
   const retried = store.retryStep(operationId, "step-1", { argDigest: PAYLOAD_A, retry }, context());
-  assert.equal(retried.steps[0].startedAt, clock.now());
-  assert.notEqual(retried.steps[0].startedAt, started);
+  assert.equal(retried.snapshot.steps[0].startedAt, clock.now());
+  assert.notEqual(retried.snapshot.steps[0].startedAt, started);
 });
 
 test("backend operation identity is assigned once after dispatch and survives restart", () => {

@@ -310,6 +310,9 @@ export type RetryStepInput = StartStepInput & {
   retry: RetryPolicy;
 };
 
+export type DispatchAuthorization = (claims: { capability: string; version: string; payloadDigest: string }) => boolean;
+export type RetryStepResult = { snapshot: OperationSnapshot; authorizeDispatch: DispatchAuthorization };
+
 export type CancelStepInput = { evidenceRefs: string[]; summary?: string };
 
 export type RequireDecisionInput = {
@@ -325,7 +328,7 @@ export type RequireDecisionInput = {
 export type ResumeInput = { request: ResumeRequest; context: TrustedActorContext };
 
 export type ResumeResult =
-  | { outcome: "dispatch"; snapshot: OperationSnapshot; stepId: string; decisionId: string; recordId: string; dispatchDigest: string }
+  | { outcome: "dispatch"; snapshot: OperationSnapshot; stepId: string; decisionId: string; recordId: string; dispatchDigest: string; authorizeDispatch: DispatchAuthorization }
   | { outcome: "supply_input"; snapshot: OperationSnapshot; decisionId: string; resolution: Extract<DecisionResolution, { kind: "additional_input" }> }
   | { outcome: "refuse_step"; snapshot: OperationSnapshot; stepId: string; decisionId: string; recordId: string };
 
@@ -1211,7 +1214,7 @@ export class OperationStore {
    * `reconcile_required` never restart, an unknown outcome is not a failure and cannot
    * reach here, and the attempt count is checked before a new intent is recorded.
    */
-  retryStep(operationId: string, stepId: string, input: RetryStepInput, currentContext: TrustedActorContext): OperationSnapshot {
+  retryStep(operationId: string, stepId: string, input: RetryStepInput, currentContext: TrustedActorContext): RetryStepResult {
     const loaded = this.#require(operationId);
     const snapshot = this.#requireSnapshot(operationId);
     const context = validated(validateTrustedActorContext(currentContext), "$.context");
@@ -1276,7 +1279,7 @@ export class OperationStore {
         ...(input.backendOperationId !== undefined ? { backendOperationId: input.backendOperationId } : {}),
       },
     };
-    return this.#apply(operationId, {
+    const applied = this.#apply(operationId, {
       now,
       turnRevision: context.turnRevision,
       steps: [change],
@@ -1293,7 +1296,8 @@ export class OperationStore {
           retryCount: step.attempts,
         },
       ],
-    }).snapshot;
+    });
+    return { snapshot: applied.snapshot, authorizeDispatch: this.#dispatchAuthorization(operationId, stepId, digest, applied.snapshot.steps.find((entry) => entry.stepId === stepId)!.attempts) };
   }
 
   /** Cancels a running step only with evidence that no effect was applied. */
@@ -1615,6 +1619,19 @@ export class OperationStore {
       decisionId: pending.decisionId,
       recordId,
       dispatchDigest: payloadDigest,
+      authorizeDispatch: this.#dispatchAuthorization(snapshot.operationId, pending.stepId, payloadDigest, applied.snapshot.steps.find((entry) => entry.stepId === pending.stepId)!.attempts),
+    };
+  }
+
+  #dispatchAuthorization(operationId: string, stepId: string, digest: string, attempt: number): DispatchAuthorization {
+    let available = true;
+    return (claims) => {
+      if (!available) return false;
+      const snapshot = this.#requireSnapshot(operationId);
+      const step = stepOf(snapshot, stepId);
+      if (step.state !== "running" || step.attempts !== attempt || step.capability !== claims.capability || step.capabilityVersion !== claims.version || digest !== claims.payloadDigest) return false;
+      available = false;
+      return true;
     };
   }
 

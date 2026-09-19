@@ -13,7 +13,7 @@ import {
   createBenchCapabilityRuntime,
 } from "../src/operations/capabilities.ts";
 import type { CapabilityDefinition } from "../src/operations/capabilities.ts";
-import { validateCapabilityDescriptor } from "../src/operations/contracts.ts";
+import { checkResumeAgainstRecord, validateCapabilityDescriptor, validateRecordedDecision } from "../src/operations/contracts.ts";
 import type { RecordedDecision, ResumeExpectation } from "../src/operations/contracts.ts";
 import { toJsonSchema } from "../src/operations/shape.ts";
 import type { Validation } from "../src/operations/shape.ts";
@@ -113,7 +113,13 @@ const approvedDispatch = async (
   assert.equal(prepared.ok, true);
   if (!prepared.ok || !prepared.approval) assert.fail("expected an approval request");
   const record = grantedDecision(prepared.approval.expectation, overrides);
-  return registry.dispatch(capability, args, { runtime, allowedPolicySources, approval: { record, expectation: prepared.approval.expectation } });
+  const authorizeDispatch = () => {
+    const shaped = validateRecordedDecision(record);
+    if (!shaped.ok || !allowedPolicySources.includes(record.policySource)) return false;
+    const checked = checkResumeAgainstRecord(record, prepared.approval!.expectation);
+    return checked.ok && checked.value.dispatchAuthorized;
+  };
+  return registry.dispatch(capability, args, { runtime, authorizeDispatch });
 };
 
 test("every shipped contract is valid, and its published schema is its executable shape", () => {
@@ -268,7 +274,7 @@ test("trusted policy decisions run only when the trusted dispatch context allows
   const allowed = await dispatch(["trusted_policy"]);
   assert.equal(allowed.outcome, "completed");
   const downgraded = expectRefused(await dispatch(["user_ui"]));
-  assert.equal(downgraded.code, "forged_approval");
+  assert.equal(downgraded.code, "permission_denied");
   assert.equal(runs, 1);
 });
 
@@ -276,7 +282,7 @@ test("malformed decisions are refused from the shaped record before binding chec
   const registry = new CapabilityRegistry(CAPABILITY_CONTRACTS, ["environment.restore"]);
   const runtime = capabilityRuntime({ "environment.restore": async () => ({ ok: true, value: { id: "env-1" } }) });
   const refused = expectRefused(await approvedDispatch(registry, "environment.restore", { id: "env-1", snapshot: "snap-1" }, runtime, { expiresAt: "later" as any }));
-  assert.equal(refused.code, "forged_approval");
+  assert.equal(refused.code, "permission_denied");
 });
 
 test("shared mutation adapters preserve collections and use explicit clear transport", async () => {
@@ -424,20 +430,28 @@ test("a prepared denial refuses the step and runs nothing; a prepared grant runs
   assert.equal(prepared.approval.prompt, "Restore snapshot snap-1 into environment devstack, in place");
   assert.match(prepared.approval.payloadDigest, /^sha256:[0-9a-f]{64}$/);
 
-  const denied = expectRefused(await registry.dispatch("environment.restore", args, { runtime, approval: {
-    record: grantedDecision(prepared.approval.expectation, { outcome: "denied" }),
-    expectation: prepared.approval.expectation,
-  } }));
+  const denied = expectRefused(await registry.dispatch("environment.restore", args, { runtime, authorizeDispatch: () => false }));
   assert.equal(denied.code, "permission_denied");
   assert.equal(denied.reason, DECLINED);
   assert.equal(calls.filter((call) => call.startsWith("run:")).length, 0, "a denial never reaches the handler");
 
-  const granted = await registry.dispatch("environment.restore", args, { runtime, approval: {
-    record: grantedDecision(prepared.approval.expectation),
-    expectation: prepared.approval.expectation,
-  } });
+  const granted = await registry.dispatch("environment.restore", args, { runtime, authorizeDispatch: () => true });
   assert.equal(granted.outcome, "completed");
   assert.deepEqual(calls.filter((call) => call.startsWith("run:")), ["run:devstack"]);
+});
+
+test("an approval-required adapter needs a one-shot attempt authorization", async () => {
+  const registry = new CapabilityRegistry(CAPABILITY_CONTRACTS, ["environment.restore"]);
+  let runs = 0;
+  let checks = 0;
+  const runtime = capabilityRuntime({ "environment.restore": async () => (runs += 1, { ok: true, value: { id: "devstack" } }) });
+  const authorizeDispatch = () => (checks += 1) === 1;
+  const deps = { runtime, authorizeDispatch };
+
+  assert.equal((await registry.dispatch("environment.restore", { id: "devstack", snapshot: "snap-1" }, deps)).outcome, "completed");
+  const replay = expectRefused(await registry.dispatch("environment.restore", { id: "devstack", snapshot: "snap-1" }, deps));
+  assert.equal(replay.code, "permission_denied");
+  assert.equal(runs, 1);
 });
 
 test("a mutating plan with no approval channel is refused, never run", async () => {
@@ -862,7 +876,7 @@ test("approval cannot mutate the payload that the handler executes", async () =>
   assert.equal(prepared.ok, true);
   if (!prepared.ok || !prepared.approval) assert.fail("expected an approval request");
   (prepared.approval.args as Record<string, unknown>).snapshot = "other-snapshot";
-  const result = await registry.dispatch("environment.restore", args, { runtime, approval: { record: grantedDecision(prepared.approval.expectation), expectation: prepared.approval.expectation } });
+  const result = await registry.dispatch("environment.restore", args, { runtime, authorizeDispatch: () => true });
   assert.equal(result.outcome, "completed");
   assert.deepEqual(executed, { id: "devstack", snapshot: "snap-1" });
 });
