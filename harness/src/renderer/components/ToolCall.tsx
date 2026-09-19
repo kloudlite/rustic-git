@@ -9,6 +9,7 @@ import { FileDiff } from "./results/FileDiff";
 import { editFile, patchFiles } from "./results/diff";
 import { defaultOpen } from "./results/opencode-map";
 import { Spinner } from "./Motion";
+import { OperationPanel, operationIdFromAction, operationStore, type OperationStore } from "../operations/index.ts";
 
 type Action = Extract<Message, { role: "action" }>;
 
@@ -20,7 +21,7 @@ type Action = Extract<Message, { role: "action" }>;
  * verb, the subject, how long it took, a chevron — and folds to that head.
  * A failed call shows only its error; nobody wants the whole response then.
  */
-export function ToolCall(props: { a: Action }) {
+export function ToolCall(props: { a: Action; operations?: OperationStore; sessionId?: string; workspaceId?: string }) {
   const a = () => props.a;
   // Folded to its one line, opened on click. A transcript of open blocks is a wall; what a person
   // wants at a glance is WHAT ran and whether it worked — a failure opens itself, because that is
@@ -50,6 +51,10 @@ export function ToolCall(props: { a: Action }) {
     return files.length > 0 && files.every((f) => f.type === "delete");
   };
   const line = createMemo(() => toolLine(a().tool, a().args ?? {}, a().output, { pending: a().pending, ok: a().ok !== false, secs: a().pending ? Math.round((tick() - (a().ts ?? tick())) / 1000) : undefined }));
+  const operation = createMemo(() => {
+    const id = operationIdFromAction(a());
+    return id ? (props.operations ?? operationStore())?.open(id, { sessionId: props.sessionId, workspaceId: props.workspaceId }) : undefined;
+  });
 
   // opencode's contract (§16b): a read or a search is ONE line, but an edit and a command are rail
   // BLOCKS — their result is the thing you came to see, so it is not behind a click.
@@ -104,6 +109,7 @@ export function ToolCall(props: { a: Action }) {
           </div>
         </div>
       </Show>
+      <Show when={operation()}>{(entry) => <OperationPanel view={entry().view()} onResync={entry().resync} onDecision={entry().controls.decide} onAdditionalInput={entry().controls.answer} onCancel={entry().controls.cancel} loadError={entry().error()} onRetry={entry().reload} />}</Show>
     </div>
   );
 }

@@ -1,0 +1,70 @@
+/*
+ * The operation panel's own few shapes. Colours come from the theme vars in
+ * `renderer/styles/app.css`, so this file adds layout only and needs no theme of its own.
+ */
+
+.op-panel {
+  font-size: var(--text-base, 13px);
+}
+
+.op-header,
+.op-actions,
+.op-row {
+  flex-wrap: wrap;
+}
+
+.op-step-toggle {
+  border: 0;
+  color: inherit;
+  font: inherit;
+}
+
+@media (max-width: 560px) {
+  .op-header > button,
+  .op-actions,
+  .op-row > :last-child {
+    width: 100%;
+  }
+
+  .op-row > :first-child {
+    width: auto;
+  }
+}
+
+/* The expanded body sits under the header, indented by nothing: it is a section, not a card. */
+.op-body {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+}
+
+.op-step {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+}
+
+.op-detail {
+  display: flex;
+  flex-direction: column;
+  padding-bottom: 4px;
+  border-left: 1px solid var(--line-subtle);
+  margin-left: 22px;
+}
+
+/*
+ * Model-facing text — an instruction, an argument preview, a redacted event line — is drawn
+ * in the quieter colour and never as an interactive control: it is content a person reads,
+ * not a decision they make.
+ */
+.op-args {
+  color: var(--subtle);
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  user-select: text;
+}
+
+[data-evidence-id] {
+  overflow-wrap: anywhere;
+  user-select: text;
+}

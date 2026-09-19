@@ -70,7 +70,7 @@ function createWindow(): void {
   });
 
   mainWin = win;
-  void win.loadFile(path.join(__dirname, "renderer", "index.html"), {
+  void win.loadFile(path.join(__dirname, "..", "renderer", "index.html"), {
     hash: process.env.HARNESS_HASH ?? (process.env.KL_BOOT_TEST ? "boot-session" : ""),
     search: [process.env.HARNESS_THEME && `theme=${process.env.HARNESS_THEME}`, process.env.KL_BOOT_TEST && "boot-test=1"].filter(Boolean).join("&"),
   });
@@ -317,6 +317,58 @@ ipcMain.handle("bench:bootstrap", (_e, session: unknown) => {
   return needBench().rest("GET", `/bootstrap${q}`);
 });
 ipcMain.handle("bench:state", () => ({ configured: !!bench, connected: bench?.connected() ?? false, ...(bench?.cached() ?? { sessions: [], exchanges: [] }) }));
+
+const OPERATION_ID = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/;
+const operationId = (value: unknown, what = "operation") => {
+  if (typeof value !== "string" || !OPERATION_ID.test(value)) throw new Error(`not an ${what} id`);
+  return value;
+};
+const operationRevision = (value: unknown) => {
+  if (!Number.isSafeInteger(value) || (value as number) < 1) throw new Error("not an operation revision");
+  return value as number;
+};
+const exactObject = (value: unknown, keys: string[]) => {
+  if (!value || typeof value !== "object" || Array.isArray(value) || Object.keys(value).some((key) => !keys.includes(key))) throw new Error("invalid operation request");
+  return value as Record<string, unknown>;
+};
+
+async function operation<T>(call: (client: BenchClient, headers: { authorization: string; "x-kl-owner": string; "x-kl-login": string }) => Promise<T>): Promise<T> {
+  const s = auth.state();
+  const c = s.phase === "ready" ? store.load() : undefined;
+  if (s.phase !== "ready" || !c) throw new Error("not signed in");
+  try {
+    return await call(needBench(), { authorization: `Bearer ${c.token}`, "x-kl-owner": s.team, "x-kl-login": c.username });
+  } catch (e) {
+    if (e instanceof Error && e.name === "Expired" && !(await stillValid(c))) auth.expired();
+    throw e;
+  }
+}
+
+ipcMain.handle("operations:snapshot", (_e, id: unknown) => operation((client, headers) => client.operationSnapshot(operationId(id), headers)));
+ipcMain.handle("operations:events", (_e, id: unknown, after: unknown, limit: unknown) => {
+  if (after !== undefined && (typeof after !== "string" || !after)) throw new Error("not an operation cursor");
+  if (limit !== undefined && (!Number.isSafeInteger(limit) || (limit as number) < 1 || (limit as number) > 200)) throw new Error("not an operation page limit");
+  return operation((client, headers) => client.operationEvents(operationId(id), after as string | undefined, limit as number | undefined, headers));
+});
+ipcMain.handle("operations:cancel", (_e, value: unknown) => {
+  const body = exactObject(value, ["operationId", "expectedRevision"]);
+  return operation((client, headers) => client.cancelOperation(operationId(body.operationId), operationRevision(body.expectedRevision), headers));
+});
+ipcMain.handle("operations:decision", (_e, value: unknown) => {
+  const body = exactObject(value, ["operationId", "stepId", "decisionId", "expectedRevision", "outcome"]);
+  const id = operationId(body.operationId);
+  const decisionId = operationId(body.decisionId, "decision");
+  const stepId = operationId(body.stepId, "step");
+  const expectedRevision = operationRevision(body.expectedRevision);
+  if (body.outcome !== "granted" && body.outcome !== "denied") throw new Error("not a decision outcome");
+  return operation((client, headers) => client.recordOperationDecision(id, decisionId, { stepId, expectedRevision, outcome: body.outcome }, headers));
+});
+ipcMain.handle("operations:input", (_e, value: unknown) => {
+  const body = exactObject(value, ["operationId", "stepId", "decisionId", "expectedRevision", "inputs"]);
+  const inputs = exactObject(body.inputs, ["answer"]);
+  if (typeof inputs.answer !== "string" || !inputs.answer.trim()) throw new Error("not operation input");
+  return operation((client, headers) => client.provideOperationInput(operationId(body.operationId), operationId(body.decisionId, "decision"), operationRevision(body.expectedRevision), { answer: inputs.answer }, headers));
+});
 // `bench import`: the laptop's sessions onto the bench, once. The list is the
 // renderer's localStorage (only it can read it); the files are what the old
 // memos point at plus every other session file beside them. The bench merges

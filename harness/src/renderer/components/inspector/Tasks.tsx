@@ -3,6 +3,7 @@ import * as live from "../../live";
 import { Icon } from "../../ui/Icon";
 import { Heading } from "../../ui/parts";
 import { procsOf } from "../../rows";
+import type { OperationProjection, OperationTaskRow } from "../../operations/index.ts";
 
 /**
  * Only what was sent to the background (^B): a command still running in the
@@ -12,7 +13,7 @@ import { procsOf } from "../../rows";
  * then leaves; its log stays in the thread. A row is the tool and its
  * argument, the state and the clock; hover shows the cancel; click opens the log.
  */
-export function Tasks(props: { onOpen: (id: string) => void; session: string; workspace?: string }) {
+export function Tasks(props: { onOpen: (id: string) => void; onOpenOperation?: (projection: OperationProjection) => void; session: string; workspace?: string; operations?: OperationTaskRow[] | (() => OperationTaskRow[]) }) {
   const [tick, setTick] = createSignal(Date.now());
   const timer = setInterval(() => setTick(Date.now()), 1000);
   onCleanup(() => clearInterval(timer));
@@ -30,6 +31,22 @@ export function Tasks(props: { onOpen: (id: string) => void; session: string; wo
   const lost = () => mine().filter((t) => t.state === "lost");
 
   return (
+    <>
+    <Show when={(typeof props.operations === "function" ? props.operations() : props.operations)?.length}>
+      <Heading meta={`${(typeof props.operations === "function" ? props.operations() : props.operations)!.filter((row) => !row.ended).length} active`}>Background operations</Heading>
+      <For each={typeof props.operations === "function" ? props.operations() : props.operations}>
+        {(row) => (
+          <button type="button" data-operation-id={row.id} class="group flex h-11 w-full cursor-pointer items-center gap-2 px-3 text-left hover:bg-hover" onClick={() => props.onOpenOperation?.(row.projection)}>
+            <span class="flex w-4 shrink-0 items-center justify-center"><span class={`size-1.5 rounded-full ${row.state === "failed" ? "bg-danger" : row.ended ? "bg-subtle" : "bg-accent"}`} /></span>
+            <div class="flex min-w-0 flex-1 flex-col">
+              <span class="truncate font-mono text-sm font-bold text-fg-strong">Operate <span class="font-normal text-fg">{row.title}</span></span>
+              <span class="text-xs capitalize text-subtle">{row.state}</span>
+            </div>
+          </button>
+        )}
+      </For>
+      <div class="h-3" />
+    </Show>
     <Show when={background().length || settling().length || lost().length}>
       <Heading meta={background().length ? `${background().length} running` : undefined}>Background tasks</Heading>
       <Group items={background()} tone="bg-accent animate-pulse" onOpen={props.onOpen} clock={clock} />
@@ -37,6 +54,7 @@ export function Tasks(props: { onOpen: (id: string) => void; session: string; wo
       <Group items={settling()} onOpen={props.onOpen} clock={clock} dim />
       <div class="h-3" />
     </Show>
+    </>
   );
 }
 

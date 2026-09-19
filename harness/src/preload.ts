@@ -3,6 +3,12 @@ import type { AuthState } from "./auth/controller";
 import type { Team } from "./connect/bench";
 import type { ApiEnvironment, ApiRepo, ApiSnapshot, ApiWorkspace } from "./connect/platform";
 
+type OperationSnapshot = import("../bench/src/operations/contracts").OperationSnapshot;
+type OperationEvent = import("../bench/src/operations/contracts").OperationEvent;
+type CancelOperationPayload = { operationId: string; expectedRevision: number };
+type DecisionOperationPayload = CancelOperationPayload & { stepId: string; decisionId: string; outcome: "granted" | "denied" };
+type InputOperationPayload = CancelOperationPayload & { stepId: string; decisionId: string; inputs: { answer: string } };
+
 /**
  * The only surface the renderer sees. Every call is a request to the main
  * process, which validates it; nothing of Node or Electron crosses this line.
@@ -39,6 +45,15 @@ const harness = {
     list: (): Promise<{ id: string; label: string; configured: boolean }[]> => ipcRenderer.invoke("bench:providers", "list"),
     save: (id: string, apiKey: string): Promise<void> => ipcRenderer.invoke("bench:providers", "save", id, apiKey),
     remove: (id: string): Promise<void> => ipcRenderer.invoke("bench:providers", "remove", id),
+  },
+
+  operations: {
+    snapshot: (operationId: string): Promise<OperationSnapshot> => ipcRenderer.invoke("operations:snapshot", operationId),
+    events: (operationId: string, after?: string, limit?: number): Promise<{ events: OperationEvent[]; nextCursor?: string; hasMore: boolean }> =>
+      ipcRenderer.invoke("operations:events", operationId, after, limit),
+    cancel: (payload: CancelOperationPayload): Promise<OperationSnapshot> => ipcRenderer.invoke("operations:cancel", payload),
+    decision: (payload: DecisionOperationPayload): Promise<void> => ipcRenderer.invoke("operations:decision", payload),
+    input: (payload: InputOperationPayload): Promise<OperationSnapshot> => ipcRenderer.invoke("operations:input", payload),
   },
 
   /** Keeps the OS chrome (native title bars, dialogs) on the app's own theme. */

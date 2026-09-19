@@ -2,14 +2,20 @@
   "name": "kloudlite-harness",
   "version": "0.0.0",
   "private": true,
-  "main": "dist/main.js",
+  "main": "dist/src/main.js",
   "scripts": {
     "build:main": "tsc -p tsconfig.main.json",
     "build:renderer": "vite build",
     "build": "npm run build:main && npm run build:renderer",
     "start": "npm run build && electron .",
+<<<<<<< HEAD
     "typecheck": "tsc -p tsconfig.main.json --noEmit && tsc -p tsconfig.renderer.json --noEmit && tsc -p tsconfig.operations.json",
     "bench:test": "node --test --test-concurrency=4 'bench/test/*.test.ts'",
+=======
+    "typecheck": "tsc -p tsconfig.main.json --noEmit && tsc -p tsconfig.renderer.json --noEmit && tsc -p tsconfig.operations.json",
+    "bench:test": "node --test --test-concurrency=4 'bench/test/*.test.ts' && npm run test:components",
+    "test:components": "NODE_OPTIONS='--conditions=browser' vitest run --config vitest.config.ts bench/test/operations-components.test.tsx bench/test/operations-integration-components.test.tsx",
+>>>>>>> feature/operation-executor-o09
     "bench:start": "node bench/src/main.ts"
   },
   "dependencies": {
@@ -41,9 +47,12 @@
     "@types/node": "^22.0.0",
     "@types/ws": "^8.18.1",
     "electron": "^42.11.5",
+    "fast-sha256": "^1.3.0",
+    "happy-dom": "18.0.1",
     "tailwindcss": "^4.3.3",
     "typescript": "^5.9.0",
     "vite": "^7.0.0",
-    "vite-plugin-solid": "^2.11.0"
+    "vite-plugin-solid": "^2.11.0",
+    "vitest": "3.2.4"
   }
 }

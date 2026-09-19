@@ -22,8 +22,21 @@ import * as live from "./live";
 import { agentRows, benchSessions, displayModel, inFlightItems, noteModelNames, openNote, openRoute, procState, refusal, type SessionRow } from "./rows";
 import { shouldRefreshOn } from "./refresh";
 import { cycleTheme } from "./theme";
+import { collectOperationEventPages, configureOperationBridge, type OperationProjection, type OperationRendererBridge } from "./operations/index.ts";
 
 export function App() {
+  const operationBridge: OperationRendererBridge = {
+    loadSnapshot: window.harness.operations.snapshot,
+    loadEvents: (operationId, afterSequence) => collectOperationEventPages(
+      (after) => window.harness.operations.events(operationId, after, 200),
+      afterSequence,
+    ),
+    decide: (payload) => window.harness.operations.decision(payload),
+    answer: (payload) => window.harness.operations.input(payload).then(() => undefined),
+    cancel: (payload) => window.harness.operations.cancel(payload).then(() => undefined),
+  };
+  const operations = configureOperationBridge(operationBridge);
+  onCleanup(() => operations?.dispose());
   // A developer has exactly one bench per team, so switching team is what
   // switches machine: the real `auth.chooseTeam` reconnects, and leaving ready
   // reloads this page, so nothing here resets state by hand.
@@ -222,6 +235,7 @@ export function App() {
   /** Archive: the bench stops its pi, the tab closes, the row folds away; nothing is lost. */
   const archiveSession = (id: string) =>
     void bench("POST", `/sessions/${id}/archive`).then(() => {
+      operations?.archiveSession(id);
       sides.filter((t) => t.session === id).forEach((t) => removeSide(t.id));
       if (paneOf(id) >= 0) closeThread(id);
       return refreshSessions();
@@ -246,6 +260,7 @@ export function App() {
     void bench("DELETE", `/sessions/${id}`, { stop: true }).then(() => afterDelete(id), fail);
   };
   const afterDelete = (id: string) => {
+    operations?.disposeSession(id);
     sides.filter((t) => t.session === id).forEach((t) => removeSide(t.id));
     live.discard(id);
     if (paneOf(id) >= 0) closeThread(id);
@@ -358,6 +373,7 @@ export function App() {
   const asTask = (p?: live.Proc): live.Task | undefined =>
     p && { id: p.id, session: p.session ?? "", tool: "Process", arg: `${p.name} · ${p.command}`, state: procState(p), started: p.started, ended: p.ended, output: p.tail };
   const [taskId, setTaskId] = createSignal<string | undefined>();
+  const [operationTask, setOperationTask] = createSignal<OperationProjection | undefined>();
   const inspector = () => rightOpen() && !envTab() && !settingsTab();
 
   const switchTeam = (slug: string) => void window.harness.auth.chooseTeam(slug);
@@ -430,6 +446,7 @@ export function App() {
   const back = () => {
     if (file()) setFile(undefined);
     else if (taskId()) setTaskId(undefined);
+    else if (operationTask()) setOperationTask(undefined);
     else if (envTab()) setEnvTab(false);
     else if (settingsTab()) setSettingsTab(false);
     else if (maximised()) setMaximised(false);
@@ -671,10 +688,15 @@ export function App() {
   // The bench is live: session events and the bench's own changes land here.
   window.harness.onPi((ev) => {
     live.onEvent(ev);
+    if (ev.type === "bench" && typeof ev.connected === "boolean") operations?.connection(ev.connected);
     if (shouldRefreshOn(ev)) void refresh();
     if (ev.type === "sessions") void refreshSessions().catch(() => undefined);
     // After a reconnect, every open session pages in what it missed.
-    if (ev.type === "bench:resync") void refreshSessions().then(() => Promise.all(live_().map((x) => loadThread(x.id))), () => undefined);
+    if (ev.type === "bench:resync") {
+      operations?.connection(true);
+      void Promise.all((operations?.entries() ?? []).map((projection) => projection.reload()));
+      void refreshSessions().then(() => Promise.all(live_().map((x) => loadThread(x.id))), () => undefined);
+    }
   });
   void window.harness.benchState().then(async (st) => {
     if (bootTest) {
@@ -1016,7 +1038,8 @@ export function App() {
               file={isActive() ? file() : undefined}
               onCloseFile={() => setFile(undefined)}
               task={isActive() ? (live.tasks.find((t) => t.id === taskId()) ?? asTask(live.procs.find((p) => p.id === taskId()))) : undefined}
-              onCloseTask={() => setTaskId(undefined)}
+              operation={isActive() ? operationTask() : undefined}
+              onCloseTask={() => (setTaskId(undefined), setOperationTask(undefined))}
               snapshots={snapshots()}
               onCloseEnv={() => setEnvTab(false)}
               settings={isActive() && settingsTab()}
@@ -1071,6 +1094,7 @@ export function App() {
             treeOf={(id) => (sessions.find((x) => x.id === id) as unknown as { tree?: string } | undefined)?.tree}
             onOpenShell={() => toggleShell()}
             onOpenTask={(id) => (setEnvTab(false), setFile(undefined), setTaskId(id))}
+            onOpenOperation={(row) => (setEnvTab(false), setFile(undefined), setTaskId(undefined), setOperationTask(row))}
             onOpenFile={(path, status) => {
               setEnvTab(false);
               // Which workspace's tool server holds it: the selected tab's own, as the terminal
