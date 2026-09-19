@@ -109,10 +109,15 @@ export function validateSchedulePlan(calls: readonly ExactCall[], descriptor: Sc
         issues.push(issue(`$.calls[${index}].argsFrom.${name}`, "unknown_dependency", `${binding.from} must be a declared dependency`));
       } else if (Object.prototype.hasOwnProperty.call(call.args ?? {}, name)) {
         issues.push(issue(`$.calls[${index}].argsFrom.${name}`, "binding_collision", `${name} is supplied as both a literal and binding`));
-      } else if (!sourceDescriptor?.outputSchema.properties?.[binding.output]) {
-        issues.push(issue(`$.calls[${index}].argsFrom.${name}`, "unknown_dependency", `${binding.from} has no declared output ${binding.output}`));
-      } else if (target) {
-        const output = selectedSchema(sourceDescriptor.outputSchema.properties[binding.output], binding.select, sourceDescriptor.outputSchema);
+      } else if (sourceDescriptor) {
+        const declaredOutput = sourceDescriptor.outputSchema.properties?.[binding.output]
+          ?? (typeof sourceDescriptor.outputSchema.additionalProperties === "object" ? sourceDescriptor.outputSchema.additionalProperties : undefined);
+        if (!declaredOutput) {
+          issues.push(issue(`1calls[].argsFrom.`, "unknown_dependency", ` has no declared output `));
+          continue;
+        }
+        if (!target) continue;
+        const output = selectedSchema(declaredOutput, binding.select, sourceDescriptor.outputSchema);
         const expected = target.inputSchema.properties?.[name] ?? (typeof target.inputSchema.additionalProperties === "object" ? target.inputSchema.additionalProperties : undefined);
         if (!output) issues.push(issue(`$.calls[${index}].argsFrom.${name}`, "unknown_dependency", `selection does not exist in ${binding.from}.${binding.output}`));
         else if (!expected || !schemaAssignable(output, expected, sourceDescriptor.outputSchema, target.inputSchema)) {
