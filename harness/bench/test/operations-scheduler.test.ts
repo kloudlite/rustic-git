@@ -80,7 +80,44 @@ test("plan validation rejects undeclared and mistyped output bindings", () => {
     call("bound", "read.bound", { dependsOn: ["source"], argsFrom: { id: { from: "source", output: "count" } } }),
   ], (name) => capabilities.get(name));
   assert.equal(typed.ok, false);
-  if (!typed.ok) assert.ok(typed.issues.some((issue) => issue.code === "binding_type"));
+  if (!typed.ok) assert.ok(typed.issues.some((issue) => issue.code === "validation_failure"));
+});
+
+test("validates selected nested binding schemas, numeric compatibility, required fields, and collisions", () => {
+  const source = {
+    ...descriptor("read.structured"),
+    outputSchema: {
+      type: "object" as const,
+      properties: {
+        payload: { type: "object" as const, properties: { items: { type: "array" as const, items: { type: "object" as const, properties: { id: { type: "string" as const } }, required: ["id"] } } }, required: ["items"] },
+        count: { type: "integer" as const },
+        maybe: { oneOf: [{ type: "string" as const }, { type: "null" as const }] },
+      },
+      required: ["payload", "count", "maybe"],
+    },
+  };
+  const target = {
+    ...descriptor("read.typed"),
+    inputSchema: { type: "object" as const, properties: { id: { type: "string" as const }, amount: { type: "number" as const } }, required: ["id", "amount"], additionalProperties: false },
+  };
+  const typed = new Map([[source.capability, source], [target.capability, target]]);
+  const valid = validateSchedulePlan([
+    call("source", source.capability),
+    call("target", target.capability, { dependsOn: ["source"], argsFrom: {
+      id: { from: "source", output: "payload", select: ["items", 0, "id"] },
+      amount: { from: "source", output: "count" },
+    } }),
+  ], (name) => typed.get(name));
+  assert.equal(valid.ok, true, valid.ok ? "" : JSON.stringify(valid.issues));
+
+  for (const invalid of [
+    call("target", target.capability, { dependsOn: ["source"], argsFrom: { id: { from: "source", output: "maybe" }, amount: { from: "source", output: "count" } } }),
+    call("target", target.capability, { dependsOn: ["source"], args: { id: "literal" }, argsFrom: { id: { from: "source", output: "payload", select: ["items", 0, "id"] }, amount: { from: "source", output: "count" } } }),
+    call("target", target.capability, { dependsOn: ["source"], argsFrom: { id: { from: "source", output: "payload", select: ["items", 0, "id"] } } }),
+  ]) {
+    const checked = validateSchedulePlan([call("source", source.capability), invalid], (name) => typed.get(name));
+    assert.equal(checked.ok, false);
+  }
 });
 
 const deferred = <T>() => {
@@ -141,20 +178,24 @@ test("conflict lanes serialize collection writes and unknown footprints but perm
     call("pkg_rm", "packages.rm"),
     call("service", "services.put"),
     call("command", "command.run", { targetRef: "workspace-1" }),
+    call("same_scope", "read.one", { targetRef: "workspace-1" }),
     call("read", "read.one", { targetRef: "workspace-2" }),
   ], async ({ call: step }) => {
     started.push(step.key);
     if (step.key === "pkg_add") return { outcome: "succeeded", value: await packages.promise };
     if (step.key === "command") return { outcome: "succeeded", value: await command.promise };
     return { outcome: "succeeded", value: {} };
-  }));
+  }, 4, 3));
   await tick();
   assert.equal(started[0], "pkg_add");
   assert.deepEqual(new Set(started), new Set(["pkg_add", "service", "command", "read"]));
+  assert.equal(started.includes("same_scope"), false);
   packages.resolve({});
   await tick();
   assert.ok(started.includes("pkg_rm"));
   command.resolve({});
+  await tick();
+  assert.equal(started.includes("same_scope"), true);
   assert.equal((await result).state, "completed");
 });
 
@@ -182,4 +223,49 @@ test("deadline and abort cancel queued work and propagate one signal to running 
     scheduler.submit({ ...operation("expired", [call("a")], async () => ({ outcome: "succeeded", value: {} })), deadlineAt: Date.now() - 1 }),
     (error: unknown) => error instanceof SchedulerValidationError && error.code === "deadline_exceeded",
   );
+});
+
+test("rejects invalid per-operation concurrency limits", async () => {
+  const scheduler = new OperationScheduler({ maxConcurrent: 2 });
+  for (const [maxConcurrentReads, maxConcurrentMutations] of [[0, 1], [1, -1], [1.5, 1], [Number.POSITIVE_INFINITY, 1]]) {
+    await assert.rejects(
+      scheduler.submit(operation("invalid-limits", [call("a")], async () => ({ outcome: "succeeded", value: {} }), maxConcurrentReads, maxConcurrentMutations)),
+      (error: unknown) => error instanceof SchedulerValidationError && error.code === "validation_failure",
+    );
+  }
+});
+
+test("pre-aborted submissions settle without queue residue and completion removes abort listeners", async () => {
+  const scheduler = new OperationScheduler({ maxConcurrent: 1 });
+  const aborted = new AbortController();
+  aborted.abort();
+  const cancelled = await scheduler.submit({ ...operation("pre-aborted", [call("a")], async () => assert.fail("pre-aborted work ran")), signal: aborted.signal });
+  assert.equal(cancelled.state, "cancelled");
+
+  let adds = 0;
+  let removes = 0;
+  const signal = { aborted: false, addEventListener: () => { adds += 1; }, removeEventListener: () => { removes += 1; } } as unknown as AbortSignal;
+  const completed = await scheduler.submit({ ...operation("after", [call("a")], async () => ({ outcome: "succeeded", value: {} })), signal });
+  assert.equal(completed.state, "completed");
+  assert.equal(removes, adds);
+});
+
+test("a blocked early step cannot starve later ready steps in the same operation", async () => {
+  const scheduler = new OperationScheduler({ maxConcurrent: 2 });
+  const held = deferred<JsonValue>();
+  const started: string[] = [];
+  const blocker = scheduler.submit(operation("blocker", [call("hold", "packages.add", { targetRef: "workspace-shared" })], async () => ({ outcome: "succeeded", value: await held.promise }), 2, 1));
+  await tick();
+  const candidate = scheduler.submit(operation("candidate", [
+    call("blocked", "packages.rm", { targetRef: "workspace-shared" }),
+    call("later-a", "read.one", { targetRef: "workspace-a" }),
+    call("later-b", "read.one", { targetRef: "workspace-b" }),
+  ], async ({ call: step }) => (started.push(step.key), { outcome: "succeeded", value: {} }), 2, 1));
+  await tick();
+  assert.deepEqual(new Set(started), new Set(["later-a", "later-b"]));
+  assert.equal(started.includes("blocked"), false);
+  held.resolve({});
+  assert.equal((await blocker).state, "completed");
+  assert.equal((await candidate).state, "completed");
+  assert.equal(started.at(-1), "blocked");
 });

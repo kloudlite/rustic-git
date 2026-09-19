@@ -442,7 +442,7 @@ export function applyTransition(previous: OperationSnapshot, input: TransitionIn
     ...previous,
     state: finalState,
     revision,
-    updatedAt: now,
+    updatedAt: input.bumpRevision === false ? previous.updatedAt : now,
     steps,
     pendingDecisions: [...pendingDecisions],
     unknownOutcomes: [...unknownOutcomes],

@@ -1,4 +1,4 @@
-import { resolveCallArgs, type CapabilityDescriptor, type ExactCall, type JsonValue, type ValidationIssue } from "./contracts.ts";
+import { resolveCallArgs, type CapabilityDescriptor, type ExactCall, type JsonSchemaLike, type JsonValue, type ValidationIssue } from "./contracts.ts";
 
 export type ScheduledStepResult =
   | { outcome: "succeeded"; value: JsonValue; evidenceRefs?: string[] }
@@ -47,13 +47,41 @@ export class SchedulerValidationError extends Error {
   }
 }
 
-const issue = (path: string, code: ValidationIssue["code"] | "binding_type", message: string): ValidationIssue => ({ path, code: code as ValidationIssue["code"], message });
+const issue = (path: string, code: ValidationIssue["code"], message: string): ValidationIssue => ({ path, code, message });
 
-function compatibleSchemas(output: CapabilityDescriptor["outputSchema"], input: CapabilityDescriptor["inputSchema"], name: string): boolean {
-  const expected = input.properties?.[name];
-  if (!expected) return input.additionalProperties !== false;
-  const variants = output.oneOf ?? [output];
-  return variants.some((candidate) => candidate.type === undefined || expected.type === undefined || candidate.type === expected.type);
+function dereference(schema: JsonSchemaLike, root: JsonSchemaLike): JsonSchemaLike {
+  const name = schema.$ref?.startsWith("#/definitions/") ? schema.$ref.slice("#/definitions/".length) : undefined;
+  return name ? root.definitions?.[name] ?? schema : schema;
+}
+
+function selectedSchema(schema: JsonSchemaLike, select: readonly (string | number)[] | undefined, root: JsonSchemaLike): JsonSchemaLike | undefined {
+  let current = dereference(schema, root);
+  for (const segment of select ?? []) {
+    const variants = current.oneOf ?? [current];
+    const selected = variants.map((variant) => {
+      const resolved = dereference(variant, root);
+      return typeof segment === "number" ? resolved.items : resolved.properties?.[segment];
+    });
+    if (selected.some((value) => value === undefined)) return undefined;
+    current = selected.length === 1 ? selected[0]! : { oneOf: selected as JsonSchemaLike[] };
+  }
+  return current;
+}
+
+function schemaAssignable(source: JsonSchemaLike, target: JsonSchemaLike, sourceRoot: JsonSchemaLike, targetRoot: JsonSchemaLike): boolean {
+  const sources = dereference(source, sourceRoot).oneOf ?? [dereference(source, sourceRoot)];
+  const targets = dereference(target, targetRoot).oneOf ?? [dereference(target, targetRoot)];
+  return sources.every((candidate) => targets.some((expected) => {
+    const from = dereference(candidate, sourceRoot);
+    const to = dereference(expected, targetRoot);
+    if (from.type === "integer" && to.type === "number") return true;
+    if (from.type !== undefined && to.type !== undefined && from.type !== to.type) return false;
+    if (from.type === "array" && to.type === "array" && from.items && to.items) return schemaAssignable(from.items, to.items, sourceRoot, targetRoot);
+    if (from.type === "object" && to.type === "object") {
+      return (to.required ?? []).every((name) => from.properties?.[name] && to.properties?.[name] && schemaAssignable(from.properties[name], to.properties[name], sourceRoot, targetRoot));
+    }
+    return true;
+  }));
 }
 
 export function validateSchedulePlan(calls: readonly ExactCall[], descriptor: ScheduledOperation["descriptor"]): ScheduleValidation {
@@ -67,6 +95,10 @@ export function validateSchedulePlan(calls: readonly ExactCall[], descriptor: Sc
   }
   for (const [index, call] of calls.entries()) {
     const target = descriptor(call.capability);
+    const supplied = new Set([...Object.keys(call.args ?? {}), ...Object.keys(call.argsFrom ?? {})]);
+    for (const required of target?.inputSchema.required ?? []) {
+      if (!supplied.has(required)) issues.push(issue(`$.calls[${index}]`, "missing_field", `required argument ${required} is not supplied`));
+    }
     for (const dependency of call.dependsOn ?? []) {
       if (!byKey.has(dependency)) issues.push(issue(`$.calls[${index}].dependsOn`, "unknown_dependency", `unknown dependency ${dependency}`));
     }
@@ -75,10 +107,17 @@ export function validateSchedulePlan(calls: readonly ExactCall[], descriptor: Sc
       const sourceDescriptor = source && descriptor(source.capability);
       if (!source || !(call.dependsOn ?? []).includes(binding.from)) {
         issues.push(issue(`$.calls[${index}].argsFrom.${name}`, "unknown_dependency", `${binding.from} must be a declared dependency`));
+      } else if (Object.prototype.hasOwnProperty.call(call.args ?? {}, name)) {
+        issues.push(issue(`$.calls[${index}].argsFrom.${name}`, "binding_collision", `${name} is supplied as both a literal and binding`));
       } else if (!sourceDescriptor?.outputSchema.properties?.[binding.output]) {
         issues.push(issue(`$.calls[${index}].argsFrom.${name}`, "unknown_dependency", `${binding.from} has no declared output ${binding.output}`));
-      } else if (target && !compatibleSchemas(sourceDescriptor.outputSchema.properties[binding.output], target.inputSchema, name)) {
-        issues.push(issue(`$.calls[${index}].argsFrom.${name}`, "binding_type", `${binding.from}.${binding.output} is incompatible with ${call.capability}.${name}`));
+      } else if (target) {
+        const output = selectedSchema(sourceDescriptor.outputSchema.properties[binding.output], binding.select, sourceDescriptor.outputSchema);
+        const expected = target.inputSchema.properties?.[name] ?? (typeof target.inputSchema.additionalProperties === "object" ? target.inputSchema.additionalProperties : undefined);
+        if (!output) issues.push(issue(`$.calls[${index}].argsFrom.${name}`, "unknown_dependency", `selection does not exist in ${binding.from}.${binding.output}`));
+        else if (!expected || !schemaAssignable(output, expected, sourceDescriptor.outputSchema, target.inputSchema)) {
+          issues.push(issue(`$.calls[${index}].argsFrom.${name}`, "validation_failure", `${binding.from}.${binding.output} is incompatible with ${call.capability}.${name}`));
+        }
       }
     }
   }
@@ -99,7 +138,7 @@ export function validateSchedulePlan(calls: readonly ExactCall[], descriptor: Sc
   return issues.length ? { ok: false, issues } : { ok: true };
 }
 
-type Running = { operation: QueuedOperation; call: ExactCall; descriptor: CapabilityDescriptor; controller: AbortController; lanes: string[] };
+type Running = { operation: QueuedOperation; call: ExactCall; descriptor: CapabilityDescriptor; controller: AbortController; lanes: string[]; scope: string; exclusive: boolean };
 type QueuedOperation = {
   spec: ScheduledOperation;
   outputs: Record<string, JsonValue>;
@@ -107,8 +146,9 @@ type QueuedOperation = {
   runningReads: number;
   runningMutations: number;
   resolve(value: ScheduledOperationResult): void;
-  reject(error: unknown): void;
   abort(): void;
+  abortListener?: () => void;
+  settled: boolean;
   deadline?: ReturnType<typeof setTimeout>;
 };
 
@@ -126,10 +166,13 @@ export class OperationScheduler {
   }
 
   submit(spec: ScheduledOperation): Promise<ScheduledOperationResult> {
+    if (![spec.maxConcurrentReads, spec.maxConcurrentMutations].every((limit) => Number.isInteger(limit) && limit > 0)) {
+      return Promise.reject(new SchedulerValidationError("validation_failure", "per-operation concurrency limits must be positive integers"));
+    }
     const checked = validateSchedulePlan(spec.calls, spec.descriptor);
     if (!checked.ok) return Promise.reject(new SchedulerValidationError("validation_failure", checked.issues.map((entry) => entry.message).join("; "), checked.issues));
     if (spec.deadlineAt !== undefined && spec.deadlineAt <= Date.now()) return Promise.reject(new SchedulerValidationError("deadline_exceeded", "operation deadline has passed"));
-    return new Promise((resolve, reject) => {
+    return new Promise((resolve) => {
       const operation: QueuedOperation = {
         spec,
         outputs: {},
@@ -137,17 +180,20 @@ export class OperationScheduler {
         runningReads: 0,
         runningMutations: 0,
         resolve,
-        reject,
+        settled: false,
         abort: () => {
           for (const active of this.#running) if (active.operation === operation) active.controller.abort();
           for (const call of spec.calls) if (!operation.results.has(call.key) && ![...this.#running].some((active) => active.operation === operation && active.call.key === call.key)) operation.results.set(call.key, { outcome: "cancelled" });
           this.#finish(operation);
         },
       };
-      if (spec.signal?.aborted) operation.abort();
-      else spec.signal?.addEventListener("abort", operation.abort, { once: true });
-      if (spec.deadlineAt !== undefined) operation.deadline = setTimeout(operation.abort, Math.max(0, spec.deadlineAt - Date.now()));
       this.#operations.push(operation);
+      if (spec.signal?.aborted) operation.abort();
+      else if (spec.signal) {
+        operation.abortListener = operation.abort;
+        spec.signal.addEventListener("abort", operation.abortListener, { once: true });
+      }
+      if (spec.deadlineAt !== undefined) operation.deadline = setTimeout(operation.abort, Math.max(0, spec.deadlineAt - Date.now()));
       this.#pump();
     });
   }
@@ -190,7 +236,9 @@ export class OperationScheduler {
       const descriptor = operation.spec.descriptor(call.capability)!;
       if (descriptor.effect === "read" ? operation.runningReads >= operation.spec.maxConcurrentReads : operation.runningMutations >= operation.spec.maxConcurrentMutations) continue;
       const lanes = this.#laneKeys(operation.spec.operationId, call, descriptor);
+      const scope = call.targetRef ?? operation.spec.operationId;
       if (lanes.some((lane) => this.#lanes.has(lane))) continue;
+      if ([...this.#running].some((active) => active.scope === scope && (active.exclusive || descriptor.resourceAccess.exclusive))) continue;
       return { operation, call, descriptor, lanes };
     }
     this.#finish(operation);
@@ -215,7 +263,7 @@ export class OperationScheduler {
     const controller = new AbortController();
     const forwardAbort = () => controller.abort();
     operation.spec.signal?.addEventListener("abort", forwardAbort, { once: true });
-    const running: Running = { operation, call, descriptor, controller, lanes };
+    const running: Running = { operation, call, descriptor, controller, lanes, scope: call.targetRef ?? operation.spec.operationId, exclusive: descriptor.resourceAccess.exclusive };
     this.#running.add(running);
     for (const lane of lanes) this.#lanes.add(lane);
     if (descriptor.effect === "read") operation.runningReads += 1;
@@ -237,10 +285,12 @@ export class OperationScheduler {
   }
 
   #finish(operation: QueuedOperation): void {
-    if (operation.results.size !== operation.spec.calls.length || [...this.#running].some((entry) => entry.operation === operation)) return;
+    if (operation.settled || operation.results.size !== operation.spec.calls.length || [...this.#running].some((entry) => entry.operation === operation)) return;
+    operation.settled = true;
     const index = this.#operations.indexOf(operation);
     if (index >= 0) this.#operations.splice(index, 1);
     if (operation.deadline) clearTimeout(operation.deadline);
+    if (operation.abortListener) operation.spec.signal?.removeEventListener("abort", operation.abortListener);
     const steps = operation.spec.calls.map((call) => ({ key: call.key, outcome: operation.results.get(call.key)!.outcome }));
     const outcomes = steps.map((step) => step.outcome);
     const state = outcomes.includes("unknown") ? "reconciling" : outcomes.every((outcome) => outcome === "succeeded") ? "completed" : outcomes.some((outcome) => outcome === "succeeded") ? "partial" : outcomes.every((outcome) => outcome === "cancelled") ? "cancelled" : "failed";

@@ -614,7 +614,7 @@ function replayProblem(previous: OperationSnapshot, next: OperationSnapshot, rec
   ] as const) {
     if (!sameJson(left, right)) return `${name} changed after acceptance`;
   }
-  if (next.updatedAt < previous.updatedAt || record.at !== next.updatedAt) return "commit timestamp is inconsistent with the snapshot";
+  if (next.updatedAt < previous.updatedAt || (revisionOnlyCommit ? record.at < next.updatedAt : record.at !== next.updatedAt)) return "commit timestamp is inconsistent with the snapshot";
   if (revisionOnlyCommit && !sameJson({ ...previous, lastSequence: next.lastSequence }, next)) return "same-revision commit changed lifecycle facts";
   if (!revisionOnlyCommit && record.events.length === 0) return "a meaningful snapshot change has no corresponding event";
   if (next.state !== previous.state) {

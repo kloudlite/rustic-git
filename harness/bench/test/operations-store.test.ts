@@ -806,6 +806,28 @@ test("a recorded decision is bound, consumed once, and never replayed", () => {
   assert.equal(store.events(operationId).filter((event) => event.phase === "dispatched").length, 1);
 });
 
+test("recording a delayed decision preserves same-revision lifecycle timestamps", () => {
+  const { store, clock } = openStore();
+  const operationId = store.accept({ request: instruction(), context: context() }).snapshot.operationId;
+  queueEdit(store, operationId);
+  const waiting = store.requireDecision(operationId, "step-1", {
+    decisionId: "dec-delayed",
+    decisionClass: "user_authorization",
+    question: "Apply the delayed edit?",
+    payloadDigest: PAYLOAD_A,
+  });
+  clock.advance(1_000);
+  const recorded = store.recordDecision(recordedDecision(waiting, { decisionId: "dec-delayed", payloadDigest: PAYLOAD_A }), context());
+  assert.equal(recorded.revision, waiting.revision);
+  assert.equal(recorded.updatedAt, waiting.updatedAt);
+  const decisionEvent = store.events(operationId).findLast((event) => event.phase === "decision_recorded");
+  assert.equal(decisionEvent?.at, clock.now());
+  const resumed = store.resume({ request: resumeRequest(operationId, "dec-delayed", waiting.revision, "rec-1"), context: context() });
+  assert.equal(resumed.outcome, "dispatch");
+  assert.equal(resumed.snapshot.revision, waiting.revision + 1);
+  assert.equal(resumed.snapshot.updatedAt, clock.now());
+});
+
 test("a resume from a superseded user turn is refused, and the watermark is durable", () => {
   const { store, root, clock } = openStore();
   const accepted = store.accept({
