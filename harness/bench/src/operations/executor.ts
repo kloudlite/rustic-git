@@ -207,16 +207,7 @@ export class OperationExecutor {
         if (!this.#reconcile) continue;
         const conclusion = await this.#reconcile({ operationId: input.operationId, stepId: action.stepId, call, args, context: input.context, signal });
         if (conclusion.conclusion !== "unknown") this.#store.reconcileStep(input.operationId, action.stepId, conclusion);
-        continue;
       }
-      const digest = action.kind === "retry_candidate" ? action.argDigest : canonicalDigest(args);
-      if (action.kind === "retry_candidate") {
-        this.#store.retryStep(input.operationId, action.stepId, { retry: action.retry, argDigest: digest, idempotencyKey: `${input.operationId}/${action.stepId}` }, input.context);
-      } else {
-        this.#store.startStep(input.operationId, action.stepId, { argDigest: digest, idempotencyKey: `${input.operationId}/${action.stepId}` });
-      }
-      const outcome = await this.#registry.dispatch(action.capability, args, { ...this.#dispatchFor(input.context), signal }, action.capabilityVersion);
-      await this.#record({ operationId: input.operationId, context: input.context, calls: [call], ...(input.signal ? { signal: input.signal } : {}) }, call, action.stepId, descriptor.effect, args, signal, outcome);
     }
   }
 
