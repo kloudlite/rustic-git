@@ -74,9 +74,10 @@ class MemoryStore implements ExecutorStore {
   }
 }
 
-function registry(store: MemoryStore, outcomes: CapabilityDispatchResult[], descriptors: Record<string, CapabilityDescriptor> = { "read.item": READ, "write.item": WRITE }): Pick<CapabilityRegistry, "get" | "dispatch"> {
+function registry(store: MemoryStore, outcomes: CapabilityDispatchResult[], descriptors: Record<string, CapabilityDescriptor> = { "read.item": READ, "write.item": WRITE }): Pick<CapabilityRegistry, "get" | "prepare" | "dispatch"> {
   return {
     get: (name) => descriptors[name],
+    prepare: () => ({ ok: true, args: {}, states: {}, descriptor: APPROVED_WRITE }),
     dispatch: async (name, args, deps, version) => {
       store.log.push(`dispatch:${name}:${(args as any).value ?? ""}`);
       assert.equal(version, "1.0.0");
@@ -98,13 +99,23 @@ test("persists intent before trusted O02 dispatch and keeps actor context out of
 
 test("approval-required mutations enter running only through the recorded O05 resume", async () => {
   const store = new MemoryStore();
-  const reg: Pick<CapabilityRegistry, "get" | "dispatch"> = {
+  let approvals = 0;
+  const reg: Pick<CapabilityRegistry, "get" | "prepare" | "dispatch"> = {
     get: (name) => name === "write.item" ? APPROVED_WRITE : undefined,
+    prepare: (_name, _args, deps) => ({
+      ok: true,
+      args: {},
+      states: {},
+      descriptor: APPROVED_WRITE,
+      approval: {
+        capability: "write.item", version: "1.0.0", effect: "write", prompt: "Approve the exact write", args: {},
+        payloadDigest: "sha256:" + "1".repeat(64),
+        expectation: { ...deps.decision!, payloadDigest: "sha256:" + "1".repeat(64), now: 10 },
+      },
+    }),
     dispatch: async (name, _args, deps) => {
-      assert.ok(deps.approve);
-      assert.ok(deps.decision);
-      const expectation = { ...deps.decision!, payloadDigest: "sha256:" + "1".repeat(64), now: 10 };
-      await deps.approve!({ capability: name, version: "1.0.0", effect: "write", prompt: "Approve the exact write", args: {}, payloadDigest: expectation.payloadDigest, expectation });
+      assert.ok(deps.approval);
+      store.log.push(`dispatch:${name}`);
       return { outcome: "completed", capability: name, version: "1.0.0", result: {} };
     },
   };
@@ -112,7 +123,7 @@ test("approval-required mutations enter running only through the recorded O05 re
     store,
     registry: reg,
     scheduler: new OperationScheduler({ maxConcurrent: 1 }),
-    dispatchFor: () => ({ approve: async ({ expectation }) => ({
+    dispatchFor: () => ({ approve: async ({ expectation }) => (approvals += 1, {
       recordId: "record-1", operationId: expectation.operationId, stepId: expectation.stepId,
       decisionId: expectation.decisionId, decisionClass: expectation.decisionClass as "user_authorization",
       actorId: expectation.actorId, tenantId: expectation.tenantId, sessionId: expectation.sessionId,
@@ -122,9 +133,10 @@ test("approval-required mutations enter running only through the recorded O05 re
   });
   const result = await executor.execute({ operationId: "op-1", context, calls: calls({ key: "write", capability: "write.item" }) });
   assert.equal(result.state, "completed", JSON.stringify(result));
+  assert.equal(approvals, 1);
   assert.equal(store.log.includes("intent:write"), false);
   assert.ok(store.log.indexOf("decision:write") < store.log.indexOf("resume:write"));
-  assert.ok(store.log.indexOf("resume:write") < store.log.indexOf("outcome:write:succeeded"));
+  assert.ok(store.log.indexOf("resume:write") < store.log.indexOf("dispatch:write.item"));
 });
 
 test("real O02 dispatch and O05 store enforce actor-bound approval before mutation", async () => {

@@ -95,9 +95,11 @@ export type CapabilityApprovalRequest = {
 
 export type CapabilityDispatchDeps = {
   runtime?: CapabilityRuntime;
-  /** O05/O08 create and persist this record; O02 validates it before dispatch. */
+  /** The executor owns obtaining and persisting this record. */
   approve?: (request: CapabilityApprovalRequest) => Promise<RecordedDecision>;
   decision?: Omit<ResumeExpectation, "payloadDigest" | "now"> & { now?: number };
+  /** O05 consumed this exact decision before O02 dispatch began. */
+  approval?: { record: RecordedDecision; expectation: ResumeExpectation };
   /** Trusted dispatch policy, never model input. An unlisted source cannot authorize this call. */
   allowedPolicySources?: readonly RecordedDecision["policySource"][];
   signal?: AbortSignal;
@@ -855,6 +857,10 @@ export type CapabilityDescribeResult =
   | { ok: true; detail: "guide" | "schema"; entries: CapabilityDescription[]; nextCursor?: string }
   | { ok: false; code: OperationErrorCode; message: string };
 
+export type CapabilityPrepareResult =
+  | { ok: true; approval?: CapabilityApprovalRequest }
+  | { ok: false; result: CapabilityDispatchResult };
+
 export class CapabilityRegistry {
   private readonly byName: Map<string, CapabilityDefinition>;
   private readonly enabled: Set<string>;
@@ -899,6 +905,25 @@ export class CapabilityRegistry {
     }
     const index = buildDescriptionIndex(this.enabledDescriptors(), request.cursor);
     return { ok: true, detail: "guide", entries: index.entries, ...(index.nextCursor ? { nextCursor: index.nextCursor } : {}) };
+  }
+
+  prepare(capability: string, args: unknown, deps: CapabilityDispatchDeps = {}, version?: string): CapabilityPrepareResult {
+    const definition = this.byName.get(capability);
+    if (!definition) return { ok: false, result: { outcome: "refused", capability, version: version ?? "", code: "unsupported_capability", reason: `no capability ${capability}` } };
+    const { descriptor } = definition;
+    if (!this.enabled.has(capability)) return { ok: false, result: { outcome: "refused", capability, version: descriptor.version, code: "unsupported_capability", reason: `${capability} is not enabled here${definition.disabled ? `: ${definition.disabled}` : ""}` } };
+    if (version !== undefined && version !== descriptor.version) return { ok: false, result: { outcome: "refused", capability, version: descriptor.version, code: "stale_contract", reason: `${capability} ${version} is not the reviewed ${descriptor.version} contract` } };
+    const valid = validateCapabilityArgs({ shape: definition.shape, arguments: descriptor.arguments, checks: definition.checks }, args);
+    if (!valid.ok) return { ok: false, result: { outcome: "refused", capability, version: descriptor.version, code: "invalid_args", reason: valid.issues.map((issue) => `${issue.path}: ${issue.message}`).join("; "), issues: valid.issues } };
+    if (capability === "environment.intercept" && valid.value.states.workspace.kind === "unspecified") return { ok: false, result: { outcome: "refused", capability, version: descriptor.version, code: "invalid_args", reason: "workspace must name a target or be explicit null to clear the intercept" } };
+    if (!definition.target) return { ok: false, result: { outcome: "refused", capability, version: descriptor.version, code: "unsupported_capability", reason: `${capability} has no handler boundary` } };
+    if (!deps.runtime?.resolve(capability)) return { ok: false, result: { outcome: "refused", capability, version: descriptor.version, code: "unsupported_capability", reason: `no trusted adapter is wired for ${capability}` } };
+    if (descriptor.approval.required === "none") return { ok: true };
+    if (!deps.decision) return { ok: false, result: { outcome: "refused", capability, version: descriptor.version, code: "permission_denied", reason: "the dispatch has no durable decision expectation" } };
+    const approvedArgs = cloneJson(valid.value.args);
+    const payloadDigest = canonicalDigest(approvedArgs);
+    const expectation: ResumeExpectation = { ...deps.decision, payloadDigest, now: deps.decision.now ?? Date.now() };
+    return { ok: true, approval: { capability, version: descriptor.version, effect: descriptor.effect, prompt: approvalPrompt(definition, valid.value.args) ?? `${capability} ${descriptor.version}`, args: approvedArgs, payloadDigest, expectation } };
   }
 
   /**
@@ -950,7 +975,7 @@ export class CapabilityRegistry {
       outcome = await dispatchWithPolicy({
       capability,
       effect: descriptor.effect,
-      approval: this.approvalPlan(definition, approvalRequired, deps, valid.value.args),
+      approval: { required: approvalRequired, ...(approvalRequired === "none" ? {} : { obtain: async () => this.approvalGranted(deps) }) },
       inspect: () => definition.scopeCheck?.(valid.value.args),
       run: async () => handler({ args: executionArgs, states: cloneStates(valid.value.states), signal: deps.signal }),
       failed: (result) => result.ok ? undefined : result.error.code,
@@ -969,39 +994,15 @@ export class CapabilityRegistry {
     return { ...outcome, capability, version: descriptor.version };
   }
 
-  private approvalPlan(
-    definition: CapabilityDefinition,
-    required: ApprovalRequirement,
-    deps: CapabilityDispatchDeps,
-    args: Record<string, JsonValue>,
-  ): { required: ApprovalRequirement; obtain?: () => Promise<boolean> } {
-    const bridge = deps.approve;
-    if (required === "none" || !bridge || !deps.decision) return { required };
-    const prompt = approvalPrompt(definition, args);
-    const approvedArgs = cloneJson(args);
-    return {
-      required,
-      obtain: async () => {
-        const payloadDigest = canonicalDigest(approvedArgs);
-        const expectation: ResumeExpectation = { ...deps.decision!, payloadDigest, now: deps.decision!.now ?? Date.now() };
-        const record = await bridge({
-          capability: definition.descriptor.capability,
-          version: definition.descriptor.version,
-          effect: definition.descriptor.effect,
-          prompt: prompt ?? `${definition.descriptor.capability} ${definition.descriptor.version}`,
-          args: approvedArgs,
-          payloadDigest,
-          expectation,
-        });
-        const shaped = validateRecordedDecision(record);
-        if (!shaped.ok) throw new Error("forged_approval");
-        const allowed = deps.allowedPolicySources ?? ["user_ui"];
-        if (!allowed.includes(shaped.value.policySource)) throw new Error("forged_approval");
-        const checked = checkResumeAgainstRecord(shaped.value, expectation);
-        if (!checked.ok) throw new Error(checked.issues[0]?.code ?? "decision_mismatch");
-        return checked.value.dispatchAuthorized;
-      },
-    };
+  private approvalGranted(deps: CapabilityDispatchDeps): boolean {
+    if (!deps.approval) return false;
+    const shaped = validateRecordedDecision(deps.approval.record);
+    if (!shaped.ok) throw new Error("forged_approval");
+    const allowed = deps.allowedPolicySources ?? ["user_ui"];
+    if (!allowed.includes(shaped.value.policySource)) throw new Error("forged_approval");
+    const checked = checkResumeAgainstRecord(shaped.value, deps.approval.expectation);
+    if (!checked.ok) throw new Error(checked.issues[0]?.code ?? "decision_mismatch");
+    return checked.value.dispatchAuthorized;
   }
 }
 

@@ -63,14 +63,14 @@ export type RecoverInput = {
 
 export class OperationExecutor {
   #store: ExecutorStore;
-  #registry: Pick<CapabilityRegistry, "get" | "dispatch">;
+  #registry: Pick<CapabilityRegistry, "get" | "prepare" | "dispatch">;
   #scheduler: OperationScheduler;
   #dispatchFor: (context: TrustedActorContext) => CapabilityDispatchDeps;
   #reconcile?: (input: ReconciliationInput) => Promise<ReconciliationResult>;
 
   constructor(options: {
     store: ExecutorStore;
-    registry: Pick<CapabilityRegistry, "get" | "dispatch">;
+    registry: Pick<CapabilityRegistry, "get" | "prepare" | "dispatch">;
     scheduler: OperationScheduler;
     dispatchFor: (context: TrustedActorContext) => CapabilityDispatchDeps;
     reconcile?: (input: ReconciliationInput) => Promise<ReconciliationResult>;
@@ -122,48 +122,44 @@ export class OperationExecutor {
           const argDigest = canonicalDigest(args);
           const deps = this.#dispatchFor(input.context);
           let dispatchDeps: CapabilityDispatchDeps = { ...deps, signal };
-          let approvalOutcome: "dispatch" | "refuse_step" | undefined;
           if (descriptor.effect === "read" || descriptor.approval.required === "none") {
             this.#store.startStep(input.operationId, stepId, { argDigest, idempotencyKey: `${input.operationId}/${stepId}` });
           } else {
             const decisionId = `approval-${stepId}`;
             const expectedRevision = this.#store.load(input.operationId).revision + 1;
             const approve = deps.approve;
-            const approveWithDecision = async (request: CapabilityApprovalRequest) => {
-              const waiting = this.#store.requireDecision(input.operationId, stepId, {
-                decisionId,
-                decisionClass: descriptor.approval.required === "user" ? "user_authorization" : "user_preference",
-                question: request.prompt,
-                payloadDigest: request.payloadDigest,
-              });
-              if (!approve) throw new Error("approval bridge unavailable");
-              const record = await approve(request);
-              this.#store.recordDecision(record, input.context);
-              const resumed = this.#store.resume({
-                request: { action: "resume", operationId: input.operationId, decisionId, expectedRevision: waiting.revision, resolution: { kind: "recorded_user_decision", recordId: record.recordId } },
-                context: input.context,
-              });
-              approvalOutcome = resumed.outcome === "dispatch" ? "dispatch" : "refuse_step";
-              return record;
-            };
             const snapshot = this.#store.load(input.operationId);
-            dispatchDeps = { ...deps, signal, approve: approveWithDecision, decision: {
+            const decisionClass = descriptor.approval.required === "user" ? "user_authorization" as const : "user_preference" as const;
+            const decision = {
               actorId: input.context.actorId,
               tenantId: input.context.tenantId,
               sessionId: input.context.sessionId,
               operationId: input.operationId,
               stepId,
               decisionId,
-              decisionClass: descriptor.approval.required === "user" ? "user_authorization" : "user_preference",
+              decisionClass,
               revision: expectedRevision,
               expiryBound: Math.min(Date.now() + DEFAULT_DECISION_TTL_MS, snapshot.deadlineAt ?? Number.MAX_SAFE_INTEGER),
-            } };
+            };
+            const prepared = this.#registry.prepare(call.capability, args, { ...deps, signal, decision }, call.capabilityVersion);
+            if (!prepared.ok) return this.#record(input, call, stepId, descriptor.effect, args, signal, prepared.result);
+            if (!prepared.approval || !approve) throw new Error("approval bridge unavailable");
+            const waiting = this.#store.requireDecision(input.operationId, stepId, {
+              decisionId,
+              decisionClass: decision.decisionClass,
+              question: prepared.approval.prompt,
+              payloadDigest: prepared.approval.payloadDigest,
+            });
+            const record = await approve(prepared.approval);
+            this.#store.recordDecision(record, input.context);
+            const resumed = this.#store.resume({
+              request: { action: "resume", operationId: input.operationId, decisionId, expectedRevision: waiting.revision, resolution: { kind: "recorded_user_decision", recordId: record.recordId } },
+              context: input.context,
+            });
+            if (resumed.outcome !== "dispatch") return { outcome: "skipped" };
+            dispatchDeps = { ...deps, signal, approval: { record, expectation: prepared.approval.expectation } };
           }
           let outcome = await this.#registry.dispatch(call.capability, args, dispatchDeps, call.capabilityVersion);
-          if (approvalOutcome === "refuse_step") return { outcome: "skipped" };
-          if (descriptor.effect !== "read" && descriptor.approval.required !== "none" && approvalOutcome !== "dispatch") {
-            this.#store.startStep(input.operationId, stepId, { argDigest, idempotencyKey: `${input.operationId}/${stepId}` });
-          }
           while (outcome.outcome === "failed" && outcome.error.retryable && descriptor.retry.class === "idempotent") {
             this.#store.recordStepOutcome(input.operationId, stepId, { outcome: "failed", error: outcome.error });
             const step = this.#store.load(input.operationId).steps.find((entry) => entry.stepId === stepId);
