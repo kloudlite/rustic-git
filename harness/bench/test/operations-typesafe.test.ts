@@ -984,6 +984,7 @@ test("absent, denying, thrown, malformed, or mismatched policy fails closed befo
     assert.equal(failure.retryable, false, `${entry.name}: an unauthorized request is not retryable`);
     assert.equal(transport.calls.length, 0, `${entry.name}: nothing leaves the process`);
     assert.equal(result.ok && result.records[0].decision, "provider_failure");
+    assert.equal(result.ok && typeof result.failureCode, "string", `${entry.name}: structured failure code`);
     assert.equal(result.ok && judgmentIsActionable(result.records[0]), false);
   }
 });

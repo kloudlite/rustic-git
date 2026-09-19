@@ -665,6 +665,8 @@ export type JudgmentBatchFields = {
   issues: ValidationIssue[];
   model: TypeSafeModelReport;
   usage: TypeSafeUsageReport;
+  /** Machine-readable terminal provider-boundary failure, when the batch failed uniformly. */
+  failureCode?: string;
 };
 
 /** A live batch: its decisions may inform dispatch once policy allows the action. */
@@ -1016,6 +1018,7 @@ export function createTypeSafeJudgmentAdapter(config: TypeSafeConfig): TypeSafeJ
         issues: [],
         model: modelReport(observed, version),
         usage: { ...stats },
+        failureCode: reason.code,
       });
     };
 
