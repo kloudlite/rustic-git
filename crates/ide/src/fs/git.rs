@@ -5,7 +5,8 @@
 use gix::bstr::{BStr, ByteSlice};
 use gix::diff::blob::unified_diff::{ConsumeBinaryHunk, ContextSize};
 use gix::diff::blob::{Algorithm, InternedInput, UnifiedDiff};
-#[cfg(not(unix))]
+// Needed on BOTH paths now: the unix `openat`-based reader (~L100) and the non-unix fallback
+// (~L163) both hide `TREES_DIR` from a directory listing, so this is no longer platform-gated.
 use crate::trees::TREES_DIR;
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
@@ -97,7 +98,7 @@ fn worktree_bytes(root: &Path, rel: &str, hide_agents: bool) -> Option<Vec<u8>> 
     if parts.is_empty() || parts.iter().any(|part| part.as_bytes().is_empty()) {
         return None;
     }
-    if hide_agents && parts.first().is_some_and(|part| part.as_bytes() == b".agents") {
+    if hide_agents && parts.first().is_some_and(|part| part.as_bytes() == TREES_DIR.as_bytes()) {
         return None;
     }
     let root = root.canonicalize().ok()?;
@@ -133,6 +134,8 @@ fn worktree_bytes(root: &Path, rel: &str, hide_agents: bool) -> Option<Vec<u8>> 
     }
     let is_symlink = std::io::Error::last_os_error().raw_os_error() == Some(libc::ELOOP);
     if is_symlink {
+        // 4096, not a guess: it is PATH_MAX on Linux (macOS's own is smaller, 1024), so a symlink
+        // target this long cannot exist on a supported filesystem — never silently truncated.
         let mut target = vec![0u8; 4096];
         let n = unsafe { libc::readlinkat(dir, leaf.as_ptr(), target.as_mut_ptr().cast(), target.len()) };
         unsafe { libc::close(dir) };

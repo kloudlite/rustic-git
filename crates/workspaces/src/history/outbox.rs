@@ -64,7 +64,16 @@ pub async fn drain_outbox_once(h: &History) -> Result<usize, HistoryError> {
     let mut paths = Vec::with_capacity(DRAIN_BATCH);
     let prefix = Path::from(OUTBOX_PREFIX);
     let cursor = h.outbox_cursor().lock().unwrap_or_else(|poisoned| poisoned.into_inner()).clone();
-    let mut listing = os.list(Some(&prefix));
+    // `list_with_offset` when a cursor exists: production runs on S3/Azure, both of which push the
+    // offset down server-side, so a pass with nothing new to drain costs one bounded listing
+    // instead of the WHOLE `history-outbox/` prefix (unbounded with ClickHouse down and the outbox
+    // growing). `list` (unfiltered) on the very first pass, when there is no cursor yet.
+    // `retain_candidate` and the sort below are UNCHANGED: this must not assume the listing is
+    // ordered — the local filesystem store (used by `env_file`-shaped tests) is not.
+    let mut listing = match &cursor {
+        Some(c) => os.list_with_offset(Some(&prefix), c),
+        None => os.list(Some(&prefix)),
+    };
     while let Some(meta) = listing.next().await {
         let path = meta.map_err(|e| HistoryError::Outbox(e.to_string()))?.location;
         retain_candidate(&mut paths, cursor.as_ref(), path);
@@ -110,10 +119,24 @@ pub async fn drain_outbox_once(h: &History) -> Result<usize, HistoryError> {
     first_error.map_or(Ok(drained), Err)
 }
 
+/// The delay before the next pass: doubles every time a pass drained nothing (`Ok(0)`, or an
+/// error — the outbox isn't shrinking either way), capped at 60 s so a long ClickHouse outage
+/// doesn't stretch the wait past a minute; reset to the 2 s floor by ANY drained row, because a
+/// pass that found work means there is likely more right behind it.
+fn next_idle(current: std::time::Duration, drained: Option<usize>) -> std::time::Duration {
+    const FLOOR: std::time::Duration = std::time::Duration::from_secs(2);
+    const CAP: std::time::Duration = std::time::Duration::from_secs(60);
+    match drained {
+        Some(n) if n > 0 => FLOOR,
+        _ => (current * 2).min(CAP),
+    }
+}
+
 pub async fn drain_outbox_forever(history: Arc<History>) {
     const IDLE: std::time::Duration = std::time::Duration::from_secs(2);
     const STATUS_EVERY: std::time::Duration = std::time::Duration::from_secs(30);
     let mut last_status = std::time::Instant::now().checked_sub(STATUS_EVERY).unwrap_or_else(std::time::Instant::now);
+    let mut idle = IDLE;
     loop {
         if last_status.elapsed() >= STATUS_EVERY {
             last_status = std::time::Instant::now();
@@ -127,9 +150,15 @@ pub async fn drain_outbox_forever(history: Arc<History>) {
             }
         }
         match drain_outbox_once(&history).await {
-            Ok(0) => tokio::time::sleep(IDLE).await,
-            Ok(_) => {}
-            Err(e) => { tracing::warn!(error = %e, "history.outbox.drain.failed"); tokio::time::sleep(IDLE).await; }
+            Ok(n) => {
+                idle = next_idle(idle, Some(n));
+                if n == 0 { tokio::time::sleep(idle).await; }
+            }
+            Err(e) => {
+                tracing::warn!(error = %e, "history.outbox.drain.failed");
+                idle = next_idle(idle, None);
+                tokio::time::sleep(idle).await;
+            }
         }
     }
 }
@@ -151,5 +180,18 @@ mod tests {
         paths.clear();
         retain_candidate(&mut paths, cursor.as_ref(), Path::from("history-outbox/999.json"));
         assert_eq!(paths.last().unwrap().as_ref(), "history-outbox/999.json");
+    }
+
+    #[test]
+    fn next_idle_doubles_on_empty_or_error_and_resets_on_any_drain() {
+        use std::time::Duration;
+        let mut delay = Duration::from_secs(2);
+        for expected in [4, 8, 16, 32, 60, 60] {
+            delay = next_idle(delay, None);
+            assert_eq!(delay, Duration::from_secs(expected), "doubling toward the 60 s cap");
+        }
+        assert_eq!(next_idle(delay, Some(0)), Duration::from_secs(120).min(Duration::from_secs(60)), "Ok(0) still doubles (capped)");
+        assert_eq!(next_idle(Duration::from_secs(32), Some(1)), Duration::from_secs(2), "any drained row resets to the floor");
+        assert_eq!(next_idle(Duration::from_secs(60), Some(5)), Duration::from_secs(2), "draining resets even from the cap");
     }
 }
