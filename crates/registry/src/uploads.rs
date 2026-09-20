@@ -773,10 +773,8 @@ pub async fn complete(
                 }
                 Err(Refused::Failed(e)) => return crate::oci_internal(e),
             };
-            match blob_state::install(&app.store.os, owner, &d, &generation_key).await {
-                Ok(Ok(())) => {}
-                Ok(Err(blob_state::InstallError::Busy)) => return crate::oci_internal(crate::err("blob publication is busy")),
-                Err(e) => return crate::oci_internal(e),
+            if let Err(e) = blob_state::install(&app.store.os, owner, &d, &generation_key).await {
+                return crate::oci_internal(e);
             }
             len
         }
@@ -889,10 +887,8 @@ async fn complete_parts(
         .copy(&path, &generation)
         .await
         .map_err(|e| crate::oci_internal(e.into()))?;
-    match blob_state::install(&app.store.os, owner, d, &generation_key).await {
-        Ok(Ok(())) => {}
-        Ok(Err(blob_state::InstallError::Busy)) => return Err(crate::oci_internal(crate::err("blob publication is busy"))),
-        Err(e) => return Err(crate::oci_internal(e)),
+    if let Err(e) = blob_state::install(&app.store.os, owner, d, &generation_key).await {
+        return Err(crate::oci_internal(e));
     }
     Ok(size)
 }

@@ -291,42 +291,92 @@ pub async fn reconcile_repo_owner(store: &Store, owner: &str) -> Result<usize> {
     Ok(repaired)
 }
 
+/// Is this generation older than `cutoff`? Reads the record's own `installed_at` when it has one
+/// (no object-store call at all — this is CHANGE 1's whole point: a HEAD per candidate is what
+/// made an idle sweep expensive), and HEADs the physical key ONLY as a fallback for a record
+/// written before `installed_at` existed (`<= 0`, the serde default — `from_timestamp_millis(0)`
+/// is 1970, which is why the old code judged every such record ancient regardless of its real
+/// age). `None` means "skip this blob" (the object is gone — a race with GC or a client delete,
+/// not this sweep's business), `Err` propagates untouched (keep-bias: an unreadable HEAD must
+/// abort, never be read as either old or fresh).
+async fn installed_before(store: &Store, active: &blob_state::BlobGeneration, cutoff: chrono::DateTime<chrono::Utc>) -> Result<Option<bool>> {
+    if active.installed_at > 0 {
+        let installed_at = chrono::DateTime::<chrono::Utc>::from_timestamp_millis(active.installed_at).unwrap_or(cutoff);
+        return Ok(Some(installed_at <= cutoff));
+    }
+    let meta = match store.os.head(&slatedb::object_store::path::Path::from(active.physical_key.as_str())).await {
+        Ok(meta) => meta,
+        Err(slatedb::object_store::Error::NotFound { .. }) => return Ok(None),
+        Err(e) => return Err(e.into()),
+    };
+    Ok(Some(meta.last_modified <= cutoff))
+}
+
+/// One retired generation's fate this tick — CHANGE 3. `retired_at > 0` is judged against the
+/// cutoff exactly like an active generation's `installed_at`; `retired_at == 0` (an older build's
+/// record) is stamped with `now`, never deleted THIS round — the sweep does not know its age yet,
+/// and keep-bias means an unknown age keeps. `now_millis` is threaded in rather than read here so
+/// every retired entry in one sweep tick is stamped with the SAME instant.
+async fn sweep_retired(store: &Store, owner: &str, digest: &Digest, retired: &blob_state::RetiredGeneration, cutoff_millis: i64, now_millis: i64) -> Result<()> {
+    if retired.retired_at > 0 {
+        if retired.retired_at <= cutoff_millis {
+            blob_state::delete_retired(&store.os, owner, digest, &retired.physical_key).await?;
+        }
+        return Ok(());
+    }
+    blob_state::stamp_retired(&store.os, owner, digest, &retired.physical_key, now_millis).await
+}
+
 /// Delete this owner's unreferenced blobs. `grace` protects an in-flight push: a blob uploaded
 /// before its manifest exists is unreferenced for as long as the push takes.
+///
+/// ponytail: a `BlobRecord` whose `active` is `None` and `retired` is empty is never deleted — the
+/// object store has no conditional delete, so removing it could race an `install` writing a fresh
+/// generation into that same key and orphan a live blob. `candidates()` therefore costs one GET
+/// per digest this owner has EVER pushed, forever. Upgrade path: a conditional delete in the
+/// store, or compacting empty records under a generation prefix.
 pub async fn sweep_owner(store: &Store, owner: &str, grace: Duration) -> Result<usize> {
     let cutoff = chrono::DateTime::<chrono::Utc>::from(std::time::SystemTime::now() - grace);
-    // The SAME cutoff, as millis, for `blob_state::has_live_pin`: a pin's own time (the
-    // publication string's `@…` suffix) is judged against the identical instant the generation's
-    // `installed_at` is, so a push mid-flight when the sweep started reads consistently on both.
+    // The SAME cutoff, as millis, for `blob_state::has_live_pin` and `sweep_retired`: a pin's or a
+    // retirement's own time is judged against the identical instant the generation's
+    // `installed_at` is, so every reading of "is this old enough" in one sweep tick agrees.
     let cutoff_millis = cutoff.timestamp_millis();
+    let now_millis = chrono::Utc::now().timestamp_millis();
+    // CHANGE 2: candidates FIRST. In steady state every blob this owner has ever pushed already
+    // has a state record, so the legacy-adoption listing below finds nothing to adopt and costs
+    // one LIST with no GETs at all — the old order ran `resolve` (a GET, sometimes a write) on
+    // every legacy path before even checking whether it needed to.
+    let mut candidates = blob_state::candidates(&store.os, owner).await?;
+    let mut known: HashSet<String> = candidates.iter().map(|(d, _, _)| d.to_string()).collect();
     let prefix = slatedb::object_store::path::Path::from(format!("blobs/{owner}"));
     let mut legacy = store.os.list(Some(&prefix));
+    let mut adopted = false;
     while let Some(meta) = futures::StreamExt::next(&mut legacy).await {
         let meta = meta?;
         let Some(digest) = digest_from_path(&meta.location).and_then(|s| Digest::parse(&s)) else { continue };
+        if known.contains(&digest.to_string()) {
+            continue;
+        }
         let _ = blob_state::resolve(&store.os, owner, &digest).await?;
+        known.insert(digest.to_string());
+        adopted = true;
     }
-    let candidates = blob_state::candidates(&store.os, owner).await?;
+    if adopted {
+        candidates = blob_state::candidates(&store.os, owner).await?;
+    }
     let mut old_candidates = HashSet::new();
     for (digest, record, _) in &candidates {
         // A LEAKED pin (R-2: a push that died between pin and unpin) must age out, not block the
         // blob forever — `has_live_pin` reads each pin's own `@time`, not just "is the list empty".
         let Some(active) = record.active.as_ref().filter(|active| !blob_state::has_live_pin(active, cutoff_millis)) else { continue };
-        let meta = match store.os.head(&slatedb::object_store::path::Path::from(active.physical_key.as_str())).await {
-            Ok(meta) => meta,
-            Err(slatedb::object_store::Error::NotFound { .. }) => continue,
-            Err(e) => return Err(e.into()),
-        };
-        let installed_at = chrono::DateTime::<chrono::Utc>::from_timestamp_millis(active.installed_at)
-            .unwrap_or(meta.last_modified);
-        if installed_at <= cutoff {
+        if installed_before(store, active, cutoff).await? == Some(true) {
             old_candidates.insert(digest.to_string());
         }
     }
     if old_candidates.is_empty() {
         for (digest, record, _) in &candidates {
             for retired in &record.retired {
-                blob_state::delete_retired(&store.os, owner, digest, &retired.physical_key).await?;
+                sweep_retired(store, owner, digest, retired, cutoff_millis, now_millis).await?;
             }
         }
         return Ok(0);
@@ -335,7 +385,7 @@ pub async fn sweep_owner(store: &Store, owner: &str, grace: Duration) -> Result<
     let mut n = 0;
     for (digest, record, version) in candidates {
         for retired in &record.retired {
-            blob_state::delete_retired(&store.os, owner, &digest, &retired.physical_key).await?;
+            sweep_retired(store, owner, &digest, retired, cutoff_millis, now_millis).await?;
         }
         if keep.contains(&digest.to_string()) || record.active.as_ref().is_none_or(|a| blob_state::has_live_pin(a, cutoff_millis)) {
             continue;
@@ -344,19 +394,187 @@ pub async fn sweep_owner(store: &Store, owner: &str, grace: Duration) -> Result<
             continue;
         }
         let Some(active) = record.active.as_ref() else { continue };
-        let meta = match store.os.head(&slatedb::object_store::path::Path::from(active.physical_key.as_str())).await {
-            Ok(meta) => meta,
-            Err(slatedb::object_store::Error::NotFound { .. }) => continue,
-            Err(e) => return Err(e.into()),
-        };
-        let installed_at = chrono::DateTime::<chrono::Utc>::from_timestamp_millis(active.installed_at)
-            .unwrap_or(meta.last_modified);
-        if installed_at > cutoff {
+        if installed_before(store, active, cutoff).await? != Some(true) {
             continue;
         }
         let Some(retired) = blob_state::retire_if_unpinned(&store.os, owner, &digest, &version, cutoff_millis).await? else { continue };
+        // EXCEPTION to CHANGE 3's grace period, kept exactly as before: a blob the sweep ITSELF
+        // just retired here is deleted immediately — it already served its grace as an
+        // unreferenced ACTIVE generation (the `old_candidates` age check above), so making it
+        // wait a second grace period as a retired one would be double-counting the same wait.
         blob_state::delete_retired(&store.os, owner, &digest, &retired).await?;
         n += 1;
     }
     Ok(n)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use slatedb::object_store::{memory::InMemory, path::Path as OsPath, PutPayload};
+    use std::sync::atomic::{AtomicUsize, Ordering::SeqCst};
+
+    /// Counts `head` and `get` calls — the two ways `sweep_owner` used to reach the object store
+    /// per candidate. T1 asserts on `heads` specifically (CHANGE 1's promise: an idle sweep of
+    /// already-adopted blobs makes none); `gets` exists for completeness / future tests.
+    #[derive(Debug, Default)]
+    struct Counting {
+        inner: InMemory,
+        heads: AtomicUsize,
+        gets: AtomicUsize,
+    }
+    impl std::fmt::Display for Counting {
+        fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+            write!(f, "Counting")
+        }
+    }
+    #[async_trait::async_trait]
+    impl ObjectStore for Counting {
+        async fn put_opts(&self, l: &OsPath, p: PutPayload, o: slatedb::object_store::PutOptions) -> slatedb::object_store::Result<slatedb::object_store::PutResult> {
+            self.inner.put_opts(l, p, o).await
+        }
+        async fn put_multipart_opts(&self, l: &OsPath, o: slatedb::object_store::PutMultipartOptions) -> slatedb::object_store::Result<Box<dyn slatedb::object_store::MultipartUpload>> {
+            self.inner.put_multipart_opts(l, o).await
+        }
+        // `ObjectStore` has no separate `head` method to override — `ObjectStoreExt::head` (what
+        // `sweep_owner` calls) is `get_opts` with `GetOptions.head = true`, so that flag is what
+        // distinguishes the two here.
+        async fn get_opts(&self, l: &OsPath, o: slatedb::object_store::GetOptions) -> slatedb::object_store::Result<slatedb::object_store::GetResult> {
+            if o.head { self.heads.fetch_add(1, SeqCst); } else { self.gets.fetch_add(1, SeqCst); }
+            self.inner.get_opts(l, o).await
+        }
+        fn delete_stream(&self, l: futures::stream::BoxStream<'static, slatedb::object_store::Result<OsPath>>) -> futures::stream::BoxStream<'static, slatedb::object_store::Result<OsPath>> {
+            self.inner.delete_stream(l)
+        }
+        fn list(&self, prefix: Option<&OsPath>) -> futures::stream::BoxStream<'static, slatedb::object_store::Result<slatedb::object_store::ObjectMeta>> {
+            self.inner.list(prefix)
+        }
+        async fn list_with_delimiter(&self, prefix: Option<&OsPath>) -> slatedb::object_store::Result<slatedb::object_store::ListResult> {
+            self.inner.list_with_delimiter(prefix).await
+        }
+        async fn copy_opts(&self, from: &OsPath, to: &OsPath, o: slatedb::object_store::CopyOptions) -> slatedb::object_store::Result<()> {
+            self.inner.copy_opts(from, to, o).await
+        }
+    }
+
+    async fn env() -> (tempfile::TempDir, std::sync::Arc<Counting>, Store) {
+        let tmp = tempfile::tempdir().unwrap();
+        let os = std::sync::Arc::new(Counting::default());
+        let store = Store::open(os.clone(), tmp.path().join("cache"), false).await.unwrap();
+        (tmp, os, store)
+    }
+
+    fn digest(b: &[u8]) -> Digest {
+        Digest::of(b)
+    }
+
+    /// T1: three already-adopted (installed, `installed_at` set), fresh blobs — nothing to sweep,
+    /// so this must not HEAD any of them. Today (before CHANGE 1/2): 3 HEADs, one per candidate,
+    /// just to read `last_modified` for an age the record could already answer from `installed_at`.
+    #[tokio::test]
+    async fn an_idle_sweep_of_adopted_blobs_makes_no_head() {
+        let (_tmp, os, store) = env().await;
+        for i in 0..3 {
+            let bytes = format!("blob-{i}").into_bytes();
+            let d = digest(&bytes);
+            let (_, path) = blob_state::new_generation("acme", &d);
+            store.os.put(&path, PutPayload::from(bytes)).await.unwrap();
+            blob_state::install(&store.os, "acme", &d, path.as_ref()).await.unwrap();
+        }
+        os.heads.store(0, SeqCst);
+        let n = sweep_owner(&store, "acme", BLOB_GRACE).await.unwrap();
+        assert_eq!(n, 0, "nothing is old enough to sweep");
+        assert_eq!(os.heads.load(SeqCst), 0, "an idle sweep of adopted blobs must not HEAD any of them");
+    }
+
+    /// T2: the 1970 bug. A record with `installed_at: 0` (the shape a pre-this-field build wrote)
+    /// must fall back to the blob's OWN age (its `last_modified`), not be judged ancient outright.
+    /// Constructed by hand — `install` always sets a real `installed_at` now — writing the record
+    /// bytes directly the way an older build's row would already sit in the store.
+    #[tokio::test]
+    async fn a_record_with_no_install_time_falls_back_to_the_blobs_own_age() {
+        let (_tmp, _os, store) = env().await;
+        let d = digest(b"no install time");
+        let (_, path) = blob_state::new_generation("acme", &d);
+        store.os.put(&path, PutPayload::from(b"no install time".to_vec())).await.unwrap();
+        let record = blob_state::BlobRecord {
+            nonce: "n".into(),
+            active: Some(blob_state::BlobGeneration { physical_key: path.to_string(), pins: Vec::new(), installed_at: 0 }),
+            retired: Vec::new(),
+        };
+        store.os.put(&blob_state::state_path("acme", &d), PutPayload::from(serde_json::to_vec(&record).unwrap())).await.unwrap();
+
+        // Just written: not old enough under the default grace.
+        let n = sweep_owner(&store, "acme", BLOB_GRACE).await.unwrap();
+        assert_eq!(n, 0, "a just-written blob with installed_at: 0 must not read as 1970-ancient");
+        assert!(store.os.head(&path).await.is_ok(), "the blob must still be here");
+
+        // A grace long enough to put the blob's real (recent) age before the cutoff.
+        let n = sweep_owner(&store, "acme", Duration::from_secs(0)).await.unwrap();
+        assert_eq!(n, 1, "the same record, judged by its own recent age, is old enough with grace ZERO");
+    }
+
+    /// T3: a generation retired by a re-upload survives one sweep (the grace period), then goes.
+    #[tokio::test]
+    async fn a_generation_retired_by_a_reupload_survives_one_sweep() {
+        let (_tmp, _os, store) = env().await;
+        let d = digest(b"reuploaded");
+        let (_, old) = blob_state::new_generation("acme", &d);
+        store.os.put(&old, PutPayload::from("old")).await.unwrap();
+        let old_key = old.to_string();
+        blob_state::install(&store.os, "acme", &d, &old_key).await.unwrap();
+        let (_, new) = blob_state::new_generation("acme", &d);
+        store.os.put(&new, PutPayload::from("new")).await.unwrap();
+        blob_state::install(&store.os, "acme", &d, new.as_ref()).await.unwrap();
+
+        // Default grace: the retirement just happened, well inside the window.
+        sweep_owner(&store, "acme", BLOB_GRACE).await.unwrap();
+        assert!(store.os.head(&old).await.is_ok(), "the retired generation must survive its grace period");
+
+        // A cutoff after `retired_at`: grace ZERO puts "now" at the cutoff, and the retirement
+        // landed a moment before this call — so it is old enough.
+        sweep_owner(&store, "acme", Duration::from_secs(0)).await.unwrap();
+        assert!(store.os.head(&old).await.is_err(), "past its grace period, the retired generation is gone");
+    }
+
+    /// T4: a retired generation with no time at all (an older build's shape) is stamped, not
+    /// deleted, on the sweep that first finds it — and NOT deleted even under grace ZERO, because
+    /// the sweep does not yet know how old it is.
+    #[tokio::test]
+    async fn a_retired_generation_with_no_time_is_stamped_not_deleted() {
+        let (_tmp, _os, store) = env().await;
+        let d = digest(b"old format retirement");
+        let (_, old) = blob_state::new_generation("acme", &d);
+        store.os.put(&old, PutPayload::from("old")).await.unwrap();
+        let (_, new) = blob_state::new_generation("acme", &d);
+        store.os.put(&new, PutPayload::from("new")).await.unwrap();
+        let record = blob_state::BlobRecord {
+            nonce: "n".into(),
+            active: Some(blob_state::BlobGeneration { physical_key: new.to_string(), pins: Vec::new(), installed_at: chrono::Utc::now().timestamp_millis() }),
+            retired: vec![blob_state::RetiredGeneration { physical_key: old.to_string(), retired_at: 0 }],
+        };
+        store.os.put(&blob_state::state_path("acme", &d), PutPayload::from(serde_json::to_vec(&record).unwrap())).await.unwrap();
+
+        sweep_owner(&store, "acme", Duration::from_secs(0)).await.unwrap();
+        assert!(store.os.head(&old).await.is_ok(), "an unknown-age retirement must not be deleted on the sweep that first sees it");
+        let (_, stored_record, _) = blob_state::candidates(&store.os, "acme").await.unwrap().into_iter().find(|(dig, _, _)| *dig == d).unwrap();
+        let retired_at = stored_record.retired.iter().find(|r| r.physical_key == old.to_string()).unwrap().retired_at;
+        assert!(retired_at > 0, "the retirement must be stamped with a real time this round");
+    }
+
+    /// T5: the exception to CHANGE 3 — a blob the sweep retires ITSELF this tick (an unreferenced,
+    /// unpinned, aged-out ACTIVE generation `retire_if_unpinned` moves to `retired`) is deleted in
+    /// the SAME sweep, not held for a second grace period.
+    #[tokio::test]
+    async fn a_blob_the_sweep_retires_is_deleted_in_the_same_sweep() {
+        let (_tmp, _os, store) = env().await;
+        let d = digest(b"swept and retired in one tick");
+        let (_, generation) = blob_state::new_generation("acme", &d);
+        store.os.put(&generation, PutPayload::from("swept and retired in one tick")).await.unwrap();
+        blob_state::install(&store.os, "acme", &d, generation.as_ref()).await.unwrap();
+
+        let n = sweep_owner(&store, "acme", Duration::from_secs(0)).await.unwrap();
+        assert_eq!(n, 1, "the unreferenced, aged-out blob should have been swept");
+        assert!(store.os.head(&generation).await.is_err(), "a blob the sweep retires itself must not wait a second grace period");
+    }
 }

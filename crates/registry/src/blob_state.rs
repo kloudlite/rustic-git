@@ -17,6 +17,12 @@ pub struct BlobGeneration {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct RetiredGeneration {
     pub physical_key: String,
+    /// When this generation was retired, millis — `0` (the serde default) means "written before
+    /// this field existed, age unknown". `sweep_owner`'s `sweep_retired` treats that as "stamp it
+    /// this round, delete nothing" (keep-bias), never as 1970 the way the old `installed_at`
+    /// fallback did for the same shape of gap.
+    #[serde(default)]
+    pub retired_at: i64,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -31,11 +37,6 @@ pub struct BlobRecord {
 struct Loaded {
     record: BlobRecord,
     version: UpdateVersion,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum InstallError {
-    Busy,
 }
 
 pub fn state_path(owner: &str, d: &Digest) -> Path {
@@ -171,29 +172,29 @@ pub fn new_generation(owner: &str, d: &Digest) -> (String, Path) {
     (id.clone(), generation_path(owner, d, &id))
 }
 
-pub async fn install(os: &dyn ObjectStore, owner: &str, d: &Digest, physical_key: &str) -> Result<std::result::Result<(), InstallError>> {
+pub async fn install(os: &dyn ObjectStore, owner: &str, d: &Digest, physical_key: &str) -> Result<()> {
     let path = state_path(owner, d);
     for attempt in 0..8 {
         let current = load(os, owner, d).await?;
         let next = match current {
             Some(mut loaded) => {
                 if loaded.record.active.as_ref().is_some_and(|a| a.physical_key == physical_key) {
-                    return Ok(Ok(()));
+                    return Ok(());
                 }
                 if let Some(old) = loaded.record.active.take() {
-                    loaded.record.retired.push(RetiredGeneration { physical_key: old.physical_key });
+                    loaded.record.retired.push(RetiredGeneration { physical_key: old.physical_key, retired_at: chrono::Utc::now().timestamp_millis() });
                     loaded.record.active = Some(BlobGeneration { physical_key: physical_key.to_string(), pins: old.pins, installed_at: chrono::Utc::now().timestamp_millis() });
                 } else {
                     loaded.record.active = Some(BlobGeneration { physical_key: physical_key.to_string(), pins: Vec::new(), installed_at: chrono::Utc::now().timestamp_millis() });
                 }
                 loaded.record.nonce = nonce();
-                if update(os, &path, &loaded.record, &loaded.version).await? { return Ok(Ok(())) }
+                if update(os, &path, &loaded.record, &loaded.version).await? { return Ok(()) }
                 backoff(attempt).await;
                 continue;
             }
             None => BlobRecord { nonce: nonce(), active: Some(BlobGeneration { physical_key: physical_key.to_string(), pins: Vec::new(), installed_at: chrono::Utc::now().timestamp_millis() }), retired: Vec::new() },
         };
-        if create(os, &path, &next).await? { return Ok(Ok(())) }
+        if create(os, &path, &next).await? { return Ok(()) }
         backoff(attempt).await;
     }
     Err(crate::err("blob state CAS retries exhausted"))
@@ -231,7 +232,7 @@ pub async fn retire(os: &dyn ObjectStore, owner: &str, d: &Digest) -> Result<Opt
         let Some(mut loaded) = load(os, owner, d).await? else { return Ok(None) };
         let Some(active) = loaded.record.active.take() else { return Ok(None) };
         let physical_key = active.physical_key.clone();
-        loaded.record.retired.push(RetiredGeneration { physical_key: physical_key.clone() });
+        loaded.record.retired.push(RetiredGeneration { physical_key: physical_key.clone(), retired_at: chrono::Utc::now().timestamp_millis() });
         loaded.record.nonce = nonce();
         if update(os, &path, &loaded.record, &loaded.version).await? { return Ok(Some(physical_key)) }
         backoff(attempt).await;
@@ -272,7 +273,7 @@ pub async fn retire_if_unpinned(
     let Some(active) = loaded.record.active.take() else { return Ok(None) };
     if has_live_pin(&active, cutoff_millis) { return Ok(None) }
     let physical_key = active.physical_key.clone();
-    loaded.record.retired.push(RetiredGeneration { physical_key: physical_key.clone() });
+    loaded.record.retired.push(RetiredGeneration { physical_key: physical_key.clone(), retired_at: chrono::Utc::now().timestamp_millis() });
     loaded.record.nonce = nonce();
     if update(os, &path, &loaded.record, expected).await? { Ok(Some(physical_key)) } else { Ok(None) }
 }
@@ -291,6 +292,29 @@ pub async fn delete_retired(os: &dyn ObjectStore, owner: &str, d: &Digest, physi
         backoff(attempt).await;
     }
     Err(crate::err("retired blob cleanup CAS retries exhausted"))
+}
+
+/// Stamps a `retired_at` on a generation an OLDER build retired before this field existed
+/// (`retired_at == 0`) — the sweep's own keep-bias: it does not delete an entry whose age it
+/// cannot judge, but it also must not leave that entry unjudgeable forever, so this gives it a
+/// clock the NEXT sweep can act on. Same CAS-retry-with-backoff shape as `delete_retired`, but no
+/// object-store delete: the bytes are untouched.
+pub async fn stamp_retired(os: &dyn ObjectStore, owner: &str, d: &Digest, physical_key: &str, retired_at: i64) -> Result<()> {
+    let path = state_path(owner, d);
+    for attempt in 0..8 {
+        let Some(mut loaded) = read(os, &path).await? else { return Ok(()) };
+        let Some(entry) = loaded.record.retired.iter_mut().find(|r| r.physical_key == physical_key) else { return Ok(()) };
+        if entry.retired_at != 0 {
+            // Already stamped by a racing sweep (or this one, retried after an update that
+            // actually landed but answered as a version conflict) — nothing to do.
+            return Ok(());
+        }
+        entry.retired_at = retired_at;
+        loaded.record.nonce = nonce();
+        if update(os, &path, &loaded.record, &loaded.version).await? { return Ok(()) }
+        backoff(attempt).await;
+    }
+    Err(crate::err("retired blob stamp CAS retries exhausted"))
 }
 
 pub async fn delete_active(os: &dyn ObjectStore, owner: &str, d: &Digest) -> Result<Option<String>> {
@@ -327,11 +351,11 @@ mod tests {
         let (_, old) = new_generation("acme", &d);
         os.put(&old, PutPayload::from("old")).await.unwrap();
         let old_key = old.to_string();
-        install(os.as_ref(), "acme", &d, &old_key).await.unwrap().unwrap();
+        install(os.as_ref(), "acme", &d, &old_key).await.unwrap();
         let (_, new) = new_generation("acme", &d);
         os.put(&new, PutPayload::from("new")).await.unwrap();
         let new_key = new.to_string();
-        install(os.as_ref(), "acme", &d, &new_key).await.unwrap().unwrap();
+        install(os.as_ref(), "acme", &d, &new_key).await.unwrap();
         delete_retired(os.as_ref(), "acme", &d, &old_key).await.unwrap();
         assert_eq!(resolve(os.as_ref(), "acme", &d).await.unwrap(), Some(new));
     }
@@ -343,12 +367,12 @@ mod tests {
         let (_, old) = new_generation("acme", &d);
         os.put(&old, PutPayload::from("old")).await.unwrap();
         let old_key = old.to_string();
-        install(os.as_ref(), "acme", &d, &old_key).await.unwrap().unwrap();
+        install(os.as_ref(), "acme", &d, &old_key).await.unwrap();
         assert!(pin(os.as_ref(), "acme", &d, "manifest").await.unwrap());
         let (_, new) = new_generation("acme", &d);
         os.put(&new, PutPayload::from("new")).await.unwrap();
         let new_key = new.to_string();
-        install(os.as_ref(), "acme", &d, &new_key).await.unwrap().unwrap();
+        install(os.as_ref(), "acme", &d, &new_key).await.unwrap();
         assert_eq!(resolve(os.as_ref(), "acme", &d).await.unwrap(), Some(new.clone()));
         unpin(os.as_ref(), "acme", &d, "manifest").await.unwrap();
         assert!(candidates(os.as_ref(), "acme").await.unwrap().into_iter().all(|(_, record, _)| record.active.as_ref().is_none_or(|active| active.pins.is_empty())));
@@ -361,7 +385,7 @@ mod tests {
         let (_, generation) = new_generation("acme", &d);
         os.put(&generation, PutPayload::from("blob")).await.unwrap();
         let generation_key = generation.to_string();
-        install(os.as_ref(), "acme", &d, &generation_key).await.unwrap().unwrap();
+        install(os.as_ref(), "acme", &d, &generation_key).await.unwrap();
         let snapshot = candidates(os.as_ref(), "acme").await.unwrap().pop().unwrap().2;
         pin(os.as_ref(), "acme", &d, "manifest").await.unwrap();
         unpin(os.as_ref(), "acme", &d, "manifest").await.unwrap();
@@ -376,7 +400,7 @@ mod tests {
         assert!(!pin(os.as_ref(), "acme", &d, "publication").await.unwrap());
         let (_, generation) = new_generation("acme", &d);
         os.put(&generation, PutPayload::from("blob")).await.unwrap();
-        install(os.as_ref(), "acme", &d, generation.as_ref()).await.unwrap().unwrap();
+        install(os.as_ref(), "acme", &d, generation.as_ref()).await.unwrap();
         assert!(pin(os.as_ref(), "acme", &d, "publication").await.unwrap());
         assert_eq!(resolve(os.as_ref(), "acme", &d).await.unwrap(), Some(generation));
     }
@@ -397,7 +421,7 @@ mod tests {
             let d = digest();
             let (_, generation) = new_generation("acme", &d);
             os.put(&generation, PutPayload::from("blob")).await.unwrap();
-            install(os.as_ref(), "acme", &d, generation.as_ref()).await.unwrap().unwrap();
+            install(os.as_ref(), "acme", &d, generation.as_ref()).await.unwrap();
 
             let pins: Vec<_> = (0..8)
                 .map(|i| {
