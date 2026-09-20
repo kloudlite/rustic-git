@@ -604,7 +604,7 @@ test("renderer phase edges are exact projections of the frozen O01 transition ta
   );
 });
 
-test("every O01 transition is explicitly event-mapped or repair-only", () => {
+test("every O01 transition is event-mapped, branch-mapped or repair-only", () => {
   const operationMapped = Object.values(OPERATION_PHASE_EDGES).flat().map((edge) => JSON.stringify(edge));
   const operationRepairOnly = OPERATION_TRANSITIONS
     .filter((edge) => edge.trigger === "cancel_requested")
@@ -613,8 +613,12 @@ test("every O01 transition is explicitly event-mapped or repair-only", () => {
 
   const stepMapped = Object.values(STEP_PHASE).flatMap((effect) => effect.edges ?? []).map((edge) => JSON.stringify(edge));
   const stepRepairOnly = STEP_REPAIR_ONLY_EDGES.map((edge) => JSON.stringify(edge));
-  const dependencyRepairOnly = STEP_TRANSITIONS.filter((edge) => edge.trigger === "dependency_failed").map((edge) => JSON.stringify(edge));
-  assert.deepEqual(new Set([...stepMapped, ...stepRepairOnly, ...dependencyRepairOnly]), new Set(STEP_TRANSITIONS.map((edge) => JSON.stringify(edge))));
+  // `queued -> skipped (dependency_failed)` has no phase of its own: the store backs it with a
+  // `progress` event carrying decisionCode "dependency_failed", and `planStep` maps that in a
+  // dedicated branch (see "a dependency failure marks the queued step skipped"), so it is
+  // event-mapped outside STEP_PHASE.
+  const dependencyMappedByBranch = STEP_TRANSITIONS.filter((edge) => edge.trigger === "dependency_failed").map((edge) => JSON.stringify(edge));
+  assert.deepEqual(new Set([...stepMapped, ...stepRepairOnly, ...dependencyMappedByBranch]), new Set(STEP_TRANSITIONS.map((edge) => JSON.stringify(edge))));
   assert.deepEqual(
     new Set(OPERATION_OBSERVATION_PHASES),
     new Set(["resolved", "queued", "progress", "succeeded", "failed", "cancelled"]),
