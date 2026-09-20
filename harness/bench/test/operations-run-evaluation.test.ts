@@ -60,7 +60,9 @@ const bootstrap = { typeSafeConfig: testTypeSafeConfig, faultScenarios };
 test("requires explicit corpus, oracles, and output", async () => {
   for (const argv of [[], ["--corpus", corpusFixture], ["--corpus", corpusFixture, "--oracles", oracleFixture]]) {
     const io = capture();
-    assert.notEqual(await runEvaluationCli(argv, { ...io, repoRoot: path.resolve(here, "../../..") }), 0);
+    // Exact, not merely non-zero: 1 is Node's own uncaught-exception exit code, and 10 now means
+    // "ran but attempts failed" — a weak notEqual(0) here is how the two collided unnoticed before.
+    assert.equal(await runEvaluationCli(argv, { ...io, repoRoot: path.resolve(here, "../../..") }), 2);
     assert.deepEqual(io.stderr, ["argument_error"]);
   }
 });
@@ -138,7 +140,7 @@ test("test-only bootstrap custody dependency permits an injected repository path
   });
   // The corpus's own two injected-fault cases are provider_failure by design (they exercise fault
   // reporting), so even a mechanically clean run of this fixture has non-empty failure totals.
-  assert.equal(exit, 2);
+  assert.equal(exit, 10);
 });
 
 test("test-only custody dependency permits the fixture and joins reviewer oracles", async () => {
@@ -152,7 +154,7 @@ test("test-only custody dependency permits the fixture and joins reviewer oracle
     loadBootstrap: async () => bootstrap,
   });
   // See the note above: the corpus's own fault-injection cases make totals non-empty here too.
-  assert.equal(exit, 2);
+  assert.equal(exit, 10);
   const report = JSON.parse(fs.readFileSync(path.join(root, "report.json"), "utf8"));
   assert.ok(report.splits.held_out > 0);
   assert.equal(report.cases.some((entry: { split: string }) => entry.split === "held_out"), true);
@@ -166,7 +168,7 @@ test("writes deterministic report atomically with unavailable current", async ()
     const argv = args(root);
     const exit = await runEvaluationCli(argv, { ...io, repoRoot: path.resolve(here, "../../.."), clock: fixedClock, loadBootstrap: async () => bootstrap });
     // See the note above: the corpus's own fault-injection cases make totals non-empty here too.
-    assert.equal(exit, 2);
+    assert.equal(exit, 10);
     assert.deepEqual(io.stderr, []);
     assert.equal(io.stdout.some((line) => line.includes("apiKey") || line.includes("secret")), false);
     assert.equal(fs.readdirSync(path.join(root, "reports")).some((name) => name.includes(".tmp")), false);
@@ -232,7 +234,7 @@ test("injected provider config can run without live network", async () => {
   });
   // The stubbed fetch fails every dispatched case (by design, to avoid live network), so totals
   // are non-empty and the exit code says so.
-  assert.equal(exit, 2);
+  assert.equal(exit, 10);
   assert.equal(calls > 0, true);
   assert.equal([...io.stdout, ...io.stderr].join("\n").includes("test-key"), false);
 });
@@ -254,7 +256,7 @@ test("a run whose every attempt failed exits 2 and still writes the report, dist
       },
     }),
   });
-  assert.equal(exit, 2, "every attempt is provider_failure, so the run must not look green");
+  assert.equal(exit, 10, "every attempt is provider_failure, so the run must not look green");
   const report = JSON.parse(fs.readFileSync(path.join(root, "reports", "report.json"), "utf8"));
   const proposed = report.subjects.find((subject: { role: string }) => subject.role === "proposed");
   assert.ok(proposed.totals.failures && Object.keys(proposed.totals.failures).length > 0);
@@ -436,7 +438,7 @@ test("spawned CLI loads an external trusted bootstrap and emits compact stdout",
   const output = path.join(root, "report.json");
   const result = spawnSync(process.execPath, [fileURLToPath(new URL("../src/operations/run-evaluation.ts", import.meta.url)), "--corpus", corpusFixture, "--oracles", oracle, "--output", output, "--bootstrap", bootstrapFile, "--run-id", "spawn-run"], { encoding: "utf8" });
   // The stubbed fetch fails every dispatched case (offline by design), so totals are non-empty.
-  assert.equal(result.status, 2, result.stderr);
+  assert.equal(result.status, 10, result.stderr);
   assert.equal(fs.existsSync(output), true);
   assert.deepEqual(result.stdout.trim().split("\n").map((line) => line.split("=")[0]), ["runId", "cases", "output", "totals"]);
   assert.equal(result.stdout.includes("wholeCall"), false);
@@ -455,7 +457,7 @@ test("package script preserves the executable argument boundary", async () => {
   const harnessRoot = path.resolve(here, "../..");
   const result = spawnSync(bun, ["run", "evaluation:operations", "--", "--corpus", corpusFixture, "--oracles", oracle, "--output", output, "--bootstrap", bootstrapFile], { cwd: harnessRoot, encoding: "utf8" });
   // The stubbed fetch fails every dispatched case (offline by design), so totals are non-empty.
-  assert.equal(result.status, 2, result.stderr);
+  assert.equal(result.status, 10, result.stderr);
   assert.equal(fs.existsSync(output), true);
   assert.equal(result.stdout.includes("package-test-key"), false);
 });

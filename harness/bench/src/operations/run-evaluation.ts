@@ -1,13 +1,15 @@
 /**
  * Evaluation CLI: runs the o10 corpus against baseline/current/proposed subjects and writes a
- * report. Exit codes fall into three families, checked in this order, so a wrapper can tell "not
+ * report. Exit codes fall into four families, checked in this order, so a wrapper can tell "not
  * even a valid run" from "ran, but the answer isn't green":
  *   - 0: a clean run — the report was written and no attempt failed.
- *   - 1: the arguments themselves were invalid (`argument_error`) — nothing ran.
- *   - 2: at least one attempt's failure was counted in the report's totals — the run completed
- *     and was written, but the totals line is non-empty; a wrapper must not treat this as green.
+ *   - 2: the arguments themselves were invalid (`argument_error`) — nothing ran.
  *   - 3-9: the run could not complete at all (bad custody, corpus, oracle, pricing, bootstrap,
  *     suite, or output failure) — the existing per-stage codes, unchanged.
+ *   - 10: at least one attempt's failure was counted in the report's totals — the run completed
+ *     and was written, but the totals line is non-empty; a wrapper must not treat this as green.
+ * 1 is never returned deliberately: it is what Node exits with on an uncaught exception, and
+ * reusing it here would make "bad arguments" indistinguishable from "crashed".
  */
 import fs from "node:fs";
 import crypto from "node:crypto";
@@ -55,6 +57,10 @@ export type EvaluationBootstrap = {
 
 const VALUE_FLAGS = new Set(["--corpus", "--oracles", "--output", "--bootstrap", "--pricing", "--run-id"]);
 const REQUIRED_FLAGS = ["corpus", "oracles", "output", "bootstrap"] as const;
+
+/** The run completed and was written, but at least one attempt's failure is in the totals. The
+ * first code after the existing 3-9 "could not complete" family — see the module docs above. */
+const EXIT_ATTEMPTS_FAILED = 10;
 
 function parseArgs(args: readonly string[]): CliOptions {
   const parsed: Record<string, string> = {};
@@ -199,7 +205,7 @@ export async function runEvaluationCli(args: readonly string[], deps: RunEvaluat
     options = parseArgs(args);
   } catch (error) {
     stderr(errorCode(error, "argument_error"));
-    return 1;
+    return 2;
   }
 
   const repoRoot = deps.repoRoot ?? path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../../../..");
@@ -294,7 +300,7 @@ export async function runEvaluationCli(args: readonly string[], deps: RunEvaluat
   stdout(`totals=failures:${Object.entries(failures).map(([code, count]) => `${code}:${count}`).join(",") || "none"}`);
   // A run that reached the report is not the same as a run a wrapper should treat as green: at
   // least one attempt failed, so the exit code says so instead of looking identical to a clean run.
-  return Object.keys(failures).length ? 2 : 0;
+  return Object.keys(failures).length ? EXIT_ATTEMPTS_FAILED : 0;
 }
 
 async function main(): Promise<void> {
