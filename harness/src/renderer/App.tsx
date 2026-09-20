@@ -41,6 +41,9 @@ export function App() {
       const timer = setInterval(() => {
         const state = operations?.entries().find((entry) => entry.operationId === operationId)?.view().state;
         if (state !== undefined && isTerminalOperation(state)) return clearInterval(timer);
+        // MAX_SAFE_INTEGER cannot spin the store: `catchUp` only ever queues one in-flight fetch
+        // (`pendingNotification`) and clears that flag before requeuing on completion, so a tick
+        // arriving mid-fetch coalesces into the next one rather than stacking.
         onChanged(Number.MAX_SAFE_INTEGER);
       }, OPERATION_POLL_MS);
       return () => clearInterval(timer);

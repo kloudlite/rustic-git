@@ -1,4 +1,4 @@
-import { BrowserWindow, Menu, WebContentsView, app, clipboard, ipcMain, nativeTheme, safeStorage, shell, systemPreferences, type WebContents } from "electron";
+import { BrowserWindow, Menu, WebContentsView, app, clipboard, ipcMain, nativeTheme, safeStorage, shell, systemPreferences, type IpcMainInvokeEvent, type WebContents } from "electron";
 import os from "node:os";
 import path from "node:path";
 import fs from "node:fs/promises";
@@ -12,9 +12,13 @@ import { ensureBench, keepToolToken, listTeams, mintSession, mintToolToken, revo
 import { openTunnel } from "./connect/tunnel";
 import { clearMyEnvironment, getEnvironment, listEnvironments, listRepos, listWorkspaces, myEnvironment, setMyEnvironment, volumeHistory } from "./connect/platform";
 import { checkPty, checkWatch, closeSocket, readTtydFrame } from "./pty-ipc";
+import { isMainFrame, operationStepId, NOT_MAIN_FRAME } from "./operations-ipc";
 import type WebSocket from "ws";
 
-if (process.env.KL_BOOT_TEST) {
+// A packaged build never honours KL_BOOT_TEST: it is what skips the login gate, and a packaged
+// build is exactly the one a person actually trusts with real credentials.
+const BOOT_TEST = !app.isPackaged && !!process.env.KL_BOOT_TEST;
+if (BOOT_TEST) {
   app.setPath("userData", process.env.KL_BOOT_TEST_PROFILE ?? path.join(os.tmpdir(), `kloudlite-boot-${process.pid}`));
 }
 
@@ -71,8 +75,11 @@ function createWindow(): void {
 
   mainWin = win;
   void win.loadFile(path.join(__dirname, "..", "renderer", "index.html"), {
-    hash: process.env.HARNESS_HASH ?? (process.env.KL_BOOT_TEST ? "boot-session" : ""),
-    search: [process.env.HARNESS_THEME && `theme=${process.env.HARNESS_THEME}`, process.env.KL_BOOT_TEST && "boot-test=1"].filter(Boolean).join("&"),
+    hash: process.env.HARNESS_HASH ?? (BOOT_TEST ? "boot-session" : ""),
+    // `boot-test=1` is the renderer's only way to learn KL_BOOT_TEST (index.tsx reads it from
+    // location.search); gating it here, not there, is what keeps a packaged build's login gate
+    // un-skippable — nothing else ever puts that query key on the URL this window loads.
+    search: [process.env.HARNESS_THEME && `theme=${process.env.HARNESS_THEME}`, BOOT_TEST && "boot-test=1"].filter(Boolean).join("&"),
   });
 
   // HARNESS_SHOT=<file.png>: write one screenshot after first paint and exit, so
@@ -344,17 +351,29 @@ async function operation<T>(call: (client: BenchClient, headers: { authorization
   }
 }
 
-ipcMain.handle("operations:snapshot", (_e, id: unknown) => operation((client, headers) => client.operationSnapshot(operationId(id), headers)));
-ipcMain.handle("operations:events", (_e, id: unknown, after: unknown, limit: unknown) => {
+/**
+ * `outcome: "granted"` reaches a real write or destroy with no native confirmation (ruling 5:
+ * the proposal cards are the owner's chosen design, not this). The sender-frame check is the
+ * one thing standing beside the CSP between that grant and any content this window ever
+ * renders that is not the app's own top document — Chat renders model HTML, and only the CSP
+ * stands between it and a script tag.
+ */
+const mainFrameHandler = <A extends unknown[], T>(handle: (...args: A) => T) => (e: IpcMainInvokeEvent, ...args: A): T => {
+  if (!isMainFrame(e.senderFrame, mainWin?.webContents.mainFrame)) throw new Error(NOT_MAIN_FRAME);
+  return handle(...args);
+};
+
+ipcMain.handle("operations:snapshot", mainFrameHandler((id: unknown) => operation((client, headers) => client.operationSnapshot(operationId(id), headers))));
+ipcMain.handle("operations:events", mainFrameHandler((id: unknown, after: unknown, limit: unknown) => {
   if (after !== undefined && (typeof after !== "string" || !after)) throw new Error("not an operation cursor");
   if (limit !== undefined && (!Number.isSafeInteger(limit) || (limit as number) < 1 || (limit as number) > 200)) throw new Error("not an operation page limit");
   return operation((client, headers) => client.operationEvents(operationId(id), after as string | undefined, limit as number | undefined, headers));
-});
-ipcMain.handle("operations:cancel", (_e, value: unknown) => {
+}));
+ipcMain.handle("operations:cancel", mainFrameHandler((value: unknown) => {
   const body = exactObject(value, ["operationId", "expectedRevision"]);
   return operation((client, headers) => client.cancelOperation(operationId(body.operationId), operationRevision(body.expectedRevision), headers));
-});
-ipcMain.handle("operations:decision", (_e, value: unknown) => {
+}));
+ipcMain.handle("operations:decision", mainFrameHandler((value: unknown) => {
   const body = exactObject(value, ["operationId", "stepId", "decisionId", "expectedRevision", "outcome"]);
   const id = operationId(body.operationId);
   const decisionId = operationId(body.decisionId, "decision");
@@ -362,13 +381,18 @@ ipcMain.handle("operations:decision", (_e, value: unknown) => {
   const expectedRevision = operationRevision(body.expectedRevision);
   if (body.outcome !== "granted" && body.outcome !== "denied") throw new Error("not a decision outcome");
   return operation((client, headers) => client.recordOperationDecision(id, decisionId, { stepId, expectedRevision, outcome: body.outcome }, headers));
-});
-ipcMain.handle("operations:input", (_e, value: unknown) => {
+}));
+ipcMain.handle("operations:input", mainFrameHandler((value: unknown) => {
   const body = exactObject(value, ["operationId", "stepId", "decisionId", "expectedRevision", "inputs"]);
+  // Validated the same way `operations:decision` validates it, even though the bench's
+  // `/operations/:id/input` route (`provideOperationInput`) never takes a stepId and this value
+  // is never forwarded: it stays in the allow-list because the renderer's payload always
+  // carries it, so dropping the key would refuse every real call as "invalid operation request".
+  operationStepId(body.stepId);
   const inputs = exactObject(body.inputs, ["answer"]);
   if (typeof inputs.answer !== "string" || !inputs.answer.trim()) throw new Error("not operation input");
   return operation((client, headers) => client.provideOperationInput(operationId(body.operationId), operationId(body.decisionId, "decision"), operationRevision(body.expectedRevision), { answer: inputs.answer }, headers));
-});
+}));
 // `bench import`: the laptop's sessions onto the bench, once. The list is the
 // renderer's localStorage (only it can read it); the files are what the old
 // memos point at plus every other session file beside them. The bench merges
