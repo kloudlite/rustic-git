@@ -26,8 +26,13 @@ export function classifyHttp(status: number, message: string, mutation: boolean)
   if (status === 404) return err("no_match", message);
   if (status === 409) return err("revision_conflict", message);
   if (status === 400 || status === 422) return err("validation_failure", message);
-  // A mutation that reached the platform but got no definitive answer (502/503/504) may have
-  // landed; treat it as unknown so the caller reconciles instead of assuming it never happened.
+  // On a mutation: 500 is the origin's own answer — it ran and refused, so it is a definitive
+  // provider_failure. 502/503/504 mean an edge or gateway answered, not necessarily the origin,
+  // for a write that may already have committed there — unknown, never failed. Every write is
+  // reconcile-first, so a false "unknown" only costs one reconcile pass; a false "failed" can be
+  // reported to the person as an error or retried against a change that already landed. On a
+  // READ there is nothing to reconcile and nothing was committed, so every 5xx (including 503)
+  // stays a retryable provider_failure, never unknown.
   if (mutation && (status === 502 || status === 503 || status === 504)) return err("unknown_outcome", message, true);
   return err(status >= 500 ? "provider_failure" : "execution_failure", message, status >= 500);
 }
