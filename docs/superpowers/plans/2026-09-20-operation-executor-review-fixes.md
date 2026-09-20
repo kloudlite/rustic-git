@@ -45,7 +45,11 @@ holds the result against this text.
   the single-instance lock. Do not run `bench/test/renderer-boot.test.ts` locally.
 - Never read or print a credential. Never touch the dev pod, the fleet, or another worktree.
 - Harness gate per task: `npm run typecheck`, then `node --test` on the test files touched and
-  their neighbours. Lane-end gate: `npm run test:operations` (UI lane: `npm run test:components`).
+  their neighbours. Lane-end gate: `node --test --test-concurrency=4 bench/test/operations-*.test.ts`
+  (`npm run test:operations` runs only 5 of the 17 operation test files; the store, executor,
+  scheduler, recovery, capabilities and dispatch-authority suites are outside it). UI lane also
+  runs `npm run test:components`. WIRING lane also runs `bench-tools.test.ts` and
+  `proposals.test.ts`.
 - Rust gate per task: `cargo clippy -p <crate> --all-targets -- -D warnings` and
   `cargo test -p <crate>`, with
   `CARGO_TARGET_DIR=/Volumes/kdisk/rustic-git/target CARGO_NET_GIT_FETCH_WITH_CLI=true`.
