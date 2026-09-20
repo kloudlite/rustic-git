@@ -103,6 +103,12 @@ Each is a decision the review left open. Recorded with what it costs if wrong.
    same exposure and are the owner's chosen design. The task adds the sender-frame check and a
    test that pins the CSP (no inline or eval script). Residual risk is listed at the end.
 
+6. **Recovery execution is not rebuilt here.** The executor team removed it deliberately as unsafe
+   and guards that with tests. C-6 only makes `recover` report what it deferred. The open item goes
+   to the owner and the executor team: until reconcile and abort execution exist, an operation
+   that was mid-dispatch at a crash stays non-terminal after restart. Cost if wrong: none now; the
+   gap is visible instead of silent.
+
 ---
 
 ## CORE lane
@@ -223,22 +229,30 @@ scheduler has no running entry. The same with the expiry bound and an injected c
 
 **Commit:** `Bound the wait for an approval`
 
-### C-6 Recovery handles every action it can plan (core persistence gap)
+### C-6 Recovery never drops an action silently (core persistence gap, ruling 6)
 
-**Files:** `executor.ts` `recover` 193-200, `recovery.ts` (read), tests.
+**Files:** `executor.ts` `recover`, `recovery.ts` (read), executor tests.
 
-**Required behaviour:** `recover` handles every action kind `planRecovery` can emit, through an
-exhaustive switch that throws on an unknown kind; nothing is dropped silently. `reconcile_step`
-calls the capability's reconcile path with a bound and records through `reconcileStep` or
-`markOutcomeUnknown`. `resume_abort` re-issues the abort. `dispatch_step` re-enters only for the
-kinds `recovery.ts` marks safe, with a fresh token. Wiring `planRecovery` into bench boot is out
-of scope: the executor has no production caller yet.
+**Scope, corrected 20 Sep.** The first version of this task asked `recover` to carry out
+`reconcile_step`, `resume_abort` and `dispatch_step`. Reading the history showed the executor team
+REMOVED recovery dispatch on purpose ("Remove unreachable recovery dispatch", after their own review
+called it unsafe), and two existing tests assert that `recover` reconciles, retries and dispatches
+nothing. Rebuilding that here would override a deliberate safety decision and is feature work on
+their roadmap, not a review fix. What remains a defect is the silence: `recover` returns `void` and
+ignores five of the seven action kinds, so a caller cannot tell that nothing happened.
 
-**Tests first (real store):** a log left with a `running` step, a new store, `planRecovery`, then
-`recover`: the step ends reconciled or `outcome_unknown`, never `running`, and an unknown action
-kind throws.
+**Required behaviour:** `recover` returns `{ handled: RecoveryAction[]; deferred: RecoveryAction[] }`.
+`expire_decision` and `expire_operation` are handled as today. `await_decision`, `reconcile_step`,
+`resume_abort`, `dispatch_step` and `retry_candidate` are returned in `deferred` with NO side
+effect. The switch is exhaustive (a `never` check), so a new action kind fails to compile rather
+than vanishing. `CONTRACTS.md` states plainly that recovery execution is not built: after a restart
+an operation with a running or unknown step stays non-terminal until it is.
 
-**Commit:** `Carry out every planned recovery action`
+**Tests first:** every action kind lands in exactly one of the two lists; the two existing
+"recover does nothing unsafe" tests still pass unchanged; an action for another operation still
+throws.
+
+**Commit:** `Report what recovery deferred instead of dropping it`
 
 ### C-7 The executor suite runs on the real store
 
@@ -493,6 +507,8 @@ both paths and reads a symlink target of any length.
 
 ## Owner decisions this plan does not take
 
+- Building recovery execution (reconcile, abort, re-dispatch after a restart). It was removed as
+  unsafe; until it exists a crash mid-dispatch leaves an operation non-terminal (ruling 6).
 - Restoring the shell path of `bench.pkg.add` (shells were parked on 18 Sep).
 - Whether a granted write or destroy should also be confirmed by a native dialog (ruling 5).
 - Where the held-out `reviewer-oracles.json` should live; it is committed in the tree today.
