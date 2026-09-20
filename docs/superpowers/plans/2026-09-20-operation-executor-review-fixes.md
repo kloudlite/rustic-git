@@ -224,14 +224,17 @@ line 130 and `requireDecision` at line 149, so the predicted `expectedRevision` 
 
 **Files:** `executor.ts` 108, 154, `scheduler.ts` 201, `contracts.ts` 531, tests.
 
-**Required behaviour:** `approve(...)` is raced against the step's abort signal and against
-`decision.expiryBound`; losing the race cancels the step and releases its slot and lanes. Timer
-delays are clamped to 2^31-1 ms and re-armed. `selectOutputPath` refuses a negative or fractional
-index.
+**Required behaviour (corrected 20 Sep):** `approve(...)` is raced against the step's abort signal
+and against the STORE's own expiry for the pending decision; losing the race cancels the step and
+releases its slot and lanes; a late answer dispatches nothing. `selectOutputPath` refuses a
+negative or fractional index. The review's timer-overflow finding (sched #9) is NOT a defect: the
+budget schema caps an operation deadline at 24 h, far below the 2^31-1 ms at which Node clamps a
+timer, so no re-arming helper is added; a test pins that ceiling instead.
 
 **Tests first:** an `approve` that never resolves plus an abort: `execute()` returns and the
-scheduler has no running entry. The same with the expiry bound and an injected clock. A deadline
-30 days out does not fire at once.
+scheduler has no running entry. The same at the decision's expiry. An approval that arrives after
+the abort dispatches nothing. The budget schema's deadline ceiling is below 2^31-1 ms and a request
+above it is refused.
 
 **Commit:** `Bound the wait for an approval`
 
