@@ -5,7 +5,7 @@ import path from "node:path";
 import { test } from "node:test";
 import { OperationExecutor, type ExecutorStore, type ReconciliationResult } from "../src/operations/executor.ts";
 import { OperationScheduler } from "../src/operations/scheduler.ts";
-import { isTerminalOperationState, type CapabilityDescriptor, type ExactCall, type JsonValue, type OperationError, type OperationSnapshot, type RecordedDecision, type TrustedActorContext } from "../src/operations/contracts.ts";
+import { canonicalDigest, isTerminalOperationState, type CapabilityDescriptor, type ExactCall, type JsonValue, type OperationError, type OperationSnapshot, type RecordedDecision, type TrustedActorContext } from "../src/operations/contracts.ts";
 import { CAPABILITY_CONTRACTS, CapabilityRegistry } from "../src/operations/capabilities.ts";
 import type { CapabilityDispatchResult } from "../src/operations/capabilities.ts";
 import { OperationStore, type CapabilityMetadata } from "../src/operations/store.ts";
@@ -590,4 +590,246 @@ test("resume_abort never replays the original mutation without an abort adapter"
   assert.equal(dispatches, 0);
   assert.equal(store.steps.get("running")?.state, "running");
   assert.equal(store.log.includes("cancel:running"), false);
+});
+
+// C-4: cancellation revokes dispatch authority; validation comes before revocation.
+// Real OperationStore + real CapabilityRegistry sharing one DispatchAuthority, same
+// pattern as the C-2 test above — never MemoryStore for these.
+function realStoreForC4() {
+  const authority = new DispatchAuthority();
+  const registry = new CapabilityRegistry(CAPABILITY_CONTRACTS, ["environment.restore"], authority);
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "operation-executor-c4-"));
+  const ownership = { ownerId: "executor-test-c4", owned: true, assertHeld() { if (!this.owned) throw new Error("not owned"); } };
+  const metadata = (name: string, version: string): CapabilityMetadata | undefined => {
+    const found = registry.get(name);
+    return found && (!version || found.version === version) ? { version: found.version, effect: found.effect, approval: found.approval.required, retry: found.retry, resourceKeys: found.resourceAccess.conflictKeys } : undefined;
+  };
+  const store = new OperationStore({ root, ownership, now: Date.now, capabilityMetadata: metadata, dispatchAuthority: authority });
+  return { authority, registry, store, ownership };
+}
+
+const RESTORE_ARGS = { id: "devstack", snapshot: "snap-1" };
+const RESTORE_DIGEST = canonicalDigest(RESTORE_ARGS);
+
+// Drives an operation from accept through a resumed (token-issued) approval-required
+// "restore" step without dispatching it, so the test can act on the live token itself.
+function acceptAndResumeC4(store: OperationStore, decisionId = "decision-c4") {
+  const callContext: TrustedActorContext = { ...context, toolCallId: decisionId };
+  const accepted = store.accept({ request: { instruction: "Restore devstack to snap-1" }, context: callContext }).snapshot;
+  store.beginResolution(accepted.operationId);
+  const queued = store.queueStep(accepted.operationId, { key: "restore", capability: "environment.restore", capabilityVersion: "1.0.0", args: RESTORE_ARGS });
+  const stepId = queued.steps[0]!.stepId;
+  store.requireDecision(accepted.operationId, stepId, { decisionId, decisionClass: "user_authorization", question: "Restore devstack to snap-1?", payloadDigest: RESTORE_DIGEST });
+  const pending = store.load(accepted.operationId).pendingDecisions[0]!;
+  const recordedAt = Date.now();
+  const record: RecordedDecision = {
+    recordId: `record-${decisionId}`, operationId: accepted.operationId, stepId, decisionId: pending.decisionId,
+    decisionClass: "user_authorization", actorId: context.actorId, tenantId: context.tenantId, sessionId: context.sessionId,
+    payloadDigest: RESTORE_DIGEST, revision: pending.revision, policySource: "user_ui",
+    outcome: "granted", recordedAt, expiresAt: recordedAt + 60_000,
+  };
+  store.recordDecision(record, context);
+  const resumed = store.resume({
+    request: { action: "resume", operationId: accepted.operationId, decisionId: pending.decisionId, expectedRevision: pending.revision, resolution: { kind: "recorded_user_decision", recordId: record.recordId } },
+    context,
+  });
+  return { operationId: accepted.operationId, stepId, dispatchToken: resumed.dispatchToken };
+}
+
+// The `decision` a `registry.dispatch` call needs to authorize an approval-required
+// capability: the same shape `dispatchWithPolicy`'s `obtain` closure expects.
+function decisionFor(operationId: string, stepId: string, decisionId: string, revision: number) {
+  return {
+    operationId, stepId, decisionId, decisionClass: "user_authorization" as const,
+    actorId: context.actorId, tenantId: context.tenantId, sessionId: context.sessionId,
+    turnId: context.turnId, toolCallId: context.toolCallId, turnRevision: 1,
+    revision, expiryBound: Date.now() + 60_000,
+  };
+}
+
+test("C-4 T1: a cancel before dispatch revokes the token", async () => {
+  const { registry, store } = realStoreForC4();
+  let handled = 0;
+  const runtime = capabilityRuntime({ "environment.restore": async () => (handled += 1, { ok: true, value: { id: "devstack", state: "ready" } }) });
+  const { operationId, stepId, dispatchToken } = acceptAndResumeC4(store);
+  store.requestCancel(operationId, { reason: "test" });
+  const result = await registry.dispatch(
+    "environment.restore",
+    RESTORE_ARGS,
+    { runtime, decision: decisionFor(operationId, stepId, "decision-c4", store.load(operationId).revision), allowedPolicySources: ["user_ui"], dispatchToken, dispatchOperationId: operationId, dispatchStepId: stepId, dispatchAttempt: 1 },
+    "1.0.0",
+  );
+  assert.equal(result.outcome, "refused", JSON.stringify(result));
+  assert.equal(handled, 0);
+});
+
+test("C-4 T2: a refused outcome call leaves the token alive", async () => {
+  const { registry, store } = realStoreForC4();
+  let handled = 0;
+  const runtime = capabilityRuntime({ "environment.restore": async () => (handled += 1, { ok: true, value: { id: "devstack", state: "ready" } }) });
+  const { operationId, stepId, dispatchToken } = acceptAndResumeC4(store);
+  assert.throws(() => store.recordStepOutcome(operationId, stepId, { outcome: "succeeded" }));
+  const result = await registry.dispatch(
+    "environment.restore",
+    RESTORE_ARGS,
+    { runtime, decision: decisionFor(operationId, stepId, "decision-c4", store.load(operationId).revision), allowedPolicySources: ["user_ui"], dispatchToken, dispatchOperationId: operationId, dispatchStepId: stepId, dispatchAttempt: 1 },
+    "1.0.0",
+  );
+  assert.equal(result.outcome, "completed", JSON.stringify(result));
+  assert.equal(handled, 1);
+});
+
+test("C-4 T2b: cancelStep with no evidence leaves the token alive", async () => {
+  const { registry, store } = realStoreForC4();
+  let handled = 0;
+  const runtime = capabilityRuntime({ "environment.restore": async () => (handled += 1, { ok: true, value: { id: "devstack", state: "ready" } }) });
+  const { operationId, stepId, dispatchToken } = acceptAndResumeC4(store);
+  assert.throws(() => store.cancelStep(operationId, stepId, { evidenceRefs: [] }));
+  const result = await registry.dispatch(
+    "environment.restore",
+    RESTORE_ARGS,
+    { runtime, decision: decisionFor(operationId, stepId, "decision-c4", store.load(operationId).revision), allowedPolicySources: ["user_ui"], dispatchToken, dispatchOperationId: operationId, dispatchStepId: stepId, dispatchAttempt: 1 },
+    "1.0.0",
+  );
+  assert.equal(result.outcome, "completed", JSON.stringify(result));
+  assert.equal(handled, 1);
+});
+
+test("C-4 T3: a store that cannot record a cancel still aborts the work, with no uncaught exception", async () => {
+  const { authority, store } = realStoreForC4();
+  const registry = new CapabilityRegistry(CAPABILITY_CONTRACTS, ["bench.process.list"], authority);
+  // A plain delegating wrapper, not a Proxy: OperationStore's private (#) fields
+  // require `this` to be the real instance, which a Proxy's receiver is not.
+  const throwingStore: ExecutorStore = {
+    assertOwnership: () => store.assertOwnership(),
+    load: (operationId) => store.load(operationId),
+    queueStep: (...args) => store.queueStep(...args),
+    startStep: (...args) => store.startStep(...args),
+    retryStep: (...args) => store.retryStep(...args),
+    recordStepOutcome: (...args) => store.recordStepOutcome(...args),
+    markOutcomeUnknown: (...args) => store.markOutcomeUnknown(...args),
+    reconcileStep: (...args) => store.reconcileStep(...args),
+    cancelStep: (...args) => store.cancelStep(...args),
+    skipStep: (...args) => store.skipStep(...args),
+    requireDecision: (...args) => store.requireDecision(...args),
+    recordDecision: (...args) => store.recordDecision(...args),
+    resume: (...args) => store.resume(...args),
+    requestCancel: () => { throw new Error("cannot write"); },
+    expire: (...args) => store.expire(...args),
+    settle: (...args) => store.settle(...args),
+  };
+  const accepted = store.accept({ request: { instruction: "Two independent reads" }, context }).snapshot;
+  store.beginResolution(accepted.operationId);
+  let secondRan = 0;
+  let firstStarted!: () => void;
+  const firstStartedSignal = new Promise<void>((resolve) => (firstStarted = resolve));
+  const runtime = capabilityRuntime({
+    "bench.process.list": async (input) => {
+      firstStarted();
+      await new Promise<void>((resolve) => input.signal?.addEventListener("abort", () => resolve(), { once: true }));
+      return { ok: true, value: [] };
+    },
+  });
+  const executor = new OperationExecutor({
+    store: throwingStore,
+    registry,
+    scheduler: new OperationScheduler({ maxConcurrent: 1 }),
+    dispatchFor: () => ({ runtime }),
+  });
+
+  const uncaught: unknown[] = [];
+  const guard = (error: unknown) => uncaught.push(error);
+  process.once("uncaughtException", guard);
+  try {
+    const controller = new AbortController();
+    const execPromise = executor.execute({
+      operationId: accepted.operationId,
+      context,
+      signal: controller.signal,
+      calls: [
+        { key: "first", capability: "bench.process.list", capabilityVersion: "1.0.0", args: {} },
+        { key: "second", capability: "bench.process.list", capabilityVersion: "1.0.0", args: {}, dependsOn: ["first"] },
+      ],
+    });
+    await firstStartedSignal;
+    controller.abort();
+    const result = await Promise.race([
+      execPromise,
+      new Promise<never>((_, reject) => setTimeout(() => reject(new Error("execute() did not settle within 3s after abort")), 3000)),
+    ]);
+    const secondStep = result.steps.find((step) => step.key === "second");
+    if (secondStep?.outcome === "succeeded") secondRan = 1;
+    assert.equal(secondRan, 0);
+    assert.deepEqual(uncaught, []);
+  } finally {
+    process.removeListener("uncaughtException", guard);
+  }
+});
+
+test("C-4 T4: a handler that throws mid-write is unknown_outcome, not a refusal; a forged token is still refused", async () => {
+  const { registry, store } = realStoreForC4();
+  let entered = 0;
+  const runtime = capabilityRuntime({
+    "environment.restore": async () => {
+      entered += 1;
+      throw new Error("write started then the connection dropped");
+    },
+  });
+  const { operationId, stepId, dispatchToken } = acceptAndResumeC4(store);
+  const decision = decisionFor(operationId, stepId, "decision-c4", store.load(operationId).revision);
+  const result = await registry.dispatch(
+    "environment.restore",
+    RESTORE_ARGS,
+    { runtime, decision, allowedPolicySources: ["user_ui"], dispatchToken, dispatchOperationId: operationId, dispatchStepId: stepId, dispatchAttempt: 1 },
+    "1.0.0",
+  );
+  assert.equal(entered, 1);
+  assert.equal(result.outcome, "failed", JSON.stringify(result));
+  assert.equal((result as any).code, "unknown_outcome", JSON.stringify(result));
+
+  // Mirror: a wrong/forged token never reaches the handler, and is still refused.
+  const { operationId: opId2, stepId: stepId2 } = acceptAndResumeC4(store, "decision-c4-2");
+  const forgedToken = {} as DispatchToken;
+  const decision2 = decisionFor(opId2, stepId2, "decision-c4-2", store.load(opId2).revision);
+  const result2 = await registry.dispatch(
+    "environment.restore",
+    RESTORE_ARGS,
+    { runtime, decision: decision2, allowedPolicySources: ["user_ui"], dispatchToken: forgedToken, dispatchOperationId: opId2, dispatchStepId: stepId2, dispatchAttempt: 1 },
+    "1.0.0",
+  );
+  assert.equal(entered, 1, "the handler must not be entered for a forged token");
+  assert.equal(result2.outcome, "refused", JSON.stringify(result2));
+});
+
+test("C-4 T5: a bench that lost the folder does not dispatch", async () => {
+  const { authority, store, ownership } = realStoreForC4();
+  const registry = new CapabilityRegistry(CAPABILITY_CONTRACTS, ["bench.process.list"], authority);
+  const accepted = store.accept({ request: { instruction: "List bench processes" }, context }).snapshot;
+  store.beginResolution(accepted.operationId);
+  let handled = 0;
+  const runtime = capabilityRuntime({ "bench.process.list": async () => (handled += 1, { ok: true, value: [] }) });
+  const executor = new OperationExecutor({
+    store,
+    registry,
+    scheduler: new OperationScheduler({ maxConcurrent: 1 }),
+    dispatchFor: () => ({ runtime }),
+  });
+  // `queueStep` (called from inside `execute`, before dispatch) is the step that loses
+  // ownership here: flip it false as soon as the queue is observed, so the first
+  // `assertOwnership()` right before dispatch is the one that throws.
+  const originalQueueStep = store.queueStep.bind(store);
+  store.queueStep = ((...args: Parameters<typeof store.queueStep>) => {
+    const result = originalQueueStep(...args);
+    ownership.owned = false;
+    return result;
+  }) as typeof store.queueStep;
+  const executePromise = executor.execute({ operationId: accepted.operationId, context, calls: [{ key: "list", capability: "bench.process.list", capabilityVersion: "1.0.0", args: {} }] });
+  // Ownership is lost right after queueStep, so the pre-dispatch `assertOwnership()`
+  // throws inside the scheduler's run callback; the handler must never have been
+  // entered regardless of how that throw ultimately surfaces from execute().
+  await assert.rejects(() => Promise.race([
+    executePromise,
+    new Promise<never>((_, reject) => setTimeout(() => reject(new Error("execute() did not settle within 3s")), 3000)),
+  ]));
+  assert.equal(handled, 0);
 });

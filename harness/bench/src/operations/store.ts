@@ -1136,7 +1136,6 @@ export class OperationStore {
 
   /** Records an observed outcome after dispatch; never a substitute for one. */
   recordStepOutcome(operationId: string, stepId: string, input: StepOutcomeInput): OperationSnapshot {
-    this.#dispatchAuthority.invalidate(operationId, stepId);
     const snapshot = this.#requireSnapshot(operationId);
     const step = stepOf(snapshot, stepId);
     const error = input.outcome === "failed" ? validated(validateOperationError(input.error), "$.error") : undefined;
@@ -1157,7 +1156,7 @@ export class OperationStore {
             trigger: "result_failed",
             patch: { error },
           };
-    return this.#apply(operationId, {
+    const applied = this.#apply(operationId, {
       now: this.#now(),
       steps: [change],
       settle: true,
@@ -1173,7 +1172,11 @@ export class OperationStore {
           ...(input.elapsedMs !== undefined ? { elapsedMs: input.elapsedMs } : {}),
         },
       ],
-    }).snapshot;
+    });
+    // Validation happens above, in #apply: a refused call (no evidence, wrong step
+    // state) must never kill the live token of a step still about to dispatch.
+    this.#dispatchAuthority.invalidate(operationId, stepId);
+    return applied.snapshot;
   }
 
   /**
@@ -1181,7 +1184,6 @@ export class OperationStore {
    * through `reconcile_conclusive`: an unknown effect is never retried or cancelled away.
    */
   markOutcomeUnknown(operationId: string, stepId: string, input: { summary?: string } = {}): OperationSnapshot {
-    this.#dispatchAuthority.invalidate(operationId, stepId);
     const operation = this.#require(operationId);
     const snapshot = this.#requireSnapshot(operationId);
     const step = stepOf(snapshot, stepId);
@@ -1193,7 +1195,7 @@ export class OperationStore {
       since: now,
       ...(digest !== undefined ? { dispatchDigest: digest } : {}),
     };
-    return this.#apply(operationId, {
+    const applied = this.#apply(operationId, {
       now,
       steps: [{ stepId, to: "outcome_unknown", trigger: "outcome_unknown" }],
       addUnknownOutcomes: [outcome],
@@ -1209,7 +1211,11 @@ export class OperationStore {
           ...(digest !== undefined ? { argDigest: digest } : {}),
         },
       ],
-    }).snapshot;
+    });
+    // Validation happens above, in #apply: a refused call must never kill the live
+    // token of a step still about to dispatch.
+    this.#dispatchAuthority.invalidate(operationId, stepId);
+    return applied.snapshot;
   }
 
   /** Closes an unknown outcome with backend evidence instead of replaying the call. */
@@ -1336,13 +1342,12 @@ export class OperationStore {
 
   /** Cancels a running step only with evidence that no effect was applied. */
   cancelStep(operationId: string, stepId: string, input: CancelStepInput): OperationSnapshot {
-    this.#dispatchAuthority.invalidate(operationId, stepId);
     const snapshot = this.#requireSnapshot(operationId);
     const step = stepOf(snapshot, stepId);
     if (!input.evidenceRefs?.length) {
       throw new ContractViolation([{ path: "$.evidenceRefs", code: "missing_field", message: "a cancelled running step needs evidence" }]);
     }
-    return this.#apply(operationId, {
+    const applied = this.#apply(operationId, {
       now: this.#now(),
       steps: [
         {
@@ -1364,7 +1369,11 @@ export class OperationStore {
           evidenceRefs: input.evidenceRefs,
         },
       ],
-    }).snapshot;
+    });
+    // Validation happens above, in #apply: a refused call (missing evidence, wrong step
+    // state) must never kill the live token of a step still about to dispatch.
+    this.#dispatchAuthority.invalidate(operationId, stepId);
+    return applied.snapshot;
   }
 
   /**
@@ -1710,7 +1719,7 @@ export class OperationStore {
     const abortRequestedStepIds = snapshot.steps.filter((step) => step.state === "running").map((step) => step.stepId);
     const operation = operationChange(snapshot, "cancel_requested", "cancel_requested");
     if (!operation && !changes.length && !removed.length && !abortRequestedStepIds.length) return snapshot;
-    return this.#apply(operationId, {
+    const applied = this.#apply(operationId, {
       now: this.#now(),
       operation,
       steps: changes,
@@ -1724,12 +1733,20 @@ export class OperationStore {
           summary: input.summary ?? `Cancellation requested${input.reason !== undefined ? `: ${input.reason}` : "."}`,
         },
       ],
-    }).snapshot;
+    });
+    // Revoke every running step's token so a step already resumed but not yet consumed
+    // cannot dispatch its mutation after the person cancelled. A token already consumed
+    // is unaffected (invalidate is then a no-op): a handler already running keeps
+    // running and is handled by the existing abort path, not this one.
+    for (const stepId of abortRequestedStepIds) this.#dispatchAuthority.invalidate(operationId, stepId);
+    return applied.snapshot;
   }
 
   /**
    * Releases expired decisions, cancels what they blocked, and expires an operation
    * whose deadline passed only when nothing was committed and nothing is unknown.
+   * No change needed here for token revocation: expire() only acts when no step is
+   * running, and a queued or awaiting step holds no dispatch token to revoke.
    */
   expire(operationId: string): OperationSnapshot {
     let snapshot = this.#requireSnapshot(operationId);

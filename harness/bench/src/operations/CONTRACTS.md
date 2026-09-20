@@ -118,6 +118,8 @@ for the actual fact behind each trigger.
   effect was applied); `cancel_requested` alone is not an outcome. An operation holding
   unknown effects cannot expire — `reconciling` has no `deadline_reached` edge — so
   unresolved work stays visible until reconciliation is conclusive or a decision is made.
+- A recorded cancel revokes every unconsumed dispatch token of the steps it aborts; a
+  rejected outcome call leaves the token untouched.
 - Events replay monotonically by `sequence`; `validateEventSequence` refuses replays.
 - `OPERATE_REQUEST_SCHEMA` is emitted from the same descriptions the validator uses and
   carries the real bounds (`minLength`/`maxLength`/`pattern`/`minimum`/`maximum`/

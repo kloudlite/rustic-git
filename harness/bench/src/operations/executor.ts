@@ -98,11 +98,17 @@ export class OperationExecutor {
     const controller = new AbortController();
     let cancellationRecorded = false;
     const cancellation = () => {
-      if (!cancellationRecorded) {
-        cancellationRecorded = true;
-        this.#store.requestCancel(input.operationId, { reason: "executor abort" });
+      try {
+        if (!cancellationRecorded) {
+          this.#store.requestCancel(input.operationId, { reason: "executor abort" });
+          cancellationRecorded = true;
+        }
+      } catch {
+        // Left unrecorded on purpose: the deadline timer or a later abort retries it, and
+        // settle/expire reconcile the durable state. Stopping the work must not depend on a write.
+      } finally {
+        controller.abort();
       }
-      controller.abort();
     };
     input.signal?.addEventListener("abort", cancellation, { once: true });
     const deadlineAt = this.#store.load(input.operationId).deadlineAt;
@@ -163,6 +169,7 @@ export class OperationExecutor {
             const running = resumed.snapshot.steps.find((entry) => entry.stepId === stepId)!;
             dispatchDeps = { ...deps, signal, dispatchToken: resumed.dispatchToken, dispatchOperationId: input.operationId, dispatchStepId: stepId, dispatchAttempt: running.attempts };
           }
+          this.#store.assertOwnership();
           let outcome = await this.#registry.dispatch(call.capability, args, dispatchDeps, call.capabilityVersion);
           while (outcome.outcome === "failed" && outcome.error.retryable && descriptor.retry.class === "idempotent" && !signal.aborted) {
             this.#store.recordStepOutcome(input.operationId, stepId, { outcome: "failed", error: outcome.error });
@@ -176,6 +183,7 @@ export class OperationExecutor {
             const retried = this.#store.retryStep(input.operationId, stepId, { retry: descriptor.retry, argDigest, idempotencyKey: `${input.operationId}/${stepId}` }, input.context);
             const running = retried.snapshot.steps.find((entry) => entry.stepId === stepId)!;
             dispatchDeps = { ...deps, signal, dispatchToken: retried.dispatchToken, dispatchOperationId: input.operationId, dispatchStepId: stepId, dispatchAttempt: running.attempts };
+            this.#store.assertOwnership();
             outcome = await this.#registry.dispatch(call.capability, args, dispatchDeps, call.capabilityVersion);
           }
           return this.#record(input, call, stepId, descriptor.effect, args, signal, outcome);
