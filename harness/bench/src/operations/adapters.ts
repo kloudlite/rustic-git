@@ -185,7 +185,9 @@ export function progressAdapter(call: BenchCall): Adapter {
     const id = encodeURIComponent(String(args.id));
     const [exchanges, messages, procs] = await Promise.all([call("GET", `/exchanges?workspace=${id}`), call("GET", `/workspaces/${id}/messages?limit=10`), call("GET", "/procs")]);
     if (!exchanges.ok || !messages.ok) return err("provider_failure", String((exchanges.ok ? messages.data : exchanges.data)?.error ?? "the bench could not be read"), true);
-    return ok({ asks: exchanges.data, messages: messages.data?.messages ?? [], processes: Array.isArray(procs.data) ? procs.data.filter((row: any) => row.workspace === String(args.id)) : [] });
+    // The resolved id, not what the caller typed: a workspace with no running process otherwise
+    // has nothing else in this answer to name it by, and the header fell back to what was typed.
+    return ok({ id: String(args.id), asks: exchanges.data, messages: messages.data?.messages ?? [], processes: Array.isArray(procs.data) ? procs.data.filter((row: any) => row.workspace === String(args.id)) : [] });
   };
 }
 

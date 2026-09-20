@@ -49,8 +49,8 @@ export const TOOLS: ToolSpec[] = [
   { name: "kl_workspace_progress", group: "workspace", summary: "What a workspace's session is doing: what has been asked of it, and the last of what it said.", effect: "read" },
 
   { name: "kl_pkg_list", group: "workspace", summary: "The packages a workspace has, and whether they are ready.", effect: "read" },
-  { name: "kl_pkg_add", group: "workspace", summary: "Add packages to a workspace — nixpkgs attributes (rustc, cargo, nodejs_22, go, python3), not language names; `attr@version` pins. Every other installed package stays as it is.", effect: "write" },
-  { name: "kl_pkg_rm", group: "workspace", summary: "Remove packages from a workspace. Every other installed package stays as it is.", effect: "write" },
+  { name: "kl_pkg_add", group: "workspace", summary: "Add packages to a workspace — nixpkgs attributes (rustc, cargo, nodejs_22, go, python3), not language names; `attr@version` pins. Every other installed package stays as it is.", effect: "write", ask: (a) => `Add ${list(a.packages)} to ${a.workspace}` },
+  { name: "kl_pkg_rm", group: "workspace", summary: "Remove packages from a workspace. Every other installed package stays as it is.", effect: "write", ask: (a) => `Remove ${list(a.packages)} from ${a.workspace}` },
 
   { name: "kl_repos", group: "code", summary: "Repositories you can see — yours, or an owner's with `owner`.", effect: "read" },
   { name: "kl_repo_create", group: "code", summary: "Create a repository under you or a team.", effect: "write", ask: (a) => `Create repository ${a.owner ?? "you"}/${a.name}${a.visibility ? ` (${a.visibility})` : ""}` },

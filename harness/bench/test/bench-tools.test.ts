@@ -1049,24 +1049,67 @@ test("every identity says where paths are relative to, and the bench that it has
  * A package is installed in a WORKSPACE (spec §3.1). A bench session has no machine of its own, so
  * the tool takes the workspace and refuses in the spec's own words when it is not named.
  */
-test("packages from the bench name a workspace, or are refused", async () => {
+test("packages from the bench name a workspace, or are refused before anybody is asked", async () => {
   const restore = withEnv({ KL_WORKSPACE_ID: "bench-ada", KL_TEAM: "acme", KL_TOOLS_WORKSPACE: undefined, KL_FORK: undefined, KL_EPHEMERAL: undefined });
   try {
     const { pi, tools, start } = fakePi();
     kloudlite(pi);
     await start();
-    const run = (n: string, a: any) => (tools.find((t) => t.name === n)! as unknown as { execute: (...x: any[]) => Promise<any> }).execute("c1", a, undefined, undefined, undefined);
+    const widgets: [string, string[]][] = [];
+    const ctx = { ui: { setWidget: (k: string, v: string[]) => widgets.push([k, v]) } };
+    const run = (n: string, a: any) => (tools.find((t) => t.name === n)! as unknown as { execute: (...x: any[]) => Promise<any> }).execute("c1", a, undefined, undefined, ctx);
     for (const tool of ["kl_pkg_list", "kl_pkg_add", "kl_pkg_rm"]) {
+      widgets.length = 0;
       const r = await run(tool, { packages: ["ripgrep"] });
-      if (tool === "kl_pkg_list") {
-        assert.equal(r.isError, true, tool);
-        assert.match(r.content[0].text, /^name the workspace: packages are installed in a workspace/, tool);
-      } else {
-        assert.match(r.content[0].text, /declined by the person/, tool);
-      }
+      assert.equal(r.isError, true, tool);
+      assert.match(r.content[0].text, /^name the workspace: packages are installed in a workspace/, tool);
+      // A call that cannot run must never reach the person: no proposal card was raised for it.
+      assert.equal(widgets.length, 0, `${tool} raised a proposal for a call that cannot run`);
     }
   } finally {
     restore();
+  }
+});
+
+test("kl_pkg_list from the bench answers the package list only, not the whole workspace", async () => {
+  const api = fakeApi((m, url) => (url === "/v1/workspaces/ws-1" ? { id: "ws-1", name: "api", state: "running", region: "r1", packages: ["rustc", "cargo"] } : { id: "ws-1" }));
+  const base = await api.listen();
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "kl-pkglist-"));
+  fs.writeFileSync(path.join(dir, "token"), "t");
+  const restore = withEnv({ KL_TOOL_TOKEN_FILE: path.join(dir, "token"), KL_API_URL: base, KL_BENCH_URL: base, KL_WORKSPACE_ID: "bench-ada", KL_TEAM: "acme", KL_TOOLS_WORKSPACE: undefined, KL_FORK: undefined });
+  try {
+    const { pi, tools } = fakePi();
+    kloudlite(pi);
+    const r = await (tools.find((t) => t.name === "kl_pkg_list")! as unknown as { execute: (...x: any[]) => Promise<any> }).execute("c1", { workspace: "ws-1" }, undefined, undefined, undefined);
+    assert.deepEqual(JSON.parse(r.content[0].text), ["rustc", "cargo"]);
+  } finally {
+    restore();
+    api.srv.close();
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("adding or removing packages asks the person by name, naming the packages and the workspace", async () => {
+  const api = fakeApi((m, url) => (url === "/v1/workspaces/ws-1" ? { id: "ws-1", packages: ["rustc"] } : { id: "ws-1", packages: ["rustc", "go", "gnumake"] }));
+  const base = await api.listen();
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "kl-pkg-"));
+  fs.writeFileSync(path.join(dir, "token"), "t");
+  const restore = withEnv({ KL_TOOL_TOKEN_FILE: path.join(dir, "token"), KL_API_URL: base, KL_BENCH_URL: base, KL_WORKSPACE_ID: "bench-ada", KL_TEAM: "acme", KL_TOOLS_WORKSPACE: undefined, KL_FORK: undefined });
+  try {
+    const { pi, tools, start } = fakePi();
+    kloudlite(pi);
+    await start();
+    const widgets: [string, string[]][] = [];
+    const ctx = { ui: { setWidget: (k: string, v: string[]) => widgets.push([k, v]) } };
+    const run = (n: string, a: any) => (tools.find((t) => t.name === n)! as unknown as { execute: (...x: any[]) => Promise<any> }).execute("c1", a, undefined, undefined, ctx);
+    await run("kl_pkg_add", { workspace: "ws-1", packages: ["go", "gnumake"] });
+    assert.equal(widgets.length, 1);
+    const proposal = JSON.parse(widgets[0][1][0]);
+    assert.equal(proposal.summary, "Add go, gnumake to ws-1");
+  } finally {
+    restore();
+    api.srv.close();
+    fs.rmSync(dir, { recursive: true, force: true });
   }
 });
 
@@ -1470,6 +1513,38 @@ test("progress asked by name reads the workspace's own thread", async () => {
     assert.match(out, /do not poll/, "an ask that is running wakes this session; polling it learns nothing");
     assert.doesNotMatch(out, /nothing yet/);
     assert.match(out, /kl container build -t backend:0\.1 \./, "what is running there, so it is not started twice");
+  } finally {
+    restore();
+    srv.close();
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+/**
+ * Addressed by NAME, with nothing running there: the old code fell back to the name it was typed
+ * with in that case (nothing in `/procs` to read a resolved id off of), which put the workspace's
+ * own NAME on the "asked of" header instead of the id `/v1` actually holds it under.
+ */
+test("progress asked by name with nothing running still carries the resolved id", async () => {
+  const seen: string[] = [];
+  const srv = http.createServer((req, res) => {
+    seen.push(req.url!);
+    res.writeHead(200, { "content-type": "application/json" });
+    if (req.url!.startsWith("/v1/workspaces")) return void res.end(JSON.stringify([{ id: "ws-632cf9f23d9f", name: "backend" }]));
+    if (req.url!.startsWith("/exchanges")) return void res.end(JSON.stringify([]));
+    if (req.url === "/procs") return void res.end(JSON.stringify([]));
+    res.end(JSON.stringify({ total: 0, messages: [] }));
+  });
+  await new Promise<void>((r) => srv.listen(0, "127.0.0.1", r));
+  const base = `http://127.0.0.1:${(srv.address() as { port: number }).port}`;
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "kl-prog-noproc-"));
+  fs.writeFileSync(path.join(dir, "token"), "t");
+  const restore = withEnv({ KL_TOOL_TOKEN_FILE: path.join(dir, "token"), KL_API_URL: base, KL_BENCH_URL: base, KL_WORKSPACE_ID: "bench-ada", KL_TEAM: "acme", KL_TOOLS_WORKSPACE: undefined, KL_FORK: undefined });
+  try {
+    const { pi, tools } = fakePi();
+    kloudlite(pi);
+    const out = (await (tools.find((t) => t.name === "kl_workspace_progress") as any).execute("c1", { id: "backend" }, undefined, undefined, undefined)).content[0].text as string;
+    assert.match(out, /^asked of ws-632cf9f23d9f:/, out);
   } finally {
     restore();
     srv.close();

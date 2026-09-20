@@ -75,6 +75,8 @@ export type ApprovalRequirement = "none" | "user" | "policy";
 
 export const DECLINED = "declined by the person";
 const NO_APPROVAL_CHANNEL = "that change needs approval and no approval channel is available; nothing ran";
+/** `kl_pkg_add`/`kl_pkg_rm` share this refusal: a bench session has no machine of its own. */
+const NAME_IT_REASON = "name the workspace: packages are installed in a workspace, and this session has no machine of its own";
 
 /**
  * One policy-bearing dispatch for every caller: the registered tools (a person
@@ -421,6 +423,10 @@ export function makeReg(pi: ExtensionAPI) {
       return issues.length ? { code: "invalid_args", reason: issues.map((issue) => issue.message).join("; ") } : undefined;
     },
     kl_intercept: (args) => Object.prototype.hasOwnProperty.call(args, "workspace") ? undefined : { code: "invalid_args", reason: "workspace must name a target or be explicit null to clear the intercept" },
+    // A call that cannot run must never reach the person: `kl_pkg_add`/`kl_pkg_rm` with a blank
+    // workspace refuse here, before `propose` draws a card for something that cannot happen.
+    kl_pkg_add: (args) => (typeof args.workspace === "string" && args.workspace.trim() ? undefined : { code: "invalid_args", reason: NAME_IT_REASON }),
+    kl_pkg_rm: (args) => (typeof args.workspace === "string" && args.workspace.trim() ? undefined : { code: "invalid_args", reason: NAME_IT_REASON }),
   };
   const reg = <P extends Parameters<typeof Type.Object>[0]>(name: string, params: P, run: (a: Record<string, any>, signal?: AbortSignal, ctx?: any) => Promise<{ content: { type: "text"; text: string }[]; isError?: boolean }>) => {
     const s = spec(name);
@@ -921,7 +927,7 @@ export function progressTool(reg: ReturnType<typeof makeReg>) {
     if (!raw.ok && raw.error.code === "no_match") raw = await sharedAdapters()["workspace.progress"]({ args: a, states: {} });
     const result = adapterToolResult(raw);
     if (result.isError) return result;
-    const data = JSON.parse(result.content[0].text) as { asks: any[]; messages: any[]; processes: any[] };
+    const data = JSON.parse(result.content[0].text) as { id?: string; asks: any[]; messages: any[]; processes: any[] };
     const x = { ok: true, data: data.asks };
     const m = { ok: true, data: { messages: data.messages } };
     const procs = { ok: true, data: data.processes };
@@ -943,13 +949,13 @@ export function progressTool(reg: ReturnType<typeof makeReg>) {
       // A tool call is what it is DOING; the prose is what it thinks about it. Both, briefly.
       return (c as any[] ?? []).map((b) => (b.type === "toolCall" ? `  ran ${b.name}` : b.text ? `  said: ${String(b.text).slice(0, 160)}` : "")).filter(Boolean);
     });
-    const ws = String((data.processes as any[])[0]?.workspace ?? a.id);
+    const resolvedId = data.id ?? String((data.processes as any[])[0]?.workspace ?? a.id);
     const running = (procs.ok && Array.isArray(procs.data) ? (procs.data as { workspace?: string; name: string; command: string; started: number; ended?: number }[]) : [])
-      .filter((r) => r.workspace === ws && r.ended === undefined)
+      .filter((r) => r.workspace === resolvedId && r.ended === undefined)
       .map((r) => `  ${r.name}: ${String(r.command).slice(0, 120)} (since ${new Date(r.started).toISOString().slice(11, 16)})`);
     return text(
       [
-        `asked of ${a.id}:`,
+        `asked of ${resolvedId}:`,
         ...(asks.length ? asks : ["  nothing outstanding"]),
         `running there:`,
         ...(running.length ? running : ["  nothing running"]),
@@ -1003,12 +1009,14 @@ export function spaceTools(reg: ReturnType<typeof makeReg>, space: string | unde
 export function packageTools(reg: ReturnType<typeof makeReg>) {
   const P = Type.Array(Type.String(), { description: "nixpkgs ATTRIBUTE names, not language names: rustc cargo (Rust), nodejs_22, go, python3, bun, pnpm, jdk21, gcc, gnumake; `attr@version` pins one" });
   const WS = Type.Optional(Type.String({ description: "the workspace to act on, by name or id — required: this session has no machine of its own" }));
-  const NAME_IT = { ...text("name the workspace: packages are installed in a workspace, and this session has no machine of its own"), isError: true };
+  const NAME_IT = { ...text(NAME_IT_REASON), isError: true };
   const named = (workspace: unknown) => (typeof workspace === "string" && workspace.trim() ? refuseOwnBench(workspace.trim()) : undefined);
 
   reg("kl_pkg_list", { workspace: WS }, async (a) => {
     const id = named(a.workspace);
-    return id ? answer("GET", `/v1/workspaces/${encodeURIComponent(id)}`) : NAME_IT;
+    if (!id) return NAME_IT;
+    const { status, data } = await call("GET", `/v1/workspaces/${encodeURIComponent(id)}`);
+    return status >= 400 ? { ...text(sanitizeError("kl_pkg_list", status, data)), isError: true } : text((data as { packages?: string[] } | null)?.packages ?? []);
   });
   reg("kl_pkg_add", { workspace: WS, packages: P }, async (a) => {
     const id = named(a.workspace);
