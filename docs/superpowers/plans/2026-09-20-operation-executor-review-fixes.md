@@ -109,6 +109,12 @@ Each is a decision the review left open. Recorded with what it costs if wrong.
    that was mid-dispatch at a crash stays non-terminal after restart. Cost if wrong: none now; the
    gap is visible instead of silent.
 
+7. **The in-memory test store is frozen, not rewritten.** Its 18 tests check call order and the
+   absence of calls, which is what a recording fake is for. Store-dependent behaviour is tested on
+   the real store by the tasks that fix it, and a ratchet stops the fake from spreading. Cost if
+   wrong: an interaction test could still pass against a store call the real store would refuse;
+   the real-store test beside it would fail.
+
 ---
 
 ## CORE lane
@@ -254,15 +260,26 @@ throws.
 
 **Commit:** `Report what recovery deferred instead of dropping it`
 
-### C-7 The executor suite runs on the real store
+### C-7 The recording fake is frozen; store behaviour is tested on the real store (ruling 7)
 
-**Files:** `harness/bench/test/operations-executor.test.ts`, `operations-scheduler.test.ts`.
+**Files:** `harness/bench/test/operations-executor.test.ts`.
 
-**Required behaviour:** both suites construct the real `OperationStore`; `MemoryStore` is deleted
-if nothing else uses it. A test that fails on the real store is a finding: fix it inside this
-lane's files or report it. Nothing is skipped or weakened.
+**Scope, corrected 20 Sep.** The first version asked for every executor test to move to the real
+`OperationStore`. Reading the suite showed the 18 tests on the in-memory fake are INTERACTION
+tests: they assert the order of store calls and the absence of calls, and they seed step states
+directly, which the real store forbids. Rewriting them would be large and would risk weakening
+them. The review's complaint was narrower: no store-dependent behaviour (approval, failure,
+deadline, recovery) was tested against the real store. Tasks C-1 to C-6 add those tests.
 
-**Commit:** `Run the executor tests against the real store`
+**Required behaviour:** the fake is renamed `RecordingStore` with a header comment stating what it
+is for (call order and absence of calls) and what it must never be used for (anything whose
+correctness depends on the store accepting or refusing a transition). A ratchet test reads the test
+file and fails if the number of `new RecordingStore(` occurrences exceeds today's count. One
+real-store recovery test is added: a log left with a `running` step, a new store, `planRecovery`,
+then `recover` — the action is reported as deferred and the durable state is unchanged. The test
+file's header lists, for each of the four paths, the real-store test that covers it.
+
+**Commit:** `Freeze the recording store and cover recovery on the real one`
 
 ---
 
