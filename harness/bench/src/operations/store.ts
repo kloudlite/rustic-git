@@ -65,6 +65,7 @@ import {
   type TrustedActorContext,
   type UnknownOutcome,
 } from "./contracts.ts";
+import { DispatchAuthority, type DispatchToken } from "./dispatch-authority.ts";
 import { isRecord, type Validation } from "./shape.ts";
 import {
   applyTransition,
@@ -257,6 +258,7 @@ export type OperationStoreOptions = {
   ownership: ExclusiveOwnership;
   /** Trusted O02 seam. Every persisted security property comes from this descriptor. */
   capabilityMetadata: CapabilityMetadataSource;
+  dispatchAuthority: DispatchAuthority;
   fs?: StoreFs;
   now?: () => number;
   /** Test seam; the id is still validated before it can name a file. */
@@ -310,6 +312,8 @@ export type RetryStepInput = StartStepInput & {
   retry: RetryPolicy;
 };
 
+export type RetryStepResult = { snapshot: OperationSnapshot; dispatchToken: DispatchToken };
+
 export type CancelStepInput = { evidenceRefs: string[]; summary?: string };
 
 export type RequireDecisionInput = {
@@ -325,7 +329,7 @@ export type RequireDecisionInput = {
 export type ResumeInput = { request: ResumeRequest; context: TrustedActorContext };
 
 export type ResumeResult =
-  | { outcome: "dispatch"; snapshot: OperationSnapshot; stepId: string; decisionId: string; recordId: string; dispatchDigest: string }
+  | { outcome: "dispatch"; snapshot: OperationSnapshot; stepId: string; decisionId: string; recordId: string; dispatchDigest: string; dispatchToken: DispatchToken }
   | { outcome: "supply_input"; snapshot: OperationSnapshot; decisionId: string; resolution: Extract<DecisionResolution, { kind: "additional_input" }> }
   | { outcome: "refuse_step"; snapshot: OperationSnapshot; stepId: string; decisionId: string; recordId: string };
 
@@ -614,7 +618,7 @@ function replayProblem(previous: OperationSnapshot, next: OperationSnapshot, rec
   ] as const) {
     if (!sameJson(left, right)) return `${name} changed after acceptance`;
   }
-  if (next.updatedAt < previous.updatedAt || record.at !== next.updatedAt) return "commit timestamp is inconsistent with the snapshot";
+  if (next.updatedAt < previous.updatedAt || (revisionOnlyCommit ? record.at < next.updatedAt : record.at !== next.updatedAt)) return "commit timestamp is inconsistent with the snapshot";
   if (revisionOnlyCommit && !sameJson({ ...previous, lastSequence: next.lastSequence }, next)) return "same-revision commit changed lifecycle facts";
   if (!revisionOnlyCommit && record.events.length === 0) return "a meaningful snapshot change has no corresponding event";
   if (next.state !== previous.state) {
@@ -681,6 +685,7 @@ function replayProblem(previous: OperationSnapshot, next: OperationSnapshot, rec
     if (event.stepId && !next.steps.some((step) => step.stepId === event.stepId)) return `event names unknown step ${event.stepId}`;
     if (event.stepId && event.capability !== stepOf(next, event.stepId).capability) return "event capability disagrees with its step";
   }
+  if (revisionOnlyCommit && record.at > next.updatedAt && !record.events.every((event) => event.phase === "decision_recorded")) return "same-revision commit is not decision evidence";
   if (next.state !== previous.state && !record.events.some((event) => event.phase === next.state || (next.state === "running" && (event.phase === "dispatched" || event.phase === "decision_recorded")) || (next.state === "resolving" && event.phase === "decision_recorded") || (next.state === "reconciling" && event.phase === "unknown_outcome") || (next.state === "cancel_requested" && event.phase === "cancelled" && event.decisionCode === "cancel_requested") || (next.state === "awaiting_approval" && event.phase === "approval_required") || (next.state === "needs_input" && event.phase === "needs_input"))) {
     return "operation state change has no corresponding event";
   }
@@ -698,6 +703,7 @@ export class OperationStore {
   #fs: StoreFs;
   #ownership: ExclusiveOwnership;
   #capabilityMetadata: CapabilityMetadataSource;
+  #dispatchAuthority: DispatchAuthority;
   #now: () => number;
   #generateId: () => string;
   #operations = new Map<string, StoredOperation>();
@@ -715,6 +721,7 @@ export class OperationStore {
     this.#fs = options.fs ?? nodeStoreFs;
     this.#ownership = options.ownership;
     this.#capabilityMetadata = options.capabilityMetadata;
+    this.#dispatchAuthority = options.dispatchAuthority;
     this.#now = options.now ?? (() => Date.now());
     this.#generateId = options.generateOperationId ?? (() => `op-${randomUUID()}`);
     this.#scan();
@@ -1101,6 +1108,7 @@ export class OperationStore {
 
   /** Records an observed outcome after dispatch; never a substitute for one. */
   recordStepOutcome(operationId: string, stepId: string, input: StepOutcomeInput): OperationSnapshot {
+    this.#dispatchAuthority.invalidate(operationId, stepId);
     const snapshot = this.#requireSnapshot(operationId);
     const step = stepOf(snapshot, stepId);
     const error = input.outcome === "failed" ? validated(validateOperationError(input.error), "$.error") : undefined;
@@ -1145,6 +1153,7 @@ export class OperationStore {
    * through `reconcile_conclusive`: an unknown effect is never retried or cancelled away.
    */
   markOutcomeUnknown(operationId: string, stepId: string, input: { summary?: string } = {}): OperationSnapshot {
+    this.#dispatchAuthority.invalidate(operationId, stepId);
     const operation = this.#require(operationId);
     const snapshot = this.#requireSnapshot(operationId);
     const step = stepOf(snapshot, stepId);
@@ -1210,7 +1219,7 @@ export class OperationStore {
    * `reconcile_required` never restart, an unknown outcome is not a failure and cannot
    * reach here, and the attempt count is checked before a new intent is recorded.
    */
-  retryStep(operationId: string, stepId: string, input: RetryStepInput, currentContext: TrustedActorContext): OperationSnapshot {
+  retryStep(operationId: string, stepId: string, input: RetryStepInput, currentContext: TrustedActorContext): RetryStepResult {
     const loaded = this.#require(operationId);
     const snapshot = this.#requireSnapshot(operationId);
     const context = validated(validateTrustedActorContext(currentContext), "$.context");
@@ -1275,7 +1284,7 @@ export class OperationStore {
         ...(input.backendOperationId !== undefined ? { backendOperationId: input.backendOperationId } : {}),
       },
     };
-    return this.#apply(operationId, {
+    const applied = this.#apply(operationId, {
       now,
       turnRevision: context.turnRevision,
       steps: [change],
@@ -1292,11 +1301,14 @@ export class OperationStore {
           retryCount: step.attempts,
         },
       ],
-    }).snapshot;
+    });
+    const current = applied.snapshot.steps.find((entry) => entry.stepId === stepId)!;
+    return { snapshot: applied.snapshot, dispatchToken: this.#dispatchAuthority.issue({ operationId, stepId, capability: current.capability, version: current.capabilityVersion, payloadDigest: digest, attempt: current.attempts }) };
   }
 
   /** Cancels a running step only with evidence that no effect was applied. */
   cancelStep(operationId: string, stepId: string, input: CancelStepInput): OperationSnapshot {
+    this.#dispatchAuthority.invalidate(operationId, stepId);
     const snapshot = this.#requireSnapshot(operationId);
     const step = stepOf(snapshot, stepId);
     if (!input.evidenceRefs?.length) {
@@ -1614,6 +1626,7 @@ export class OperationStore {
       decisionId: pending.decisionId,
       recordId,
       dispatchDigest: payloadDigest,
+      dispatchToken: this.#dispatchAuthority.issue({ operationId: snapshot.operationId, stepId: pending.stepId, capability: step.capability, version: step.capabilityVersion, payloadDigest, attempt: applied.snapshot.steps.find((entry) => entry.stepId === pending.stepId)!.attempts }),
     };
   }
 

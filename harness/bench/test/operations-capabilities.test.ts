@@ -13,7 +13,8 @@ import {
   createBenchCapabilityRuntime,
 } from "../src/operations/capabilities.ts";
 import type { CapabilityDefinition } from "../src/operations/capabilities.ts";
-import { validateCapabilityDescriptor } from "../src/operations/contracts.ts";
+import { canonicalDigest, checkResumeAgainstRecord, validateCapabilityDescriptor, validateRecordedDecision } from "../src/operations/contracts.ts";
+import { DispatchAuthority } from "../src/operations/dispatch-authority.ts";
 import type { RecordedDecision, ResumeExpectation } from "../src/operations/contracts.ts";
 import { toJsonSchema } from "../src/operations/shape.ts";
 import type { Validation } from "../src/operations/shape.ts";
@@ -100,6 +101,30 @@ const decisionExpectation = (overrides: Partial<ResumeExpectation> = {}): Omit<R
 const grantedDecision = (expectation: ResumeExpectation, overrides: Partial<RecordedDecision> = {}): RecordedDecision => ({
   recordId: "record-1", operationId: expectation.operationId, stepId: expectation.stepId, decisionId: expectation.decisionId, decisionClass: "user_authorization", actorId: expectation.actorId, tenantId: expectation.tenantId, sessionId: expectation.sessionId, payloadDigest: expectation.payloadDigest, revision: expectation.revision, policySource: "user_ui", outcome: "granted", recordedAt: expectation.now - 1, expiresAt: expectation.expiryBound, ...overrides,
 });
+const approvedDispatch = async (
+  registry: CapabilityRegistry,
+  capability: string,
+  args: unknown,
+  runtime: ReturnType<typeof capabilityRuntime>,
+  overrides: Partial<RecordedDecision> = {},
+  allowedPolicySources: readonly ("user_ui" | "trusted_policy")[] = ["user_ui"],
+) => {
+  const authority = new DispatchAuthority();
+  const deps = { runtime, decision: decisionExpectation(), allowedPolicySources };
+  const prepared = registry.prepare(capability, args, deps);
+  assert.equal(prepared.ok, true);
+  if (!prepared.ok || !prepared.approval) assert.fail("expected an approval request");
+  const record = grantedDecision(prepared.approval.expectation, overrides);
+  const authorized = (() => {
+    const shaped = validateRecordedDecision(record);
+    if (!shaped.ok || !allowedPolicySources.includes(record.policySource)) return false;
+    const checked = checkResumeAgainstRecord(record, prepared.approval!.expectation);
+    return checked.ok && checked.value.dispatchAuthorized;
+  })();
+  const token = authority.issue({ operationId: prepared.approval.expectation.operationId, stepId: prepared.approval.expectation.stepId, capability, version: prepared.approval.version, payloadDigest: prepared.approval.payloadDigest, attempt: 1 });
+  const authorizedRegistry = new CapabilityRegistry(CAPABILITY_CONTRACTS, [capability], authority);
+  return authorizedRegistry.dispatch(capability, args, { runtime, dispatchToken: authorized ? token : ({} as typeof token), dispatchOperationId: prepared.approval.expectation.operationId, dispatchStepId: prepared.approval.expectation.stepId, dispatchAttempt: 1 });
+};
 
 test("every shipped contract is valid, and its published schema is its executable shape", () => {
   assert.ok(CAPABILITY_CONTRACTS.length >= 15);
@@ -148,9 +173,7 @@ test("trusted runtime adapters receive clear state separately from ordinary argu
   const runtime = capabilityRuntime({
       "environment.intercept": async (input) => (seen.push(input), { ok: true, value: { id: "devstack", service: "postgres", cleared: true } }),
   });
-  const result = await registry.dispatch("environment.intercept", { id: "devstack", service: "postgres", workspace: null }, {
-    runtime, decision: decisionExpectation(), approve: async ({ expectation }) => grantedDecision(expectation),
-  });
+  const result = await approvedDispatch(registry, "environment.intercept", { id: "devstack", service: "postgres", workspace: null }, runtime);
   assert.equal(result.outcome, "completed");
   assert.deepEqual(seen, [{ args: { id: "devstack", service: "postgres" }, states: { id: { kind: "known", value: "devstack" }, service: { kind: "known", value: "postgres" }, workspace: { kind: "explicitly_clear" }, ports: { kind: "unspecified" } }, signal: undefined }]);
 });
@@ -166,11 +189,7 @@ test("mutations accept only a matching, live, unused RecordedDecision", async ()
   const registry = new CapabilityRegistry(CAPABILITY_CONTRACTS, ["environment.restore"]);
   let runs = 0;
   const runtime = capabilityRuntime({ "environment.restore": async () => (runs++, { ok: true, value: { id: "devstack" } }) });
-  const attempt = (overrides: Partial<RecordedDecision> = {}) => registry.dispatch("environment.restore", { id: "devstack", snapshot: "snap-1" }, {
-    runtime,
-    decision: decisionExpectation(),
-    approve: async ({ expectation }) => grantedDecision(expectation, overrides),
-  });
+  const attempt = (overrides: Partial<RecordedDecision> = {}) => approvedDispatch(registry, "environment.restore", { id: "devstack", snapshot: "snap-1" }, runtime, overrides);
   for (const forged of [
     { actorId: "actor-2" }, { sessionId: "session-2" }, { stepId: "step-2" }, { payloadDigest: "sha256:" + "0".repeat(64) }, { revision: 2 }, { expiresAt: 3_000 }, { expiresAt: 1_000 }, { usedAt: 999 }, { outcome: "denied" as const },
   ]) {
@@ -245,9 +264,7 @@ test("a definitive HTTP 5xx is provider failure; only a thrown mutation transpor
   const transportRuntime = capabilityRuntime(createPlatformAdapters(async () => { throw new Error("connection reset after send"); }));
   for (const [runtime, code] of [[responseRuntime, "provider_failure"], [transportRuntime, "unknown_outcome"]] as const) {
     const registry = new CapabilityRegistry(CAPABILITY_CONTRACTS, ["environment.restore"]);
-    const result = await registry.dispatch("environment.restore", { id: "env-1", snapshot: "snap-1" }, {
-      runtime, decision: decisionExpectation(), allowedPolicySources: ["user_ui"], approve: async ({ expectation }) => grantedDecision(expectation),
-    });
+    const result = await approvedDispatch(registry, "environment.restore", { id: "env-1", snapshot: "snap-1" }, runtime);
     assert.equal(result.outcome, "failed");
     if (result.outcome === "failed") assert.equal(result.code, code);
   }
@@ -257,29 +274,19 @@ test("trusted policy decisions run only when the trusted dispatch context allows
   const registry = new CapabilityRegistry(CAPABILITY_CONTRACTS, ["environment.restore"]);
   let runs = 0;
   const runtime = capabilityRuntime({ "environment.restore": async () => (runs++, { ok: true, value: { id: "env-1" } }) });
-  const dispatch = (allowedPolicySources: readonly ("user_ui" | "trusted_policy")[]) => registry.dispatch("environment.restore", { id: "env-1", snapshot: "snap-1" }, {
-    runtime,
-    decision: decisionExpectation(),
-    allowedPolicySources,
-    approve: async ({ expectation }) => grantedDecision(expectation, { policySource: "trusted_policy" }),
-  });
+  const dispatch = (allowedPolicySources: readonly ("user_ui" | "trusted_policy")[]) => approvedDispatch(registry, "environment.restore", { id: "env-1", snapshot: "snap-1" }, runtime, { policySource: "trusted_policy" }, allowedPolicySources);
   const allowed = await dispatch(["trusted_policy"]);
   assert.equal(allowed.outcome, "completed");
   const downgraded = expectRefused(await dispatch(["user_ui"]));
-  assert.equal(downgraded.code, "forged_approval");
+  assert.equal(downgraded.code, "permission_denied");
   assert.equal(runs, 1);
 });
 
 test("malformed decisions are refused from the shaped record before binding checks", async () => {
   const registry = new CapabilityRegistry(CAPABILITY_CONTRACTS, ["environment.restore"]);
   const runtime = capabilityRuntime({ "environment.restore": async () => ({ ok: true, value: { id: "env-1" } }) });
-  const refused = expectRefused(await registry.dispatch("environment.restore", { id: "env-1", snapshot: "snap-1" }, {
-    runtime,
-    decision: decisionExpectation(),
-    allowedPolicySources: ["user_ui"],
-    approve: async ({ expectation }) => ({ ...grantedDecision(expectation), expiresAt: "later" } as any),
-  }));
-  assert.equal(refused.code, "forged_approval");
+  const refused = expectRefused(await approvedDispatch(registry, "environment.restore", { id: "env-1", snapshot: "snap-1" }, runtime, { expiresAt: "later" as any }));
+  assert.equal(refused.code, "permission_denied");
 });
 
 test("shared mutation adapters preserve collections and use explicit clear transport", async () => {
@@ -294,7 +301,7 @@ test("shared mutation adapters preserve collections and use explicit clear trans
   const runtime = capabilityRuntime(createPlatformAdapters(platform));
   const dispatch = async (capability: string, args: unknown) => {
     const registry = new CapabilityRegistry(CAPABILITY_CONTRACTS, [capability]);
-    return registry.dispatch(capability, args, { runtime, decision: decisionExpectation(), approve: async ({ expectation }) => grantedDecision(expectation) });
+    return approvedDispatch(registry, capability, args, runtime);
   };
   assert.equal((await dispatch("environment.intercept", { id: "env-1", service: "db", workspace: null })).outcome, "completed");
   assert.deepEqual(calls.at(-1), { method: "DELETE", route: "/v1/environments/env-1/intercepts/db", body: undefined });
@@ -321,7 +328,7 @@ test("shared mutation adapters preserve restore/create routes and unknown outcom
     ["environment.create", { name: "dev", from_snapshot: "snap-2", services: [] }],
   ] as const) {
     const registry = new CapabilityRegistry(CAPABILITY_CONTRACTS, [capability]);
-    const result = await registry.dispatch(capability, args, { runtime, decision: decisionExpectation(), approve: async ({ expectation }) => grantedDecision(expectation) });
+    const result = await approvedDispatch(registry, capability, args, runtime);
     assert.equal(result.outcome, "failed");
     if (result.outcome === "failed") assert.equal(result.code, "unknown_outcome");
   }
@@ -416,31 +423,42 @@ test("an enabled read runs through its wired handler; a refusal or an error is n
   assert.equal(stale.code, "stale_contract");
 });
 
-test("an asynchronous denial refuses the step and runs nothing; a grant runs it once", async () => {
-  const registry = new CapabilityRegistry(CAPABILITY_CONTRACTS, ["environment.restore"]);
-  const gate = deferred<RecordedDecision>();
+test("a prepared denial refuses the step and runs nothing; a prepared grant runs it once", async () => {
+  const authority = new DispatchAuthority();
+  const registry = new CapabilityRegistry(CAPABILITY_CONTRACTS, ["environment.restore"], authority);
   const calls: string[] = [];
   const runtime = capabilityRuntime({ "environment.restore": async ({ args }) => (calls.push(`run:${String(args.id)}`), { ok: true, value: { id: args.id } }) });
-  const decision = decisionExpectation();
-  const pending = registry.dispatch("environment.restore", { id: "devstack", snapshot: "snap-1" }, {
-    runtime, decision,
-    approve: async (request) => {
-      calls.push(`ask:${request.prompt}`);
-      assert.match(request.payloadDigest, /^sha256:[0-9a-f]{64}$/);
-      return gate.promise;
-    },
-  });
-  await tick();
-  assert.deepEqual(calls, ["ask:Restore snapshot snap-1 into environment devstack, in place"], "the handler waits for the person");
-  gate.resolve(grantedDecision({ ...decision, payloadDigest: "sha256:" + "0".repeat(64), now: decision.now! }, { outcome: "denied" }));
-  const denied = expectRefused(await pending);
+  const args = { id: "devstack", snapshot: "snap-1" };
+  const prepared = registry.prepare("environment.restore", args, { runtime, decision: decisionExpectation() });
+  assert.equal(prepared.ok, true);
+  if (!prepared.ok || !prepared.approval) assert.fail("expected an approval request");
+  assert.equal(prepared.approval.prompt, "Restore snapshot snap-1 into environment devstack, in place");
+  assert.match(prepared.approval.payloadDigest, /^sha256:[0-9a-f]{64}$/);
+
+  const dispatch = (token: ReturnType<DispatchAuthority["issue"]>) => registry.dispatch("environment.restore", args, { runtime, dispatchToken: token, dispatchOperationId: "op-1", dispatchStepId: "step-1", dispatchAttempt: 1 });
+  const denied = expectRefused(await dispatch({} as ReturnType<DispatchAuthority["issue"]>));
   assert.equal(denied.code, "permission_denied");
-  assert.match(denied.reason, /recorded decision did not authorize/);
+  assert.equal(denied.reason, DECLINED);
   assert.equal(calls.filter((call) => call.startsWith("run:")).length, 0, "a denial never reaches the handler");
 
-  const granted = await registry.dispatch("environment.restore", { id: "devstack", snapshot: "snap-1" }, { runtime, decision, approve: async ({ expectation }) => grantedDecision(expectation) });
+  const granted = await dispatch(authority.issue({ operationId: "op-1", stepId: "step-1", capability: "environment.restore", version: "1.0.0", payloadDigest: prepared.approval.payloadDigest, attempt: 1 }));
   assert.equal(granted.outcome, "completed");
   assert.deepEqual(calls.filter((call) => call.startsWith("run:")), ["run:devstack"]);
+});
+
+test("an approval-required adapter needs a one-shot attempt authorization", async () => {
+  const authority = new DispatchAuthority();
+  const registry = new CapabilityRegistry(CAPABILITY_CONTRACTS, ["environment.restore"], authority);
+  let runs = 0;
+  const runtime = capabilityRuntime({ "environment.restore": async () => (runs += 1, { ok: true, value: { id: "devstack" } }) });
+  const args = { id: "devstack", snapshot: "snap-1" };
+  const token = authority.issue({ operationId: "op-1", stepId: "step-1", capability: "environment.restore", version: "1.0.0", payloadDigest: canonicalDigest(args), attempt: 1 });
+  const deps = { runtime, dispatchToken: token, dispatchOperationId: "op-1", dispatchStepId: "step-1", dispatchAttempt: 1 };
+
+  assert.equal((await registry.dispatch("environment.restore", args, deps)).outcome, "completed");
+  const replay = expectRefused(await registry.dispatch("environment.restore", args, deps));
+  assert.equal(replay.code, "permission_denied");
+  assert.equal(runs, 1);
 });
 
 test("a mutating plan with no approval channel is refused, never run", async () => {
@@ -856,21 +874,19 @@ test("intercept says set, clear or the one-to-one default explicitly", () => {
 test("approval cannot mutate the payload that the handler executes", async () => {
   const registry = new CapabilityRegistry(CAPABILITY_CONTRACTS, ["environment.restore"]);
   let executed: Record<string, unknown> | undefined;
-  const result = await registry.dispatch(
-    "environment.restore",
-    { id: "devstack", snapshot: "snap-1" },
-    {
-      runtime: capabilityRuntime({ "environment.restore": async ({ args }) => {
-        executed = args;
-        return { ok: true, value: { id: args.id } };
-      } }),
-      decision: decisionExpectation(),
-      approve: async (request) => {
-        (request.args as Record<string, unknown>).snapshot = "other-snapshot";
-        return grantedDecision(request.expectation);
-      },
-    },
-  );
+  const runtime = capabilityRuntime({ "environment.restore": async ({ args }) => {
+    executed = args;
+    return { ok: true, value: { id: args.id } };
+  } });
+  const args = { id: "devstack", snapshot: "snap-1" };
+  const prepared = registry.prepare("environment.restore", args, { runtime, decision: decisionExpectation() });
+  assert.equal(prepared.ok, true);
+  if (!prepared.ok || !prepared.approval) assert.fail("expected an approval request");
+  (prepared.approval.args as Record<string, unknown>).snapshot = "other-snapshot";
+  const authority = new DispatchAuthority();
+  const authorized = new CapabilityRegistry(CAPABILITY_CONTRACTS, ["environment.restore"], authority);
+  const token = authority.issue({ operationId: "op-1", stepId: "step-1", capability: "environment.restore", version: "1.0.0", payloadDigest: canonicalDigest(args), attempt: 1 });
+  const result = await authorized.dispatch("environment.restore", args, { runtime, dispatchToken: token, dispatchOperationId: "op-1", dispatchStepId: "step-1", dispatchAttempt: 1 });
   assert.equal(result.outcome, "completed");
   assert.deepEqual(executed, { id: "devstack", snapshot: "snap-1" });
 });

@@ -6,6 +6,7 @@ import path from "node:path";
 import { canonicalDigest, type OperateRequest, type TrustedActorContext } from "../src/operations/contracts.ts";
 import { OperationStore, StoreNotOwnedError, type CapabilityMetadata, type RetryPolicy } from "../src/operations/store.ts";
 import { planRecovery, pendingReconciliation, type RecoveryPlan, type RecoveryReport } from "../src/operations/recovery.ts";
+import { DispatchAuthority } from "../src/operations/dispatch-authority.ts";
 
 const PAYLOAD_A = canonicalDigest({ path: "src/config.ts", revision: 4 });
 
@@ -52,12 +53,12 @@ function bench(start = 1_760_000_000_000, retry: RetryPolicy = { class: "none", 
   const root = fs.mkdtempSync(path.join(os.tmpdir(), "bench-oprecovery-"));
   const clock = clockFrom(start);
   const ownership = new OwnershipStub();
-  const store = new OperationStore({ root, ownership, now: clock.now, capabilityMetadata: (capability) => metadata(capability, retry) });
+  const store = new OperationStore({ root, ownership, now: clock.now, capabilityMetadata: (capability) => metadata(capability, retry), dispatchAuthority: new DispatchAuthority() });
   return { root, clock, ownership, store };
 }
 
 function restart(root: string, clock: ReturnType<typeof clockFrom>, retry: RetryPolicy = { class: "none", maxAttempts: 1 }): OperationStore {
-  return new OperationStore({ root, ownership: new OwnershipStub(), now: clock.now, capabilityMetadata: (capability) => metadata(capability, retry) });
+  return new OperationStore({ root, ownership: new OwnershipStub(), now: clock.now, capabilityMetadata: (capability) => metadata(capability, retry), dispatchAuthority: new DispatchAuthority() });
 }
 
 function operationFile(root: string, operationId: string): string {
@@ -201,7 +202,7 @@ test("an expired approval after restart cannot turn a retry candidate into dispa
     const found = metadata(capability, { class: "idempotent", maxAttempts: 2 });
     return found ? { ...found, approval: capability === "file.edit" ? "user" : "none" } : undefined;
   };
-  const store = new OperationStore({ root, ownership: new OwnershipStub(), now: clock.now, capabilityMetadata: approved });
+  const store = new OperationStore({ root, ownership: new OwnershipStub(), now: clock.now, capabilityMetadata: approved, dispatchAuthority: new DispatchAuthority() });
   const operationId = store.accept({ request: instruction(), context: context() }).snapshot.operationId;
   store.queueStep(operationId, { key: "edit_config", capability: "file.edit" });
   const waiting = store.requireDecision(operationId, "step-1", {
@@ -231,7 +232,7 @@ test("an expired approval after restart cannot turn a retry candidate into dispa
   store.recordStepOutcome(operationId, "step-1", { outcome: "failed", error: { code: "execution_failure", message: "retry", retryable: true } });
   clock.advance(2_000);
 
-  const restarted = new OperationStore({ root, ownership: new OwnershipStub(), now: clock.now, capabilityMetadata: approved });
+  const restarted = new OperationStore({ root, ownership: new OwnershipStub(), now: clock.now, capabilityMetadata: approved, dispatchAuthority: new DispatchAuthority() });
   const candidate = planFor(planRecovery(restarted, { now: clock.now() }), operationId).actions.find((action) => action.kind === "retry_candidate");
   assert.ok(candidate && candidate.kind === "retry_candidate");
   assert.throws(
