@@ -63,6 +63,59 @@ async fn holder_is_live(client: &kube::Client, owner_pod_uid: Option<&str>, job_
     })
 }
 
+/// How long a roll lock with no resolvable pod (`roll.sh` run by hand, from an operator's laptop —
+/// there is no API object to ask) is still read as live. The ONE place this module judges by age
+/// rather than the API — matches `roll.sh`'s own upper bound (it does not run for 2 h), so a lock
+/// left behind by a killed `roll.sh` is dead within the same window the script itself would have
+/// given up in.
+const OPERATOR_ROLL_MAX_AGE: Duration = Duration::from_secs(2 * 3600);
+
+/// A roll lock's own liveness, distinct from `holder_is_live` above: a roll lock never carries a
+/// `job_uid` (only the hourly probe does), and its `owner_pod_uid` is absent for an operator's
+/// `roll.sh` — the one case this whole module allows age to decide, because there is no pod or job
+/// object to ask. `created_at` is the lock's own `creationTimestamp` off the wire, not a value this
+/// process invented, so two processes agree on it.
+async fn roll_holder_is_live(client: &kube::Client, owner_pod_uid: Option<&str>, created_at_unix_secs: Option<i64>) -> Result<bool> {
+    if owner_pod_uid.is_some() {
+        return holder_is_live(client, owner_pod_uid, None).await;
+    }
+    Ok(created_at_unix_secs.is_none_or(|created| {
+        let age_secs = chrono::Utc::now().timestamp() - created;
+        age_secs < 0 || (age_secs as u64) < OPERATOR_ROLL_MAX_AGE.as_secs()
+    }))
+}
+
+/// What kind of thing a lock is keeping apart from the fleet — the whole reason the fast suite may
+/// read one and not the other (ruling 3): a roll and a probe never share a lock's semantics, only
+/// its ConfigMap. Recorded in `data.kind`; inferred for a lock an older build wrote with no such
+/// field, from the one shape only `roll.sh` ever produced (`holder` = `{pod_uid}/roll-…`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Kind {
+    Roll,
+    Probe,
+}
+
+impl Kind {
+    fn as_str(self) -> &'static str {
+        match self {
+            Kind::Roll => "roll",
+            Kind::Probe => "probe",
+        }
+    }
+
+    fn of(data: &std::collections::BTreeMap<String, String>) -> Option<Kind> {
+        match data.get("kind").map(String::as_str) {
+            Some("roll") => Some(Kind::Roll),
+            Some("probe") => Some(Kind::Probe),
+            // No `kind` at all: only a lock `roll.sh` wrote before this field existed looks like
+            // this — every probe-written lock has always carried `holder = {pod_uid}/{run_id}/…`
+            // with a run id, never a bare `roll-…` prefix on its own.
+            None if data.get("holder").is_some_and(|h| h.split('/').nth(1).is_some_and(|part| part.starts_with("roll-"))) => Some(Kind::Roll),
+            _ => None,
+        }
+    }
+}
+
 pub struct RollLock {
     api: Api<ConfigMap>,
     uid: String,
@@ -78,7 +131,9 @@ pub async fn client() -> Result<kube::Client> {
         .map_err(|e| anyhow!("no kube client for roll coordination: {e}"))
 }
 
-pub async fn acquire(client: kube::Client, run_id: &str) -> Result<RollLock> {
+/// Every non-fast suite's lock: `kind: probe`, `suite` naming which one. The fast suite never
+/// calls this (ruling 3) — it only ever peeks with `fast_peek`, below.
+pub async fn acquire(client: kube::Client, run_id: &str, suite: &str) -> Result<RollLock> {
     let api = Api::namespaced(client.clone(), NAMESPACE);
     let pod_uid = std::env::var("KLOUDLITE_POD_UID").unwrap_or_else(|_| "manual".into());
     // Kubelet sets a pod's hostname to its own name by default — `roll.sh` already leans on the
@@ -87,11 +142,13 @@ pub async fn acquire(client: kube::Client, run_id: &str) -> Result<RollLock> {
     let job_name = std::env::var("KLOUDLITE_SLO_JOB_NAME").unwrap_or_default();
     let random = format!("{:032x}", rand::random::<u128>());
     let holder = format!("{pod_uid}/{run_id}/{random}");
-    let mut data = [("holder".into(), holder)].into_iter().collect::<std::collections::BTreeMap<_, _>>();
-    // `owner_pod_uid` on EVERY lock, not only a job-owned one: a fast run's lock needs it just as
-    // much for `holder_is_live` to judge a takeover, and a plain "manual" run (no pod at all, a
-    // human at a shell) records the sentinel so takeover treats it as never live rather than
-    // panicking on a missing key.
+    let mut data = [("holder".into(), holder), ("kind".into(), Kind::Probe.as_str().into()), ("suite".into(), suite.into())]
+        .into_iter()
+        .collect::<std::collections::BTreeMap<_, _>>();
+    // `owner_pod_uid` on EVERY lock, not only a job-owned one: a takeover needs it just as much
+    // for `holder_is_live` to judge one, and a plain "manual" run (no pod at all, a human at a
+    // shell) records the sentinel so takeover treats it as never live rather than panicking on a
+    // missing key.
     if pod_uid != "manual" {
         data.insert("owner_pod_uid".into(), pod_uid.clone());
     }
@@ -114,6 +171,18 @@ pub async fn acquire(client: kube::Client, run_id: &str) -> Result<RollLock> {
             block_owner_deletion: Some(false),
         }]
     });
+    create_or_take_over(&api, client, data, owner_references).await
+}
+
+/// Try the ordinary create; on AlreadyExists, judge the existing lock and either take it over or
+/// report who holds it. Shared by `acquire` (probe locks) — a roll lock is created by `roll.sh` in
+/// bash, never from here.
+async fn create_or_take_over(
+    api: &Api<ConfigMap>,
+    client: kube::Client,
+    data: std::collections::BTreeMap<String, String>,
+    owner_references: Option<Vec<OwnerReference>>,
+) -> Result<RollLock> {
     let cm = ConfigMap {
         metadata: kube::api::ObjectMeta {
             name: Some(NAME.into()),
@@ -126,23 +195,26 @@ pub async fn acquire(client: kube::Client, run_id: &str) -> Result<RollLock> {
     };
     match api.create(&PostParams::default(), &cm).await {
         Ok(created) => Ok(RollLock {
-            api,
+            api: api.clone(),
             uid: created.uid().ok_or_else(|| anyhow!("coordination lock has no uid"))?,
             resource_version: created.resource_version().ok_or_else(|| anyhow!("coordination lock has no resourceVersion"))?,
         }),
-        Err(kube::Error::Api(e)) if e.code == 409 => take_over(&api, client, &data, owner_references).await,
+        Err(kube::Error::Api(e)) if e.code == 409 => take_over(api, client, data, owner_references).await,
         Err(e) => Err(anyhow!("roll coordination is held or unavailable: {e}")),
     }
 }
 
-/// The existing lock's holder is gone or terminal (checked against the API, never age): replace it
-/// with OUR data, CAS'd on the uid/resourceVersion just read so two racing takeovers cannot both
-/// win — the loser's precondition fails and it falls back to reporting the (by-then new) holder as
-/// live, same as any other contended acquire.
+/// The existing lock's holder is gone or terminal (checked against the API, never age — except a
+/// roll lock with no resolvable pod, `roll_holder_is_live`'s one exception): DELETE it
+/// preconditioned on the uid/resourceVersion just read, then run the ordinary create. Never a PUT
+/// — the probe's Role has no `update`, and needs none: the delete's precondition is what stops two
+/// racing takeovers both winning. The loser's delete gets 409/404 (someone else's delete already
+/// landed, or already recreated it), so it falls through to reporting whoever won as the new live
+/// holder — same as any other contended acquire.
 async fn take_over(
     api: &Api<ConfigMap>,
     client: kube::Client,
-    data: &std::collections::BTreeMap<String, String>,
+    data: std::collections::BTreeMap<String, String>,
     owner_references: Option<Vec<OwnerReference>>,
 ) -> Result<RollLock> {
     let existing = api.get(NAME).await.map_err(|e| anyhow!("could not read existing roll lock: {e}"))?;
@@ -152,29 +224,57 @@ async fn take_over(
         let holder = existing_data.get("holder").cloned().unwrap_or_else(|| "an unknown holder".into());
         return Err(Held(holder).into());
     }
+    let uid = existing.uid().ok_or_else(|| anyhow!("existing roll lock has no uid"))?;
     let resource_version = existing.resource_version().ok_or_else(|| anyhow!("existing roll lock has no resourceVersion"))?;
-    let replace = ConfigMap {
-        metadata: kube::api::ObjectMeta {
-            name: Some(NAME.into()),
-            namespace: Some(NAMESPACE.into()),
-            resource_version: Some(resource_version),
-            owner_references,
-            ..Default::default()
-        },
-        data: Some(data.clone()),
+    let params = DeleteParams { preconditions: Some(Preconditions { uid: Some(uid), resource_version: Some(resource_version) }), ..Default::default() };
+    match api.delete(NAME, &params).await {
+        Ok(_) => {}
+        // Someone else's delete (or takeover) already won this race — fall through to the create,
+        // which will itself answer AlreadyExists if they recreated it before we get there, and
+        // report THEM as the live holder rather than looping.
+        Err(kube::Error::Api(e)) if e.code == 409 || e.code == 404 => {}
+        Err(e) => return Err(anyhow!("roll coordination takeover delete was refused: {e}")),
+    }
+    let cm = ConfigMap {
+        metadata: kube::api::ObjectMeta { name: Some(NAME.into()), namespace: Some(NAMESPACE.into()), owner_references, ..Default::default() },
+        data: Some(data),
         ..Default::default()
     };
-    // `replace` (PUT), not delete-then-create: the resourceVersion IS the precondition, and a
-    // delete-then-create window is exactly where a second dead-holder takeover would race this one.
-    let taken = api
-        .replace(NAME, &PostParams::default(), &replace)
-        .await
-        .map_err(|e| anyhow!("roll coordination takeover was refused (a racing takeover likely won): {e}"))?;
-    Ok(RollLock {
-        api: api.clone(),
-        uid: taken.uid().ok_or_else(|| anyhow!("coordination lock has no uid"))?,
-        resource_version: taken.resource_version().ok_or_else(|| anyhow!("coordination lock has no resourceVersion"))?,
-    })
+    match api.create(&PostParams::default(), &cm).await {
+        Ok(created) => Ok(RollLock {
+            api: api.clone(),
+            uid: created.uid().ok_or_else(|| anyhow!("coordination lock has no uid"))?,
+            resource_version: created.resource_version().ok_or_else(|| anyhow!("coordination lock has no resourceVersion"))?,
+        }),
+        Err(kube::Error::Api(e)) if e.code == 409 => {
+            let winner = api.get(NAME).await.map_err(|e| anyhow!("could not read the lock a racing takeover won: {e}"))?;
+            let holder = winner.data.as_ref().and_then(|d| d.get("holder")).cloned().unwrap_or_else(|| "an unknown holder".into());
+            Err(Held(holder).into())
+        }
+        Err(e) => Err(anyhow!("roll coordination is held or unavailable: {e}")),
+    }
+}
+
+/// The fast suite's own path (ruling 3): GET only, never `acquire` — a fast run does not hold the
+/// lock and creates none. `Some(holder)` only for a LIVE lock of kind `roll`; every other case
+/// (no lock, a dead roll, any probe lock however live) is `None`, meaning "run normally".
+pub async fn fast_peek(client: kube::Client) -> Result<Option<String>> {
+    let api: Api<ConfigMap> = Api::namespaced(client.clone(), NAMESPACE);
+    let existing = match api.get(NAME).await {
+        Ok(cm) => cm,
+        Err(kube::Error::Api(e)) if e.code == 404 => return Ok(None),
+        Err(e) => return Err(anyhow!("could not read roll coordination: {e}")),
+    };
+    let data = existing.data.clone().unwrap_or_default();
+    if Kind::of(&data) != Some(Kind::Roll) {
+        return Ok(None);
+    }
+    let created_at_unix_secs = existing.metadata.creation_timestamp.map(|t| t.0.as_second());
+    let live = roll_holder_is_live(&client, data.get("owner_pod_uid").map(String::as_str), created_at_unix_secs).await?;
+    if !live {
+        return Ok(None);
+    }
+    Ok(Some(data.get("holder").cloned().unwrap_or_else(|| "an unknown holder".into())))
 }
 
 pub async fn wait_for_group_owner(client: kube::Client, job_name: &str, timeout: Duration) -> Result<()> {

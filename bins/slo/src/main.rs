@@ -122,9 +122,10 @@ async fn parent(cfg: Config, kind: Suite) -> i32 {
     };
     tracing::info!(run_id = %c.run_id, suite = kind.as_str(), "slo.run.started");
     let started = Instant::now();
-    // The fast suite found a LIVE roll lock (R-1): no child to spawn and no steps to hand over —
-    // it ticks every 5 min underneath the hourly's up-to-55-minute hold, so this is routine, not a
-    // failure. Every OTHER suite still fails `Ctx::new` outright (`ctx.rs::build`), so
+    // The fast suite found a LIVE ROLL lock (R-1, ruling 3): no child to spawn and no steps to
+    // hand over. A live PROBE lock (the hourly, say) never sets this — fast does not even look at
+    // one, it just runs normally — so this only fires while a roll is actually in progress. Every
+    // other suite still fails `Ctx::new` outright on a live holder (`ctx.rs::build`), so
     // `coordination_held_by` is only ever set here for `Suite::Fast`.
     let held = c.coordination_held_by.clone();
     // On the held-lock path there is no child at all: `child_stopped = true` since nothing is

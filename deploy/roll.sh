@@ -5,54 +5,23 @@
 # and a peer holds the writer inside LEADER_TTL plus one tick. The rollout waits say when it is done.
 set -euo pipefail
 cd "$(dirname "$0")"
-# Never roll over a probe run. A pod restarting under an in-flight suite fails that suite's
-# samples for the roll's reasons, not the fleet's — an agent DaemonSet roll under a push at 14:08
-# on 2026-09-06 cost an hourly two ids that had nothing to do with what was being deployed. The
-# probe cannot yield to a roll that starts after it did, so the roll yields to the probe: wait,
-# up to the longest suite's deadline, for every SLO Job to be finished. The k3s agent roll is a
-# hand step; run this script's wait (`deploy/roll.sh --wait-only`) before it for the same reason.
-wait_for_probes() {
-  local waited=0
-  while :; do
-    local active
-active=$(kubectl -n kloudlite get jobs -o json | python3 -c '
-import sys, json
-for j in json.load(sys.stdin)["items"]:
-    n = j["metadata"]["name"]
-    labels = j["metadata"].get("labels", {})
-    owners = j["metadata"].get("ownerReferences", [])
-    probe = labels.get("kloudlite.io/probe") == "true" or any(o.get("kind") == "CronJob" and o.get("name", "").startswith("kloudlite-slo-") for o in owners) or n.startswith(("slo-", "fast-", "hourly-", "weekly-", "monthly-"))
-    status = j.get("status", {})
-    pending = not status.get("completionTime") and not status.get("failed") and not status.get("succeeded")
-    if probe and ((status.get("active") or 0) > 0 or pending):
-        print(n)')
-    [ -z "$active" ] && return 0
-    if [ "$waited" -ge 7200 ]; then
-      echo "probe still running after 2 h: $active" >&2
-      return 1
-    fi
-    [ "$waited" -eq 0 ] && echo "waiting for the probe to finish before rolling: $active"
-    sleep 15; waited=$((waited + 15))
-  done
-}
-wait_for_probes
-[ "${1:-}" = "--wait-only" ] && exit 0
+[ "${1:-}" = "--wait-only" ] && WAIT_ONLY=1 || WAIT_ONLY=0
 ROLL_RUN="roll-$(date -u +%s)-$RANDOM"
 POD_UID=$(kubectl -n kloudlite get pod "${HOSTNAME:-}" -o jsonpath='{.metadata.uid}' 2>/dev/null || true)
 HOLDER="${POD_UID:-operator}/$ROLL_RUN"
-# R-1: this script has no pod identity of its own to check against, so a takeover is judged
-# entirely from what the EXISTING lock names — never age. Mirrors `coordination::take_over` in
-# `bins/slo/src/coordination.rs`: a job-owned (hourly probe) lock is gone/terminal when its
-# `job_uid` names no Job with a True `Complete`/`Failed` condition, or names no Job at all; a
-# plain lock (another `roll.sh`, or a fast run) is gone when its `owner_pod_uid` (or, for a lock
-# this old script itself wrote before that field existed, the pod uid `holder` starts with) names
-# no live Pod.
+# R-1 / ruling 3: this script has no pod identity of its own to check a PROBE holder against, so a
+# takeover is judged entirely from what the EXISTING lock names — never age (mirrors
+# `coordination::holder_is_live` in `bins/slo/src/coordination.rs`) — with one exception: a roll
+# lock with no `owner_pod_uid` (an operator's own earlier `roll.sh`, run from a laptop with no pod
+# to ask about) is judged by age against the same 2 h bound `coordination::OPERATOR_ROLL_MAX_AGE`
+# uses, because there is no API object to check instead.
 holder_is_live() {
   local existing_json="$1"
-  local job_uid owner_pod_uid holder
+  local job_uid owner_pod_uid holder kind created
   job_uid=$(jq -r '.data.job_uid // empty' <<<"$existing_json")
   owner_pod_uid=$(jq -r '.data.owner_pod_uid // empty' <<<"$existing_json")
   holder=$(jq -r '.data.holder // empty' <<<"$existing_json")
+  kind=$(jq -r '.data.kind // empty' <<<"$existing_json")
   if [ -n "$job_uid" ]; then
     local job
     job=$(kubectl -n kloudlite get jobs -o json | jq -c --arg uid "$job_uid" '.items[] | select(.metadata.uid == $uid)')
@@ -61,32 +30,64 @@ holder_is_live() {
     return 0
   fi
   local pod_uid="${owner_pod_uid:-${holder%%/*}}"
-  [ -z "$pod_uid" ] && return 1
-  kubectl -n kloudlite get pods -o json \
-    | jq -e --arg uid "$pod_uid" '.items[] | select(.metadata.uid == $uid and (.status.phase != "Succeeded" and .status.phase != "Failed"))' >/dev/null
+  if [ -n "$pod_uid" ] && [ "$pod_uid" != "operator" ]; then
+    kubectl -n kloudlite get pods -o json \
+      | jq -e --arg uid "$pod_uid" '.items[] | select(.metadata.uid == $uid and (.status.phase != "Succeeded" and .status.phase != "Failed"))' >/dev/null
+    return $?
+  fi
+  # No resolvable pod: only sound for a ROLL lock (a probe lock always has an `owner_pod_uid` — it
+  # runs as a Job's pod, never by hand), and only for the 2 h bound `roll.sh` itself never exceeds.
+  [ "$kind" = "roll" ] || return 1
+  created=$(jq -r '.metadata.creationTimestamp // empty' <<<"$existing_json")
+  [ -z "$created" ] && return 0
+  local created_epoch now_epoch age
+  created_epoch=$(date -u -d "$created" +%s 2>/dev/null || date -u -j -f "%Y-%m-%dT%H:%M:%SZ" "$created" +%s 2>/dev/null || echo 0)
+  now_epoch=$(date -u +%s)
+  age=$((now_epoch - created_epoch))
+  [ "$age" -lt 7200 ]
 }
-LOCK_JSON=$(kubectl -n kloudlite create configmap kloudlite-roll-coordination \
-  --from-literal="holder=$HOLDER" -o json 2>/dev/null) || {
+is_kind() {
+  jq -e --arg k "$2" '.data.kind == $k' <<<"$1" >/dev/null
+}
+# Lock FIRST, wait for running probes only after: waiting first left a gap in which a probe could
+# start between the wait finishing and the lock being taken. A live PROBE holder is not a refusal
+# here — the roll waits for it, inside the same two-hour bound the old `wait_for_probes` used; only
+# a live ROLL holder (another roll already in progress) is a hard `exit 3`.
+LOCK_WAITED=0
+while :; do
+  LOCK_JSON=$(kubectl -n kloudlite create configmap kloudlite-roll-coordination \
+    --from-literal="holder=$HOLDER" --from-literal="kind=roll" -o json 2>/dev/null) && break
   EXISTING_JSON=$(kubectl -n kloudlite get configmap kloudlite-roll-coordination -o json) || {
     echo "roll coordination is held or unavailable" >&2
     exit 3
   }
   if holder_is_live "$EXISTING_JSON"; then
-    echo "roll coordination is held by $(jq -r '.data.holder // "an unknown holder"' <<<"$EXISTING_JSON")" >&2
-    exit 3
+    EXISTING_HOLDER=$(jq -r '.data.holder // "an unknown holder"' <<<"$EXISTING_JSON")
+    if is_kind "$EXISTING_JSON" "roll"; then
+      echo "roll coordination is held by $EXISTING_HOLDER" >&2
+      exit 3
+    fi
+    if [ "$LOCK_WAITED" -ge 7200 ]; then
+      echo "probe still running after 2 h: $EXISTING_HOLDER" >&2
+      exit 3
+    fi
+    [ "$LOCK_WAITED" -eq 0 ] && echo "waiting for the probe to finish before rolling: $EXISTING_HOLDER"
+    sleep 15; LOCK_WAITED=$((LOCK_WAITED + 15))
+    continue
   fi
   EXISTING_UID=$(jq -r '.metadata.uid' <<<"$EXISTING_JSON")
   EXISTING_RV=$(jq -r '.metadata.resourceVersion' <<<"$EXISTING_JSON")
-  # Replace (PUT), CAS'd on the resourceVersion just read — the same reason the Rust side uses
-  # `replace` rather than delete-then-create: a delete-then-create window is exactly where a
-  # second, racing takeover would land, and a PUT's precondition catches that race instead.
-  REPLACE_BODY=$(jq -n --arg uid "$EXISTING_UID" --arg rv "$EXISTING_RV" --arg holder "$HOLDER" \
-    '{apiVersion:"v1",kind:"ConfigMap",metadata:{name:"kloudlite-roll-coordination",namespace:"kloudlite",uid:$uid,resourceVersion:$rv},data:{holder:$holder}}')
-  LOCK_JSON=$(kubectl -n kloudlite replace -f - -o json <<<"$REPLACE_BODY") || {
-    echo "roll coordination takeover was refused (a racing takeover likely won)" >&2
-    exit 3
-  }
-}
+  DELETE_OPTIONS=$(mktemp)
+  printf '{"apiVersion":"v1","kind":"DeleteOptions","preconditions":{"uid":"%s","resourceVersion":"%s"}}' \
+    "$EXISTING_UID" "$EXISTING_RV" >"$DELETE_OPTIONS"
+  # Delete preconditioned on uid+resourceVersion, then the ordinary create — never a PUT (the
+  # Role has no `update`, and needs none: the delete's precondition is what stops two racing
+  # takeovers both winning). A refused delete (someone else's takeover already landed) falls
+  # through to retrying the loop, which re-reads and re-judges the new holder.
+  kubectl delete --raw '/api/v1/namespaces/kloudlite/configmaps/kloudlite-roll-coordination' \
+    -f "$DELETE_OPTIONS" >/dev/null 2>&1 || true
+  rm -f "$DELETE_OPTIONS"
+done
 LOCK_UID=$(jq -r '.metadata.uid' <<<"$LOCK_JSON")
 LOCK_RV=$(jq -r '.metadata.resourceVersion' <<<"$LOCK_JSON")
 LOCK_DELETE_OPTIONS=$(mktemp)
@@ -106,6 +107,11 @@ release_roll_lock() {
   }
 }
 trap 'command_status=$?; release_status=0; release_roll_lock || release_status=$?; rm -f "$LOCK_DELETE_OPTIONS"; [ "$command_status" -eq 0 ] || exit "$command_status"; exit "$release_status"' EXIT
+# `--wait-only` is its own bounded step (a human runs it right before the separate, manual k3s
+# agent roll) — it still takes the lock first and waits for probes inside the loop above, closing
+# the same start-in-the-gap window for ITS OWN duration, but releases before returning rather than
+# holding the lock across the human's next, unbounded step.
+[ "$WAIT_ONLY" -eq 1 ] && exit 0
 # A schedule suspended by hand stays suspended across the roll. The manifest says `suspend: false`
 # for the fast and hourly probes, so a plain apply would switch them back on — and a CronJob that
 # missed a tick fires the moment it is unsuspended, i.e. straight into the rollout, which is a
