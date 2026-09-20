@@ -501,11 +501,20 @@ captures the active key before the sweep and asserts `head(key).is_err()` as wel
 **Files:** `bins/slo/src/stages/bench_ws.rs` 127, `crates/workspaces/src/slo/catalogue.rs`,
 `deploy/slo.md`, `crates/workspaces/src/history/outbox.rs`, `crates/ide/src/fs/git.rs`.
 
-**Required behaviour:** `bench.pkg.add` reads the current package list and appends, never
-overwrites; after the PATCH it verifies in the pod that the package is present; its catalogue
-entry and `deploy/slo.md` describe the API path (the test that holds the two equal must pass). The
-outbox drainer stops listing at `DRAIN_BATCH` and backs off on error. `git.rs` uses `TREES_DIR` on
-both paths and reads a symlink target of any length.
+**Required behaviour (corrected 20 Sep after reading the code):** `bench.pkg.add` reads the
+bench's current package list and PATCHes that list plus the probe package, never a fixed list, and
+its teardown restores exactly the list it read. Its wait stays on the SPEC, as the probe's own
+comment says: a nix build is minutes and is `ws.packages.add`'s sample, so nothing is verified
+inside the pod (the first version of this task asked for that and was wrong). The step's inner
+poll gets less than the step's own ceiling: today both are `PKG_CEILING`, so the poll can eat the
+whole budget, which is the "timed out after 30000 ms" seen in two hourlies. The catalogue entry
+and `deploy/slo.md` say what is measured: a package added through the API lands in the bench's
+`spec.packages` (the test that holds the two equal must pass; every other copy of the old sentence
+in the repo changes with them). The outbox drainer lists from its cursor with
+`list_with_offset` (native on Azure and S3 in object_store 0.14.1) and backs off from 2 s to 60 s
+while a pass drains nothing or fails. `git.rs` uses `TREES_DIR` on both paths. The 4096-byte
+symlink buffer is NOT a defect: it equals `PATH_MAX`, so a longer target cannot exist; it gets a
+comment, no code change.
 
 **Commit:** `Describe the bench package probe as what it measures`
 
