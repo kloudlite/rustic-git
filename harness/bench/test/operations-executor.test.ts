@@ -12,7 +12,6 @@ import { OperationStore, type CapabilityMetadata } from "../src/operations/store
 import type { RecoveryAction } from "../src/operations/recovery.ts";
 import { capabilityRuntime } from "./operations-runtime-fixture.ts";
 import { DispatchAuthority, type DispatchToken } from "../src/operations/dispatch-authority.ts";
-import { setLongTimeout } from "../src/operations/timers.ts";
 
 const context: TrustedActorContext = {
   actorId: "actor-1", tenantId: "tenant-1", sessionId: "session-1", turnId: "turn-1", toolCallId: "call-1", turnRevision: 1, scope: { workspaceId: "ws-1" },
@@ -968,9 +967,11 @@ test("C-5 T4: a deadline far away does not fire at once", async () => {
   // `accept`'s own policy ceiling (store.ts, DEFAULT_BUDGETS.operationDeadlineMs) caps a
   // real operation's deadline at 10 minutes regardless of the wider schema bound, so the
   // real store cannot be given a literal 30-day deadline; this integration test uses the
-  // store's maximum allowed deadline to prove the executor's own deadline timer
-  // (setLongTimeout, C-5's CHANGE 2) does not fire early on a far-out but reachable
-  // value. `setLongTimeout`'s re-arming past 2^31-1ms itself is proven directly by T4b.
+  // store's maximum allowed deadline to prove the executor's own deadline timer does not
+  // fire early on a far-out but reachable value. The deadline can never overflow a timer
+  // in the first place (see "an operation deadline can never overflow a timer",
+  // operations-contracts.test.ts) since the budget schema caps it at 24h, far below the
+  // 2^31-1 ms Node clamps at.
   const { registry, store, callContext, operationId } = realStoreForC5({ operationDeadlineMs: 10 * 60 * 1000 });
   let ran = 0;
   const runtime = capabilityRuntime({ "environment.restore": async () => { ran += 1; await new Promise((resolve) => setTimeout(resolve, 100)); return { ok: true, value: { id: "devstack", state: "ready" } }; } });
@@ -1000,24 +1001,6 @@ test("C-5 T4: a deadline far away does not fire at once", async () => {
   assert.equal(result.state, "completed", JSON.stringify(result));
   assert.equal(result.steps.find((step) => step.key === "restore")?.outcome, "succeeded");
   assert.equal(ran, 1);
-});
-
-test("C-5 T4b: setLongTimeout re-arms past a small injected max and clear() prevents the fire", async () => {
-  let fired = 0;
-  const timer = setLongTimeout(() => { fired += 1; }, 70, 20);
-  await new Promise((resolve) => setTimeout(resolve, 40));
-  assert.equal(fired, 0, "must not fire before its real delay even though maxMs is tiny");
-  await new Promise((resolve) => setTimeout(resolve, 60));
-  assert.equal(fired, 1);
-  await new Promise((resolve) => setTimeout(resolve, 40));
-  assert.equal(fired, 1, "fires exactly once");
-
-  let firedAfterClear = 0;
-  const cleared = setLongTimeout(() => { firedAfterClear += 1; }, 70, 20);
-  await new Promise((resolve) => setTimeout(resolve, 30));
-  cleared.clear();
-  await new Promise((resolve) => setTimeout(resolve, 80));
-  assert.equal(firedAfterClear, 0);
 });
 
 test("C-5 T5: a negative or fractional output index is a missing dependency", async () => {

@@ -4,7 +4,6 @@ import { OperationScheduler, SchedulerValidationError, validateSchedulePlan, typ
 import { DEFAULT_DECISION_TTL_MS } from "./store.ts";
 import type { RecoveryAction } from "./recovery.ts";
 import type { DispatchToken } from "./dispatch-authority.ts";
-import { setLongTimeout } from "./timers.ts";
 
 export interface ExecutorStore {
   assertOwnership(): void;
@@ -113,7 +112,10 @@ export class OperationExecutor {
     };
     input.signal?.addEventListener("abort", cancellation, { once: true });
     const deadlineAt = this.#store.load(input.operationId).deadlineAt;
-    const deadline = deadlineAt !== undefined && deadlineAt > Date.now() ? setLongTimeout(cancellation, deadlineAt - Date.now()) : undefined;
+    // The delay is bounded by the operation deadline, which the budget schema caps at
+    // 24h, far below the 2^31-1 ms at which Node clamps a timer (see the test "an
+    // operation deadline can never overflow a timer").
+    const deadline = deadlineAt !== undefined && deadlineAt > Date.now() ? setTimeout(cancellation, deadlineAt - Date.now()) : undefined;
     try {
       let scheduled: ScheduledOperationResult;
       try {
@@ -179,7 +181,11 @@ export class OperationExecutor {
               settle(result);
             };
             const onAbort = () => { finish({ via: "abort" }); approvalAbort.abort(); };
-            const expiryTimer = setLongTimeout(() => { finish({ via: "expiry" }); approvalAbort.abort(); }, pendingDecision.expiresAt - Date.now() + 5);
+            // The delay is bounded by the operation deadline, which the budget schema
+            // caps at 24h, far below the 2^31-1 ms at which Node clamps a timer (see the
+            // test "an operation deadline can never overflow a timer") — the pending
+            // decision's own expiry is clamped to that same deadline by requireDecision.
+            const expiryTimer = setTimeout(() => { finish({ via: "expiry" }); approvalAbort.abort(); }, Math.max(0, pendingDecision.expiresAt - Date.now() + 5));
             let raceOutcome: Race;
             try {
               if (signal.aborted) onAbort();
@@ -190,7 +196,7 @@ export class OperationExecutor {
               );
               raceOutcome = await race;
             } finally {
-              expiryTimer.clear();
+              clearTimeout(expiryTimer);
               signal.removeEventListener("abort", onAbort);
             }
             if (raceOutcome.via === "rejected") throw raceOutcome.error;
@@ -258,7 +264,7 @@ export class OperationExecutor {
       const settled = deadlineAt !== undefined && Date.now() >= deadlineAt ? this.#store.expire(input.operationId) : this.#store.settle(input.operationId, { settleFailed: true }).snapshot;
       return this.#aggregate(settled, scheduled);
     } finally {
-      if (deadline) deadline.clear();
+      if (deadline) clearTimeout(deadline);
       input.signal?.removeEventListener("abort", cancellation);
     }
   }

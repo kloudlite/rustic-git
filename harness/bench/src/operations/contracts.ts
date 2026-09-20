@@ -944,7 +944,8 @@ export const DEFAULT_BUDGETS: OperationBudgets = {
   maxReadSnapshotBytes: 4 * 1024 * 1024,
 };
 
-const BUDGET_NODE: Node = {
+/** Exported so a test can read the real ceiling instead of duplicating the number. */
+export const BUDGET_NODE: Node = {
   t: "object",
   fields: {
     maxSteps: { t: "int", min: 1, max: 1_000 },

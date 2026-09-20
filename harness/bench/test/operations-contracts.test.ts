@@ -1,12 +1,14 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import fs from "node:fs";
+import os from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import {
   APPROVAL_BINDINGS,
   ARTIFACT_TAG,
   BINDING_RESOLUTION_PHASE,
+  BUDGET_NODE,
   CONTRACT_VERSION,
   DEFAULT_BUDGETS,
   DEFAULT_INSTRUCTION_DESCRIPTION,
@@ -70,7 +72,10 @@ import type {
   RecordedDecision,
   ResumeExpectation,
   ResumeRequest,
+  TrustedActorContext,
 } from "../src/operations/contracts.ts";
+import { OperationStore } from "../src/operations/store.ts";
+import { DispatchAuthority } from "../src/operations/dispatch-authority.ts";
 
 const FIXTURES = path.join(path.dirname(fileURLToPath(import.meta.url)), "fixtures", "operations");
 const DIGEST = `sha256:${"0123456789abcdef".repeat(4)}`;
@@ -796,4 +801,28 @@ test("every fixture validates against its declared kind and none is unlisted", (
     .map((name) => name.split(path.sep).join("/"));
   for (const name of onDisk) assert.ok(listed.has(name), `fixture ${name} is missing from the manifest`);
   assert.equal(listed.size, manifest.files.length);
+});
+
+test("an operation deadline can never overflow a timer", () => {
+  const operationDeadlineMs = BUDGET_NODE.fields.operationDeadlineMs;
+  if (operationDeadlineMs.t !== "int") throw new Error("operationDeadlineMs is expected to be an int field");
+  // Every deadline-derived delay in the executor and scheduler relies on this: Node
+  // clamps a `setTimeout` delay above 2^31-1 ms (24.8 days) to fire almost immediately,
+  // so a timer built from an operation deadline is only ever safe because the budget
+  // schema's own ceiling stays under that bound.
+  assert.ok(operationDeadlineMs.max < 2 ** 31 - 1);
+
+  // The ceiling is enforced, not just declared: accept() refuses a request whose budget
+  // asks for one millisecond more than the schema's own maximum.
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "operation-deadline-ceiling-"));
+  const ownership = { ownerId: "ceiling-test", assertHeld: () => {} };
+  const store = new OperationStore({ root, ownership, now: Date.now, capabilityMetadata: () => undefined, dispatchAuthority: new DispatchAuthority() });
+  const context: TrustedActorContext = {
+    actorId: "actor-1", tenantId: "tenant-1", sessionId: "session-1", turnId: "turn-1", toolCallId: "call-1", turnRevision: 1, scope: { workspaceId: "ws-1" },
+  };
+  assert.throws(() => store.accept({
+    request: { instruction: "Restore devstack to snap-1" },
+    context,
+    budgets: { operationDeadlineMs: operationDeadlineMs.max + 1 },
+  }));
 });
