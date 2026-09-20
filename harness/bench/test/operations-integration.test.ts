@@ -169,14 +169,17 @@ test("operation store queues the highest notification received while loading", a
   store.dispose();
 });
 
-test("archiving retains operation projections while transcript deletion disposes them", async () => {
+// Session-boundaries design §1.6: renderer state belongs to exactly one level and never leaks
+// across, so a session's operation views must not survive that session being archived or
+// deleted. `archiveSession` used to be a no-op (kept the projection alive with a dead session
+// underneath it); it now disposes the same way `disposeSession` does.
+test("archiving and deleting a session both dispose its operation projections", async () => {
   const scenario = scenarioById("parallel-steps");
   const store = createOperationStore({ loadSnapshot: async () => scenario.seed, loadEvents: async () => [] });
   store.open(scenario.seed.operationId, { sessionId: "s-1" });
   await flush();
-  store.archiveSession("s-1");
   assert.deepEqual(store.entries().map((entry) => entry.operationId), [scenario.seed.operationId]);
-  store.disposeSession("s-1");
+  store.archiveSession("s-1");
   assert.deepEqual(store.entries(), []);
 });
 

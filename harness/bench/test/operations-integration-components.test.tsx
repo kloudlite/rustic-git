@@ -8,6 +8,7 @@ import { OperationTaskView } from "../../src/renderer/components/TaskView.tsx";
 import { scenarioById } from "../../src/renderer/operations/fixtures/scenarios.ts";
 import { createOperationStore, operationTaskRow } from "../../src/renderer/operations/store.ts";
 import { openScenario } from "../../src/renderer/operations/fixtures/scenarios.ts";
+import { sessionOf } from "../../src/renderer/rows.ts";
 
 let dispose: (() => void) | undefined;
 
@@ -34,6 +35,49 @@ test("operate tool calls mount one live operation panel and other tools do not",
   </>, host);
   await waitFor(() => host.querySelectorAll("[data-component=operation]").length === 1);
   assert.equal(store.entries().length, 1);
+  store.dispose();
+});
+
+test("two ToolCalls showing one operation: unmounting the first leaves the second live; unmounting both releases it", async () => {
+  const scenario = scenarioById("parallel-steps");
+  const result = { operationId: scenario.expected.operationId, revision: 1, state: "running", summary: "Started" };
+  const store = createOperationStore({ loadSnapshot: async () => scenario.expected, loadEvents: async () => [] });
+  const [showFirst, setShowFirst] = createSignal(true);
+  const [showSecond, setShowSecond] = createSignal(true);
+  const a = { role: "action" as const, kind: "note" as const, at: "now", text: "operate", tool: "operate", output: JSON.stringify(result) };
+  const host = document.createElement("div");
+  document.body.append(host);
+  dispose = render(() => <>
+    {showFirst() && <ToolCall a={a} operations={store} />}
+    {showSecond() && <ToolCall a={a} operations={store} />}
+  </>, host);
+  await waitFor(() => store.entries().length === 1);
+  setShowFirst(false);
+  await waitFor(() => host.querySelectorAll("[data-component=operation]").length === 1);
+  assert.equal(store.entries().length, 1, "the second ToolCall's own view keeps the projection held");
+  setShowSecond(false);
+  await waitFor(() => store.entries().length === 0);
+  store.dispose();
+});
+
+test("the inspector lists an operation opened from a session tab, under the same sessionOf() keys Chat now uses", async () => {
+  const scenario = scenarioById("parallel-steps");
+  const result = { operationId: scenario.expected.operationId, revision: 1, state: "running", summary: "Started" };
+  const store = createOperationStore({ loadSnapshot: async () => scenario.expected, loadEvents: async () => [] });
+  // What Chat.tsx's `opSession`/`opWorkspace` compute for a workspace tab (`ws-1`), the same
+  // `sessionOf({kind:"workspace", id})` shape Inspector.tsx's `procSession` computes from
+  // `props.selected` for that same workspace. Before this fix Chat passed the raw pi/thread id
+  // instead, which only coincidentally matched; this pins the two call sites to one function.
+  const chatSessionId = sessionOf({ kind: "workspace", id: "ws-1" });
+  const chatWorkspaceId = "ws-1";
+  const host = document.createElement("div");
+  document.body.append(host);
+  const a = { role: "action" as const, kind: "note" as const, at: "now", text: "operate", tool: "operate", output: JSON.stringify(result) };
+  dispose = render(() => <>
+    <ToolCall a={a} operations={store} sessionId={chatSessionId} workspaceId={chatWorkspaceId} />
+    <Tasks onOpen={() => undefined} session={chatSessionId} workspace={chatWorkspaceId} operations={() => { store.entries(); return store.taskRows(chatSessionId, chatWorkspaceId); }} />
+  </>, host);
+  await waitFor(() => host.querySelectorAll("[data-operation-id]").length === 1);
   store.dispose();
 });
 

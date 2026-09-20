@@ -16,7 +16,7 @@ import { TEXT_RENDER_PACE_MS, paced } from "./results/paced";
 import { mentions } from "./results/mentions";
 import { ContextGroup } from "./results/ContextGroup";
 import { notification, spinnerMeta, summary, turnFooter, verbAt } from "./results/summary";
-import { argLine, exchangeText, modeLine, modeParts, modelOfThread, proposalHeader, turnMeta } from "../rows";
+import { argLine, exchangeText, modeLine, modeParts, modelOfThread, proposalHeader, sessionOf, turnMeta } from "../rows";
 import { ModelDialog } from "./ModelDialog";
 import { KEYS } from "../keys";
 import { Scanner, Ticker } from "./Motion";
@@ -77,6 +77,26 @@ export function Chat(props: {
     () => props.threads.find((t) => t.id === props.threadId),
   );
   const blocks = () => thread()?.messages ?? [];
+  /**
+   * The same owner keys `Inspector.tsx`'s `procSession`/`procWorkspace` compute from
+   * `props.selected` (Inspector's own `found()`), so an operation opened from a session tab here
+   * is the same row the inspector's "Background operations" list resolves by `sessionOf(...)`.
+   * `thread()?.pi ?? thread()?.id` used to be passed straight to ToolCall/ToolGroup instead,
+   * which only coincidentally matched for a workspace or ephemeral tab.
+   */
+  const opFound = () => {
+    for (const ws of props.machine.workspaces) {
+      if (ws.id === props.threadId) return { ws };
+      const eph = ws.ephemerals.find((e) => e.id === props.threadId);
+      if (eph) return { ws, eph };
+    }
+    return {};
+  };
+  const opSession = () =>
+    opFound().eph ? sessionOf({ kind: "ephemeral", id: opFound().eph!.id })
+      : opFound().ws ? sessionOf({ kind: "workspace", id: opFound().ws!.id })
+      : sessionOf({ kind: /^s-\d+$/.test(props.threadId) ? "session" : "bench", id: props.threadId });
+  const opWorkspace = () => opFound().eph?.id ?? opFound().ws?.id ?? "bench";
   /** How many times escape has been pressed just now: two stops the turn. */
   const [escapes, setEscapes] = createSignal(0);
   let escTimer: ReturnType<typeof setTimeout> | undefined;
@@ -431,7 +451,7 @@ export function Chat(props: {
                 <Show when={seg.kind === "one"} fallback={
                   seg.kind === "context"
                     ? <ContextGroup rows={(seg as { rows: Action[] }).rows} />
-                    : <ToolGroup rows={(seg as { rows: Action[] }).rows} sessionId={thread()?.pi ?? thread()?.id} workspaceId={props.threadId} />
+                    : <ToolGroup rows={(seg as { rows: Action[] }).rows} sessionId={opSession()} workspaceId={opWorkspace()} />
                 }>
                 {(() => { const b = (seg as { row: Message }).row; return (
                 <Show when={b.role !== "divider"} fallback={<Divider text={(b as { text: string }).text} />}>
@@ -439,7 +459,7 @@ export function Chat(props: {
                     place, the way Claude Code does it (owner, 2026-09-17). What stays here is the
                     record of what was asked and what was said. */}
                 <Show when={b.role !== "question"} fallback={<Answered q={b as QuestionRow} />}>
-                <Show when={b.role !== "action"} fallback={<div class="[contain:layout_style]"><Show when={(b as Action).tool} fallback={<Step a={b as Action} />}><ToolCall a={b as Action} sessionId={thread()?.pi ?? thread()?.id} workspaceId={props.threadId} /></Show></div>}>
+                <Show when={b.role !== "action"} fallback={<div class="[contain:layout_style]"><Show when={(b as Action).tool} fallback={<Step a={b as Action} />}><ToolCall a={b as Action} sessionId={opSession()} workspaceId={opWorkspace()} /></Show></div>}>
                   {/* A prompt is a command and reads like one — an accent rail and a `>` — and an
                       answer is plain text beside it; the two turns are told apart by shape. */}
                   <Show

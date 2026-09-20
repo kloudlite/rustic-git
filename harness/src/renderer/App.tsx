@@ -258,6 +258,7 @@ export function App() {
   const archiveSession = (id: string) =>
     void bench("POST", `/sessions/${id}/archive`).then(() => {
       operations?.archiveSession(id);
+      if (operationTask()?.session === id) closeOperationTask();
       sides.filter((t) => t.session === id).forEach((t) => removeSide(t.id));
       if (paneOf(id) >= 0) closeThread(id);
       return refreshSessions();
@@ -283,6 +284,7 @@ export function App() {
   };
   const afterDelete = (id: string) => {
     operations?.disposeSession(id);
+    if (operationTask()?.session === id) closeOperationTask();
     sides.filter((t) => t.session === id).forEach((t) => removeSide(t.id));
     live.discard(id);
     if (paneOf(id) >= 0) closeThread(id);
@@ -395,7 +397,13 @@ export function App() {
   const asTask = (p?: live.Proc): live.Task | undefined =>
     p && { id: p.id, session: p.session ?? "", tool: "Process", arg: `${p.name} · ${p.command}`, state: procState(p), started: p.started, ended: p.ended, output: p.tail };
   const [taskId, setTaskId] = createSignal<string | undefined>();
-  const [operationTask, setOperationTask] = createSignal<OperationProjection | undefined>();
+  // Owned by the tab it was opened from (§1.6: renderer state lives at exactly one level, never
+  // leaks across). `session` is the raw tab id (`p.sel`'s own namespace — a workspace or
+  // ephemeral id, a session id, or "bench"), captured from `selected()` at open time; it is NOT
+  // `projection.sessionId`, which is the store's own `sessionOf()`-derived owner key and lives in
+  // a different namespace. A pane renders this only when its own `p.sel` equals `session`.
+  const [operationTask, setOperationTask] = createSignal<{ session: string; projection: OperationProjection } | undefined>();
+  const closeOperationTask = () => setOperationTask(undefined);
   const inspector = () => rightOpen() && !envTab() && !settingsTab();
 
   const switchTeam = (slug: string) => void window.harness.auth.chooseTeam(slug);
@@ -468,7 +476,7 @@ export function App() {
   const back = () => {
     if (file()) setFile(undefined);
     else if (taskId()) setTaskId(undefined);
-    else if (operationTask()) setOperationTask(undefined);
+    else if (operationTask()) closeOperationTask();
     else if (envTab()) setEnvTab(false);
     else if (settingsTab()) setSettingsTab(false);
     else if (maximised()) setMaximised(false);
@@ -1060,8 +1068,8 @@ export function App() {
               file={isActive() ? file() : undefined}
               onCloseFile={() => setFile(undefined)}
               task={isActive() ? (live.tasks.find((t) => t.id === taskId()) ?? asTask(live.procs.find((p) => p.id === taskId()))) : undefined}
-              operation={isActive() ? operationTask() : undefined}
-              onCloseTask={() => (setTaskId(undefined), setOperationTask(undefined))}
+              operation={isActive() && operationTask()?.session === p.sel ? operationTask()?.projection : undefined}
+              onCloseTask={() => (setTaskId(undefined), closeOperationTask())}
               snapshots={snapshots()}
               onCloseEnv={() => setEnvTab(false)}
               settings={isActive() && settingsTab()}
@@ -1116,7 +1124,7 @@ export function App() {
             treeOf={(id) => (sessions.find((x) => x.id === id) as unknown as { tree?: string } | undefined)?.tree}
             onOpenShell={() => toggleShell()}
             onOpenTask={(id) => (setEnvTab(false), setFile(undefined), setTaskId(id))}
-            onOpenOperation={(row) => (setEnvTab(false), setFile(undefined), setTaskId(undefined), setOperationTask(row))}
+            onOpenOperation={(row) => (setEnvTab(false), setFile(undefined), setTaskId(undefined), setOperationTask({ session: selected(), projection: row }))}
             onOpenFile={(path, status) => {
               setEnvTab(false);
               // Which workspace's tool server holds it: the selected tab's own, as the terminal
