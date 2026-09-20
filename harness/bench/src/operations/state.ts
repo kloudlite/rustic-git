@@ -424,6 +424,14 @@ export function applyTransition(previous: OperationSnapshot, input: TransitionIn
   const bodyChanged =
     finalState !== previous.state || stepsChanged || decisionsChanged || unknownChanged || usageChanged || deadlineChanged;
   if (!bodyChanged && newEvents.length === 0) return { ok: true, changed: false, snapshot: previous, events: [] };
+  // A same-revision commit is recorded evidence (a decision, a resolution) laid on top of
+  // the current lifecycle facts, never a second commit's worth of state change: replay
+  // refuses anything else it changed (store.ts replayProblem, "same-revision commit
+  // changed lifecycle facts"). Catching it here means a caller never gets to write a frame
+  // that the next load would then reject (C-1 path A/B shared root cause).
+  if (input.bumpRevision === false && bodyChanged) {
+    return failure(storeError("invalid_transition", "a same-revision commit may not change lifecycle facts"));
+  }
 
   const revision = input.bumpRevision === false ? previous.revision : previous.revision + 1;
   const effectiveOperation: OperationChange | undefined = plan ? { to: plan.to, trigger: plan.trigger } : requestedOperation;

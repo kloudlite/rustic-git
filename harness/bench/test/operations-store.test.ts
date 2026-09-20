@@ -33,6 +33,7 @@ import {
   type StoreFs,
 } from "../src/operations/store.ts";
 import { DispatchAuthority } from "../src/operations/dispatch-authority.ts";
+import { applyTransition } from "../src/operations/state.ts";
 
 const FIXTURES = path.join(path.dirname(fileURLToPath(import.meta.url)), "fixtures", "operations-o05");
 const INSTRUCTION = "In src/config.ts, change the timeout to 30000.";
@@ -2337,4 +2338,100 @@ test("active operation history is not removable and terminal history is reclaime
   assert.deepEqual(store.operationIds(), []);
   assert.equal(fs.existsSync(logFile(root, operationId)), false);
   assert.deepEqual(reopened(root, clockFrom()).operationIds(), []);
+});
+
+// C-1: a commit that replay would refuse must never reach disk at all. Before the fix,
+// #apply appended and fsynced the frame and only THEN ran the equivalent of replay's
+// checks (#fold), so a call the API accepted could write a frame the log refused on the
+// next load — one bad file made the store constructor throw for every operation.
+test("recordDecision refuses a revision-conflicted approval before any byte is written (C-1 path A)", () => {
+  const { store, root, clock } = openStore();
+  const operationId = store.accept({ request: instruction(), context: context() }).snapshot.operationId;
+  queueEdit(store, operationId, "edit_config");
+  const waiting = store.requireDecision(operationId, "step-1", {
+    decisionId: "dec-a",
+    decisionClass: "user_authorization",
+    question: "Apply the change to src/config.ts: timeout 9000 -> 30000?",
+    payloadDigest: PAYLOAD_A,
+  });
+  // A sibling commit lands between the prompt and the answer: a second, independent
+  // step queued on the same operation. This bumps the operation's snapshot revision
+  // while leaving the pending decision's OWN revision (fixed at state.ts:438, when the
+  // question was raised) unchanged.
+  store.queueStep(operationId, { key: "read_config", capability: "file.read" });
+  const beforeSize = fs.statSync(logFile(root, operationId)).size;
+
+  // The decision cites the operation's now-current snapshot revision (what a caller
+  // that only reads the snapshot would naturally supply) rather than the pending
+  // decision's own revision.
+  const staleRecord = recordedDecision(waiting, {
+    decisionId: "dec-a",
+    payloadDigest: PAYLOAD_A,
+    revision: store.load(operationId).revision,
+  });
+  assert.notEqual(staleRecord.revision, waiting.pendingDecisions[0].revision, "the test setup must actually diverge the two revisions");
+
+  // Refused: recordDecision now binds to the pending decision's own revision, matching
+  // what replay has always demanded (store.ts #validateCommit / replayProblem, "recorded
+  // decision does not bind the predecessor pending decision").
+  assert.throws(() => store.recordDecision(staleRecord, context()), (error) => isStoreError(error, "revision_conflict"));
+
+  // Nothing was written: the log file is byte-for-byte the same size as before the
+  // refused call, because the pre-append validation runs before #append now, not after.
+  assert.equal(fs.statSync(logFile(root, operationId)).size, beforeSize);
+
+  // The store stays usable after a refused write: a further valid commit succeeds, citing
+  // the pending decision's own (unchanged) revision.
+  const record = recordedDecision(waiting, { decisionId: "dec-a", payloadDigest: PAYLOAD_A, revision: waiting.pendingDecisions[0].revision });
+  const recorded = store.recordDecision(record, context());
+  assert.equal(store.recordedDecisions(operationId).length, 1);
+  assert.equal(recorded.pendingDecisions.length, 1, "recordDecision stores the answer; resume is what consumes the pending question");
+  // Actually dispatching it (resume) still requires the pending and snapshot revisions to
+  // agree, which the sibling commit above deliberately broke — that gap is C-2's "an
+  // approval survives concurrent progress", out of scope here. C-1 only guarantees the
+  // decision can be RECORDED without corrupting the log.
+
+  // And a NEW store opened on the same directory constructs and loads the operation:
+  // the refused commit never poisoned the log for the next reader.
+  const reloaded = reopened(root, clock);
+  assert.equal(reloaded.recordedDecisions(operationId).length, 1);
+});
+
+test("a backward clock step is clamped so the store never writes an unloadable log (C-1 path B)", () => {
+  const { store, root, clock } = openStore();
+  const operationId = store.accept({ request: instruction(), context: context() }).snapshot.operationId;
+  const first = queueEdit(store, operationId);
+  assert.equal(first.updatedAt, clock.now());
+
+  // NTP steps the clock backwards between two commits.
+  clock.advance(-5_000);
+  const second = store.queueStep(operationId, { key: "read_config", capability: "file.read" });
+
+  // The commit succeeds rather than writing a frame replay would refuse, and the
+  // snapshot's updatedAt is clamped forward rather than going backwards.
+  assert.equal(second.updatedAt >= first.updatedAt, true);
+
+  // A new store on the same directory constructs and loads it: the backward clock never
+  // produced an unloadable log.
+  const reloaded = reopened(root, clock);
+  assert.equal(reloaded.load(operationId).steps.length, 2);
+});
+
+test("applyTransition refuses a same-revision commit that changes the body", () => {
+  const { store } = openStore();
+  const operationId = store.accept({ request: instruction(), context: context() }).snapshot.operationId;
+  const snapshot = queueEdit(store, operationId);
+  // bumpRevision: false is the shape recordDecision always uses; a same-revision commit
+  // is meant to lay recorded evidence (a decision, a resolution) on top of the current
+  // lifecycle facts, never a second commit's worth of state change. Here it is exercised
+  // directly against applyTransition with a step transition as the body change, so the
+  // guard is pinned independently of any one caller's own narrower checks.
+  const result = applyTransition(snapshot, {
+    now: snapshot.updatedAt,
+    bumpRevision: false,
+    steps: [{ stepId: "step-1", to: "cancelled", trigger: "cancel_requested", cancelEvidence: ["no effect applied"] }],
+  });
+  assert.equal(result.ok, false);
+  if (result.ok) assert.fail("expected a failure");
+  assert.equal(result.error.code, "invalid_transition");
 });

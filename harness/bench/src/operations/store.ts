@@ -990,8 +990,10 @@ export class OperationStore {
       snapshot: accepted,
       events: [{ operationId, sequence: 1, at: now, phase: "accepted", revision: 1, summary: "Operation accepted." }],
     };
+    const file = this.#file(operationId);
+    this.#validateCommit(operationId, record, file);
     this.#append(operationId, record);
-    this.#fold(operationId, record, this.#file(operationId));
+    this.#fold(operationId, record, file);
     return { snapshot: accepted, replayed: false };
   }
 
@@ -1434,8 +1436,14 @@ export class OperationStore {
     if (!pending) reject("decision_mismatch", `no pending decision ${decision.decisionId} in ${decision.operationId}`);
     if (pending.stepId !== decision.stepId) reject("decision_mismatch", "the decision names another step");
     if (pending.decisionClass !== decision.decisionClass) reject("decision_mismatch", "the decision answers another class of question");
-    if (decision.revision !== snapshot.revision) {
-      reject("revision_conflict", `the decision was recorded for revision ${decision.revision}; the operation is at ${snapshot.revision}`);
+    // Bind to the pending decision's OWN revision (fixed when the question was raised,
+    // state.ts:438), not the operation's current snapshot revision: replay demands exactly
+    // that binding (store.ts #validateCommit / replayProblem), and a sibling step settling
+    // between the prompt and the answer must not make a legal approval unrecordable (C-1
+    // path A / ruling 1). What actually protects a changed payload is the digest check below,
+    // which a sibling commit cannot alter.
+    if (decision.revision !== pending.revision) {
+      reject("revision_conflict", `the decision was recorded for revision ${decision.revision}; the pending question is at ${pending.revision}`);
     }
     const digest = operation.payloadDigests.get(decision.stepId);
     if (!digest) reject("validation_failure", `step ${decision.stepId} has no recorded approved payload`);
@@ -2023,7 +2031,14 @@ export class OperationStore {
     this.#tornTails = this.#tornTails.filter((entry) => entry !== file);
   }
 
-  #fold(operationId: string, record: CommitRecord, file: string, format: "v1" | "v2" = "v2"): void {
+  /**
+   * The read-only half of accepting a commit: everything that decides whether a
+   * commit may be folded at all, with no mutation of store state. `#apply` calls this
+   * BEFORE `#append` so a commit replay would refuse never reaches disk (C-1); `#fold`
+   * calls it again on load, where it is also the corruption check for a log written by
+   * an earlier, buggier build.
+   */
+  #validateCommit(operationId: string, record: CommitRecord, file: string): void {
     if (record.snapshot.operationId !== operationId) {
       throw new OperationLogCorruptError(file, `the commit names ${record.snapshot.operationId}`, operationId);
     }
@@ -2082,6 +2097,13 @@ export class OperationStore {
         operationId,
       );
     }
+  }
+
+  #fold(operationId: string, record: CommitRecord, file: string, format: "v1" | "v2" = "v2"): void {
+    this.#validateCommit(operationId, record, file);
+    // #validateCommit already threw if a stored entry exists with no snapshot (the
+    // tombstone-conflict case), so a present entry here is always a full LoadedOperation.
+    const existing = this.#operations.get(operationId) as LoadedOperation | undefined;
     const operation: LoadedOperation =
       existing ?? {
         snapshot: record.snapshot,
@@ -2114,7 +2136,13 @@ export class OperationStore {
   #apply(operationId: string, input: StoreTransitionInput): AppliedChange {
     this.#assertWritable();
     const operation = this.#require(operationId);
-    const result = applyTransition(this.#requireSnapshot(operationId), input);
+    const previous = this.#requireSnapshot(operationId);
+    // A clock that steps backwards (NTP) must never produce updatedAt < previous.updatedAt:
+    // replay refuses that on load (C-1 path B), so clamp before the transition is computed,
+    // not after.
+    const now = Math.max(input.now, previous.updatedAt);
+    const clamped: StoreTransitionInput = now === input.now ? input : { ...input, now };
+    const result = applyTransition(previous, clamped);
     if (!result.ok) {
       throw new OperationStoreError(result.error.code, result.error.message, {
         missing: result.error.missing,
@@ -2125,17 +2153,29 @@ export class OperationStore {
     const record: CommitRecord = {
       v: COMMIT_FORMAT_VERSION,
       kind: "commit",
-      at: input.now,
-      turnRevision: input.turnRevision ?? operation.turnRevision,
+      at: now,
+      turnRevision: clamped.turnRevision ?? operation.turnRevision,
       snapshot: result.snapshot,
       events: result.events,
     };
-    if (input.decisions?.length) record.decisions = input.decisions;
-    if (input.resolutions?.length) record.resolutions = input.resolutions;
-    if (input.abortRequestedStepIds?.length) record.abortRequestedStepIds = input.abortRequestedStepIds;
+    if (clamped.decisions?.length) record.decisions = clamped.decisions;
+    if (clamped.resolutions?.length) record.resolutions = clamped.resolutions;
+    if (clamped.abortRequestedStepIds?.length) record.abortRequestedStepIds = clamped.abortRequestedStepIds;
+    // Validate the exact frame replay will see BEFORE any byte reaches disk (C-1 path A):
+    // a commit that fold would refuse on the next load must never be appended in the first
+    // place, so one bad write can never make the store constructor throw for everything.
+    this.#validateCommit(operationId, record, operation.file);
     if (operation.format === "v1" && operation.snapshot !== undefined) this.#rewriteV2(operation);
     this.#append(operationId, record);
-    this.#fold(operationId, record, operation.file);
+    try {
+      this.#fold(operationId, record, operation.file);
+    } catch (error) {
+      // The frame is durable but the in-memory fold rejected it — this instance no
+      // longer knows the true state of this operation, so it refuses every further
+      // write rather than risk composing on top of a fact it never recorded.
+      this.#failedAppend = this.#failedAppend ?? (error as Error);
+      throw error;
+    }
     return { snapshot: result.snapshot, changed: true };
   }
 
