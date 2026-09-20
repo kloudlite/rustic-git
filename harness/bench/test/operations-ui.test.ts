@@ -1,5 +1,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
+import { readFileSync } from "node:fs";
+import { resolve } from "node:path";
 import {
   OPERATION_EVENT_PHASES,
   OPERATION_TRANSITIONS,
@@ -349,6 +351,83 @@ test("a conflicting recent duplicate requests authoritative repair", () => {
   assert.equal(conflict.resync?.need, "snapshot");
 });
 
+/**
+ * O01 has no "skipped" event phase: a step that depended on one that failed is recorded as a
+ * `progress` event carrying `decisionCode: "dependency_failed"`. These pin `planStep`'s handling
+ * of it (reduce.ts), so the person never sits looking at a "queued" step that will never run.
+ */
+function dependencyFailedEvent(operationId: string, stepId: string, sequence: number, revision: number): OperationEvent {
+  return {
+    operationId,
+    stepId,
+    sequence,
+    revision,
+    at: FIXTURE_CLOCK + sequence,
+    phase: "progress",
+    decisionCode: "dependency_failed",
+    summary: "Skipped: a step it depends on did not succeed.",
+  };
+}
+
+/** A view with step A `failed` and step B `queued`, at the revision/sequence the skip event follows. */
+function skipFixtureView(): OperationView {
+  const scenario = scenarioById("parallel-steps");
+  const stepA = scenario.expected.steps[0];
+  const snapshot = {
+    ...scenario.expected,
+    state: "running" as const,
+    revision: 3,
+    lastSequence: 3,
+    steps: [
+      { ...stepA, stepId: "step-a", key: "step_a", state: "failed" as const, endedAt: FIXTURE_CLOCK + 2 },
+      { ...stepA, stepId: "step-b", key: "step_b", state: "queued" as const, startedAt: undefined, endedAt: undefined, attempts: 0 },
+    ],
+  };
+  return applyOperationSnapshot(createOperationView(scenario.expected.operationId), snapshot);
+}
+
+test("a dependency failure marks the queued step skipped", () => {
+  const view = skipFixtureView();
+  const applied = applyOperationEvent(view, dependencyFailedEvent(view.operationId, "step-b", 4, 3));
+  const stepB = applied.steps.find((step) => step.stepId === "step-b")!;
+  assert.equal(stepB.state, "skipped");
+  assert.ok(stepB.endedAt !== undefined, "a skipped step is ended");
+  assert.equal(stepB.summary, "Skipped: a step it depends on did not succeed.");
+  assert.equal(applied.resync, undefined, "no repair is requested for the expected transition");
+});
+
+test("a dependency-failure skip from a non-queued step asks for a snapshot", () => {
+  const view = skipFixtureView();
+  // step-a is already `failed`, not `queued`: a skip event naming it is the unexpected case.
+  const applied = applyOperationEvent(view, dependencyFailedEvent(view.operationId, "step-a", 4, 3));
+  assert.equal(applied.resync?.need, "snapshot");
+  assert.equal(applied.resync?.reason, "unexpected_transition");
+});
+
+test("a plain progress event still changes nothing", () => {
+  const view = skipFixtureView();
+  const applied = applyOperationEvent(view, {
+    operationId: view.operationId,
+    stepId: "step-b",
+    sequence: 4,
+    revision: 3,
+    at: FIXTURE_CLOCK + 4,
+    phase: "progress",
+    summary: "still waiting",
+  });
+  const stepB = applied.steps.find((step) => step.stepId === "step-b")!;
+  assert.equal(stepB.state, "queued", "an ordinary progress event with no decisionCode is a pure observation");
+  assert.equal(applied.resync, undefined);
+});
+
+test("replaying the same skip event twice applies it once", () => {
+  const view = skipFixtureView();
+  const event = dependencyFailedEvent(view.operationId, "step-b", 4, 3);
+  const once = applyOperationEvent(view, event);
+  const twice = applyOperationEvent(once, event);
+  assert.equal(twice, once, "a retained applied sequence returns the same view, not a re-derived one");
+});
+
 test("an evicted old duplicate requests authoritative repair instead of silently passing", () => {
   const operationId = "op-evicted-duplicate";
   let view = applyOperationSnapshot(createOperationView(operationId), {
@@ -525,7 +604,7 @@ test("renderer phase edges are exact projections of the frozen O01 transition ta
   );
 });
 
-test("every O01 transition is explicitly event-mapped or repair-only", () => {
+test("every O01 transition is event-mapped, branch-mapped or repair-only", () => {
   const operationMapped = Object.values(OPERATION_PHASE_EDGES).flat().map((edge) => JSON.stringify(edge));
   const operationRepairOnly = OPERATION_TRANSITIONS
     .filter((edge) => edge.trigger === "cancel_requested")
@@ -534,8 +613,12 @@ test("every O01 transition is explicitly event-mapped or repair-only", () => {
 
   const stepMapped = Object.values(STEP_PHASE).flatMap((effect) => effect.edges ?? []).map((edge) => JSON.stringify(edge));
   const stepRepairOnly = STEP_REPAIR_ONLY_EDGES.map((edge) => JSON.stringify(edge));
-  const dependencyRepairOnly = STEP_TRANSITIONS.filter((edge) => edge.trigger === "dependency_failed").map((edge) => JSON.stringify(edge));
-  assert.deepEqual(new Set([...stepMapped, ...stepRepairOnly, ...dependencyRepairOnly]), new Set(STEP_TRANSITIONS.map((edge) => JSON.stringify(edge))));
+  // `queued -> skipped (dependency_failed)` has no phase of its own: the store backs it with a
+  // `progress` event carrying decisionCode "dependency_failed", and `planStep` maps that in a
+  // dedicated branch (see "a dependency failure marks the queued step skipped"), so it is
+  // event-mapped outside STEP_PHASE.
+  const dependencyMappedByBranch = STEP_TRANSITIONS.filter((edge) => edge.trigger === "dependency_failed").map((edge) => JSON.stringify(edge));
+  assert.deepEqual(new Set([...stepMapped, ...stepRepairOnly, ...dependencyMappedByBranch]), new Set(STEP_TRANSITIONS.map((edge) => JSON.stringify(edge))));
   assert.deepEqual(
     new Set(OPERATION_OBSERVATION_PHASES),
     new Set(["resolved", "queued", "progress", "succeeded", "failed", "cancelled"]),
@@ -1226,4 +1309,12 @@ test("the envelope's own limits are reported, not hidden", () => {
   assert.equal(durable.steps[0].error?.retryable, true, "only the record says it is retryable");
   assert.match(errorRows(durable)[0].value, /retryable/);
   assert.ok((durable.steps[0].error?.message.length ?? 0) > 0, "the record carries the failure's words");
+});
+
+test("the operations barrel does not re-export the test fixtures", () => {
+  // `./fixtures/scenarios.ts` is 1168 lines of scenario data; every test imports it directly by
+  // path, so re-exporting it from `operations/index.ts` only shipped it in the production
+  // bundle for nothing (review M1). This is a source-level guard against it coming back.
+  const barrel = readFileSync(resolve(process.cwd(), "src/renderer/operations/index.ts"), "utf8");
+  assert.doesNotMatch(barrel, /fixtures\//);
 });

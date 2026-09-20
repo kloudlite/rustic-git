@@ -134,10 +134,11 @@ test("approval revalidates the current decision while confirmation is open", asy
   dispose = render(() => <OperationPanel view={view()} now={FIXTURE_CLOCK + 2_000} expanded onDecision={() => { calls += 1; }} />, host);
   const approve = [...host.querySelectorAll("button")].find((button) => button.textContent === "Approve")!;
   click(approve);
-  assert.ok(host.querySelector("[role=dialog]"));
+  // Confirm renders through a Portal, under document.body, not under `host`.
+  assert.ok(document.body.querySelector("[role=dialog]"));
   setView({ ...view(), pendingDecisions: [] });
   await Promise.resolve();
-  const confirm = [...host.querySelectorAll("button")].find((button) => button.textContent === "Approve and apply") as HTMLButtonElement | undefined;
+  const confirm = [...document.body.querySelectorAll("button")].find((button) => button.textContent === "Approve and apply") as HTMLButtonElement | undefined;
   assert.ok(!confirm || confirm.disabled, "stale confirmation must close or disable");
   if (confirm) click(confirm);
   assert.equal(calls, 0);
@@ -159,7 +160,7 @@ for (const action of ["cancel", "yes", "backdrop", "escape", "controlled"] as co
   test(`Confirm restores focus after ${action}`, async () => {
     const mounted = mountConfirm(action);
     await Promise.resolve();
-    const dialog = mounted.host.querySelector("[role=dialog]")!;
+    const dialog = document.body.querySelector("[role=dialog]")!;
     if (action === "cancel") click([...dialog.querySelectorAll("button")].find((button) => button.textContent === "Cancel")!);
     if (action === "yes") click([...dialog.querySelectorAll("button")].find((button) => button.textContent === "Apply")!);
     if (action === "backdrop") dialog.parentElement!.dispatchEvent(new MouseEvent("mousedown", { bubbles: true }));
@@ -183,9 +184,9 @@ test("Confirm does not steal focus when another modal opens during close", async
 });
 
 test("Confirm contains document-level focus while open", async () => {
-  const { host } = mountConfirm("controlled");
+  mountConfirm("controlled");
   await Promise.resolve();
-  const dialog = host.querySelector("[role=dialog]")!;
+  const dialog = document.body.querySelector("[role=dialog]")!;
   const outside = document.createElement("button");
   document.body.append(outside);
   outside.focus();
@@ -194,9 +195,9 @@ test("Confirm contains document-level focus while open", async () => {
 });
 
 test("Confirm enters and traps focus in both tab directions", async () => {
-  const { host } = mountConfirm("controlled");
+  mountConfirm("controlled");
   await Promise.resolve();
-  const dialog = host.querySelector("[role=dialog]")!;
+  const dialog = document.body.querySelector("[role=dialog]")!;
   assert.equal(dialog.getAttribute("aria-modal"), "true");
   assert.ok(dialog.getAttribute("aria-labelledby"));
   assert.equal((document.activeElement as HTMLElement).textContent, "Cancel");
@@ -208,6 +209,24 @@ test("Confirm enters and traps focus in both tab directions", async () => {
   cancel.focus();
   dialog.dispatchEvent(new KeyboardEvent("keydown", { key: "Tab", shiftKey: true, bubbles: true, cancelable: true }));
   assert.equal((document.activeElement as HTMLElement).textContent, "Apply");
+});
+
+test("Confirm renders through a portal: outside its host, inside document.body, and gone on dispose", async () => {
+  const { host, disposeNow } = mountConfirm("controlled");
+  await Promise.resolve();
+  const dialog = document.body.querySelector("[role=dialog]")!;
+  assert.equal(host.contains(dialog), false, "the dialog is still a child of its host");
+  assert.equal(document.body.contains(dialog), true);
+  disposeNow();
+  assert.equal(document.body.querySelector("[role=dialog]"), null, "the portal left an orphaned dialog behind");
+});
+
+test("Confirm's backdrop is fixed to the viewport, not positioned relative to a containing ancestor", async () => {
+  mountConfirm("controlled");
+  await Promise.resolve();
+  const backdrop = document.body.querySelector("[role=dialog]")!.parentElement!;
+  assert.ok(backdrop.classList.contains("fixed"), "the backdrop must be fixed to escape a `contain: layout` ancestor (e.g. Chat.tsx's action rows)");
+  assert.ok(!backdrop.classList.contains("absolute"));
 });
 
 test("cancel is promise-aware, prevents duplicates, and reports rejection", async () => {
@@ -262,6 +281,66 @@ test("resync is promise-aware, prevents duplicates, and reports rejection", asyn
   await waitFor(() => !!host.querySelector("[role=alert]"), "reload error did not render");
   assert.equal(reload.disabled, false);
   assert.match(host.querySelector("[role=alert]")?.textContent ?? "", /reload failed/);
+});
+
+test("decision card survives an unrelated view rebuild without losing typed input or the open confirmation", async () => {
+  const base = openScenario(scenarioById("needs-input"));
+  const [view, setView] = createSignal(base);
+  const host = document.createElement("div");
+  document.body.append(host);
+  dispose = render(() => <OperationPanel view={view()} now={FIXTURE_CLOCK + 2_000} expanded />, host);
+  const input = host.querySelector("input") as HTMLInputElement;
+  input.value = "draft answer";
+  input.dispatchEvent(new Event("input", { bubbles: true }));
+  const approve = [...host.querySelectorAll("button")].find((button) => button.textContent === "Approve")!;
+  click(approve);
+  assert.ok(document.body.querySelector("[role=dialog]"), "confirmation did not open");
+  // An unrelated view change (a fresh object, same decision content) rebuilds `decisionRows()`
+  // wholesale; a card keyed by array position or row reference would remount and lose both.
+  setView({ ...view(), sequence: view().sequence });
+  await Promise.resolve();
+  assert.equal((host.querySelector("input") as HTMLInputElement).value, "draft answer");
+  assert.ok(document.body.querySelector("[role=dialog]"), "confirmation dialog closed on an unrelated rebuild");
+});
+
+test("decision card survives ten clock ticks without losing typed input or the open confirmation", async () => {
+  const base = openScenario(scenarioById("needs-input"));
+  const [now, setNow] = createSignal(FIXTURE_CLOCK + 2_000);
+  const host = document.createElement("div");
+  document.body.append(host);
+  dispose = render(() => <OperationPanel view={base} now={now()} expanded />, host);
+  const input = host.querySelector("input") as HTMLInputElement;
+  input.value = "draft answer";
+  input.dispatchEvent(new Event("input", { bubbles: true }));
+  const approve = [...host.querySelectorAll("button")].find((button) => button.textContent === "Approve")!;
+  click(approve);
+  assert.ok(document.body.querySelector("[role=dialog]"), "confirmation did not open");
+  for (let tick = 1; tick <= 10; tick += 1) {
+    setNow(FIXTURE_CLOCK + 2_000 + tick * 500);
+    await Promise.resolve();
+  }
+  assert.equal((host.querySelector("input") as HTMLInputElement).value, "draft answer");
+  assert.ok(document.body.querySelector("[role=dialog]"), "confirmation dialog closed while the clock advanced");
+});
+
+test("a granted decision stops being answerable once it resolves", async () => {
+  const base = openScenario(scenarioById("needs-input"));
+  const [view, setView] = createSignal(base);
+  const host = document.createElement("div");
+  document.body.append(host);
+  let resolved = false;
+  dispose = render(() => <OperationPanel view={view()} now={FIXTURE_CLOCK + 2_000} expanded onDecision={() => { resolved = true; }} />, host);
+  const approve = [...host.querySelectorAll("button")].find((button) => button.textContent === "Approve")!;
+  click(approve);
+  const confirm = [...document.body.querySelectorAll("button")].find((button) => button.textContent === "Approve and apply")!;
+  click(confirm);
+  assert.ok(resolved, "onDecision was not called");
+  // The real store removes a granted decision from `pendingDecisions` on the next snapshot/event;
+  // simulate that here to prove the card stops offering Approve once it is no longer open.
+  setView({ ...view(), pendingDecisions: view().pendingDecisions.filter((d) => d.decisionId !== "dec-approve-edit") });
+  await Promise.resolve();
+  const stillApprove = [...host.querySelectorAll("button")].find((button) => button.textContent === "Approve");
+  assert.equal(stillApprove, undefined, "a granted decision is still answerable");
 });
 
 test("responsive rules wrap controls and preserve selectable full evidence IDs", () => {

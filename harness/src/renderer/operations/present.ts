@@ -233,6 +233,10 @@ export function stepRows(view: OperationView, now: number): StepRow[] {
     // A failure the durable record has not been loaded for still has the log's own words:
     // the phase carried the error code and the message, just no typed error object.
     const reportedFailure = !step.error && step.state === "failed" && step.decisionCode !== undefined;
+    // A skipped step never ran and never had an outcome of its own — `errorTone` stays neutral
+    // rather than the danger a failure gets — but the person still needs to see WHY it will
+    // never run, in the same collapsed-row slot a failure's summary appears in.
+    const reportedSkip = step.state === "skipped" && step.decisionCode !== undefined;
     return {
       key: step.stepId,
       stepId: step.stepId,
@@ -257,8 +261,10 @@ export function stepRows(view: OperationView, now: number): StepRow[] {
         ? `${step.error.code}: ${step.error.message}`
         : reportedFailure
           ? `${step.decisionCode}: ${step.summary ?? "reported failed"}`
-          : undefined,
-      errorTone: step.error ? (step.error.retryable ? "warning" : "danger") : reportedFailure ? "danger" : undefined,
+          : reportedSkip
+            ? (step.summary ?? `${step.decisionCode}`)
+            : undefined,
+      errorTone: step.error ? (step.error.retryable ? "warning" : "danger") : reportedFailure ? "danger" : reportedSkip ? "neutral" : undefined,
       observedLine: step.summary,
       reconcileLabel:
         step.state === "outcome_unknown" && step.reconciledAt !== undefined

@@ -1,4 +1,4 @@
-import { For, Show, createEffect, createMemo, createSignal, onCleanup, type JSX } from "solid-js";
+import { For, Show, createEffect, createMemo, createSignal, on, onCleanup, type JSX } from "solid-js";
 import { Icon } from "../ui/Icon";
 import { highlight, languageOf } from "../syntax";
 import type { Message } from "../model";
@@ -9,7 +9,7 @@ import { FileDiff } from "./results/FileDiff";
 import { editFile, patchFiles } from "./results/diff";
 import { defaultOpen } from "./results/opencode-map";
 import { Spinner } from "./Motion";
-import { OperationPanel, operationIdFromAction, operationStore, type OperationStore } from "../operations/index.ts";
+import { OperationPanel, operationIdFromAction, operationStore, useOperationClock, type OperationProjection, type OperationStore } from "../operations/index.ts";
 
 type Action = Extract<Message, { role: "action" }>;
 
@@ -27,6 +27,7 @@ export function ToolCall(props: { a: Action; operations?: OperationStore; sessio
   // wants at a glance is WHAT ran and whether it worked — a failure opens itself, because that is
   // the one they were about to click anyway.
   const [open, setOpen] = createSignal(false);
+  const operationNow = useOperationClock();
   createEffect(() => props.a.ok === false && setOpen(true));
   // What opens itself, per opencode's own policy: a shell and an edit are the thing you came to
   // see; a patch that only deletes is not (`part-default-open.ts:19`).
@@ -51,10 +52,21 @@ export function ToolCall(props: { a: Action; operations?: OperationStore; sessio
     return files.length > 0 && files.every((f) => f.type === "delete");
   };
   const line = createMemo(() => toolLine(a().tool, a().args ?? {}, a().output, { pending: a().pending, ok: a().ok !== false, secs: a().pending ? Math.round((tick() - (a().ts ?? tick())) / 1000) : undefined }));
-  const operation = createMemo(() => {
-    const id = operationIdFromAction(a());
-    return id ? (props.operations ?? operationStore())?.open(id, { sessionId: props.sessionId, workspaceId: props.workspaceId }) : undefined;
-  });
+  // `open()` is a side effect (it registers a fetch and, for a shared operation, a refcount) —
+  // it belongs in an effect with a matching `onCleanup`, not inside a memo, which runs during
+  // Solid's computation pass and is never told when this component unmounts. Keyed `on` the
+  // operation id: several ToolCalls can show the same id (a re-run, or the same operation
+  // referenced twice), so each mount's own `dispose()` only releases its own share
+  // (`store.ts`'s refcount), never what a sibling still has open.
+  const [operation, setOperation] = createSignal<OperationProjection>();
+  createEffect(on(() => operationIdFromAction(a()), (id, _prev, prevProjection: OperationProjection | undefined) => {
+    prevProjection?.dispose();
+    if (!id) return setOperation(undefined);
+    const opened = (props.operations ?? operationStore())?.open(id, { sessionId: props.sessionId, workspaceId: props.workspaceId });
+    setOperation(opened);
+    return opened;
+  }));
+  onCleanup(() => operation()?.dispose());
 
   // opencode's contract (§16b): a read or a search is ONE line, but an edit and a command are rail
   // BLOCKS — their result is the thing you came to see, so it is not behind a click.
@@ -109,7 +121,7 @@ export function ToolCall(props: { a: Action; operations?: OperationStore; sessio
           </div>
         </div>
       </Show>
-      <Show when={operation()}>{(entry) => <OperationPanel view={entry().view()} onResync={entry().resync} onDecision={entry().controls.decide} onAdditionalInput={entry().controls.answer} onCancel={entry().controls.cancel} loadError={entry().error()} onRetry={entry().reload} />}</Show>
+      <Show when={operation()}>{(entry) => <OperationPanel view={entry().view()} now={operationNow()} onResync={entry().resync} onDecision={entry().controls.decide} onAdditionalInput={entry().controls.answer} onCancel={entry().controls.cancel} loadError={entry().error()} onRetry={entry().reload} />}</Show>
     </div>
   );
 }

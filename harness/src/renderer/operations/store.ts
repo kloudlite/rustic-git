@@ -113,6 +113,11 @@ export function createOperationStore(bridge: OperationRendererBridge) {
   const releases = new Map<string, () => void>();
   const catchUps = new Map<string, (lastSequence?: number, snapshot?: boolean) => Promise<void> | undefined>();
   const reconnects = new Map<string, () => void>();
+  // How many open views share one projection. `open()` increments; a view's own `dispose()`
+  // only really releases the projection at zero. `disposeSession`/`dispose` bypass this and
+  // force the release, because a gone session has nothing left to share.
+  const refCounts = new Map<string, number>();
+  const forceReleases = new Map<string, () => void>();
   const [entries, setEntries] = createSignal<OperationProjection[]>([]);
   let connected = true;
   let disposed = false;
@@ -132,10 +137,33 @@ export function createOperationStore(bridge: OperationRendererBridge) {
   const open = (operationId: string, owner: { sessionId?: string; workspaceId?: string } = {}): OperationProjection => {
     const held = projections.get(operationId);
     if (held) {
-      if ((owner.sessionId !== undefined && held.sessionId !== owner.sessionId) || (owner.workspaceId !== undefined && held.workspaceId !== owner.workspaceId)) {
+      // An empty `sessionId` is "not resolved yet", never a real owner: a ToolCall that opened
+      // before its thread resolved must not be read as conflicting with the first caller that
+      // supplies the real one.
+      if ((owner.sessionId !== undefined && held.sessionId !== "" && held.sessionId !== owner.sessionId) || (owner.workspaceId !== undefined && held.workspaceId !== undefined && held.workspaceId !== owner.workspaceId)) {
         const mismatch: OperationLoadError = { kind: "snapshot", code: "operation_owner_mismatch", message: "operation owner mismatch", retryable: true };
-        return { ...held, error: () => mismatch };
+        // A mismatched view is read-only: no `resync`/`reload`/`controls`, so Approve, Cancel and
+        // the reconnect repair banner cannot act on a projection this caller does not own.
+        return { ...held, resync: async () => undefined, reload: async () => undefined, dispose: () => undefined, controls: {}, error: () => mismatch };
       }
+      // A second ToolCall (or the inspector's task row) showing the same operation shares this
+      // projection rather than opening a duplicate fetch; each caller's own `dispose()` only
+      // counts down, so the first one to unmount does not pull the projection out from under
+      // whichever other view still shows it.
+      refCounts.set(operationId, (refCounts.get(operationId) ?? 1) + 1);
+      // A ToolCall can mount before its thread resolves a real session id (`open(id, { sessionId:
+      // "" })`); once a caller supplies the real one, fill it in so `disposeSession` can find this
+      // projection under the session that actually owns it, rather than leaving it stranded on
+      // the empty placeholder forever.
+      let ownerFilled = false;
+      if (held.sessionId === "" && owner.sessionId) { held.sessionId = owner.sessionId; ownerFilled = true; }
+      if (held.workspaceId === undefined && owner.workspaceId !== undefined) { held.workspaceId = owner.workspaceId; ownerFilled = true; }
+      // `taskRows` filters by `sessionId`, a plain field, not a signal — a projection that was
+      // filtered out because it had no owner yet never had its `view()` read, so nothing re-runs
+      // the inspector's memo. Notify `entries()` so a caller reading it (`Inspector.tsx`'s
+      // `Tasks`) sees this projection become visible the moment the real owner is known, not on
+      // the next unrelated store change.
+      if (ownerFilled) setEntries([...projections.values()]);
       return held;
     }
     const [view, setView] = createSignal(createOperationView(operationId, Date.now()));
@@ -207,6 +235,8 @@ export function createOperationStore(bridge: OperationRendererBridge) {
       if (released) return;
       released = true;
       generation += 1;
+      refCounts.delete(operationId);
+      forceReleases.delete(operationId);
       releases.get(operationId)?.();
       releases.delete(operationId);
       catchUps.delete(operationId);
@@ -215,8 +245,17 @@ export function createOperationStore(bridge: OperationRendererBridge) {
       setters.delete(operationId);
       setEntries([...projections.values()]);
     };
-    const projection = { operationId, sessionId: owner.sessionId ?? "", workspaceId: owner.workspaceId, view, resync, reload: () => catchUp(undefined, true) ?? Promise.resolve(), dispose: release, controls: { decide: bridge.decide, answer: bridge.answer, cancel: bridge.cancel }, error };
+    forceReleases.set(operationId, release);
+    // A view's own `dispose()` (ToolCall's `onCleanup`, or a test that opened one directly) only
+    // counts itself out; the projection is actually released once nothing still holds it.
+    const releaseOne = () => {
+      const left = (refCounts.get(operationId) ?? 1) - 1;
+      if (left <= 0) release();
+      else refCounts.set(operationId, left);
+    };
+    const projection = { operationId, sessionId: owner.sessionId ?? "", workspaceId: owner.workspaceId, view, resync, reload: () => catchUp(undefined, true) ?? Promise.resolve(), dispose: releaseOne, controls: { decide: bridge.decide, answer: bridge.answer, cancel: bridge.cancel }, error };
     projections.set(operationId, projection);
+    refCounts.set(operationId, 1);
     catchUps.set(operationId, catchUp);
     reconnects.set(operationId, () => {
       if (loading) {
@@ -241,11 +280,14 @@ export function createOperationStore(bridge: OperationRendererBridge) {
     .filter((projection) => projection.sessionId === sessionId && (projection.workspaceId === undefined || projection.workspaceId === workspaceId))
     .map((projection) => operationTaskRow(projection.view(), projection));
 
+  // A deleted or archived session's projections go regardless of how many views still had them
+  // open — those views are unmounting anyway — so this calls the real release, not the
+  // refcounted one a view's own `dispose()` uses.
   const disposeSession = (sessionId: string) => {
-    for (const projection of [...projections.values()]) if (projection.sessionId === sessionId) projection.dispose();
+    for (const projection of [...projections.values()]) if (projection.sessionId === sessionId) forceReleases.get(projection.operationId)?.();
   };
 
-  const archiveSession = (_sessionId: string) => undefined;
+  const archiveSession = disposeSession;
 
   const dispose = () => {
     disposed = true;

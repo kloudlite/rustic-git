@@ -1,4 +1,4 @@
-import { For, Show, createEffect, createSignal, createUniqueId } from "solid-js";
+import { For, Show, createEffect, createMemo, createSignal, createUniqueId } from "solid-js";
 import { Button } from "../../ui/Button";
 import { Empty } from "../../ui/parts";
 import { Confirm } from "../../ui/Confirm";
@@ -22,9 +22,15 @@ export function DecisionPrompt(props: {
   onAdditionalInput?: (payload: AdditionalInputCallbackPayload) => void | Promise<void>;
 }) {
   const rows = () => decisionRows(props.view, props.now);
+  // `decisionRows()` rebuilds fresh row objects on every view or clock change, and `<For>` keys
+  // by reference — keying on the object would remount every card (and its typed answer, open
+  // confirmation and pending guard) on every tick. Key on the stable `decisionId` string instead,
+  // and look the current row up inside the child so it stays mounted while the id is present.
+  const ids = createMemo(() => rows().map((row) => row.decisionId), undefined, { equals: (a, b) => a.length === b.length && a.every((id, i) => id === b[i]) });
+  const rowById = (decisionId: string) => rows().find((row) => row.decisionId === decisionId)!;
   return (
     <Show when={rows().length} fallback={<Empty>Nothing is waiting on you.</Empty>}>
-      <For each={rows()}>{(row) => <Decision view={props.view} row={row} onDecision={props.onDecision} onAdditionalInput={props.onAdditionalInput} />}</For>
+      <For each={ids()}>{(decisionId) => <Decision view={props.view} row={rowById(decisionId)} onDecision={props.onDecision} onAdditionalInput={props.onAdditionalInput} />}</For>
     </Show>
   );
 }

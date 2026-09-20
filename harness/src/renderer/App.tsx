@@ -22,18 +22,40 @@ import * as live from "./live";
 import { agentRows, benchSessions, displayModel, inFlightItems, noteModelNames, openNote, openRoute, procState, refusal, type SessionRow } from "./rows";
 import { shouldRefreshOn } from "./refresh";
 import { cycleTheme } from "./theme";
-import { collectOperationEventPages, configureOperationBridge, type OperationProjection, type OperationRendererBridge } from "./operations/index.ts";
+import { collectOperationEventPages, configureOperationBridge, isTerminalOperation, type OperationProjection, type OperationRendererBridge } from "./operations/index.ts";
 
 export function App() {
+  // No operation-changed event exists on the `onPi` stream yet (main only pushes `bench` and
+  // `bench:resync`), so `watch` polls the event log itself rather than inventing an IPC channel
+  // this lane may not add. Bounded to a running/waiting operation only: the store's own `catchUp`
+  // is a no-op once the fetched cursor is not ahead, so this just costs one idle events request
+  // per tick until the projection reaches a terminal state, when the poll clears itself.
+  const OPERATION_POLL_MS = 2_000;
   const operationBridge: OperationRendererBridge = {
     loadSnapshot: window.harness.operations.snapshot,
     loadEvents: (operationId, afterSequence) => collectOperationEventPages(
       (after) => window.harness.operations.events(operationId, after, 200),
       afterSequence,
     ),
-    decide: (payload) => window.harness.operations.decision(payload),
-    answer: (payload) => window.harness.operations.input(payload).then(() => undefined),
-    cancel: (payload) => window.harness.operations.cancel(payload).then(() => undefined),
+    watch: (operationId, onChanged) => {
+      const timer = setInterval(() => {
+        const state = operations?.entries().find((entry) => entry.operationId === operationId)?.view().state;
+        if (state !== undefined && isTerminalOperation(state)) return clearInterval(timer);
+        // MAX_SAFE_INTEGER cannot spin the store: `catchUp` only ever queues one in-flight fetch
+        // (`pendingNotification`) and clears that flag before requeuing on completion, so a tick
+        // arriving mid-fetch coalesces into the next one rather than stacking.
+        onChanged(Number.MAX_SAFE_INTEGER);
+      }, OPERATION_POLL_MS);
+      return () => clearInterval(timer);
+    },
+    // Every control refreshes the view once the write lands, so a granted decision stops
+    // offering Approve rather than waiting on the next poll tick or reconnect.
+    decide: (payload) => window.harness.operations.decision(payload).then(() => refreshOperation(payload.operationId)),
+    answer: (payload) => window.harness.operations.input(payload).then(() => refreshOperation(payload.operationId)),
+    cancel: (payload) => window.harness.operations.cancel(payload).then(() => refreshOperation(payload.operationId)),
+  };
+  const refreshOperation = (operationId: string) => {
+    void operations?.entries().find((entry) => entry.operationId === operationId)?.reload();
   };
   const operations = configureOperationBridge(operationBridge);
   onCleanup(() => operations?.dispose());
@@ -236,6 +258,7 @@ export function App() {
   const archiveSession = (id: string) =>
     void bench("POST", `/sessions/${id}/archive`).then(() => {
       operations?.archiveSession(id);
+      if (operationTask()?.session === id) closeOperationTask();
       sides.filter((t) => t.session === id).forEach((t) => removeSide(t.id));
       if (paneOf(id) >= 0) closeThread(id);
       return refreshSessions();
@@ -261,6 +284,7 @@ export function App() {
   };
   const afterDelete = (id: string) => {
     operations?.disposeSession(id);
+    if (operationTask()?.session === id) closeOperationTask();
     sides.filter((t) => t.session === id).forEach((t) => removeSide(t.id));
     live.discard(id);
     if (paneOf(id) >= 0) closeThread(id);
@@ -373,7 +397,13 @@ export function App() {
   const asTask = (p?: live.Proc): live.Task | undefined =>
     p && { id: p.id, session: p.session ?? "", tool: "Process", arg: `${p.name} · ${p.command}`, state: procState(p), started: p.started, ended: p.ended, output: p.tail };
   const [taskId, setTaskId] = createSignal<string | undefined>();
-  const [operationTask, setOperationTask] = createSignal<OperationProjection | undefined>();
+  // Owned by the tab it was opened from (§1.6: renderer state lives at exactly one level, never
+  // leaks across). `session` is the raw tab id (`p.sel`'s own namespace — a workspace or
+  // ephemeral id, a session id, or "bench"), captured from `selected()` at open time; it is NOT
+  // `projection.sessionId`, which is the store's own `sessionOf()`-derived owner key and lives in
+  // a different namespace. A pane renders this only when its own `p.sel` equals `session`.
+  const [operationTask, setOperationTask] = createSignal<{ session: string; projection: OperationProjection } | undefined>();
+  const closeOperationTask = () => setOperationTask(undefined);
   const inspector = () => rightOpen() && !envTab() && !settingsTab();
 
   const switchTeam = (slug: string) => void window.harness.auth.chooseTeam(slug);
@@ -446,7 +476,7 @@ export function App() {
   const back = () => {
     if (file()) setFile(undefined);
     else if (taskId()) setTaskId(undefined);
-    else if (operationTask()) setOperationTask(undefined);
+    else if (operationTask()) closeOperationTask();
     else if (envTab()) setEnvTab(false);
     else if (settingsTab()) setSettingsTab(false);
     else if (maximised()) setMaximised(false);
@@ -1038,8 +1068,8 @@ export function App() {
               file={isActive() ? file() : undefined}
               onCloseFile={() => setFile(undefined)}
               task={isActive() ? (live.tasks.find((t) => t.id === taskId()) ?? asTask(live.procs.find((p) => p.id === taskId()))) : undefined}
-              operation={isActive() ? operationTask() : undefined}
-              onCloseTask={() => (setTaskId(undefined), setOperationTask(undefined))}
+              operation={isActive() && operationTask()?.session === p.sel ? operationTask()?.projection : undefined}
+              onCloseTask={() => (setTaskId(undefined), closeOperationTask())}
               snapshots={snapshots()}
               onCloseEnv={() => setEnvTab(false)}
               settings={isActive() && settingsTab()}
@@ -1094,7 +1124,7 @@ export function App() {
             treeOf={(id) => (sessions.find((x) => x.id === id) as unknown as { tree?: string } | undefined)?.tree}
             onOpenShell={() => toggleShell()}
             onOpenTask={(id) => (setEnvTab(false), setFile(undefined), setTaskId(id))}
-            onOpenOperation={(row) => (setEnvTab(false), setFile(undefined), setTaskId(undefined), setOperationTask(row))}
+            onOpenOperation={(row) => (setEnvTab(false), setFile(undefined), setTaskId(undefined), setOperationTask({ session: selected(), projection: row }))}
             onOpenFile={(path, status) => {
               setEnvTab(false);
               // Which workspace's tool server holds it: the selected tab's own, as the terminal
