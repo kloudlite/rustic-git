@@ -83,8 +83,17 @@ Each is a decision the review left open. Recorded with what it costs if wrong.
 2. **`expired` means nothing ran and nothing failed.** With a failed step and a passed deadline the
    operation settles through `settledState(snapshot, true)`, so the terminal state reports the
    failure. Cost if wrong: a label, never a hang.
-3. **A fast probe that finds the lock held by a live holder skips and reports; it does not fail
-   construction.** A failed sample that was never filed is invisible; a reported skip is not.
+3. **The fast suite reads the lock and never holds it; only a roll stops it.** (Corrected 20 Sep
+   after R-1's first pass. The first version of this ruling had a fast run skip under any live
+   holder.) On 16 Sep the owner had the fast suite stop yielding to the hourly (8cd61d51), because
+   32 % of fast runs in six hours were standing aside; the shared lock silently reversed that. The
+   lock exists to keep probes and a ROLL apart, not probes apart from each other. So: a fast run
+   only GETs the lock; a live holder of kind `roll` makes it yield with a report naming the roll;
+   a probe holder is ignored. `roll.sh` takes the lock BEFORE it waits for running probe jobs, so
+   no probe can start in the gap, and it waits for a live probe holder instead of exiting. Every
+   takeover is a preconditioned delete followed by the ordinary create, which needs only the
+   `get`, `create` and `delete` the probe's Role already has. Cost if wrong: a fast sample taken
+   beside an hourly, which the owner measured and accepted on 16 Sep.
 4. **`bench.pkg.add` keeps the API mechanism and is made truthful; the shell variant stays parked.**
    The owner parked all shell work on 18 Sep, and the original pty path depends on it. The task
    stops the probe overwriting the package list, verifies the package is present in the pod after
@@ -404,15 +413,21 @@ resolves to the built `index.html`; change nothing if it does.
 `bins/slo/tests/out_of_process.rs`.
 
 **Required behaviour:** the lock ConfigMap carries an ownerReference to its holder pod when there
-is one. On AlreadyExists, `acquire` reads `owner_pod_uid` / `job_uid` and takes over, with a
-resourceVersion precondition, when that pod or job is gone or terminal. `roll.sh` does the same
-check before `exit 3` and prints who holds the lock. A fast run that finds a LIVE holder files a
-skipped run naming the holder instead of failing `Ctx::new`. The unread env and the test that sets
-it to "0" are removed.
+is one (`blockOwnerDeletion` false), and records `kind` (`roll` or `probe`) and `suite`. On
+AlreadyExists, `acquire` reads `owner_pod_uid` / `job_uid` and, when that pod or job is gone or
+terminal, takes over by a delete preconditioned on the lock's uid and resourceVersion followed by
+the ordinary create; never a PUT (the Role has no `update`, and needs none). The FAST suite never
+acquires: it GETs the lock, yields with a report naming the holder only when a LIVE holder of kind
+`roll` has it, and otherwise runs (ruling 3). `roll.sh` takes the lock first and only then waits
+for running probe jobs; a live probe holder makes it wait inside the existing two-hour bound, a
+live roll holder makes it `exit 3` naming the holder, a dead holder is taken over the same way.
+The unread env and the test that sets it to "0" are removed. No RBAC change.
 
-**Tests first:** against the fake API server in `out_of_process.rs`: a lock whose owner pod is
-absent is taken over; a lock whose owner is live is respected; a fast run under a live hourly lock
-exits 0 having reported a skip.
+**Tests first:** against the fake API server in `out_of_process.rs`, passing under the default
+parallel test runner: a lock whose owner pod is absent is taken over by delete-then-create and the
+stub saw no PUT; a lock whose owner is live is respected; a fast run under a live HOURLY lock runs
+normally and creates no lock; a fast run under a live ROLL lock exits 0 having reported a yield
+naming the roll.
 
 **Commit:** `Take over a roll lock whose holder is gone`
 
