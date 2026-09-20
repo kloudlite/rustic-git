@@ -232,9 +232,10 @@ test("every enabled read is wired in the real Bench runtime and returns schema-v
     const args: Record<string, unknown> = {
       "bench.process.list": {}, "skill.read": {}, "workspace.inspect": { id: "api" }, "workspace.list": {}, "workspace.progress": { id: "ws-1" },
     };
+    const runtime = await bench.capabilityRuntime;
     for (const capability of INITIAL_READ_CAPABILITIES) {
-      assert.ok(bench.capabilityRuntime.resolve(capability), capability);
-      const result = await capabilityRegistry.dispatch(capability, args[capability], { runtime: bench.capabilityRuntime });
+      assert.ok(runtime.resolve(capability), capability);
+      const result = await capabilityRegistry.dispatch(capability, args[capability], { runtime });
       assert.equal(result.outcome, "completed", `${capability}: ${JSON.stringify(result)}`);
       if (capability === "workspace.list" && result.outcome === "completed") assert.deepEqual(result.result, [{ id: "ws-1", name: "api", state: "running" }]);
     }
