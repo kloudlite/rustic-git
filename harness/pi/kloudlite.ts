@@ -33,13 +33,14 @@ function token(): { api: string; token: string } {
   return { api: api.replace(/\/$/, ""), token: t };
 }
 
-export async function call(method: string, p: string, body?: unknown): Promise<{ status: number; data: unknown }> {
+export async function call(method: string, p: string, body?: unknown, signal?: AbortSignal): Promise<{ status: number; data: unknown }> {
   const c = token();
   const r = await fetch(`${c.api}${p}`, {
     method,
     redirect: "error",
     headers: { authorization: `Bearer ${c.token}`, ...(body !== undefined ? { "content-type": "application/json" } : {}) },
     body: body !== undefined ? JSON.stringify(body) : undefined,
+    signal,
   });
   const text = await r.text();
   if (r.status === 401) return { status: 401, data: `${SIGN_IN} (your desktop session ended or the bench was stopped)` };
@@ -970,11 +971,17 @@ export function progressTool(reg: ReturnType<typeof makeReg>) {
  * "devstack"}` answered 404 and had to be retried by id (transcripts, 2026-09-18).
  */
 export async function resolveNamed(kind: "workspaces" | "environments", idOrName: string): Promise<string> {
-  const r = await call("GET", `/v1/${kind}`);
+  // No `team` query means "personal only" (`/v1`'s own default); a team bench must list its
+  // team's rows too, or every id lookup below sees an empty listing.
+  const team = process.env.KL_TEAM;
+  const r = await call("GET", `/v1/${kind}${team ? `?team=${encodeURIComponent(team)}` : ""}`);
   const rows = (Array.isArray(r.data) ? r.data : []) as { id?: string; name?: string }[];
   const resolved = resolveUnique(rows as JsonValue[], idOrName, kind.slice(0, -1));
-  if (!resolved.ok) throw new Error(resolved.message);
-  return resolved.id;
+  if (resolved.ok) return resolved.id;
+  // Not in the listing: hand it on as given, so /v1's own 404 is the answer rather than ours —
+  // this also covers a team workspace this listing didn't resolve.
+  if (resolved.code === "no_match") return idOrName;
+  throw new Error(resolved.message);
 }
 
 /**

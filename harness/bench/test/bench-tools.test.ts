@@ -387,7 +387,7 @@ test("kl_workspace_progress reads the bench's own routes and says what that work
     const { pi, tools } = fakePi();
     kloudlite(pi);
     const out = (await (tools.find((t) => t.name === "kl_workspace_progress") as any).execute("c1", { id: "api" }, undefined, undefined, undefined)).content[0].text as string;
-    assert.deepEqual(seen.sort(), ["/exchanges?workspace=api", "/procs", "/v1/workspaces", "/workspaces/api/messages?limit=10"]);
+    assert.deepEqual(seen.sort(), ["/exchanges?workspace=api", "/procs", "/v1/workspaces?team=acme", "/workspaces/api/messages?limit=10"]);
     assert.equal(
       out,
       [
@@ -527,7 +527,7 @@ function fakeApi(routes: (m: string, url: string, body: any) => unknown, missing
 test("a create fills in the region and the owner, and takes a name where an id is expected", async () => {
   const api = fakeApi((m, url) => {
     if (url === "/v1/workspaces/bench-ada") return { id: "bench-ada", state: "running", region: "centralindia-k3s" };
-    if (url === "/v1/workspaces" && m === "GET") return [{ id: "ws-abc123", name: "svelte-frontend", state: "running" }, { id: "ws-def456", name: "api", state: "running" }, { id: "ws-ghi789", name: "api", state: "stopped" }];
+    if ((url === "/v1/workspaces" || url === "/v1/workspaces?team=acme") && m === "GET") return [{ id: "ws-abc123", name: "svelte-frontend", state: "running" }, { id: "ws-def456", name: "api", state: "running" }, { id: "ws-ghi789", name: "api", state: "stopped" }];
     if (url === "/v1/workspaces" && m === "POST") return { id: "ws-new", state: "running" };
     if (url.startsWith("/v1/workspaces/ws-")) return { id: "ws-abc123", state: "running" };
     return {};
@@ -572,7 +572,7 @@ test("a create fills in the region and the owner, and takes a name where an id i
 test("a snapshot is a snapshot: create from one, list them, and never the word volume", async () => {
   const api = fakeApi((m, url) => {
     if (url === "/v1/workspaces/bench-ada") return { id: "bench-ada", state: "running", region: "r1" };
-    if (url === "/v1/workspaces" && m === "GET") return [{ id: "ws-1", name: "api", state: "running" }];
+    if ((url === "/v1/workspaces" || url === "/v1/workspaces?team=acme") && m === "GET") return [{ id: "ws-1", name: "api", state: "running" }];
     if (url === "/v1/volumes") return [{ name: "ws-1", volume: "vol-9", kind: "workspace" }];
     if (url === "/v1/volumes/vol-9/history") return [{ id: "snap-2", message: "before the refactor", createdAt: "2026-09-17T10:00:00Z", phase: "Ready" }];
     if (url === "/v1/workspaces/restore") return { id: "ws-new", state: "running" };
@@ -1325,7 +1325,7 @@ test("the transcripts' own case: search kl_workspaces, call it, and it is still 
  */
 test("switching environments takes the name a person uses", async () => {
   const api = fakeApi((m, url) => {
-    if (url === "/v1/environments" && m === "GET") return [{ id: "env-1", name: "devstack" }, { id: "env-2", name: "twin" }, { id: "env-3", name: "twin" }];
+    if ((url === "/v1/environments" || url === "/v1/environments?team=acme") && m === "GET") return [{ id: "env-1", name: "devstack" }, { id: "env-2", name: "twin" }, { id: "env-3", name: "twin" }];
     return { ok: true };
   });
   const base = await api.listen();
@@ -1537,7 +1537,7 @@ test("an intercept is cleared only by explicit null, never omission", async () =
  */
 test("the bench is never a workspace target, and never in a listing", async () => {
   const api = fakeApi((m, url) => {
-    if (url === "/v1/workspaces" && m === "GET")
+    if ((url === "/v1/workspaces" || url === "/v1/workspaces?team=acme") && m === "GET")
       return [
         { id: "ws-632cf9f23d9f2fbf", name: "backend", state: "running" },
         // A row that leaked from anywhere — an older api, a cached answer — must not be nameable.
