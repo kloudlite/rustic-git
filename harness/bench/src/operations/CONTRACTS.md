@@ -120,6 +120,9 @@ for the actual fact behind each trigger.
   unresolved work stays visible until reconciliation is conclusive or a decision is made.
 - A recorded cancel revokes every unconsumed dispatch token of the steps it aborts; a
   rejected outcome call leaves the token untouched.
+- An approval wait ends at the store's decision expiry or at cancellation, whichever
+  comes first, and a late answer dispatches nothing; timers longer than 2^31-1 ms are
+  re-armed, never clamped.
 - Events replay monotonically by `sequence`; `validateEventSequence` refuses replays.
 - `OPERATE_REQUEST_SCHEMA` is emitted from the same descriptions the validator uses and
   carries the real bounds (`minLength`/`maxLength`/`pattern`/`minimum`/`maximum`/

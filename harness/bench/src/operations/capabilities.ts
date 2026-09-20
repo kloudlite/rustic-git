@@ -95,7 +95,7 @@ export type CapabilityApprovalRequest = {
 export type CapabilityDispatchDeps = {
   runtime?: CapabilityRuntime;
   /** The executor owns obtaining and persisting this record. */
-  approve?: (request: CapabilityApprovalRequest) => Promise<RecordedDecision>;
+  approve?: (request: CapabilityApprovalRequest, options?: { signal?: AbortSignal }) => Promise<RecordedDecision>;
   decision?: Omit<ResumeExpectation, "payloadDigest" | "now"> & { now?: number };
   /** O05-issued, one-shot authorization for this exact dispatch attempt. */
   dispatchToken?: DispatchToken;

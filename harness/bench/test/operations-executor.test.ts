@@ -5,13 +5,14 @@ import path from "node:path";
 import { test } from "node:test";
 import { OperationExecutor, type ExecutorStore, type ReconciliationResult } from "../src/operations/executor.ts";
 import { OperationScheduler } from "../src/operations/scheduler.ts";
-import { canonicalDigest, isTerminalOperationState, type CapabilityDescriptor, type ExactCall, type JsonValue, type OperationError, type OperationSnapshot, type RecordedDecision, type TrustedActorContext } from "../src/operations/contracts.ts";
+import { canonicalDigest, isTerminalOperationState, selectOutputPath, type CapabilityDescriptor, type ExactCall, type JsonValue, type OperationError, type OperationSnapshot, type RecordedDecision, type TrustedActorContext } from "../src/operations/contracts.ts";
 import { CAPABILITY_CONTRACTS, CapabilityRegistry } from "../src/operations/capabilities.ts";
 import type { CapabilityDispatchResult } from "../src/operations/capabilities.ts";
 import { OperationStore, type CapabilityMetadata } from "../src/operations/store.ts";
 import type { RecoveryAction } from "../src/operations/recovery.ts";
 import { capabilityRuntime } from "./operations-runtime-fixture.ts";
 import { DispatchAuthority, type DispatchToken } from "../src/operations/dispatch-authority.ts";
+import { setLongTimeout } from "../src/operations/timers.ts";
 
 const context: TrustedActorContext = {
   actorId: "actor-1", tenantId: "tenant-1", sessionId: "session-1", turnId: "turn-1", toolCallId: "call-1", turnRevision: 1, scope: { workspaceId: "ws-1" },
@@ -394,7 +395,15 @@ test("uses the durable deadline and persists expiry", async () => {
 
 test("a running durable deadline records cancellation intent before aborting work", async () => {
   const store = new MemoryStore();
-  store.deadlineAt = Date.now() + 20;
+  // The race this test hit under load (flaky at --test-concurrency=4): `deadlineAt` is
+  // read once in `execute()` (`deadlineAt > Date.now()`) before the timer is armed. A
+  // margin as tight as 20ms could already have elapsed by the time that check runs under
+  // event-loop contention, so the timer never arms and `cancel-requested` never happens —
+  // not a bug in the code under test, a fixed-margin-vs-real-timer race in the test's own
+  // setup. A wider margin makes the "still ahead of Date.now() when execute() reads it"
+  // check reliable without polling anything (there is nothing to poll: the assertion
+  // below only inspects the log after execute() has already fully resolved).
+  store.deadlineAt = Date.now() + 300;
   const reg = registry(store, []);
   reg.dispatch = async (name, _args, deps) => {
     await new Promise<void>((resolve) => deps.signal?.addEventListener("abort", () => resolve(), { once: true }));
@@ -832,4 +841,191 @@ test("C-4 T5: a bench that lost the folder does not dispatch", async () => {
     new Promise<never>((_, reject) => setTimeout(() => reject(new Error("execute() did not settle within 3s")), 3000)),
   ]));
   assert.equal(handled, 0);
+});
+
+// C-5: bounded waits in the executor. Real OperationStore + real CapabilityRegistry
+// sharing one DispatchAuthority, same pattern as the C-4 block above.
+function realStoreForC5(budgets?: Partial<{ operationDeadlineMs: number }>) {
+  const authority = new DispatchAuthority();
+  const registry = new CapabilityRegistry(CAPABILITY_CONTRACTS, ["environment.restore"], authority);
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "operation-executor-c5-"));
+  const ownership = { ownerId: "executor-test-c5", assertHeld: () => {} };
+  const metadata = (name: string, version: string): CapabilityMetadata | undefined => {
+    const found = registry.get(name);
+    return found && (!version || found.version === version) ? { version: found.version, effect: found.effect, approval: found.approval.required, retry: found.retry, resourceKeys: found.resourceAccess.conflictKeys } : undefined;
+  };
+  const store = new OperationStore({ root, ownership, now: Date.now, capabilityMetadata: metadata, dispatchAuthority: authority });
+  const callContext: TrustedActorContext = { ...context, toolCallId: `c5-${Math.random()}` };
+  const accepted = store.accept({ request: { instruction: "Restore devstack to snap-1" }, context: callContext, ...(budgets ? { budgets } : {}) }).snapshot;
+  store.beginResolution(accepted.operationId);
+  return { authority, registry, store, callContext, operationId: accepted.operationId };
+}
+
+// Bounds a promise that must settle for the test itself to make progress (never the
+// production code under test): a hang here fails the test instead of the whole run.
+function bounded<T>(promise: Promise<T>, label: string, ms = 3000): Promise<T> {
+  return Promise.race([
+    promise,
+    new Promise<never>((_, reject) => setTimeout(() => reject(new Error(`${label} did not settle within ${ms}ms`)), ms)),
+  ]);
+}
+
+test("C-5 T1: an approval nobody answers ends when the operation is aborted", async () => {
+  const { registry, store, callContext, operationId } = realStoreForC5();
+  let handled = 0;
+  let approveSignal: AbortSignal | undefined;
+  const runtime = capabilityRuntime({ "environment.restore": async () => (handled += 1, { ok: true, value: { id: "devstack", state: "ready" } }) });
+  const controller = new AbortController();
+  const executor = new OperationExecutor({
+    store,
+    registry,
+    scheduler: new OperationScheduler({ maxConcurrent: 1 }),
+    dispatchFor: () => ({
+      runtime,
+      allowedPolicySources: ["user_ui"],
+      approve: (_approval, options) => { approveSignal = options?.signal; return new Promise<RecordedDecision>(() => {}); },
+    }),
+  });
+  const execPromise = executor.execute({ operationId, context: callContext, signal: controller.signal, calls: [{ key: "restore", capability: "environment.restore", capabilityVersion: "1.0.0", args: { id: "devstack", snapshot: "snap-1" } }] });
+  setTimeout(() => controller.abort(), 50);
+  const result = await bounded(execPromise, "execute()");
+  assert.equal(result.state, "cancelled", JSON.stringify(result));
+  assert.equal(result.steps.find((step) => step.key === "restore")?.outcome, "cancelled");
+  assert.equal(handled, 0);
+  assert.equal(approveSignal?.aborted, true);
+  const snapshot = store.load(operationId);
+  assert.equal(isTerminalOperationState(snapshot.state), true);
+});
+
+test("C-5 T2: an approval nobody answers ends at its expiry", async () => {
+  const { registry, store, callContext, operationId } = realStoreForC5({ operationDeadlineMs: 1_000 });
+  // The operation's deadline (1000ms floor, the schema minimum) outlives the decision's
+  // clamp: requireDecision clamps expiresAt to min(now+ttl, deadlineAt), and ttl here is
+  // the store's 10-minute default, so the deadline is what actually bounds this wait —
+  // set the deadline near-term relative to the 2s guard below.
+  let handled = 0;
+  const runtime = capabilityRuntime({ "environment.restore": async () => (handled += 1, { ok: true, value: { id: "devstack", state: "ready" } }) });
+  const executor = new OperationExecutor({
+    store,
+    registry,
+    scheduler: new OperationScheduler({ maxConcurrent: 1 }),
+    dispatchFor: () => ({
+      runtime,
+      allowedPolicySources: ["user_ui"],
+      approve: () => new Promise<RecordedDecision>(() => {}),
+    }),
+  });
+  const result = await bounded(
+    executor.execute({ operationId, context: callContext, calls: [{ key: "restore", capability: "environment.restore", capabilityVersion: "1.0.0", args: { id: "devstack", snapshot: "snap-1" } }] }),
+    "execute()",
+    2_000,
+  );
+  assert.equal(result.steps.find((step) => step.key === "restore")?.outcome, "cancelled", JSON.stringify(result));
+  assert.equal(handled, 0);
+  const snapshot = store.load(operationId);
+  assert.equal(isTerminalOperationState(snapshot.state), true);
+});
+
+test("C-5 T3: an approval that arrives after the abort dispatches nothing", async () => {
+  const { registry, store, callContext, operationId } = realStoreForC5();
+  let handled = 0;
+  const runtime = capabilityRuntime({ "environment.restore": async () => (handled += 1, { ok: true, value: { id: "devstack", state: "ready" } }) });
+  const controller = new AbortController();
+  const executor = new OperationExecutor({
+    store,
+    registry,
+    scheduler: new OperationScheduler({ maxConcurrent: 1 }),
+    dispatchFor: () => ({
+      runtime,
+      allowedPolicySources: ["user_ui"],
+      approve: async ({ expectation }) => {
+        await new Promise((resolve) => setTimeout(resolve, 200));
+        const recordedAt = Date.now();
+        return {
+          recordId: "record-c5-t3", operationId: expectation.operationId, stepId: expectation.stepId,
+          decisionId: expectation.decisionId, decisionClass: expectation.decisionClass as "user_authorization",
+          actorId: expectation.actorId, tenantId: expectation.tenantId, sessionId: expectation.sessionId,
+          payloadDigest: expectation.payloadDigest, revision: expectation.revision, policySource: "user_ui",
+          outcome: "granted", recordedAt, expiresAt: recordedAt + 60_000,
+        };
+      },
+    }),
+  });
+  const execPromise = executor.execute({ operationId, context: callContext, signal: controller.signal, calls: [{ key: "restore", capability: "environment.restore", capabilityVersion: "1.0.0", args: { id: "devstack", snapshot: "snap-1" } }] });
+  setTimeout(() => controller.abort(), 50);
+  const result = await bounded(execPromise, "execute()");
+  assert.equal(result.steps.find((step) => step.key === "restore")?.outcome, "cancelled", JSON.stringify(result));
+  assert.equal(handled, 0);
+  // The late-arriving approval must never have been recorded: the operation's decision
+  // list stays empty after the cancel resolved, even though `approve` resolves 150ms
+  // after execute() has already returned.
+  await new Promise((resolve) => setTimeout(resolve, 250));
+  assert.equal(handled, 0);
+  assert.equal(store.recordedDecisions(operationId).length, 0);
+});
+
+test("C-5 T4: a deadline far away does not fire at once", async () => {
+  // `accept`'s own policy ceiling (store.ts, DEFAULT_BUDGETS.operationDeadlineMs) caps a
+  // real operation's deadline at 10 minutes regardless of the wider schema bound, so the
+  // real store cannot be given a literal 30-day deadline; this integration test uses the
+  // store's maximum allowed deadline to prove the executor's own deadline timer
+  // (setLongTimeout, C-5's CHANGE 2) does not fire early on a far-out but reachable
+  // value. `setLongTimeout`'s re-arming past 2^31-1ms itself is proven directly by T4b.
+  const { registry, store, callContext, operationId } = realStoreForC5({ operationDeadlineMs: 10 * 60 * 1000 });
+  let ran = 0;
+  const runtime = capabilityRuntime({ "environment.restore": async () => { ran += 1; await new Promise((resolve) => setTimeout(resolve, 100)); return { ok: true, value: { id: "devstack", state: "ready" } }; } });
+  const executor = new OperationExecutor({
+    store,
+    registry,
+    scheduler: new OperationScheduler({ maxConcurrent: 1 }),
+    dispatchFor: () => ({
+      runtime,
+      allowedPolicySources: ["user_ui"],
+      approve: async ({ expectation }) => {
+        const recordedAt = Date.now();
+        return {
+          recordId: "record-c5-t4", operationId: expectation.operationId, stepId: expectation.stepId,
+          decisionId: expectation.decisionId, decisionClass: expectation.decisionClass as "user_authorization",
+          actorId: expectation.actorId, tenantId: expectation.tenantId, sessionId: expectation.sessionId,
+          payloadDigest: expectation.payloadDigest, revision: expectation.revision, policySource: "user_ui",
+          outcome: "granted", recordedAt, expiresAt: recordedAt + 60_000,
+        };
+      },
+    }),
+  });
+  const result = await bounded(
+    executor.execute({ operationId, context: callContext, calls: [{ key: "restore", capability: "environment.restore", capabilityVersion: "1.0.0", args: { id: "devstack", snapshot: "snap-1" } }] }),
+    "execute()",
+  );
+  assert.equal(result.state, "completed", JSON.stringify(result));
+  assert.equal(result.steps.find((step) => step.key === "restore")?.outcome, "succeeded");
+  assert.equal(ran, 1);
+});
+
+test("C-5 T4b: setLongTimeout re-arms past a small injected max and clear() prevents the fire", async () => {
+  let fired = 0;
+  const timer = setLongTimeout(() => { fired += 1; }, 70, 20);
+  await new Promise((resolve) => setTimeout(resolve, 40));
+  assert.equal(fired, 0, "must not fire before its real delay even though maxMs is tiny");
+  await new Promise((resolve) => setTimeout(resolve, 60));
+  assert.equal(fired, 1);
+  await new Promise((resolve) => setTimeout(resolve, 40));
+  assert.equal(fired, 1, "fires exactly once");
+
+  let firedAfterClear = 0;
+  const cleared = setLongTimeout(() => { firedAfterClear += 1; }, 70, 20);
+  await new Promise((resolve) => setTimeout(resolve, 30));
+  cleared.clear();
+  await new Promise((resolve) => setTimeout(resolve, 80));
+  assert.equal(firedAfterClear, 0);
+});
+
+test("C-5 T5: a negative or fractional output index is a missing dependency", async () => {
+  const outputs = { list: { items: [1, 2, 3] } };
+  const negative = selectOutputPath(outputs, { from: "list", output: "items", select: [-1] });
+  assert.equal(negative.ok, false);
+  assert.equal(negative.ok ? undefined : negative.issues[0]?.code, "unknown_dependency");
+  const fractional = selectOutputPath(outputs, { from: "list", output: "items", select: [1.5] });
+  assert.equal(fractional.ok, false);
+  assert.equal(fractional.ok ? undefined : fractional.issues[0]?.code, "unknown_dependency");
 });

@@ -1,4 +1,5 @@
 import { resolveCallArgs, type CapabilityDescriptor, type ExactCall, type JsonSchemaLike, type JsonValue, type ValidationIssue } from "./contracts.ts";
+import { setLongTimeout } from "./timers.ts";
 
 export type ScheduledStepResult =
   | { outcome: "succeeded"; value: JsonValue; evidenceRefs?: string[] }
@@ -154,7 +155,7 @@ type QueuedOperation = {
   abort(): void;
   abortListener?: () => void;
   settled: boolean;
-  deadline?: ReturnType<typeof setTimeout>;
+  deadline?: { clear(): void };
 };
 
 export class OperationScheduler {
@@ -198,7 +199,7 @@ export class OperationScheduler {
         operation.abortListener = operation.abort;
         spec.signal.addEventListener("abort", operation.abortListener, { once: true });
       }
-      if (spec.deadlineAt !== undefined) operation.deadline = setTimeout(operation.abort, Math.max(0, spec.deadlineAt - Date.now()));
+      if (spec.deadlineAt !== undefined) operation.deadline = setLongTimeout(operation.abort, Math.max(0, spec.deadlineAt - Date.now()));
       this.#pump();
     });
   }
@@ -308,7 +309,7 @@ export class OperationScheduler {
     operation.settled = true;
     const index = this.#operations.indexOf(operation);
     if (index >= 0) this.#operations.splice(index, 1);
-    if (operation.deadline) clearTimeout(operation.deadline);
+    if (operation.deadline) operation.deadline.clear();
     if (operation.abortListener) operation.spec.signal?.removeEventListener("abort", operation.abortListener);
     const steps = operation.spec.calls.map((call) => ({ key: call.key, outcome: operation.results.get(call.key)!.outcome }));
     const outcomes = steps.map((step) => step.outcome);

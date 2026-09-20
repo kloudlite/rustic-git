@@ -4,6 +4,7 @@ import { OperationScheduler, SchedulerValidationError, validateSchedulePlan, typ
 import { DEFAULT_DECISION_TTL_MS } from "./store.ts";
 import type { RecoveryAction } from "./recovery.ts";
 import type { DispatchToken } from "./dispatch-authority.ts";
+import { setLongTimeout } from "./timers.ts";
 
 export interface ExecutorStore {
   assertOwnership(): void;
@@ -112,7 +113,7 @@ export class OperationExecutor {
     };
     input.signal?.addEventListener("abort", cancellation, { once: true });
     const deadlineAt = this.#store.load(input.operationId).deadlineAt;
-    const deadline = deadlineAt !== undefined && deadlineAt > Date.now() ? setTimeout(cancellation, deadlineAt - Date.now()) : undefined;
+    const deadline = deadlineAt !== undefined && deadlineAt > Date.now() ? setLongTimeout(cancellation, deadlineAt - Date.now()) : undefined;
     try {
       let scheduled: ScheduledOperationResult;
       try {
@@ -158,7 +159,53 @@ export class OperationExecutor {
               question: prepared.approval.prompt,
               payloadDigest: prepared.approval.payloadDigest,
             });
-            const record = await approve(prepared.approval);
+            // Nothing waits forever: an unanswered approval holds a global concurrency
+            // slot and blocks every sibling step from starting (C-2), so the wait is
+            // raced against the step's own abort and the store's own decision expiry
+            // (never the locally computed bound: the store clock is authoritative).
+            const pendingDecision = waiting.pendingDecisions.find((entry) => entry.decisionId === decisionId)!;
+            const approvalAbort = new AbortController();
+            type Race =
+              | { via: "approval"; record: RecordedDecision }
+              | { via: "rejected"; error: unknown }
+              | { via: "abort" }
+              | { via: "expiry" };
+            let done = false;
+            let settle!: (result: Race) => void;
+            const race = new Promise<Race>((resolve) => { settle = resolve; });
+            const finish = (result: Race) => {
+              if (done) return;
+              done = true;
+              settle(result);
+            };
+            const onAbort = () => { finish({ via: "abort" }); approvalAbort.abort(); };
+            const expiryTimer = setLongTimeout(() => { finish({ via: "expiry" }); approvalAbort.abort(); }, pendingDecision.expiresAt - Date.now() + 5);
+            let raceOutcome: Race;
+            try {
+              if (signal.aborted) onAbort();
+              else signal.addEventListener("abort", onAbort, { once: true });
+              approve(prepared.approval!, { signal: approvalAbort.signal }).then(
+                (record) => finish({ via: "approval", record }),
+                (error) => finish({ via: "rejected", error }),
+              );
+              raceOutcome = await race;
+            } finally {
+              expiryTimer.clear();
+              signal.removeEventListener("abort", onAbort);
+            }
+            if (raceOutcome.via === "rejected") throw raceOutcome.error;
+            if (raceOutcome.via === "abort") {
+              // The executor's `cancellation` closure already ran requestCancel, which
+              // cancels an awaiting_approval step and removes its pending decision.
+              return { outcome: "cancelled" };
+            }
+            if (raceOutcome.via === "expiry") {
+              this.#store.expire(input.operationId);
+              const afterExpiry = this.#store.load(input.operationId).steps.find((entry) => entry.stepId === stepId);
+              if (afterExpiry?.state === "cancelled") return { outcome: "cancelled" };
+              throw new Error("approval expiry disagreed with the store clock");
+            }
+            const record = raceOutcome.record;
             this.#store.recordDecision(record, input.context);
             const resumed = this.#store.resume({
               request: { action: "resume", operationId: input.operationId, decisionId, expectedRevision: waiting.revision, resolution: { kind: "recorded_user_decision", recordId: record.recordId } },
@@ -211,7 +258,7 @@ export class OperationExecutor {
       const settled = deadlineAt !== undefined && Date.now() >= deadlineAt ? this.#store.expire(input.operationId) : this.#store.settle(input.operationId, { settleFailed: true }).snapshot;
       return this.#aggregate(settled, scheduled);
     } finally {
-      if (deadline) clearTimeout(deadline);
+      if (deadline) deadline.clear();
       input.signal?.removeEventListener("abort", cancellation);
     }
   }

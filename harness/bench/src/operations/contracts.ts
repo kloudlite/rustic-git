@@ -528,7 +528,7 @@ export function selectOutputPath(outputs: Record<string, JsonValue>, binding: Ou
     const segment = segments[i];
     const path = `${base}.${binding.output}[${i}]`;
     if (typeof segment === "number") {
-      if (!Array.isArray(current) || segment >= current.length) {
+      if (!Array.isArray(current) || !Number.isInteger(segment) || segment < 0 || segment >= current.length) {
         return missing(path, "unknown_dependency", `no element ${segment} in bound output`);
       }
       current = current[segment];
