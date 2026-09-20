@@ -1,9 +1,30 @@
+/**
+ * Real-store coverage of the four paths whose correctness depends on the store
+ * accepting or refusing a transition, not merely on which calls the executor made
+ * (`RecordingStore` below records call order and validates nothing):
+ *  - approval: "an approval survives an independent step settling first (C-2)"
+ *  - failure: "a failed dependency leaves a terminal durable operation (C-3 T7)" and
+ *    "an exhausted retry keeps the provider's error (C-3 T8)"
+ *  - deadline and approval expiry: "C-5 T1: an approval nobody answers ends when the
+ *    operation is aborted", "C-5 T2: an approval nobody answers ends at its expiry",
+ *    "C-5 T3: an approval that arrives after the abort dispatches nothing", "C-5 T4: a
+ *    deadline far away does not fire at once"
+ *  - cancellation and tokens: "C-4 T1: a cancel before dispatch revokes the token",
+ *    "C-4 T2: a refused outcome call leaves the token alive", "C-4 T2b: cancelStep with
+ *    no evidence leaves the token alive", "C-4 T3: a store that cannot record a cancel
+ *    still aborts the work, with no uncaught exception", "C-4 T4: a handler that throws
+ *    mid-write is unknown_outcome, not a refusal; a forged token is still refused",
+ *    "C-4 T5: a bench that lost the folder does not dispatch"
+ *  - recovery: "after a restart a running step is reported for reconciliation and left
+ *    untouched"
+ */
 import assert from "node:assert/strict";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { test } from "node:test";
 import { OperationExecutor, type ExecutorStore, type ReconciliationResult } from "../src/operations/executor.ts";
+import { planRecovery } from "../src/operations/recovery.ts";
 import { OperationScheduler } from "../src/operations/scheduler.ts";
 import { canonicalDigest, isTerminalOperationState, selectOutputPath, type CapabilityDescriptor, type ExactCall, type JsonValue, type OperationError, type OperationSnapshot, type RecordedDecision, type TrustedActorContext } from "../src/operations/contracts.ts";
 import { CAPABILITY_CONTRACTS, CapabilityRegistry } from "../src/operations/capabilities.ts";
@@ -38,7 +59,11 @@ const calls = (...items: Array<Partial<ExactCall> & Pick<ExactCall, "key">>): Ex
 const callForRecovery = (key: string, capability = "read.item"): ExactCall => ({ key, capability, capabilityVersion: "1.0.0" });
 const dispatchFor = () => ({});
 
-class MemoryStore implements ExecutorStore {
+// Records the calls the executor makes and validates nothing. Use it ONLY to assert
+// call order or the absence of calls; NEVER for behaviour whose correctness depends on
+// the store accepting or refusing a transition — those tests build a real
+// `OperationStore` on `fs.mkdtempSync` (see the C-2, C-3 and C-4 tests below).
+class RecordingStore implements ExecutorStore {
   authority = new DispatchAuthority();
   log: string[] = [];
   owned = true;
@@ -77,7 +102,7 @@ class MemoryStore implements ExecutorStore {
   }
 }
 
-function registry(store: MemoryStore, outcomes: CapabilityDispatchResult[], descriptors: Record<string, CapabilityDescriptor> = { "read.item": READ, "write.item": WRITE }): Pick<CapabilityRegistry, "get" | "prepare" | "dispatch"> {
+function registry(store: RecordingStore, outcomes: CapabilityDispatchResult[], descriptors: Record<string, CapabilityDescriptor> = { "read.item": READ, "write.item": WRITE }): Pick<CapabilityRegistry, "get" | "prepare" | "dispatch"> {
   return {
     get: (name) => descriptors[name],
     prepare: () => ({ ok: true, args: {}, states: {}, descriptor: APPROVED_WRITE }),
@@ -90,7 +115,7 @@ function registry(store: MemoryStore, outcomes: CapabilityDispatchResult[], desc
   };
 }
 
-function approvedRegistry(store: MemoryStore): Pick<CapabilityRegistry, "get" | "prepare" | "dispatch"> {
+function approvedRegistry(store: RecordingStore): Pick<CapabilityRegistry, "get" | "prepare" | "dispatch"> {
   const runtime = capabilityRuntime({ "environment.restore": async () => ({ ok: true, value: {} }) });
   const real = new CapabilityRegistry(CAPABILITY_CONTRACTS, ["environment.restore"], store.authority);
   return {
@@ -109,7 +134,7 @@ function approvedRegistry(store: MemoryStore): Pick<CapabilityRegistry, "get" | 
 }
 
 test("persists intent before trusted O02 dispatch and keeps actor context out of arguments", async () => {
-  const store = new MemoryStore();
+  const store = new RecordingStore();
   let trustedContext: TrustedActorContext | undefined;
   const executor = new OperationExecutor({ store, registry: registry(store, [{ outcome: "completed", capability: "write.item", version: "1.0.0", result: { id: "x" } }]), scheduler: new OperationScheduler({ maxConcurrent: 2 }), dispatchFor: (actor) => (trustedContext = actor, {}) });
   await executor.execute({ operationId: "op-1", context, calls: calls({ key: "write", capability: "write.item", args: { value: "x" } }) });
@@ -119,7 +144,7 @@ test("persists intent before trusted O02 dispatch and keeps actor context out of
 });
 
 test("approval-required mutations enter running only through the recorded O05 resume", async () => {
-  const store = new MemoryStore();
+  const store = new RecordingStore();
   let approvals = 0;
   const reg = approvedRegistry(store);
   const executor = new OperationExecutor({
@@ -259,7 +284,7 @@ test("an approval survives an independent step settling first (C-2)", async () =
 });
 
 test("reconciles unknown mutation outcomes before retrying or dispatching dependents", async () => {
-  const store = new MemoryStore();
+  const store = new RecordingStore();
   const reconciled: string[] = [];
   const executor = new OperationExecutor({
     store,
@@ -279,7 +304,7 @@ test("reconciles unknown mutation outcomes before retrying or dispatching depend
 });
 
 test("leaves inconclusive mutation reconciliation observable", async () => {
-  const store = new MemoryStore();
+  const store = new RecordingStore();
   const executor = new OperationExecutor({ store, registry: registry(store, [{ outcome: "failed", capability: "write.item", version: "1.0.0", code: "unknown_outcome", error: { code: "unknown_outcome", message: "lost", retryable: false } }]), scheduler: new OperationScheduler({ maxConcurrent: 1 }), dispatchFor, reconcile: async () => ({ conclusion: "unknown" }) });
   const result = await executor.execute({ operationId: "op-1", context, calls: calls({ key: "write", capability: "write.item" }) });
   assert.equal(result.state, "reconciling");
@@ -287,7 +312,7 @@ test("leaves inconclusive mutation reconciliation observable", async () => {
 });
 
 test("preserves external version conflicts and exact partial aggregation without rollback", async () => {
-  const store = new MemoryStore();
+  const store = new RecordingStore();
   const executor = new OperationExecutor({ store, registry: registry(store, [
     { outcome: "completed", capability: "write.item", version: "1.0.0", result: { id: "x" } },
     { outcome: "failed", capability: "write.item", version: "1.0.0", code: "revision_conflict", error: { code: "revision_conflict", message: "version changed", retryable: false } },
@@ -300,7 +325,7 @@ test("preserves external version conflicts and exact partial aggregation without
 });
 
 test("abort propagation preserves committed evidence and reports cancelled remainder", async () => {
-  const store = new MemoryStore();
+  const store = new RecordingStore();
   const controller = new AbortController();
   let dispatches = 0;
   const reg = registry(store, []);
@@ -322,7 +347,7 @@ test("abort propagation preserves committed evidence and reports cancelled remai
 });
 
 test("an abort race never turns a mutation failure into fabricated cancellation evidence", async () => {
-  const store = new MemoryStore();
+  const store = new RecordingStore();
   const controller = new AbortController();
   const reg = registry(store, []);
   reg.dispatch = async (name, _args, deps) => {
@@ -342,7 +367,7 @@ test("an abort race never turns a mutation failure into fabricated cancellation 
 
 
 test("a read failure racing with abort remains the authoritative failure", async () => {
-  const store = new MemoryStore();
+  const store = new RecordingStore();
   const controller = new AbortController();
   const reg = registry(store, []);
   reg.dispatch = async (name, _args, deps) => {
@@ -360,7 +385,7 @@ test("a read failure racing with abort remains the authoritative failure", async
 });
 
 test("exclusive bench ownership is checked before queueing and every dispatch", async () => {
-  const store = new MemoryStore();
+  const store = new RecordingStore();
   store.owned = false;
   const executor = new OperationExecutor({ store, registry: registry(store, []), scheduler: new OperationScheduler({ maxConcurrent: 1 }), dispatchFor });
   await assert.rejects(executor.execute({ operationId: "op-1", context, calls: calls({ key: "read" }) }), /not owned/);
@@ -368,7 +393,7 @@ test("exclusive bench ownership is checked before queueing and every dispatch", 
 });
 
 test("validates the complete plan before persisting any step", async () => {
-  const store = new MemoryStore();
+  const store = new RecordingStore();
   const executor = new OperationExecutor({ store, registry: registry(store, []), scheduler: new OperationScheduler({ maxConcurrent: 1 }), dispatchFor });
   await assert.rejects(executor.execute({ operationId: "op-1", context, calls: calls(
     { key: "a", dependsOn: ["b"] },
@@ -379,7 +404,7 @@ test("validates the complete plan before persisting any step", async () => {
 });
 
 test("uses the durable deadline and persists expiry", async () => {
-  const store = new MemoryStore();
+  const store = new RecordingStore();
   store.deadlineAt = Date.now() - 1;
   const reg = registry(store, []);
   reg.dispatch = async (name, _args, deps) => {
@@ -393,7 +418,7 @@ test("uses the durable deadline and persists expiry", async () => {
 
 
 test("a running durable deadline records cancellation intent before aborting work", async () => {
-  const store = new MemoryStore();
+  const store = new RecordingStore();
   // The race this test hit under load (flaky at --test-concurrency=4): `deadlineAt` is
   // read once in `execute()` (`deadlineAt > Date.now()`) before the timer is armed. A
   // margin as tight as 20ms could already have elapsed by the time that check runs under
@@ -415,7 +440,7 @@ test("a running durable deadline records cancellation intent before aborting wor
 });
 
 test("returns the authoritative durable settlement instead of scheduler-local state", async () => {
-  const store = new MemoryStore();
+  const store = new RecordingStore();
   store.settledState = "failed";
   const executor = new OperationExecutor({ store, registry: registry(store, [{ outcome: "completed", capability: "read.item", version: "1.0.0", result: {} }]), scheduler: new OperationScheduler({ maxConcurrent: 1 }), dispatchFor });
   const result = await executor.execute({ operationId: "op-1", context, calls: calls({ key: "read" }) });
@@ -423,7 +448,7 @@ test("returns the authoritative durable settlement instead of scheduler-local st
 });
 
 test("retries idempotent failures only after O05 retryStep authorizes the exact payload", async () => {
-  const store = new MemoryStore();
+  const store = new RecordingStore();
   const reg = registry(store, [
     { outcome: "failed", capability: "read.item", version: "1.0.0", code: "provider_failure", error: { code: "provider_failure", message: "temporary", retryable: true } },
     { outcome: "completed", capability: "read.item", version: "1.0.0", result: { ok: true } },
@@ -438,7 +463,7 @@ test("retries idempotent failures only after O05 retryStep authorizes the exact 
 
 
 test("settles the final retryable failure at the trusted attempt limit", async () => {
-  const store = new MemoryStore();
+  const store = new RecordingStore();
   const reg = registry(store, [
     { outcome: "failed", capability: "read.item", version: "1.0.0", code: "provider_failure", error: { code: "provider_failure", message: "temporary one", retryable: true } },
     { outcome: "failed", capability: "read.item", version: "1.0.0", code: "provider_failure", error: { code: "provider_failure", message: "temporary two", retryable: true } },
@@ -452,7 +477,7 @@ test("settles the final retryable failure at the trusted attempt limit", async (
 });
 
 test("recovery expires operations but defers actions that need authoritative arguments or authorization", async () => {
-  const store = new MemoryStore();
+  const store = new RecordingStore();
   store.steps.set("recover", { state: "outcome_unknown", effect: "write" });
   store.steps.set("retry", { state: "failed", effect: "read", error: { code: "provider_failure", message: "temporary", retryable: true } });
   store.steps.set("queued", { state: "queued", effect: "read" });
@@ -581,7 +606,7 @@ test("an exhausted retry keeps the provider's error (C-3 T8)", async () => {
 });
 
 test("resume_abort never replays the original mutation without an abort adapter", async () => {
-  const store = new MemoryStore();
+  const store = new RecordingStore();
   store.steps.set("running", { state: "running", effect: "write" });
   const reg = registry(store, []);
   let dispatches = 0;
@@ -602,7 +627,7 @@ test("resume_abort never replays the original mutation without an abort adapter"
 
 // C-4: cancellation revokes dispatch authority; validation comes before revocation.
 // Real OperationStore + real CapabilityRegistry sharing one DispatchAuthority, same
-// pattern as the C-2 test above — never MemoryStore for these.
+// pattern as the C-2 test above — never RecordingStore for these.
 function realStoreForC4() {
   const authority = new DispatchAuthority();
   const registry = new CapabilityRegistry(CAPABILITY_CONTRACTS, ["environment.restore"], authority);
@@ -1018,7 +1043,7 @@ test("C-5 T5: a negative or fractional output index is a missing dependency", as
 // visible, so the fake store here is acceptable ONLY because these tests assert the
 // ABSENCE of store calls, the same reasoning the two pre-existing recover tests use.
 test("C-6 T1: recovery reports every action it deferred", async () => {
-  const store = new MemoryStore();
+  const store = new RecordingStore();
   store.steps.set("recover", { state: "outcome_unknown", effect: "write" });
   store.steps.set("retry", { state: "failed", effect: "read", error: { code: "provider_failure", message: "temporary", retryable: true } });
   store.steps.set("queued", { state: "queued", effect: "read" });
@@ -1052,10 +1077,61 @@ test("C-6 T1: recovery reports every action it deferred", async () => {
 });
 
 test("C-6 T2: an action for another operation still throws", async () => {
-  const store = new MemoryStore();
+  const store = new RecordingStore();
   const executor = new OperationExecutor({ store, registry: registry(store, []), scheduler: new OperationScheduler({ maxConcurrent: 1 }), dispatchFor });
   await assert.rejects(
     () => executor.recover({ operationId: "op-1", context, actions: [{ kind: "expire_operation", operationId: "op-2", deadlineAt: 1 }], calls: {} }),
     /recovery action belongs to op-2/,
   );
+});
+
+test("the recording store is frozen: new executor tests use the real store", () => {
+  // N counted after the RecordingStore rename and before adding anything else. Lower it
+  // when a test moves to the real store; never raise it.
+  const N = 19;
+  const source = fs.readFileSync(new URL(import.meta.url), "utf8");
+  // Built from two literals so this line does not count itself.
+  const needle = "new Recording" + "Store(";
+  const occurrences = source.split(needle).length - 1;
+  assert.ok(occurrences <= N, `expected at most ${N} occurrences of the needle, found ${occurrences}`);
+});
+
+test("after a restart a running step is reported for reconciliation and left untouched", async () => {
+  const authority = new DispatchAuthority();
+  const registry = new CapabilityRegistry(CAPABILITY_CONTRACTS, ["bench.process.list"], authority);
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "operation-executor-c7-recovery-"));
+  const ownership = { ownerId: "executor-test-c7", assertHeld: () => {} };
+  const metadata = (name: string, version: string): CapabilityMetadata | undefined => {
+    const found = registry.get(name);
+    return found && (!version || found.version === version) ? { version: found.version, effect: found.effect, approval: found.approval.required, retry: found.retry, resourceKeys: found.resourceAccess.conflictKeys } : undefined;
+  };
+  const store = new OperationStore({ root, ownership, now: Date.now, capabilityMetadata: metadata, dispatchAuthority: authority });
+  const accepted = store.accept({ request: { instruction: "List bench processes" }, context }).snapshot;
+  store.beginResolution(accepted.operationId);
+  const queued = store.queueStep(accepted.operationId, { key: "list", capability: "bench.process.list", capabilityVersion: "1.0.0" });
+  const stepId = queued.steps[0]!.stepId;
+  store.startStep(accepted.operationId, stepId, { argDigest: canonicalDigest({}), idempotencyKey: `${accepted.operationId}/${stepId}` });
+
+  // The restart: a new OperationStore on the same directory, never the same instance.
+  const newStore = new OperationStore({ root, ownership, now: Date.now, capabilityMetadata: metadata, dispatchAuthority: authority });
+  const report = planRecovery(newStore, { now: Date.now() });
+  const plan = report.plans.find((entry) => entry.operationId === accepted.operationId)!;
+  const reconcile = plan.actions.find((action) => action.kind === "reconcile_step" && action.stepId === stepId);
+  assert.ok(reconcile, `expected a reconcile_step action for ${stepId}, got ${JSON.stringify(plan.actions)}`);
+  assert.equal(plan.actions.some((action) => action.kind === "dispatch_step"), false);
+
+  const executor = new OperationExecutor({ store: newStore, registry, scheduler: new OperationScheduler({ maxConcurrent: 1 }), dispatchFor: () => ({}) });
+  const outcome = await executor.recover({
+    operationId: accepted.operationId,
+    context,
+    actions: plan.actions,
+    calls: { [stepId]: { key: "list", capability: "bench.process.list", capabilityVersion: "1.0.0" } },
+  });
+  assert.deepEqual(outcome.handled, []);
+  assert.equal(outcome.deferred.length, plan.actions.length);
+  assert.ok(outcome.deferred.some((action) => action.kind === "reconcile_step" && action.stepId === stepId));
+
+  const snapshot = newStore.load(accepted.operationId);
+  assert.equal(snapshot.steps.find((step) => step.stepId === stepId)?.state, "running");
+  assert.equal(isTerminalOperationState(snapshot.state), false);
 });
