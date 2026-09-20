@@ -2386,15 +2386,66 @@ test("recordDecision refuses a revision-conflicted approval before any byte is w
   const recorded = store.recordDecision(record, context());
   assert.equal(store.recordedDecisions(operationId).length, 1);
   assert.equal(recorded.pendingDecisions.length, 1, "recordDecision stores the answer; resume is what consumes the pending question");
-  // Actually dispatching it (resume) still requires the pending and snapshot revisions to
-  // agree, which the sibling commit above deliberately broke — that gap is C-2's "an
-  // approval survives concurrent progress", out of scope here. C-1 only guarantees the
-  // decision can be RECORDED without corrupting the log.
+
+  // C-2: the sibling commit's revision bump no longer strands the approval. resume binds
+  // to the pending decision's own (fixed) revision too, so the step dispatches even
+  // though the operation's current snapshot revision has moved on.
+  const resumed = store.resume({ request: resumeRequest(operationId, "dec-a", waiting.pendingDecisions[0].revision, "rec-1"), context: context() });
+  assert.equal(resumed.outcome, "dispatch");
 
   // And a NEW store opened on the same directory constructs and loads the operation:
   // the refused commit never poisoned the log for the next reader.
   const reloaded = reopened(root, clock);
-  assert.equal(reloaded.recordedDecisions(operationId).length, 1);
+  assert.equal(reloaded.load(operationId).steps.find((step) => step.stepId === "step-1")?.state, "running");
+});
+
+test("a decision citing the wrong revision is refused with revision_conflict and nothing is written (C-2)", () => {
+  const { store, root } = openStore();
+  const operationId = store.accept({ request: instruction(), context: context() }).snapshot.operationId;
+  queueEdit(store, operationId, "edit_config");
+  const waiting = store.requireDecision(operationId, "step-1", {
+    decisionId: "dec-c2a",
+    decisionClass: "user_authorization",
+    question: "Apply the change to src/config.ts: timeout 9000 -> 30000?",
+    payloadDigest: PAYLOAD_A,
+  });
+  const beforeSize = fs.statSync(logFile(root, operationId)).size;
+  const wrongRevision = recordedDecision(waiting, { decisionId: "dec-c2a", payloadDigest: PAYLOAD_A, revision: waiting.pendingDecisions[0].revision + 1 });
+  assert.throws(() => store.recordDecision(wrongRevision, context()), (error) => isStoreError(error, "revision_conflict"));
+  assert.equal(fs.statSync(logFile(root, operationId)).size, beforeSize);
+});
+
+test("a changed payload digest is refused at resume, and a second record for the same decision is refused (C-2)", () => {
+  const { store } = openStore();
+  const operationId = store.accept({ request: instruction(), context: context() }).snapshot.operationId;
+  queueEdit(store, operationId, "edit_config");
+  const waiting = store.requireDecision(operationId, "step-1", {
+    decisionId: "dec-c2b",
+    decisionClass: "user_authorization",
+    question: "Apply the change to src/config.ts: timeout 9000 -> 30000?",
+    payloadDigest: PAYLOAD_A,
+  });
+  const record = recordedDecision(waiting, { decisionId: "dec-c2b", payloadDigest: PAYLOAD_A, revision: waiting.pendingDecisions[0].revision });
+  store.recordDecision(record, context());
+
+  // The step is re-proposed with a new payload before the recorded decision is resumed
+  // (a retried propose bumped the approved args). The new pending question carries a
+  // different payload digest and a new revision; resuming the ORIGINAL record against it
+  // must refuse rather than dispatch a stale approval against new args.
+  const reproposed = store.requireDecision(operationId, "step-1", {
+    decisionId: "dec-c2b-retry",
+    decisionClass: "user_authorization",
+    question: "Apply the change to src/config.ts: timeout 9000 -> 45000?",
+    payloadDigest: PAYLOAD_B,
+  });
+  assert.throws(
+    () => store.resume({ request: resumeRequest(operationId, "dec-c2b", reproposed.pendingDecisions[0].revision, "rec-1"), context: context() }),
+    (error) => isStoreError(error, "decision_mismatch"),
+  );
+
+  // A second record for the same decisionId is refused (decision_replayed): recording an
+  // answer twice must not be possible even when the citation would otherwise check out.
+  assert.throws(() => store.recordDecision(record, context()), (error) => isStoreError(error, "decision_replayed"));
 });
 
 test("a backward clock step is clamped so the store never writes an unloadable log (C-1 path B)", () => {

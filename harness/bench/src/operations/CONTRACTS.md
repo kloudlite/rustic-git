@@ -40,10 +40,17 @@ listing every rejected path.
   permission grant; the store and dispatch adapter still authorize every read.
 - `RecordedDecision` is written only by the authenticated user UI or the trusted policy
   adapter, and binds actor, tenant, session, operation, step, payload digest, revision,
-  policy source, and expiry (`checkResumeAgainstRecord` enforces each). `resume` may cite
-  a record; it can never carry one. `additional_input` may not contain approval-looking
-  keys at any depth, and it can never resolve a `user_authorization`/`user_preference`
-  decision (`decisionClassesForResolution`).
+  policy source, and expiry (`checkResumeAgainstRecord` enforces each). The revision a
+  decision and its `resume` bind to is the revision **at which the question was raised**
+  (`PendingDecision.revision`, fixed at creation), never the operation's current snapshot
+  revision: an unrelated sibling step settling between the prompt and the answer must not
+  strand an otherwise-valid approval, and replay (`store.ts` `replayProblem`) already
+  demands exactly this binding, so a store-level check that disagreed with it could accept
+  a call that the next load would then refuse. What actually protects a changed payload
+  from a stale approval is the payload digest, which sibling progress cannot alter.
+  `resume` may cite a record; it can never carry one. `additional_input` may not contain
+  approval-looking keys at any depth, and it can never resolve a
+  `user_authorization`/`user_preference` decision (`decisionClassesForResolution`).
 - `checkResumeAgainstRecord` returns a `ResumeVerdict`: `ok` means the citation checked
   out, not that work may run. A matching `granted` record yields `requiredAction:
   "dispatch"`; a validly recorded **denial** yields `"refuse_step"` and

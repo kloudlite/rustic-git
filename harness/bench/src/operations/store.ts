@@ -1498,13 +1498,17 @@ export class OperationStore {
     }
     const pending = snapshot.pendingDecisions.find((entry) => entry.decisionId === request.decisionId);
     if (!pending) throw new OperationStoreError("decision_mismatch", `no pending decision ${request.decisionId} in ${request.operationId}`);
-    if (pending.revision !== snapshot.revision) {
-      throw new OperationStoreError("revision_conflict", "the pending decision belongs to another revision");
-    }
-    if (request.expectedRevision !== snapshot.revision) {
+    // Bound to the revision the QUESTION was raised at (fixed, state.ts:438), not the
+    // operation's current snapshot revision: a sibling step settling between the prompt
+    // and the answer must not strand an approval (C-2, ruling 1). Replay already demands
+    // exactly this binding (store.ts #validateCommit / replayProblem, "recorded decision
+    // does not bind the predecessor pending decision"); what actually protects a changed
+    // payload from a stale approval is the digest check below, which sibling progress
+    // cannot alter.
+    if (request.expectedRevision !== pending.revision) {
       throw new OperationStoreError(
         "revision_conflict",
-        `expected revision ${request.expectedRevision}; the operation is at ${snapshot.revision}`,
+        `expected revision ${request.expectedRevision}; the pending question is at ${pending.revision}`,
       );
     }
     if (!resolutionCanResolve(request.resolution, pending.decisionClass)) {
@@ -1556,7 +1560,10 @@ export class OperationStore {
       decisionId: pending.decisionId,
       decisionClass: pending.decisionClass,
       payloadDigest,
-      revision: snapshot.revision,
+      // The recorded decision was bound to the pending question's own revision
+      // (recordDecision, C-1/C-2), not the operation's current snapshot revision, so the
+      // record is checked against that same fixed value here.
+      revision: pending.revision,
       now,
       expiryBound: snapshot.deadlineAt !== undefined ? Math.min(pending.expiresAt, snapshot.deadlineAt) : pending.expiresAt,
     };

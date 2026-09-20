@@ -183,6 +183,80 @@ test("real O02 dispatch and O05 store enforce actor-bound approval before mutati
   assert.equal(store.recordedDecisions(accepted.operationId)[0]?.usedAt !== undefined, true);
 });
 
+test("an approval survives an independent step settling first (C-2)", async () => {
+  const authority = new DispatchAuthority();
+  const registry = new CapabilityRegistry(CAPABILITY_CONTRACTS, ["environment.restore", "bench.process.list"], authority);
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "operation-executor-c2-"));
+  const ownership = { ownerId: "executor-test", assertHeld: () => {} };
+  const metadata = (name: string, version: string): CapabilityMetadata | undefined => {
+    const found = registry.get(name);
+    return found && (!version || found.version === version) ? { version: found.version, effect: found.effect, approval: found.approval.required, retry: found.retry, resourceKeys: found.resourceAccess.conflictKeys } : undefined;
+  };
+  const store = new OperationStore({ root, ownership, now: Date.now, capabilityMetadata: metadata, dispatchAuthority: authority });
+  const accepted = store.accept({ request: { instruction: "Restore devstack to snap-1 and list bench processes" }, context }).snapshot;
+  store.beginResolution(accepted.operationId);
+  let mutations = 0;
+  let reads = 0;
+  let resolveReadSettled!: () => void;
+  const readSettledSignal = new Promise<void>((resolve) => {
+    resolveReadSettled = resolve;
+  });
+  const runtime = capabilityRuntime({
+    "environment.restore": async () => (mutations += 1, { ok: true, value: { id: "devstack", state: "ready" } }),
+    "bench.process.list": async () => (reads += 1, resolveReadSettled(), { ok: true, value: [] }),
+  });
+  const executor = new OperationExecutor({
+    store,
+    registry,
+    scheduler: new OperationScheduler({ maxConcurrent: 2 }),
+    dispatchFor: () => ({
+      runtime,
+      allowedPolicySources: ["user_ui"],
+      // The prompt is raised (and the pending decision's revision fixed) before the read
+      // even starts, but the approval itself resolves only AFTER the independent read has
+      // settled — a sibling commit lands on the operation between the prompt and the
+      // answer, exactly the C-2 scenario. Without the fix, resume would refuse the
+      // now-stale revision and the write would never dispatch.
+      approve: async ({ expectation }) => {
+        await readSettledSignal;
+        const recordedAt = Date.now();
+        return {
+          recordId: "record-c2", operationId: expectation.operationId, stepId: expectation.stepId,
+          decisionId: expectation.decisionId, decisionClass: expectation.decisionClass as "user_authorization",
+          actorId: expectation.actorId, tenantId: expectation.tenantId, sessionId: expectation.sessionId,
+          payloadDigest: expectation.payloadDigest, revision: expectation.revision, policySource: "user_ui",
+          outcome: "granted", recordedAt, expiresAt: Math.min(recordedAt + 60_000, expectation.expiryBound),
+        };
+      },
+    }),
+  });
+  // "list" is offered first: once the operation raises the "restore" prompt it moves to
+  // awaiting_approval, which blocks any OTHER step from starting (`operationChange`
+  // refuses "running" from "awaiting_approval"). The read must therefore already be
+  // running (and settle) before the prompt is raised for the sibling commit to land
+  // between the prompt and the answer, which is the C-2 scenario: a step that already
+  // started (and here, finished) while approval was pending, not one starting after.
+  const result = await executor.execute({
+    operationId: accepted.operationId,
+    context,
+    calls: [
+      { key: "list", capability: "bench.process.list", capabilityVersion: "1.0.0", args: {} },
+      { key: "restore", capability: "environment.restore", capabilityVersion: "1.0.0", args: { id: "devstack", snapshot: "snap-1" } },
+    ],
+  });
+  assert.equal(result.state, "completed", JSON.stringify(result));
+  assert.equal(mutations, 1);
+  assert.equal(reads, 1);
+  const snapshot = store.load(accepted.operationId);
+  assert.equal(snapshot.steps.find((step) => step.key === "restore")?.state, "succeeded");
+  assert.equal(snapshot.steps.find((step) => step.key === "list")?.state, "succeeded");
+
+  // A new store on the same directory constructs and loads a terminal operation: the
+  // concurrent progress never poisoned the log.
+  const reopened = new OperationStore({ root, ownership: { ownerId: "executor-test-2", assertHeld: () => {} }, now: Date.now, capabilityMetadata: metadata, dispatchAuthority: authority });
+  assert.equal(reopened.load(accepted.operationId).state, "completed");
+});
+
 test("reconciles unknown mutation outcomes before retrying or dispatching dependents", async () => {
   const store = new MemoryStore();
   const reconciled: string[] = [];
