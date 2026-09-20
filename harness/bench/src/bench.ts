@@ -13,7 +13,6 @@ import { SessionList, type SessionRow } from "./sessions.ts";
 import { Defaults, type Triple } from "./defaults.ts";
 import { allProviders } from "./providers.ts";
 import { readJson, replaceJson } from "./log.ts";
-import { createBenchCapabilityRuntime } from "./operations/capabilities.ts";
 import type { CapabilityAdapter, CapabilityRuntime } from "./operations/capabilities.ts";
 import { createSharedAdapters, resolveWorkspaceProgress } from "./operations/adapters.ts";
 
@@ -153,7 +152,15 @@ export class Bench {
   readonly exchanges: ExchangeLog;
   readonly tasks: Tasks;
   readonly procs: Procs;
-  readonly capabilityRuntime: CapabilityRuntime;
+  /**
+   * The capability runtime and the platform tool module (pi/kloudlite.ts) load on first use, not
+   * at boot: this getter is what keeps operations/capabilities.ts's own import of pi/kloudlite.ts
+   * out of the bench's static graph, which was otherwise the one chain the executor work added.
+   */
+  #capabilityRuntime?: Promise<CapabilityRuntime>;
+  get capabilityRuntime(): Promise<CapabilityRuntime> {
+    return (this.#capabilityRuntime ??= import("./operations/capabilities.ts").then((m) => m.createBenchCapabilityRuntime(this.procs, this.platformCapabilityAdapters())));
+  }
   readonly plans: Plans;
   readonly memories: Memories;
   readonly defaults: Defaults;
@@ -201,7 +208,6 @@ export class Bench {
     this.exchanges = new ExchangeLog(opts.dir);
     this.tasks = new Tasks(opts.dir);
     this.procs = new Procs(opts.dir);
-    this.capabilityRuntime = createBenchCapabilityRuntime(this.procs, this.platformCapabilityAdapters());
     this.plans = new Plans(opts.dir);
     this.memories = new Memories(opts.dir);
     this.defaults = new Defaults(opts.dir);

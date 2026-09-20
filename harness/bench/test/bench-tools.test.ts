@@ -387,7 +387,7 @@ test("kl_workspace_progress reads the bench's own routes and says what that work
     const { pi, tools } = fakePi();
     kloudlite(pi);
     const out = (await (tools.find((t) => t.name === "kl_workspace_progress") as any).execute("c1", { id: "api" }, undefined, undefined, undefined)).content[0].text as string;
-    assert.deepEqual(seen.sort(), ["/exchanges?workspace=api", "/procs", "/v1/workspaces", "/workspaces/api/messages?limit=10"]);
+    assert.deepEqual(seen.sort(), ["/exchanges?workspace=api", "/procs", "/v1/workspaces?team=acme", "/workspaces/api/messages?limit=10"]);
     assert.equal(
       out,
       [
@@ -527,7 +527,7 @@ function fakeApi(routes: (m: string, url: string, body: any) => unknown, missing
 test("a create fills in the region and the owner, and takes a name where an id is expected", async () => {
   const api = fakeApi((m, url) => {
     if (url === "/v1/workspaces/bench-ada") return { id: "bench-ada", state: "running", region: "centralindia-k3s" };
-    if (url === "/v1/workspaces" && m === "GET") return [{ id: "ws-abc123", name: "svelte-frontend", state: "running" }, { id: "ws-def456", name: "api", state: "running" }, { id: "ws-ghi789", name: "api", state: "stopped" }];
+    if ((url === "/v1/workspaces" || url === "/v1/workspaces?team=acme") && m === "GET") return [{ id: "ws-abc123", name: "svelte-frontend", state: "running" }, { id: "ws-def456", name: "api", state: "running" }, { id: "ws-ghi789", name: "api", state: "stopped" }];
     if (url === "/v1/workspaces" && m === "POST") return { id: "ws-new", state: "running" };
     if (url.startsWith("/v1/workspaces/ws-")) return { id: "ws-abc123", state: "running" };
     return {};
@@ -572,7 +572,7 @@ test("a create fills in the region and the owner, and takes a name where an id i
 test("a snapshot is a snapshot: create from one, list them, and never the word volume", async () => {
   const api = fakeApi((m, url) => {
     if (url === "/v1/workspaces/bench-ada") return { id: "bench-ada", state: "running", region: "r1" };
-    if (url === "/v1/workspaces" && m === "GET") return [{ id: "ws-1", name: "api", state: "running" }];
+    if ((url === "/v1/workspaces" || url === "/v1/workspaces?team=acme") && m === "GET") return [{ id: "ws-1", name: "api", state: "running" }];
     if (url === "/v1/volumes") return [{ name: "ws-1", volume: "vol-9", kind: "workspace" }];
     if (url === "/v1/volumes/vol-9/history") return [{ id: "snap-2", message: "before the refactor", createdAt: "2026-09-17T10:00:00Z", phase: "Ready" }];
     if (url === "/v1/workspaces/restore") return { id: "ws-new", state: "running" };
@@ -1049,24 +1049,67 @@ test("every identity says where paths are relative to, and the bench that it has
  * A package is installed in a WORKSPACE (spec §3.1). A bench session has no machine of its own, so
  * the tool takes the workspace and refuses in the spec's own words when it is not named.
  */
-test("packages from the bench name a workspace, or are refused", async () => {
+test("packages from the bench name a workspace, or are refused before anybody is asked", async () => {
   const restore = withEnv({ KL_WORKSPACE_ID: "bench-ada", KL_TEAM: "acme", KL_TOOLS_WORKSPACE: undefined, KL_FORK: undefined, KL_EPHEMERAL: undefined });
   try {
     const { pi, tools, start } = fakePi();
     kloudlite(pi);
     await start();
-    const run = (n: string, a: any) => (tools.find((t) => t.name === n)! as unknown as { execute: (...x: any[]) => Promise<any> }).execute("c1", a, undefined, undefined, undefined);
+    const widgets: [string, string[]][] = [];
+    const ctx = { ui: { setWidget: (k: string, v: string[]) => widgets.push([k, v]) } };
+    const run = (n: string, a: any) => (tools.find((t) => t.name === n)! as unknown as { execute: (...x: any[]) => Promise<any> }).execute("c1", a, undefined, undefined, ctx);
     for (const tool of ["kl_pkg_list", "kl_pkg_add", "kl_pkg_rm"]) {
+      widgets.length = 0;
       const r = await run(tool, { packages: ["ripgrep"] });
-      if (tool === "kl_pkg_list") {
-        assert.equal(r.isError, true, tool);
-        assert.match(r.content[0].text, /^name the workspace: packages are installed in a workspace/, tool);
-      } else {
-        assert.match(r.content[0].text, /declined by the person/, tool);
-      }
+      assert.equal(r.isError, true, tool);
+      assert.match(r.content[0].text, /^name the workspace: packages are installed in a workspace/, tool);
+      // A call that cannot run must never reach the person: no proposal card was raised for it.
+      assert.equal(widgets.length, 0, `${tool} raised a proposal for a call that cannot run`);
     }
   } finally {
     restore();
+  }
+});
+
+test("kl_pkg_list from the bench answers the package list only, not the whole workspace", async () => {
+  const api = fakeApi((m, url) => (url === "/v1/workspaces/ws-1" ? { id: "ws-1", name: "api", state: "running", region: "r1", packages: ["rustc", "cargo"] } : { id: "ws-1" }));
+  const base = await api.listen();
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "kl-pkglist-"));
+  fs.writeFileSync(path.join(dir, "token"), "t");
+  const restore = withEnv({ KL_TOOL_TOKEN_FILE: path.join(dir, "token"), KL_API_URL: base, KL_BENCH_URL: base, KL_WORKSPACE_ID: "bench-ada", KL_TEAM: "acme", KL_TOOLS_WORKSPACE: undefined, KL_FORK: undefined });
+  try {
+    const { pi, tools } = fakePi();
+    kloudlite(pi);
+    const r = await (tools.find((t) => t.name === "kl_pkg_list")! as unknown as { execute: (...x: any[]) => Promise<any> }).execute("c1", { workspace: "ws-1" }, undefined, undefined, undefined);
+    assert.deepEqual(JSON.parse(r.content[0].text), ["rustc", "cargo"]);
+  } finally {
+    restore();
+    api.srv.close();
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("adding or removing packages asks the person by name, naming the packages and the workspace", async () => {
+  const api = fakeApi((m, url) => (url === "/v1/workspaces/ws-1" ? { id: "ws-1", packages: ["rustc"] } : { id: "ws-1", packages: ["rustc", "go", "gnumake"] }));
+  const base = await api.listen();
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "kl-pkg-"));
+  fs.writeFileSync(path.join(dir, "token"), "t");
+  const restore = withEnv({ KL_TOOL_TOKEN_FILE: path.join(dir, "token"), KL_API_URL: base, KL_BENCH_URL: base, KL_WORKSPACE_ID: "bench-ada", KL_TEAM: "acme", KL_TOOLS_WORKSPACE: undefined, KL_FORK: undefined });
+  try {
+    const { pi, tools, start } = fakePi();
+    kloudlite(pi);
+    await start();
+    const widgets: [string, string[]][] = [];
+    const ctx = { ui: { setWidget: (k: string, v: string[]) => widgets.push([k, v]) } };
+    const run = (n: string, a: any) => (tools.find((t) => t.name === n)! as unknown as { execute: (...x: any[]) => Promise<any> }).execute("c1", a, undefined, undefined, ctx);
+    await run("kl_pkg_add", { workspace: "ws-1", packages: ["go", "gnumake"] });
+    assert.equal(widgets.length, 1);
+    const proposal = JSON.parse(widgets[0][1][0]);
+    assert.equal(proposal.summary, "Add go, gnumake to ws-1");
+  } finally {
+    restore();
+    api.srv.close();
+    fs.rmSync(dir, { recursive: true, force: true });
   }
 });
 
@@ -1325,7 +1368,7 @@ test("the transcripts' own case: search kl_workspaces, call it, and it is still 
  */
 test("switching environments takes the name a person uses", async () => {
   const api = fakeApi((m, url) => {
-    if (url === "/v1/environments" && m === "GET") return [{ id: "env-1", name: "devstack" }, { id: "env-2", name: "twin" }, { id: "env-3", name: "twin" }];
+    if ((url === "/v1/environments" || url === "/v1/environments?team=acme") && m === "GET") return [{ id: "env-1", name: "devstack" }, { id: "env-2", name: "twin" }, { id: "env-3", name: "twin" }];
     return { ok: true };
   });
   const base = await api.listen();
@@ -1478,6 +1521,38 @@ test("progress asked by name reads the workspace's own thread", async () => {
 });
 
 /**
+ * Addressed by NAME, with nothing running there: the old code fell back to the name it was typed
+ * with in that case (nothing in `/procs` to read a resolved id off of), which put the workspace's
+ * own NAME on the "asked of" header instead of the id `/v1` actually holds it under.
+ */
+test("progress asked by name with nothing running still carries the resolved id", async () => {
+  const seen: string[] = [];
+  const srv = http.createServer((req, res) => {
+    seen.push(req.url!);
+    res.writeHead(200, { "content-type": "application/json" });
+    if (req.url!.startsWith("/v1/workspaces")) return void res.end(JSON.stringify([{ id: "ws-632cf9f23d9f", name: "backend" }]));
+    if (req.url!.startsWith("/exchanges")) return void res.end(JSON.stringify([]));
+    if (req.url === "/procs") return void res.end(JSON.stringify([]));
+    res.end(JSON.stringify({ total: 0, messages: [] }));
+  });
+  await new Promise<void>((r) => srv.listen(0, "127.0.0.1", r));
+  const base = `http://127.0.0.1:${(srv.address() as { port: number }).port}`;
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "kl-prog-noproc-"));
+  fs.writeFileSync(path.join(dir, "token"), "t");
+  const restore = withEnv({ KL_TOOL_TOKEN_FILE: path.join(dir, "token"), KL_API_URL: base, KL_BENCH_URL: base, KL_WORKSPACE_ID: "bench-ada", KL_TEAM: "acme", KL_TOOLS_WORKSPACE: undefined, KL_FORK: undefined });
+  try {
+    const { pi, tools } = fakePi();
+    kloudlite(pi);
+    const out = (await (tools.find((t) => t.name === "kl_workspace_progress") as any).execute("c1", { id: "backend" }, undefined, undefined, undefined)).content[0].text as string;
+    assert.match(out, /^asked of ws-632cf9f23d9f:/, out);
+  } finally {
+    restore();
+    srv.close();
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+/**
  * The tool declared `ports: [{from, to}]` while `/v1` takes `crd::PortMap` — `{service, workspace}`
  * — so every remap was a 422 naming a field the model could not see, and it guessed three shapes in
  * a row (transcripts, 2026-09-18). The schema is `/v1`'s, and the description says which is which.
@@ -1537,7 +1612,7 @@ test("an intercept is cleared only by explicit null, never omission", async () =
  */
 test("the bench is never a workspace target, and never in a listing", async () => {
   const api = fakeApi((m, url) => {
-    if (url === "/v1/workspaces" && m === "GET")
+    if ((url === "/v1/workspaces" || url === "/v1/workspaces?team=acme") && m === "GET")
       return [
         { id: "ws-632cf9f23d9f2fbf", name: "backend", state: "running" },
         // A row that leaked from anywhere — an older api, a cached answer — must not be nameable.

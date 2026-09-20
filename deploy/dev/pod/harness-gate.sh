@@ -40,7 +40,8 @@ cd "$ROOT/harness"
 npm ci
 npm run typecheck
 xvfb-run -a npm run bench:test
-xvfb-run -a node --test 'bench/test/renderer-boot.test.ts'
+npm run build
+xvfb-run -a node --test 'bench/test/gate/renderer-boot.test.ts'
 
 # Unconditional, not only under RECORD: a recordless run is a plain pass/fail a human reads, so it
 # must catch a checkout that moved during the gate too.

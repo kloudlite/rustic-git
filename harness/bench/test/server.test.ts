@@ -303,3 +303,57 @@ test("two prompts close together over the socket both land", async () => {
     await t.down();
   }
 });
+
+/**
+ * The operation control envelope (`{error:{code,message}}`) is `/operations/*`'s own shape.
+ * `operationControlError` matches on `.code` alone, so an ordinary route whose handler throws an
+ * error that happens to carry `code: "not_found"` (a session or workspace lookup, say) answered
+ * with that object envelope instead of the bench's own `{error: "<message>"}` — the bug this gate
+ * closes.
+ */
+test("a non-operation route's thrown error keeps the bench's own string envelope, not the operation object one", async () => {
+  const t = await up();
+  try {
+    const original = t.bench.models;
+    t.bench.models = async () => { throw Object.assign(new Error("nope"), { code: "not_found" }); };
+    try {
+      const r = await fetch(t.base + "/models");
+      const body = await r.json();
+      assert.equal(typeof body.error, "string", JSON.stringify(body));
+      assert.equal(body.error, "nope");
+    } finally {
+      t.bench.models = original;
+    }
+  } finally {
+    await t.down();
+  }
+});
+
+/**
+ * The mirror: a `/operations/*` request whose operation source throws the very same shape of
+ * error still answers the operation control's own object envelope — `isOperationRoute` must let
+ * this one through, never blanket-suppress it.
+ */
+test("an operations route's thrown error still answers the operation object envelope", async () => {
+  const bench = new Bench({ dir: fs.mkdtempSync(path.join(os.tmpdir(), "bench-opsrv-")), readOnly: false, model: "fake/m", bin: FAKE });
+  await bench.start();
+  const srv = await serve(bench, 0, "127.0.0.1", undefined, undefined, {
+    operationSource: {
+      inspect: async () => { throw Object.assign(new Error("no such operation"), { code: "not_found" }); },
+      events: async () => ({ events: [], hasMore: false }),
+      cancel: async () => ({}),
+      recordDecision: async () => ({}),
+      provideInput: async () => ({}),
+    },
+    operationAuthorizer: async (request) => (request.authorization === "Bearer person" ? { actorId: "alice", tenantId: "alice", tokenKind: "person" } : undefined),
+  });
+  try {
+    const r = await fetch(`http://127.0.0.1:${srv.port}/operations/op-1`, { headers: { authorization: "Bearer person", "x-kl-owner": "alice", "x-kl-login": "alice" } });
+    const body = await r.json();
+    assert.equal(r.status, 404);
+    assert.equal(body.error.code, "operation_not_found");
+  } finally {
+    await bench.stop();
+    await srv.close();
+  }
+});

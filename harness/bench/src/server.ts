@@ -19,6 +19,21 @@ const status = (e: Error) => (/no session/.test(e.message) ? 404 : /read-only|no
 const TOO_LARGE = "request body too large";
 const MAX_BODY = 64 * 1024 * 1024;
 
+/**
+ * The operation envelope is for `/operations/*` only: a `not_found`/`forbidden`/`stale_revision`
+ * thrown by an ordinary route (a session, a workspace) must still answer this server's own
+ * `{error: "<message>"}`, not the operation control's `{error:{code,message}}` — never throws,
+ * so a malformed URL (a bad `%` escape) falls through to the ordinary catch instead of crashing it.
+ */
+function isOperationRoute(req: http.IncomingMessage): boolean {
+  try {
+    const u = new URL(req.url ?? "/", "http://bench");
+    return u.pathname.split("/").filter(Boolean)[0] === "operations";
+  } catch {
+    return false;
+  }
+}
+
 /** Split and decode a path; a bad escape or an id that could walk out of a folder (`..%2F`) is a 400, never a crash or a read elsewhere. */
 function segments(pathname: string): string[] {
   const p = pathname.split("/").filter(Boolean).map(decodeURIComponent);
@@ -409,7 +424,7 @@ export function serve(
       }
       send(res, 404, { error: `no route ${m} ${u.pathname}` });
     } catch (e) {
-      if (operationControlError(res, e)) return;
+      if (isOperationRoute(req) && operationControlError(res, e)) return;
       const msg = (e as Error).message;
       if (msg === TOO_LARGE) {
         // The rest of the upload is never read; closing is the only way to stop it.

@@ -232,9 +232,10 @@ test("every enabled read is wired in the real Bench runtime and returns schema-v
     const args: Record<string, unknown> = {
       "bench.process.list": {}, "skill.read": {}, "workspace.inspect": { id: "api" }, "workspace.list": {}, "workspace.progress": { id: "ws-1" },
     };
+    const runtime = await bench.capabilityRuntime;
     for (const capability of INITIAL_READ_CAPABILITIES) {
-      assert.ok(bench.capabilityRuntime.resolve(capability), capability);
-      const result = await capabilityRegistry.dispatch(capability, args[capability], { runtime: bench.capabilityRuntime });
+      assert.ok(runtime.resolve(capability), capability);
+      const result = await capabilityRegistry.dispatch(capability, args[capability], { runtime });
       assert.equal(result.outcome, "completed", `${capability}: ${JSON.stringify(result)}`);
       if (capability === "workspace.list" && result.outcome === "completed") assert.deepEqual(result.result, [{ id: "ws-1", name: "api", state: "running" }]);
     }
@@ -259,14 +260,24 @@ test("runtime rejects missing required output fields and non-JSON output", async
   }
 });
 
-test("a definitive HTTP 5xx is provider failure; only a thrown mutation transport is unknown", async () => {
-  const responseRuntime = capabilityRuntime(createPlatformAdapters(async () => ({ status: 503, data: { error: "unavailable" } })));
+test("on a mutation, 500 is the origin's own failure; 502/503/504 and a thrown transport are unknown; a read's 503 stays a retryable failure", async () => {
+  const originRuntime = capabilityRuntime(createPlatformAdapters(async () => ({ status: 500, data: { error: "internal error" } })));
+  const gatewayRuntime = capabilityRuntime(createPlatformAdapters(async () => ({ status: 503, data: { error: "unavailable" } })));
   const transportRuntime = capabilityRuntime(createPlatformAdapters(async () => { throw new Error("connection reset after send"); }));
-  for (const [runtime, code] of [[responseRuntime, "provider_failure"], [transportRuntime, "unknown_outcome"]] as const) {
+  for (const [runtime, code] of [[originRuntime, "provider_failure"], [gatewayRuntime, "unknown_outcome"], [transportRuntime, "unknown_outcome"]] as const) {
     const registry = new CapabilityRegistry(CAPABILITY_CONTRACTS, ["environment.restore"]);
     const result = await approvedDispatch(registry, "environment.restore", { id: "env-1", snapshot: "snap-1" }, runtime);
     assert.equal(result.outcome, "failed");
     if (result.outcome === "failed") assert.equal(result.code, code);
+  }
+
+  const readRuntime = capabilityRuntime(createPlatformAdapters(async () => ({ status: 503, data: { error: "unavailable" } })));
+  const readRegistry = new CapabilityRegistry(CAPABILITY_CONTRACTS, ["workspace.list"]);
+  const readResult = await readRegistry.dispatch("workspace.list", {}, { runtime: readRuntime });
+  assert.equal(readResult.outcome, "failed");
+  if (readResult.outcome === "failed") {
+    assert.equal(readResult.code, "provider_failure");
+    assert.equal(readResult.error.retryable, true);
   }
 });
 
