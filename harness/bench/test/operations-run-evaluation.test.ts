@@ -89,27 +89,41 @@ test("refuses reviewer paths in any committed source or fixture directory", asyn
   assert.deepEqual(io.stderr, ["oracle_custody_error"]);
 });
 
+test("refuses any oracle path inside the repository root, not only named directories", async () => {
+  const root = temp();
+  const repoRoot = path.join(root, "repo");
+  // Not under src/test/fixtures — the old check only refused those directory names, so a held-out
+  // file checked in at e.g. docs/oracles.json used to pass custody. The whole repository is
+  // committed source; any in-repo path is refused.
+  const oracle = path.join(repoRoot, "docs", "oracles.json");
+  fs.mkdirSync(path.dirname(oracle), { recursive: true });
+  fs.copyFileSync(oracleFixture, oracle);
+  const io = capture();
+  const exit = await runEvaluationCli(["--corpus", corpusFixture, "--oracles", oracle, "--output", path.join(root, "report.json"), "--bootstrap", path.join(root, "bootstrap.mjs")], { ...io, repoRoot });
+  assert.notEqual(exit, 0);
+  assert.deepEqual(io.stderr, ["oracle_custody_error"]);
+});
+
 test("bootstrap custody rejects repository paths, symlinks into the repository, and writable files", async () => {
   const root = temp();
-  const repoRoot = path.resolve(here, "../../..");
+  // The "committed" case is built under its own temp directory used as `repoRoot`, rather than
+  // writing into this working tree: a killed run must never leave an untracked file for `git
+  // status` to notice.
+  const fakeRepoRoot = temp();
   const outsideOracle = path.join(root, "reviewer-oracles.json");
   fs.copyFileSync(oracleFixture, outsideOracle);
-  const committed = path.join(here, "fixtures", "operations-evaluation", "bootstrap.mjs");
+  const committed = path.join(fakeRepoRoot, "bootstrap.mjs");
   const symlink = path.join(root, "bootstrap-link.mjs");
   fs.writeFileSync(committed, "export function createEvaluationBootstrap() {}\n");
   fs.symlinkSync(committed, symlink);
   const writable = path.join(root, "writable-bootstrap.mjs");
   fs.writeFileSync(writable, "export function createEvaluationBootstrap() {}\n", { mode: 0o600 });
   fs.chmodSync(writable, 0o666);
-  try {
-    for (const bootstrapFile of [committed, symlink, writable]) {
-      const io = capture();
-      const exit = await runEvaluationCli(["--corpus", corpusFixture, "--oracles", outsideOracle, "--output", path.join(root, "report.json"), "--bootstrap", bootstrapFile], { ...io, repoRoot });
-      assert.notEqual(exit, 0);
-      assert.deepEqual(io.stderr, ["bootstrap_custody_error"]);
-    }
-  } finally {
-    fs.unlinkSync(committed);
+  for (const bootstrapFile of [committed, symlink, writable]) {
+    const io = capture();
+    const exit = await runEvaluationCli(["--corpus", corpusFixture, "--oracles", outsideOracle, "--output", path.join(root, "report.json"), "--bootstrap", bootstrapFile], { ...io, repoRoot: fakeRepoRoot });
+    assert.notEqual(exit, 0);
+    assert.deepEqual(io.stderr, ["bootstrap_custody_error"]);
   }
 });
 
@@ -122,7 +136,9 @@ test("test-only bootstrap custody dependency permits an injected repository path
     allowBootstrapPathForTests: true,
     loadBootstrap: async () => bootstrap,
   });
-  assert.equal(exit, 0);
+  // The corpus's own two injected-fault cases are provider_failure by design (they exercise fault
+  // reporting), so even a mechanically clean run of this fixture has non-empty failure totals.
+  assert.equal(exit, 2);
 });
 
 test("test-only custody dependency permits the fixture and joins reviewer oracles", async () => {
@@ -135,7 +151,8 @@ test("test-only custody dependency permits the fixture and joins reviewer oracle
     clock: fixedClock,
     loadBootstrap: async () => bootstrap,
   });
-  assert.equal(exit, 0);
+  // See the note above: the corpus's own fault-injection cases make totals non-empty here too.
+  assert.equal(exit, 2);
   const report = JSON.parse(fs.readFileSync(path.join(root, "report.json"), "utf8"));
   assert.ok(report.splits.held_out > 0);
   assert.equal(report.cases.some((entry: { split: string }) => entry.split === "held_out"), true);
@@ -148,7 +165,8 @@ test("writes deterministic report atomically with unavailable current", async ()
     const io = capture();
     const argv = args(root);
     const exit = await runEvaluationCli(argv, { ...io, repoRoot: path.resolve(here, "../../.."), clock: fixedClock, loadBootstrap: async () => bootstrap });
-    assert.equal(exit, 0);
+    // See the note above: the corpus's own fault-injection cases make totals non-empty here too.
+    assert.equal(exit, 2);
     assert.deepEqual(io.stderr, []);
     assert.equal(io.stdout.some((line) => line.includes("apiKey") || line.includes("secret")), false);
     assert.equal(fs.readdirSync(path.join(root, "reports")).some((name) => name.includes(".tmp")), false);
@@ -212,9 +230,36 @@ test("injected provider config can run without live network", async () => {
       },
     }),
   });
-  assert.equal(exit, 0);
+  // The stubbed fetch fails every dispatched case (by design, to avoid live network), so totals
+  // are non-empty and the exit code says so.
+  assert.equal(exit, 2);
   assert.equal(calls > 0, true);
   assert.equal([...io.stdout, ...io.stderr].join("\n").includes("test-key"), false);
+});
+
+test("a run whose every attempt failed exits 2 and still writes the report, distinct from a clean run", async () => {
+  const root = temp();
+  const io = capture();
+  const exit = await runEvaluationCli(args(root), {
+    ...io,
+    repoRoot: path.resolve(here, "../../.."),
+    clock: fixedClock,
+    loadBootstrap: async () => ({
+      faultScenarios,
+      typeSafeConfig: {
+        apiKey: "test-key-that-is-never-printed",
+        providerInputPolicy: () => ({ authorized: false, code: "sensitive_input" }),
+        fetch: async () => { throw new Error("never reached: the policy denies before dispatch"); },
+        maxAttempts: 1,
+      },
+    }),
+  });
+  assert.equal(exit, 2, "every attempt is provider_failure, so the run must not look green");
+  const report = JSON.parse(fs.readFileSync(path.join(root, "reports", "report.json"), "utf8"));
+  const proposed = report.subjects.find((subject: { role: string }) => subject.role === "proposed");
+  assert.ok(proposed.totals.failures && Object.keys(proposed.totals.failures).length > 0);
+  const totalsLine = io.stdout.find((line: string) => line.startsWith("totals="));
+  assert.notEqual(totalsLine, "totals=failures:none");
 });
 
 test("missing or incomplete trusted bootstrap fails before writing a report", async () => {
@@ -293,6 +338,32 @@ test("output failure preserves the prior report and removes temporary files", as
   assert.equal([...io.stdout, ...io.stderr].join("\n").includes("fake-output-secret"), false);
 });
 
+test("output custody refuses an existing non-regular path and any path inside the repository", async () => {
+  const root = temp();
+  const argv = args(root);
+  const asDirectory = path.join(root, "already-a-directory");
+  fs.mkdirSync(asDirectory);
+  const directoryIo = capture();
+  const directoryExit = await runEvaluationCli(["--corpus", argv[1], "--oracles", argv[3], "--output", asDirectory, "--bootstrap", argv[7]], {
+    ...directoryIo,
+    repoRoot: path.resolve(here, "../../.."),
+    loadBootstrap: async () => bootstrap,
+  });
+  assert.notEqual(directoryExit, 0);
+  assert.deepEqual(directoryIo.stderr, ["output_custody_error"]);
+
+  const insideRepo = path.join(here, "fixtures", "operations-evaluation", "should-never-be-written.json");
+  const insideIo = capture();
+  const insideExit = await runEvaluationCli(["--corpus", argv[1], "--oracles", argv[3], "--output", insideRepo, "--bootstrap", argv[7]], {
+    ...insideIo,
+    repoRoot: path.resolve(here, "../../.."),
+    loadBootstrap: async () => bootstrap,
+  });
+  assert.notEqual(insideExit, 0);
+  assert.deepEqual(insideIo.stderr, ["output_custody_error"]);
+  assert.equal(fs.existsSync(insideRepo), false, "an in-repo output path is refused before anything is written");
+});
+
 function atomicFs(failAt?: "file_sync" | "rename"): { api: AtomicFs; calls: Array<readonly unknown[]> } {
   const calls: Array<readonly unknown[]> = [];
   let nextFd = 10;
@@ -361,10 +432,11 @@ test("spawned CLI loads an external trusted bootstrap and emits compact stdout",
   const oracle = path.join(root, "reviewer-oracles.json");
   fs.copyFileSync(oracleFixture, oracle);
   const bootstrapFile = path.join(root, "bootstrap.mjs");
-  fs.writeFileSync(bootstrapFile, `export async function createEvaluationBootstrap() { return {\n  typeSafeConfig: { apiKey: "spawn-test-key", providerInputPolicy: request => ({ authorized: true, digest: request.digest }), fetch: async () => { throw new Error("offline") }, maxAttempts: 1 },\n  faultScenarios: { f001: async () => ({ outcome: "provider_failure", failure: { code: "timeout" } }), f002: async () => ({ outcome: "provider_failure", failure: { code: "invalid_response" } }) }\n}; }\n`);
+  fs.writeFileSync(bootstrapFile, `export async function createEvaluationBootstrap() { return {\n  typeSafeConfig: { apiKey: "spawn-test-key", providerInputPolicy: request => ({ authorized: true, digest: request.digest, authorizationRef: "test_authz_ref" }), fetch: async () => { throw new Error("offline") }, maxAttempts: 1 },\n  faultScenarios: { f001: async () => ({ outcome: "provider_failure", failure: { code: "timeout" } }), f002: async () => ({ outcome: "provider_failure", failure: { code: "invalid_response" } }) }\n}; }\n`);
   const output = path.join(root, "report.json");
   const result = spawnSync(process.execPath, [fileURLToPath(new URL("../src/operations/run-evaluation.ts", import.meta.url)), "--corpus", corpusFixture, "--oracles", oracle, "--output", output, "--bootstrap", bootstrapFile, "--run-id", "spawn-run"], { encoding: "utf8" });
-  assert.equal(result.status, 0, result.stderr);
+  // The stubbed fetch fails every dispatched case (offline by design), so totals are non-empty.
+  assert.equal(result.status, 2, result.stderr);
   assert.equal(fs.existsSync(output), true);
   assert.deepEqual(result.stdout.trim().split("\n").map((line) => line.split("=")[0]), ["runId", "cases", "output", "totals"]);
   assert.equal(result.stdout.includes("wholeCall"), false);
@@ -378,11 +450,12 @@ test("package script preserves the executable argument boundary", async () => {
   const oracle = path.join(root, "reviewer-oracles.json");
   fs.copyFileSync(oracleFixture, oracle);
   const bootstrapFile = path.join(root, "bootstrap.mjs");
-  fs.writeFileSync(bootstrapFile, `export function createEvaluationBootstrap() { return { typeSafeConfig: { apiKey: "package-test-key", providerInputPolicy: request => ({ authorized: true, digest: request.digest }), fetch: async () => { throw new Error("offline") }, maxAttempts: 1 }, faultScenarios: { f001: async () => ({ outcome: "provider_failure", failure: { code: "timeout" } }), f002: async () => ({ outcome: "provider_failure", failure: { code: "invalid_response" } }) } }; }\n`);
+  fs.writeFileSync(bootstrapFile, `export function createEvaluationBootstrap() { return { typeSafeConfig: { apiKey: "package-test-key", providerInputPolicy: request => ({ authorized: true, digest: request.digest, authorizationRef: "test_authz_ref" }), fetch: async () => { throw new Error("offline") }, maxAttempts: 1 }, faultScenarios: { f001: async () => ({ outcome: "provider_failure", failure: { code: "timeout" } }), f002: async () => ({ outcome: "provider_failure", failure: { code: "invalid_response" } }) } }; }\n`);
   const output = path.join(root, "package-report.json");
   const harnessRoot = path.resolve(here, "../..");
   const result = spawnSync(bun, ["run", "evaluation:operations", "--", "--corpus", corpusFixture, "--oracles", oracle, "--output", output, "--bootstrap", bootstrapFile], { cwd: harnessRoot, encoding: "utf8" });
-  assert.equal(result.status, 0, result.stderr);
+  // The stubbed fetch fails every dispatched case (offline by design), so totals are non-empty.
+  assert.equal(result.status, 2, result.stderr);
   assert.equal(fs.existsSync(output), true);
   assert.equal(result.stdout.includes("package-test-key"), false);
 });
