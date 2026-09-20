@@ -41,7 +41,12 @@ holder_is_live() {
   created=$(jq -r '.metadata.creationTimestamp // empty' <<<"$existing_json")
   [ -z "$created" ] && return 0
   local created_epoch now_epoch age
-  created_epoch=$(date -u -d "$created" +%s 2>/dev/null || date -u -j -f "%Y-%m-%dT%H:%M:%SZ" "$created" +%s 2>/dev/null || echo 0)
+  # Fail SAFE, not fail dead: if neither `date` form can parse the timestamp, `created_epoch` is
+  # empty rather than 0 — 0 would compute an age of ~1.8 billion seconds and take over a live
+  # operator roll lock. Uncertainty here must read as live, the same rule
+  # `coordination::roll_holder_is_live` applies to a missing `creationTimestamp` in Rust.
+  created_epoch=$(date -u -d "$created" +%s 2>/dev/null || date -u -j -f "%Y-%m-%dT%H:%M:%SZ" "$created" +%s 2>/dev/null || echo "")
+  [ -z "$created_epoch" ] && return 0
   now_epoch=$(date -u +%s)
   age=$((now_epoch - created_epoch))
   [ "$age" -lt 7200 ]

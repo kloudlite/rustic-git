@@ -75,6 +75,9 @@ struct KubeCalls {
     /// name the run that held the lock and prove the release targeted the object it made.
     holder: Mutex<Option<String>>,
     deleted_uid: Mutex<Option<String>>,
+    /// Every delete's preconditions, in call order — (uid, resourceVersion) — so a test can assert
+    /// on a SPECIFIC delete (the takeover's, the final release's) rather than only a count.
+    delete_preconditions: Mutex<Vec<(Option<String>, Option<String>)>>,
 }
 
 /// Mounts the fake ConfigMap store used by every test below. `initial` seeds an existing lock (for
@@ -151,6 +154,7 @@ async fn mount(calls: Arc<KubeCalls>, initial: Option<serde_json::Value>) -> (St
                 async move {
                     let mut slot = lock.lock().expect("lock");
                     let precondition_uid = body.pointer("/preconditions/uid").and_then(|v| v.as_str()).map(str::to_owned);
+                    let precondition_rv = body.pointer("/preconditions/resourceVersion").and_then(|v| v.as_str()).map(str::to_owned);
                     let current_uid = slot.as_ref().and_then(|cm| cm.pointer("/metadata/uid")).and_then(|v| v.as_str()).map(str::to_owned);
                     if slot.is_none() {
                         return (
@@ -166,6 +170,7 @@ async fn mount(calls: Arc<KubeCalls>, initial: Option<serde_json::Value>) -> (St
                     }
                     calls.deleted.fetch_add(1, Ordering::SeqCst);
                     *calls.deleted_uid.lock().expect("lock") = current_uid;
+                    calls.delete_preconditions.lock().expect("lock").push((precondition_uid, precondition_rv));
                     *slot = None;
                     (StatusCode::OK, Json(serde_json::json!({ "apiVersion": "v1", "kind": "Status", "status": "Success", "code": 200 })))
                 }
@@ -415,47 +420,57 @@ async fn a_malformed_incluster_env_cannot_fall_back_to_the_kubeconfig() {
     assert_eq!(kube.nodes_listed.load(Ordering::SeqCst), 0, "logs:\n{logs}");
 }
 
-/// R-1 / R-C1, for a suite that DOES hold the lock (hourly): a lock left behind by a holder pod
-/// that is simply gone (never went `Succeeded` or `Failed` — OOM-killed or SIGKILLed, nothing
-/// cleaned up) must not block the fleet forever. `acquire`'s AlreadyExists branch reads the old
-/// lock, sees its `owner_pod_uid` names no live pod, and takes it over by a preconditioned DELETE
-/// followed by the ordinary create — never a PUT (the fake server's PUT route on the lock refuses
-/// with 405, and this test asserts it was never hit).
-#[tokio::test(flavor = "multi_thread")]
+/// R-1 / R-C1: a lock left behind by a holder pod that is simply gone (never went `Succeeded` or
+/// `Failed` — OOM-killed or SIGKILLed, nothing cleaned up) must not block the fleet forever.
+/// `acquire`'s AlreadyExists branch reads the old lock, sees its `owner_pod_uid` names no live
+/// pod, and takes it over by a preconditioned DELETE followed by the ordinary create — never a PUT
+/// (the fake server's PUT route on the lock refuses with 405).
+///
+/// Calls the library directly (`coordination::acquire_as`), no child process and no KUBECONFIG env:
+/// the earlier version of this test spawned the real binary with `--suite hourly`, so after the
+/// takeover it walked the ENTIRE hourly journey against a bare fake server just to prove four
+/// counters — 162 seconds for what this version asserts in well under one. `acquire_as` takes an
+/// explicit `Identity` rather than `acquire` reading `KLOUDLITE_POD_UID`/`HOSTNAME`/
+/// `KLOUDLITE_SLO_JOB_NAME` from the process environment, which is what makes a direct call
+/// possible without `std::env::set_var` racing every OTHER test in this binary.
+#[tokio::test]
 async fn a_lock_whose_owner_pod_is_absent_is_taken_over() {
-    let (url, reports, _lists) = stub().await;
+    // The OTHER tests in this file spawn the real binary, whose `main` installs rustls's crypto
+    // provider itself; this test builds a `kube::Client` in-process, the one path here that reaches
+    // rustls without going through that `main`. Idempotent and harmless if a provider is already
+    // installed (`let _ =`, same as `main.rs`'s own call) — first-writer-wins is fine since every
+    // caller installs the identical `ring` provider.
+    let _ = rustls::crypto::ring::default_provider().install_default();
+    let started = std::time::Instant::now();
     let existing = seeded_lock("dead-pod-uid/hourly-1/aaaa", Some("probe"), "dead-pod-uid", "2026-09-20T00:00:00Z");
     let (kube_url, kube) = mount(Arc::new(KubeCalls::default()), Some(existing)).await;
     let (kube_url, kube) = with_pods(&kube_url, kube, None, "Running").await;
-    let kubeconfig = write_kubeconfig(&kube_url);
-    let out = tokio::task::spawn_blocking({
-        let url = url.clone();
-        let kubeconfig = kubeconfig.clone();
-        move || child_command("hourly", &url, &kubeconfig).output().expect("spawn")
-    })
-    .await
-    .expect("join");
-    let _ = std::fs::remove_dir_all(kubeconfig.parent().expect("kubeconfig dir"));
+    let client = kube::Client::try_from(kube::Config::new(kube_url.parse().expect("url"))).expect("client");
 
-    let logs = String::from_utf8_lossy(&out.stderr).to_string();
-    // Not asserting exit 0: the takeover succeeds and the full hourly journey then runs for real
-    // against this test's bare-bones fake admin server, which fails plenty of unrelated steps —
-    // that noise is not what R-1 is about. What R-1 promises is that the run was never REFUSED
-    // for the lock: it took the roll lock and reported normally rather than being skipped.
-    assert_ne!(out.status.code(), Some(2), "the run failed to start (EXIT_CONFIG); logs:\n{logs}");
-    assert_eq!(kube.put_count.load(Ordering::SeqCst), 0, "a PUT was sent for the lock; logs:\n{logs}");
-    // At least two deletes: the takeover's precondition-delete of the OLD lock (uid captured
-    // below), and the run's own release of the NEW lock it then held at the end — both legitimate,
-    // neither a PUT. `deleted_uid` is overwritten by whichever delete lands last, so the takeover's
-    // own delete is asserted by its call count having happened at all (`>= 2`), and separately that
-    // the OLD lock's uid appears among what the test observed (the create only succeeds because
-    // that delete happened first).
-    assert!(kube.deleted.load(Ordering::SeqCst) >= 2, "the dead lock was never taken over; logs:\n{logs}");
-    assert!(kube.created.load(Ordering::SeqCst) >= 1, "never attempted the create; logs:\n{logs}");
-    assert!(logs.contains("slo.run.finished"), "no final log; logs:\n{logs}");
-    let reports = reports.lock().expect("lock");
-    let last = reports.last().expect("at least one report");
-    assert_ne!(last["state"], "yielded", "a dead-holder lock should have been taken, not skipped: {last}");
+    let identity = kloudlite_slo::coordination::Identity::for_test("caller-pod-uid", Some("caller-pod"), "");
+    let lock = kloudlite_slo::coordination::acquire_as(client, "hourly-test", "hourly", identity)
+        .await
+        .expect("the dead lock should have been taken over, not refused");
+
+    assert_eq!(kube.put_count.load(Ordering::SeqCst), 0, "a PUT was sent for the lock");
+    // Exactly one delete so far (the takeover's own), carrying the OLD lock's uid/resourceVersion
+    // as preconditions — asserted on what the fake actually recorded, not only a count.
+    let preconditions = kube.delete_preconditions.lock().expect("lock").clone();
+    assert_eq!(preconditions.len(), 1, "expected exactly one delete before the create: {preconditions:?}");
+    assert_eq!(preconditions[0], (Some("old-lock-uid".to_string()), Some("9".to_string())), "the takeover delete did not carry the OLD lock's precondition");
+    // `created` counts every POST attempt, not only successes: the FIRST create hits the seeded
+    // lock and answers 409 (what triggers the takeover at all), the SECOND lands after the delete
+    // and succeeds — two attempts, one dead lock taken over.
+    assert_eq!(kube.created.load(Ordering::SeqCst), 2, "expected the initial 409 plus the post-takeover create");
+
+    lock.release().await.expect("release");
+    let preconditions = kube.delete_preconditions.lock().expect("lock").clone();
+    assert_eq!(preconditions.len(), 2, "expected a second delete for the release: {preconditions:?}");
+    // The NEW lock's uid/resourceVersion — `mount`'s create assigns them sequentially from 100.
+    assert_eq!(preconditions[1].0.as_deref(), Some("lock-uid-101"), "the release did not carry the NEW lock's uid");
+
+    let elapsed = started.elapsed();
+    assert!(elapsed < std::time::Duration::from_secs(5), "took {elapsed:?}, expected well under 5s");
 }
 
 /// The other half, same suite: a LIVE holder must still refuse the takeover.

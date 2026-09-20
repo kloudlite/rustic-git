@@ -131,15 +131,47 @@ pub async fn client() -> Result<kube::Client> {
         .map_err(|e| anyhow!("no kube client for roll coordination: {e}"))
 }
 
+/// Who this process is, for the lock it writes — split out of `acquire` so a test can supply an
+/// explicit identity instead of mutating process-wide env (which would interfere with every other
+/// test running in parallel in this binary).
+pub struct Identity {
+    pod_uid: String,
+    /// Kubelet sets a pod's hostname to its own name by default — `roll.sh` already leans on the
+    /// same `${HOSTNAME:-}` for its ownerReference, so this is not a new assumption.
+    pod_name: Option<String>,
+    job_name: String,
+}
+
+impl Identity {
+    pub fn from_env() -> Self {
+        Self {
+            pod_uid: std::env::var("KLOUDLITE_POD_UID").unwrap_or_else(|_| "manual".into()),
+            pod_name: std::env::var("HOSTNAME").ok().filter(|s| !s.is_empty()),
+            job_name: std::env::var("KLOUDLITE_SLO_JOB_NAME").unwrap_or_default(),
+        }
+    }
+
+    // Not `#[cfg(test)]`: `bins/slo/tests/out_of_process.rs` is a SEPARATE crate (an integration
+    // test binary), so a unit-test-only cfg would not compile there. Public and undocumented is
+    // the honest shape — this exists for tests, not as a general constructor.
+    #[doc(hidden)]
+    pub fn for_test(pod_uid: &str, pod_name: Option<&str>, job_name: &str) -> Self {
+        Self { pod_uid: pod_uid.into(), pod_name: pod_name.map(String::from), job_name: job_name.into() }
+    }
+}
+
 /// Every non-fast suite's lock: `kind: probe`, `suite` naming which one. The fast suite never
 /// calls this (ruling 3) — it only ever peeks with `fast_peek`, below.
 pub async fn acquire(client: kube::Client, run_id: &str, suite: &str) -> Result<RollLock> {
+    acquire_as(client, run_id, suite, Identity::from_env()).await
+}
+
+/// `acquire`'s real work, taking an explicit `Identity` — this is what a test calls directly, so
+/// no test ever mutates `KLOUDLITE_POD_UID`/`HOSTNAME`/`KLOUDLITE_SLO_JOB_NAME`, which are
+/// process-wide and would leak into every other test running in parallel in this binary.
+pub async fn acquire_as(client: kube::Client, run_id: &str, suite: &str, identity: Identity) -> Result<RollLock> {
     let api = Api::namespaced(client.clone(), NAMESPACE);
-    let pod_uid = std::env::var("KLOUDLITE_POD_UID").unwrap_or_else(|_| "manual".into());
-    // Kubelet sets a pod's hostname to its own name by default — `roll.sh` already leans on the
-    // same `${HOSTNAME:-}` for its ownerReference, so this is not a new assumption.
-    let pod_name = std::env::var("HOSTNAME").ok().filter(|s| !s.is_empty());
-    let job_name = std::env::var("KLOUDLITE_SLO_JOB_NAME").unwrap_or_default();
+    let Identity { pod_uid, pod_name, job_name } = identity;
     let random = format!("{:032x}", rand::random::<u128>());
     let holder = format!("{pod_uid}/{run_id}/{random}");
     let mut data = [("holder".into(), holder), ("kind".into(), Kind::Probe.as_str().into()), ("suite".into(), suite.into())]
@@ -363,7 +395,27 @@ fn index_accounted(indexes: Option<&str>, expected: usize) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use super::{active_phase, index_accounted};
+    use super::{active_phase, index_accounted, roll_holder_is_live};
+
+    /// Never dialled — `roll_holder_is_live` with `owner_pod_uid: None` and no timestamp never
+    /// reaches the client at all, so an unreachable address is fine as long as nothing tries it.
+    /// Building a `kube::Client` still touches rustls's provider lookup even for a plain `http://`
+    /// address, which only `main.rs` installs outside of tests — same call, same idempotent
+    /// `let _ =`, as the direct-call integration test uses for the same reason.
+    fn unreachable_client() -> kube::Client {
+        let _ = rustls::crypto::ring::default_provider().install_default();
+        kube::Client::try_from(kube::Config::new("http://127.0.0.1:1".parse().expect("url"))).expect("client")
+    }
+
+    /// Uncertainty must read as live. A roll lock with no resolvable pod and no `creationTimestamp`
+    /// at all — the Rust side never sees an unparsable string; `creationTimestamp` off the wire is
+    /// already a typed `Time` or absent — must be respected, not taken over. Mirrors the shell
+    /// side's `[ -z "$created_epoch" ] && return 0` after both `date` forms fail.
+    #[tokio::test]
+    async fn a_roll_lock_with_no_resolvable_pod_and_no_timestamp_is_respected() {
+        let live = roll_holder_is_live(&unreachable_client(), None, None).await.expect("no client call needed");
+        assert!(live, "an unreadable roll lock must be judged live, not taken over");
+    }
 
     #[test]
     fn holder_contains_pod_run_and_random_identity() {
