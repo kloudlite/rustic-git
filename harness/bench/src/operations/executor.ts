@@ -63,6 +63,8 @@ export type RecoverInput = {
   signal?: AbortSignal;
 };
 
+export type RecoveryOutcome = { handled: RecoveryAction[]; deferred: RecoveryAction[] };
+
 export class OperationExecutor {
   #store: ExecutorStore;
   #registry: Pick<CapabilityRegistry, "get" | "prepare" | "dispatch">;
@@ -269,14 +271,34 @@ export class OperationExecutor {
     }
   }
 
-  async recover(input: RecoverInput): Promise<void> {
+  async recover(input: RecoverInput): Promise<RecoveryOutcome> {
+    const handled: RecoveryAction[] = [];
+    const deferred: RecoveryAction[] = [];
     for (const action of input.actions) {
       this.#store.assertOwnership();
       if (action.operationId !== input.operationId) throw new Error(`recovery action belongs to ${action.operationId}`);
-      if (action.kind === "expire_decision" || action.kind === "expire_operation") {
-        this.#store.expire(input.operationId);
+      // Recovery execution was removed as unsafe (the executor team's own review); until
+      // it is built, deferral is reported, never hidden.
+      switch (action.kind) {
+        case "expire_decision":
+        case "expire_operation":
+          this.#store.expire(input.operationId);
+          handled.push(action);
+          break;
+        case "await_decision":
+        case "reconcile_step":
+        case "resume_abort":
+        case "dispatch_step":
+        case "retry_candidate":
+          deferred.push(action);
+          break;
+        default: {
+          const unreachable: never = action;
+          throw new Error(`unknown recovery action ${(unreachable as { kind: string }).kind}`);
+        }
       }
     }
+    return { handled, deferred };
   }
 
   async #record(input: ExecuteInput, call: ExactCall, stepId: string, effect: string, args: Record<string, JsonValue>, signal: AbortSignal, outcome: CapabilityDispatchResult): Promise<ScheduledStepResult> {

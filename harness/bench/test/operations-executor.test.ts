@@ -1012,3 +1012,50 @@ test("C-5 T5: a negative or fractional output index is a missing dependency", as
   assert.equal(fractional.ok, false);
   assert.equal(fractional.ok ? undefined : fractional.issues[0]?.code, "unknown_dependency");
 });
+
+// C-6: recovery reports what it deferred instead of dropping it silently. The executor
+// team removed recovery dispatch on purpose (unsafe); this task only makes the silence
+// visible, so the fake store here is acceptable ONLY because these tests assert the
+// ABSENCE of store calls, the same reasoning the two pre-existing recover tests use.
+test("C-6 T1: recovery reports every action it deferred", async () => {
+  const store = new MemoryStore();
+  store.steps.set("recover", { state: "outcome_unknown", effect: "write" });
+  store.steps.set("retry", { state: "failed", effect: "read", error: { code: "provider_failure", message: "temporary", retryable: true } });
+  store.steps.set("queued", { state: "queued", effect: "read" });
+  store.steps.set("resuming", { state: "running", effect: "write" });
+  store.steps.set("awaiting", { state: "awaiting_approval", effect: "write" });
+  const reg = registry(store, []);
+  const reconciled: string[] = [];
+  const executor = new OperationExecutor({ store, registry: reg, scheduler: new OperationScheduler({ maxConcurrent: 1 }), dispatchFor, reconcile: async ({ stepId }) => (reconciled.push(stepId), { conclusion: "succeeded", evidenceRefs: ["backend:done"] }) });
+  const actions: RecoveryAction[] = [
+    { kind: "reconcile_step", operationId: "op-1", stepId: "recover", capability: "write.item", capabilityVersion: "1.0.0", effect: "write", retry: { class: "reconcile_required", maxAttempts: 1 }, recorded: true, since: 1, dispatchDigest: "sha256:" + "1".repeat(64) },
+    { kind: "dispatch_step", operationId: "op-1", stepId: "queued", capability: "read.item", capabilityVersion: "1.0.0" },
+    { kind: "resume_abort", operationId: "op-1", stepId: "resuming", capability: "write.item", capabilityVersion: "1.0.0", dispatchDigest: "sha256:" + "3".repeat(64) },
+    { kind: "retry_candidate", operationId: "op-1", stepId: "retry", capability: "read.item", capabilityVersion: "1.0.0", retry: { class: "idempotent", maxAttempts: 2 }, argDigest: "sha256:" + "2".repeat(64) },
+    { kind: "await_decision", operationId: "op-1", decisionId: "decision-1", stepId: "awaiting", expiresAt: 1_000 },
+    { kind: "expire_decision", operationId: "op-1", decisionId: "decision-2", stepId: "awaiting", expiresAt: 1_000 },
+    { kind: "expire_operation", operationId: "op-1", deadlineAt: 1 },
+  ];
+  const outcome = await executor.recover({ operationId: "op-1", context, actions, calls: {
+    recover: callForRecovery("recover", "write.item"), retry: callForRecovery("retry"), queued: callForRecovery("queued"),
+    resuming: callForRecovery("resuming", "write.item"), awaiting: callForRecovery("awaiting", "write.item"),
+  } });
+  assert.deepEqual(outcome.handled, [actions[5], actions[6]]);
+  assert.deepEqual(outcome.deferred, [actions[0], actions[1], actions[2], actions[3], actions[4]]);
+  assert.deepEqual(reconciled, []);
+  assert.equal(store.log.includes("retry:retry"), false);
+  assert.equal(store.log.includes("intent:queued"), false);
+  assert.equal(store.log.some((entry) => entry.startsWith("dispatch:")), false);
+  assert.equal(store.log.some((entry) => entry.startsWith("unknown:")), false);
+  assert.equal(store.log.some((entry) => entry.startsWith("cancel:")), false);
+  assert.equal(store.log.filter((entry) => entry === "expire").length, 2);
+});
+
+test("C-6 T2: an action for another operation still throws", async () => {
+  const store = new MemoryStore();
+  const executor = new OperationExecutor({ store, registry: registry(store, []), scheduler: new OperationScheduler({ maxConcurrent: 1 }), dispatchFor });
+  await assert.rejects(
+    () => executor.recover({ operationId: "op-1", context, actions: [{ kind: "expire_operation", operationId: "op-2", deadlineAt: 1 }], calls: {} }),
+    /recovery action belongs to op-2/,
+  );
+});

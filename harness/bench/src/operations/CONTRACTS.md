@@ -124,6 +124,10 @@ for the actual fact behind each trigger.
   comes first, and a late answer dispatches nothing. An operation deadline is capped at
   24 hours by the budget schema, so no timer derived from it can reach the 2^31-1 ms at
   which Node clamps a delay.
+- `OperationExecutor.recover` carries out expiry only and returns what it deferred:
+  reconcile, abort, retry and re-dispatch after a restart are NOT built. Until they are,
+  an operation that was mid-dispatch at a crash stays non-terminal after restart, and the
+  caller is told so through `deferred` rather than the gap being silent.
 - Events replay monotonically by `sequence`; `validateEventSequence` refuses replays.
 - `OPERATE_REQUEST_SCHEMA` is emitted from the same descriptions the validator uses and
   carries the real bounds (`minLength`/`maxLength`/`pattern`/`minimum`/`maximum`/
