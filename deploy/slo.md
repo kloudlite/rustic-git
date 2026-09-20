@@ -257,7 +257,7 @@ first destructive stage.
 | `bench.shell.workspace` | Benches | A shell opened through the bench into the run's workspace starts in the workspace directory, and a named session reattaches to its own scrollback | 99.9 % ≤ 20000 ms | hourly | 14 · Experience |
 | `bench.workspace.tool_roundtrip` | Benches | A workspace session on the bench runs `exec echo` in a workspace through its tool server, and the turn lands under `/bench/workspaces/{ws}/` | 99.9 % ≤ 180000 ms | hourly | 14 · Experience |
 | `bench.push.p95` | Benches | `POST /v1/workspaces/{bench}/push` completes and the volume's history lists the snapshot as ready | 95 % ≤ 60000 ms | hourly | 14 · Experience |
-| `bench.pkg.add` | Benches | `kl pkg add` in the bench shell lands in the bench's `spec.packages` | 99.9 % ≤ 20000 ms | hourly | 14 · Experience |
+| `bench.pkg.add` | Benches | a package added through the API lands in the bench's `spec.packages` | 99.9 % ≤ 20000 ms | hourly | 14 · Experience |
 | `agent.tree.run` | Benches | A dispatched agent gets a tree, reports, and leaves both standing; closing it deletes the tree and archives the session | 95 % ≤ 300000 ms | hourly | 14 · Experience |
 | `git.push.large` | Git hosting | Push of a large commit succeeds — 90 MiB over HTTP, under Cloudflare's 100 MB upload cap, and 100 MiB over SSH, which has no proxy in front of it | 99.9 % | weekly | 12 · Weekly |
 | `reg.push.large` | Container registry | Pushing a large image layer succeeds | 99.9 % | weekly | 12 · Weekly |

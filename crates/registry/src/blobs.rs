@@ -223,10 +223,8 @@ pub(super) async fn finish_blob(
         }
         Err(super::uploads::Refused::Failed(e)) => return crate::oci_internal(e),
     }
-    match blob_state::install(&app.store.os, owner, &d, &generation_key).await {
-        Ok(Ok(())) => {}
-        Ok(Err(blob_state::InstallError::Busy)) => return crate::oci_internal(crate::err("blob publication is busy")),
-        Err(e) => return crate::oci_internal(e),
+    if let Err(e) = blob_state::install(&app.store.os, owner, &d, &generation_key).await {
+        return crate::oci_internal(e);
     }
     // The image now exists, even with no manifest yet: a push that uploads layers and then fails
     // should leave something the owner can see and clean up. `hold_blob`, never

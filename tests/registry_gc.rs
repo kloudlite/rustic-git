@@ -216,11 +216,13 @@ async fn a_stale_gc_version_cannot_retire_a_blob_that_was_pinned_and_released() 
     let (_, generation) = blob_state::new_generation("acme", &d);
     e.store.os.put(&generation, PutPayload::from("generation race")).await.unwrap();
     let generation_key = generation.to_string();
-    blob_state::install(&e.store.os, "acme", &d, &generation_key).await.unwrap().unwrap();
+    blob_state::install(&e.store.os, "acme", &d, &generation_key).await.unwrap();
     let snapshot = blob_state::candidates(&e.store.os, "acme").await.unwrap().pop().unwrap().2;
     blob_state::pin(&e.store.os, "acme", &d, "manifest").await.unwrap();
     blob_state::unpin(&e.store.os, "acme", &d, "manifest").await.unwrap();
-    assert!(blob_state::retire_if_unpinned(&e.store.os, "acme", &d, &snapshot).await.unwrap().is_none());
+    // Signature-only change for R-2's new `cutoff_millis` param — this call already unpinned
+    // before retiring, so any cutoff answers the same "still None" the assertion below checks.
+    assert!(blob_state::retire_if_unpinned(&e.store.os, "acme", &d, &snapshot, i64::MAX).await.unwrap().is_none());
     assert!(blob_state::resolve(&e.store.os, "acme", &d).await.unwrap().is_some());
 }
 
@@ -231,11 +233,11 @@ async fn a_delayed_old_generation_delete_cannot_remove_a_reupload() {
     let (_, old) = blob_state::new_generation("acme", &d);
     e.store.os.put(&old, PutPayload::from("old")).await.unwrap();
     let old_key = old.to_string();
-    blob_state::install(&e.store.os, "acme", &d, &old_key).await.unwrap().unwrap();
+    blob_state::install(&e.store.os, "acme", &d, &old_key).await.unwrap();
     let (_, new) = blob_state::new_generation("acme", &d);
     e.store.os.put(&new, PutPayload::from("new")).await.unwrap();
     let new_key = new.to_string();
-    blob_state::install(&e.store.os, "acme", &d, &new_key).await.unwrap().unwrap();
+    blob_state::install(&e.store.os, "acme", &d, &new_key).await.unwrap();
     blob_state::delete_retired(&e.store.os, "acme", &d, &old_key).await.unwrap();
     assert_eq!(blob_state::resolve(&e.store.os, "acme", &d).await.unwrap(), Some(new));
 }
@@ -326,8 +328,15 @@ async fn deleting_a_manifest_drops_its_rows_but_not_a_shared_blob() {
 
     let r = c.delete(format!("{base}/v2/acme/nginx/manifests/{md}")).basic_auth("acme", Some(&token)).send().await.unwrap();
     assert_eq!(r.status(), axum::http::StatusCode::ACCEPTED);
+    // CHANGE 5 (R-3): the active physical key, captured BEFORE the sweep — `resolve(...).is_none()`
+    // alone only proves the RECORD was retired, not that the BYTES are gone (that was the weakened
+    // assertion this restores). With retirement grace now real, `retire_if_unpinned` + immediate
+    // `delete_retired` still fires in the SAME tick here — the sweep retires this blob itself
+    // (CHANGE 3's exception) rather than finding an already-retired one.
+    let key = blob_state::resolve(&e.store.os, "acme", &sd).await.unwrap().expect("still active before this sweep");
     assert_eq!(gc::sweep_owner(&e.store, "acme", Duration::ZERO).await.unwrap(), 1);
     assert!(blob_state::resolve(&e.store.os, "acme", &sd).await.unwrap().is_none(), "unreferenced everywhere: swept");
+    assert!(e.store.os.head(&key).await.is_err(), "unreferenced everywhere: swept");
 }
 
 /// The owning node stamps the marker's `updated_ms` from its clock; the worker recomputes it from

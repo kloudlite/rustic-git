@@ -180,7 +180,7 @@ workspace. `kl pkg`/`kl env` inside the bench shell are how its packages and env
 
 All `bench.*` ids keep their meaning through the facade. New: `bench.push.p95` (hourly, group 3:
 `POST /v1/workspaces/{bench}/push` completes, `history` lists the snapshot; `95 % ≤ 60000 ms`),
-`bench.pkg.add` (hourly, group 3: `kl pkg add cowsay` in the bench shell lands in `spec.packages`;
+`bench.pkg.add` (hourly, group 3: a package added through the API lands in `spec.packages`;
 `99.9 % ≤ 20000 ms`), `bench.migrated` (weekly drill: a legacy folder seeded beside a fresh bench is
 copied in on first start and renamed `.migrated-*`; `99.9 %`). `bench.idle.wake` asserts the new
 idle signal (`.idle` + readiness false → pod gone → wake).

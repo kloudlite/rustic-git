@@ -655,7 +655,7 @@ pub const CATALOGUE: &[Slo] = &[
     // list is edited from its own shell. Both are group 3's, walked last: a package edit recreates
     // the pod.
     Slo { id: "bench.push.p95", feature: "Benches", sli: "`POST /v1/workspaces/{bench}/push` completes and the volume's history lists the snapshot as ready", target: p95(60_000), suite: Suite::Hourly, stage: "14 · Experience" },
-    Slo { id: "bench.pkg.add", feature: "Benches", sli: "`kl pkg add` in the bench shell lands in the bench's `spec.packages`", target: bound(20_000), suite: Suite::Hourly, stage: "14 · Experience" },
+    Slo { id: "bench.pkg.add", feature: "Benches", sli: "a package added through the API lands in the bench's `spec.packages`", target: bound(20_000), suite: Suite::Hourly, stage: "14 · Experience" },
     // The whole subagent lifecycle as a person drives it, from the bench: the tree and the session
     // STAY after the report — nothing is dropped on completion — and only a close takes them.
     Slo { id: "agent.tree.run", feature: "Benches", sli: "A dispatched agent gets a tree, reports, and leaves both standing; closing it deletes the tree and archives the session", target: p95(300_000), suite: Suite::Hourly, stage: "14 · Experience" },

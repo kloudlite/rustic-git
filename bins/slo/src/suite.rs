@@ -513,6 +513,18 @@ async fn report(c: &mut Ctx, stage: &str) {
     }
 }
 
+/// The fast suite found a live roll lock before it even spawned a child (R-1): file the whole run
+/// as skipped, naming the holder, rather than the old `Ctx::new` failure that cost every fast
+/// sample in the hourly's up-to-55-minute hold. Called directly by `main::parent` — there is no
+/// child here to hand steps over from, so this both marks and reports in one call.
+pub async fn report_held(c: &mut Ctx, kind: Suite, holder: &str) {
+    let stages = suite(kind);
+    let why = format!("roll coordination is held by {holder}");
+    let skipped = skip_remaining_because(c, kind, &stages, &why, SkipReason::InFlight);
+    tracing::warn!(skipped, holder, "slo.run.yielded");
+    report(c, TEARDOWN).await;
+}
+
 /// Everything the child owes the parent, on disk: the steps it measured and the names it made.
 /// `State` is also written after every STEP (`Ctx::save_state`); this is the stage boundary's own
 /// copy, and the one that carries `steps.json`.

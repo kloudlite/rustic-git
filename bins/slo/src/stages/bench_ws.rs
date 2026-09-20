@@ -31,6 +31,10 @@ use crate::ctx::Ctx;
 const PUSH_CEILING: Duration = Duration::from_secs(90);
 /// `bench.pkg.add`: target 20 s — the id is about the spec landing, never about nix building it.
 const PKG_CEILING: Duration = Duration::from_secs(30);
+/// Strictly less than `PKG_CEILING` so the PATCH before it always fits inside the step's own
+/// budget — the two used to share `PKG_CEILING`, so a slow poll could consume the whole step and
+/// leave nothing for the PATCH ("timed out after 30000 ms" on two fleet hourlies).
+const PKG_POLL: Duration = Duration::from_secs(25);
 /// Cheap, tiny and nothing else in the suite declares it, so a leftover is visible rather than
 /// indistinguishable from a real package somebody wanted.
 const PKG: &str = "cowsay";
@@ -113,19 +117,41 @@ async fn prune_pushes(c: &Ctx, id: &str) {
     }
 }
 
-/// `bench.pkg.add` uses the authenticated workspace package route. The wait is on the SPEC, never
-/// on `PackagesReady`: a nix build is minutes and is `ws.packages.add`'s sample, not this one's.
+/// `bench.pkg.add` reads the bench's CURRENT package list and appends, never overwrites — the
+/// bench is long-lived and shared, so a fixed PATCH here wiped whatever the owner had already
+/// installed, and the teardown's `{ "packages": [] }` wiped everything a second time. `original`
+/// is read before the timed step (this probe is about the spec landing, not about a GET), and the
+/// teardown restores exactly that snapshot, not the empty list.
+///
+/// The wait is on the SPEC, never on `PackagesReady`: a nix build is minutes and is
+/// `ws.packages.add`'s sample, not this one's.
 async fn pkg_add(c: &mut Ctx, id: &str) {
     let workspace_id = id.to_owned();
     let ws = api(c, &format!("/v1/workspaces/{id}"));
+    let original: Vec<String> = match get(c, &ws, &c.probe_jwt).await {
+        Ok(doc) => doc
+            .get("packages")
+            .and_then(Value::as_array)
+            .map(|ps| ps.iter().filter_map(Value::as_str).map(str::to_string).collect())
+            .unwrap_or_default(),
+        Err(e) => {
+            let why = format!("could not read the bench's current packages: {}", super::clip(&format!("{e:#}")));
+            return c.skip("bench.pkg.add", &why);
+        }
+    };
+    let wanted = with_package(&original, PKG);
     let landed = c
         .step("bench.pkg.add", PKG_CEILING, move |c| {
             let jwt = c.probe_jwt.clone();
             let ws = ws.clone();
             let workspace_id = workspace_id.clone();
+            let wanted = wanted.clone();
             async move {
-                set_packages(c, &workspace_id, &["bash", PKG]).await.context("the authenticated workspace package update failed")?;
-                poll_json(c, &ws, &jwt, PKG_CEILING, |v| declares(v, PKG)).await.context("the package never reached the bench's spec")
+                set_packages(c, &workspace_id, &wanted).await.context("the authenticated workspace package update failed")?;
+                // Strictly shorter than the step's own ceiling: the PATCH above must always have
+                // room left in the step's budget, or a slow poll starves it (the "timed out after
+                // 30000 ms" the two shared PKG_CEILING produced on the fleet).
+                poll_json(c, &ws, &jwt, PKG_POLL, |v| declares(v, PKG)).await.context("the package never reached the bench's spec")
             }
             .boxed()
         })
@@ -135,12 +161,13 @@ async fn pkg_add(c: &mut Ctx, id: &str) {
     }
     // Untimed teardown: the bench is long-lived, so a package left behind would be rebuilt into
     // every later run's profile. Through `/v1` rather than the shell — the pod is being recreated
-    // for the package that just landed, and a second shell would race the kubelet.
+    // for the package that just landed, and a second shell would race the kubelet. Restores the
+    // ORIGINAL list read before the step, never `[]` — the bench may have carried packages of its
+    // own before this run touched it.
     let removed = async {
-        let body = json!({ "packages": [] });
         // `patch_ws_packages` IS the PATCH on the workspace and takes packages only; there is no
         // `/packages` route (`api::mod`'s note on the spelling).
-        call(c, reqwest::Method::PATCH, &api(c, &format!("/v1/workspaces/{id}")), &c.probe_jwt, Some(body)).await?;
+        set_packages(c, id, &original).await?;
         wait_phase(c, "ready", Duration::from_secs(180)).await
     };
     if let Err(e) = removed.await {
@@ -148,7 +175,17 @@ async fn pkg_add(c: &mut Ctx, id: &str) {
     }
 }
 
-async fn set_packages(c: &Ctx, id: &str, packages: &[&str]) -> Result<()> {
+/// `original` with `pkg` appended if it is not already present — order preserved, no duplicate.
+fn with_package(original: &[String], pkg: &str) -> Vec<String> {
+    if original.iter().any(|p| p == pkg) {
+        return original.to_vec();
+    }
+    let mut wanted = original.to_vec();
+    wanted.push(pkg.to_string());
+    wanted
+}
+
+async fn set_packages(c: &Ctx, id: &str, packages: &[String]) -> Result<()> {
     call(
         c,
         reqwest::Method::PATCH,
@@ -167,6 +204,8 @@ fn declares(v: &Value, want: &str) -> bool {
     })
 }
 
+const _: () = assert!(PKG_POLL.as_secs() < PKG_CEILING.as_secs());
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -184,5 +223,20 @@ mod tests {
             assert!(cap.as_millis() >= slo.target.max_ms.unwrap() as u128, "{id}");
             assert_eq!(crate::suite::group_of(id), 3, "{id}");
         }
+    }
+
+    #[test]
+    fn with_package_appends_once_and_preserves_order() {
+        assert_eq!(with_package(&[], PKG), vec![PKG.to_string()], "absent: appended");
+        assert_eq!(
+            with_package(&["jq".to_string(), "yq".to_string()], PKG),
+            vec!["jq".to_string(), "yq".to_string(), PKG.to_string()],
+            "absent: appended after the existing list, order preserved"
+        );
+        assert_eq!(
+            with_package(&["jq".to_string(), PKG.to_string()], PKG),
+            vec!["jq".to_string(), PKG.to_string()],
+            "present: list untouched"
+        );
     }
 }
