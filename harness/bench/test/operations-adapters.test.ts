@@ -31,6 +31,17 @@ test("a 504 on a mutation is unknown, not failed", async () => {
   if (!result.ok) assert.equal(result.error.code, "unknown_outcome");
 });
 
+test("a failed listing keeps its retryable flag through workspace.inspect", async () => {
+  const call: PlatformCall = async () => ({ status: 503, data: { error: "unavailable" } });
+  const adapters = createPlatformAdapters(call, "bench-ada", "acme");
+  const result = await adapters["workspace.inspect"]({ args: { id: "ws-1" }, states: {} });
+  assert.equal(result.ok, false);
+  if (!result.ok) {
+    assert.equal(result.error.code, "provider_failure");
+    assert.equal(result.error.retryable, true);
+  }
+});
+
 test("with KL_TEAM set, an id absent from the team listing is passed through as given", async () => {
   const calls: string[] = [];
   const call: PlatformCall = async (method, route) => {

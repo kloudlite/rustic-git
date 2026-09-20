@@ -96,17 +96,18 @@ export function createPlatformAdapters(call: PlatformCall, ownBench = process.en
   // The listing exists to disambiguate a NAME; an id that is not in it is not necessarily wrong —
   // it may be a team workspace the listing didn't need to resolve. Pass it through as given so
   // /v1's own 404 (or success) is the answer, rather than a lookup failure of ours.
-  const resolveId = async (idOrName: string, signal?: AbortSignal): Promise<{ ok: true; id: string } | { ok: false; code: OperationErrorCode; message: string }> => {
+  const resolveId = async (idOrName: string, signal?: AbortSignal): Promise<{ ok: true; id: string } | { ok: false; result: AdapterResult }> => {
     const listed = await workspaceList({ args: {}, states: {}, signal });
-    if (!listed.ok) return { ok: false, code: listed.error.code, message: listed.error.message };
+    if (!listed.ok) return { ok: false, result: listed };
     const resolved = resolveUnique(listed.value as JsonValue[], idOrName);
-    return resolved.ok || resolved.code !== "no_match" ? resolved : { ok: true, id: idOrName };
+    if (resolved.ok) return resolved;
+    return resolved.code === "no_match" ? { ok: true, id: idOrName } : { ok: false, result: err(resolved.code, resolved.message) };
   };
   const workspaceInspect: Adapter = async ({ args, signal }) => {
     const requested = String(args.id);
     if (requested === ownBench || /^bench-[0-9a-f]{8,}$/.test(requested)) return err("scope_denied", "that is you, not a workspace; name a workspace");
     const resolved = await resolveId(requested, signal);
-    if (!resolved.ok) return err(resolved.code, resolved.message);
+    if (!resolved.ok) return resolved.result;
     return platformResult(call, "GET", `/v1/workspaces/${encodeURIComponent(resolved.id)}`, undefined, false, signal);
   };
   const services = async (id: string, signal?: AbortSignal): Promise<AdapterResult> => {

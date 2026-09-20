@@ -3,7 +3,7 @@ import assert from "node:assert/strict";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import { execFileSync, spawn } from "node:child_process";
+import { spawn } from "node:child_process";
 import WebSocket from "ws";
 
 /**
@@ -16,7 +16,7 @@ import WebSocket from "ws";
  */
 const wait = (ms: number) => new Promise((r) => setTimeout(r, ms));
 test("the desktop's renderer loads with no uncaught exception", { timeout: 60_000 }, async () => {
-  execFileSync("npm", ["run", "build"], { cwd: path.resolve(".") });
+  assert.ok(fs.existsSync(path.resolve("dist/src/main.js")) && fs.existsSync(path.resolve("dist/renderer/index.html")), "build first: the harness gate runs npm run build before this test");
   const electron = path.resolve("node_modules/.bin/electron");
   assert.ok(fs.existsSync(electron), "Electron is required for the renderer boot gate");
   const profile = fs.mkdtempSync(path.join(os.tmpdir(), "kloudlite-boot-profile-"));
