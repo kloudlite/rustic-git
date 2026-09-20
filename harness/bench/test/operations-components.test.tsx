@@ -264,6 +264,66 @@ test("resync is promise-aware, prevents duplicates, and reports rejection", asyn
   assert.match(host.querySelector("[role=alert]")?.textContent ?? "", /reload failed/);
 });
 
+test("decision card survives an unrelated view rebuild without losing typed input or the open confirmation", async () => {
+  const base = openScenario(scenarioById("needs-input"));
+  const [view, setView] = createSignal(base);
+  const host = document.createElement("div");
+  document.body.append(host);
+  dispose = render(() => <OperationPanel view={view()} now={FIXTURE_CLOCK + 2_000} expanded />, host);
+  const input = host.querySelector("input") as HTMLInputElement;
+  input.value = "draft answer";
+  input.dispatchEvent(new Event("input", { bubbles: true }));
+  const approve = [...host.querySelectorAll("button")].find((button) => button.textContent === "Approve")!;
+  click(approve);
+  assert.ok(host.querySelector("[role=dialog]"), "confirmation did not open");
+  // An unrelated view change (a fresh object, same decision content) rebuilds `decisionRows()`
+  // wholesale; a card keyed by array position or row reference would remount and lose both.
+  setView({ ...view(), sequence: view().sequence });
+  await Promise.resolve();
+  assert.equal((host.querySelector("input") as HTMLInputElement).value, "draft answer");
+  assert.ok(host.querySelector("[role=dialog]"), "confirmation dialog closed on an unrelated rebuild");
+});
+
+test("decision card survives ten clock ticks without losing typed input or the open confirmation", async () => {
+  const base = openScenario(scenarioById("needs-input"));
+  const [now, setNow] = createSignal(FIXTURE_CLOCK + 2_000);
+  const host = document.createElement("div");
+  document.body.append(host);
+  dispose = render(() => <OperationPanel view={base} now={now()} expanded />, host);
+  const input = host.querySelector("input") as HTMLInputElement;
+  input.value = "draft answer";
+  input.dispatchEvent(new Event("input", { bubbles: true }));
+  const approve = [...host.querySelectorAll("button")].find((button) => button.textContent === "Approve")!;
+  click(approve);
+  assert.ok(host.querySelector("[role=dialog]"), "confirmation did not open");
+  for (let tick = 1; tick <= 10; tick += 1) {
+    setNow(FIXTURE_CLOCK + 2_000 + tick * 500);
+    await Promise.resolve();
+  }
+  assert.equal((host.querySelector("input") as HTMLInputElement).value, "draft answer");
+  assert.ok(host.querySelector("[role=dialog]"), "confirmation dialog closed while the clock advanced");
+});
+
+test("a granted decision stops being answerable once it resolves", async () => {
+  const base = openScenario(scenarioById("needs-input"));
+  const [view, setView] = createSignal(base);
+  const host = document.createElement("div");
+  document.body.append(host);
+  let resolved = false;
+  dispose = render(() => <OperationPanel view={view()} now={FIXTURE_CLOCK + 2_000} expanded onDecision={() => { resolved = true; }} />, host);
+  const approve = [...host.querySelectorAll("button")].find((button) => button.textContent === "Approve")!;
+  click(approve);
+  const confirm = [...host.querySelectorAll("button")].find((button) => button.textContent === "Approve and apply")!;
+  click(confirm);
+  assert.ok(resolved, "onDecision was not called");
+  // The real store removes a granted decision from `pendingDecisions` on the next snapshot/event;
+  // simulate that here to prove the card stops offering Approve once it is no longer open.
+  setView({ ...view(), pendingDecisions: view().pendingDecisions.filter((d) => d.decisionId !== "dec-approve-edit") });
+  await Promise.resolve();
+  const stillApprove = [...host.querySelectorAll("button")].find((button) => button.textContent === "Approve");
+  assert.equal(stillApprove, undefined, "a granted decision is still answerable");
+});
+
 test("responsive rules wrap controls and preserve selectable full evidence IDs", () => {
   const operationsCss = readFileSync(resolve(process.cwd(), "src/renderer/operations/styles/operations.css"), "utf8");
   const host = mount(openScenario(scenarioById("needs-input")), { expanded: true });

@@ -9,7 +9,7 @@ import { FileDiff } from "./results/FileDiff";
 import { editFile, patchFiles } from "./results/diff";
 import { defaultOpen } from "./results/opencode-map";
 import { Spinner } from "./Motion";
-import { OperationPanel, operationIdFromAction, operationStore, type OperationStore } from "../operations/index.ts";
+import { OperationPanel, operationIdFromAction, operationStore, useOperationClock, type OperationStore } from "../operations/index.ts";
 
 type Action = Extract<Message, { role: "action" }>;
 
@@ -27,6 +27,7 @@ export function ToolCall(props: { a: Action; operations?: OperationStore; sessio
   // wants at a glance is WHAT ran and whether it worked — a failure opens itself, because that is
   // the one they were about to click anyway.
   const [open, setOpen] = createSignal(false);
+  const operationNow = useOperationClock();
   createEffect(() => props.a.ok === false && setOpen(true));
   // What opens itself, per opencode's own policy: a shell and an edit are the thing you came to
   // see; a patch that only deletes is not (`part-default-open.ts:19`).
@@ -109,7 +110,7 @@ export function ToolCall(props: { a: Action; operations?: OperationStore; sessio
           </div>
         </div>
       </Show>
-      <Show when={operation()}>{(entry) => <OperationPanel view={entry().view()} onResync={entry().resync} onDecision={entry().controls.decide} onAdditionalInput={entry().controls.answer} onCancel={entry().controls.cancel} loadError={entry().error()} onRetry={entry().reload} />}</Show>
+      <Show when={operation()}>{(entry) => <OperationPanel view={entry().view()} now={operationNow()} onResync={entry().resync} onDecision={entry().controls.decide} onAdditionalInput={entry().controls.answer} onCancel={entry().controls.cancel} loadError={entry().error()} onRetry={entry().reload} />}</Show>
     </div>
   );
 }

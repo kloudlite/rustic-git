@@ -22,18 +22,37 @@ import * as live from "./live";
 import { agentRows, benchSessions, displayModel, inFlightItems, noteModelNames, openNote, openRoute, procState, refusal, type SessionRow } from "./rows";
 import { shouldRefreshOn } from "./refresh";
 import { cycleTheme } from "./theme";
-import { collectOperationEventPages, configureOperationBridge, type OperationProjection, type OperationRendererBridge } from "./operations/index.ts";
+import { collectOperationEventPages, configureOperationBridge, isTerminalOperation, type OperationProjection, type OperationRendererBridge } from "./operations/index.ts";
 
 export function App() {
+  // No operation-changed event exists on the `onPi` stream yet (main only pushes `bench` and
+  // `bench:resync`), so `watch` polls the event log itself rather than inventing an IPC channel
+  // this lane may not add. Bounded to a running/waiting operation only: the store's own `catchUp`
+  // is a no-op once the fetched cursor is not ahead, so this just costs one idle events request
+  // per tick until the projection reaches a terminal state, when the poll clears itself.
+  const OPERATION_POLL_MS = 2_000;
   const operationBridge: OperationRendererBridge = {
     loadSnapshot: window.harness.operations.snapshot,
     loadEvents: (operationId, afterSequence) => collectOperationEventPages(
       (after) => window.harness.operations.events(operationId, after, 200),
       afterSequence,
     ),
-    decide: (payload) => window.harness.operations.decision(payload),
-    answer: (payload) => window.harness.operations.input(payload).then(() => undefined),
-    cancel: (payload) => window.harness.operations.cancel(payload).then(() => undefined),
+    watch: (operationId, onChanged) => {
+      const timer = setInterval(() => {
+        const state = operations?.entries().find((entry) => entry.operationId === operationId)?.view().state;
+        if (state !== undefined && isTerminalOperation(state)) return clearInterval(timer);
+        onChanged(Number.MAX_SAFE_INTEGER);
+      }, OPERATION_POLL_MS);
+      return () => clearInterval(timer);
+    },
+    // Every control refreshes the view once the write lands, so a granted decision stops
+    // offering Approve rather than waiting on the next poll tick or reconnect.
+    decide: (payload) => window.harness.operations.decision(payload).then(() => refreshOperation(payload.operationId)),
+    answer: (payload) => window.harness.operations.input(payload).then(() => refreshOperation(payload.operationId)),
+    cancel: (payload) => window.harness.operations.cancel(payload).then(() => refreshOperation(payload.operationId)),
+  };
+  const refreshOperation = (operationId: string) => {
+    void operations?.entries().find((entry) => entry.operationId === operationId)?.reload();
   };
   const operations = configureOperationBridge(operationBridge);
   onCleanup(() => operations?.dispose());

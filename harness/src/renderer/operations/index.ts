@@ -32,3 +32,4 @@ export {
   type ScenarioExpectation,
 } from "./fixtures/scenarios.ts";
 export { OperationPanel, type OperationPanelProps } from "./components/OperationPanel.tsx";
+export { useOperationClock } from "./clock.ts";
