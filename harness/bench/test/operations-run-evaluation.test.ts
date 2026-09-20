@@ -203,7 +203,7 @@ test("injected provider config can run without live network", async () => {
       faultScenarios,
       typeSafeConfig: {
         apiKey: "test-key-that-is-never-printed",
-        providerInputPolicy: (request) => ({ authorized: true, digest: request.digest }),
+        providerInputPolicy: (request) => ({ authorized: true, digest: request.digest, authorizationRef: "test_authz_ref" }),
         fetch: async () => {
           calls += 1;
           throw new Error("network disabled");

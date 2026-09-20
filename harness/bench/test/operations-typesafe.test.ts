@@ -139,7 +139,7 @@ const providerBody = (answers: Record<string, unknown>, model: string = TYPESAFE
 });
 
 /** Test stand-in for the O07/O08 trusted policy: authorizes exactly what it was shown. */
-const authorizeExactly: ProviderInputPolicy = (request) => ({ authorized: true, digest: request.digest });
+const authorizeExactly: ProviderInputPolicy = (request) => ({ authorized: true, digest: request.digest, authorizationRef: "test_authz_ref" });
 
 function adapterWith(
   transport: { fetch: TypeSafeFetch },
@@ -997,7 +997,7 @@ test("the trusted scope label reaches the policy and can be denied", async () =>
     providerInputPolicy: (request) => {
       seen.push(request.scope);
       return request.scope === "tenant_configured"
-        ? { authorized: true, digest: request.digest }
+        ? { authorized: true, digest: request.digest, authorizationRef: "test_authz_ref" }
         : { authorized: false, code: "scope_denied" };
     },
   });
@@ -1018,7 +1018,10 @@ test("an unpatterned secret is refused by policy and never reaches results or re
     apiKey: API_KEY,
     state: state.ok ? state.value : approvedState(),
     fetch: transport.fetch,
-    providerInputPolicy: (request) => (request.state.text.includes(secret) ? { authorized: false, code: "sensitive_input" } : { authorized: true, digest: request.digest }),
+    providerInputPolicy: (request) =>
+      request.state.text.includes(secret)
+        ? { authorized: false, code: "sensitive_input" }
+        : { authorized: true, digest: request.digest, authorizationRef: "test_authz_ref" },
   });
   const result = await adapter.judge({ questions: [single("q", NOUL_REQUEST)] });
   const failure = failureOf(result, "q");

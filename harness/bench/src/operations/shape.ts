@@ -513,6 +513,74 @@ export function withDefinitions(schema: JsonSchemaLike): JsonSchemaLike {
 
 const SCHEMA_TYPES: readonly string[] = ["object", "array", "string", "number", "integer", "boolean", "null"];
 
+/** A request-supplied `pattern` runs over model text (generation.ts:765); both caps refuse it
+ * before that happens rather than bounding the match at run time. */
+const PATTERN_MAX_CHARS = 256;
+
+/**
+ * Conservative catastrophic-backtracking guard: a group that is itself quantified (`(...)+`,
+ * `(...)*`, `(...){n,}`) and whose own body contains another quantifier (`(a+)+`, `(a*)*`,
+ * `(a|b+)*`). This is a syntactic scan, not an NFA analysis — it over-refuses some patterns a
+ * real backtracking analysis would clear (e.g. a quantified group with an inner quantifier that
+ * can never actually overlap) — ponytail: string scan over the pattern text, upgrade to a proper
+ * regex-safety library (e.g. `recheck`) if a legitimate pattern is ever rejected by it.
+ */
+function hasNestedQuantifier(pattern: string): boolean {
+  const isQuantifierChar = (ch: string): boolean => ch === "+" || ch === "*";
+  // For each open group: whether a quantifier has been seen inside it so far, and whether the
+  // group opened with a mandatory literal (plain char or `\x` escape) before any quantifier or
+  // alternation could appear. A leading literal forces every repetition of the group to consume
+  // that exact character first, so the group's own iterations cannot overlap ambiguously with an
+  // inner quantifier — the shape `(\.[a-z][a-z0-9_]*)*` (a dotted-name matcher) is this case, and
+  // is common enough in this codebase's own schemas to carve out rather than over-refuse.
+  const groupHasInnerQuantifier: boolean[] = [];
+  const groupGatedByLiteral: boolean[] = [];
+  for (let i = 0; i < pattern.length; i++) {
+    const ch = pattern[i];
+    if (ch === "\\") {
+      i++;
+      continue;
+    }
+    if (ch === "(") {
+      groupHasInnerQuantifier.push(false);
+      const next = pattern[i + 1];
+      const afterNext = next === "\\" ? pattern[i + 3] : pattern[i + 2];
+      const nextIsLiteral = next !== undefined && !"(|[.^$?*+{)".includes(next);
+      groupGatedByLiteral.push(nextIsLiteral && afterNext !== "*" && afterNext !== "+" && afterNext !== "?");
+      continue;
+    }
+    if (ch === ")") {
+      const bodyHadQuantifier = groupHasInnerQuantifier.pop() ?? false;
+      const gatedByLiteral = groupGatedByLiteral.pop() ?? false;
+      let quantifiesThisGroup = isQuantifierChar(pattern[i + 1] ?? "");
+      let braceEnd = -1;
+      if (!quantifiesThisGroup && pattern[i + 1] === "{") {
+        braceEnd = pattern.indexOf("}", i + 1);
+        quantifiesThisGroup = braceEnd !== -1 && /^\{\d*,?\d*\}$/.test(pattern.slice(i + 1, braceEnd + 1));
+      }
+      if (quantifiesThisGroup && bodyHadQuantifier && !gatedByLiteral) return true;
+      // A quantifier (or bounded repeat) on this group also counts as a quantifier for whatever
+      // group encloses it — that is exactly the shape `((a+)+)+` nests through.
+      if (quantifiesThisGroup && groupHasInnerQuantifier.length) groupHasInnerQuantifier[groupHasInnerQuantifier.length - 1] = true;
+      continue;
+    }
+    if (groupHasInnerQuantifier.length === 0) continue;
+    if (ch === "|") {
+      // An alternation means the group no longer always starts with the same leading literal
+      // (`(a|b+)*`: the `b+` branch has no leading `a`), so the literal gate no longer applies.
+      groupGatedByLiteral[groupGatedByLiteral.length - 1] = false;
+    } else if (isQuantifierChar(ch)) {
+      groupHasInnerQuantifier[groupHasInnerQuantifier.length - 1] = true;
+    } else if (ch === "{") {
+      const close = pattern.indexOf("}", i);
+      if (close !== -1 && /^\d*,?\d*$/.test(pattern.slice(i + 1, close))) {
+        groupHasInnerQuantifier[groupHasInnerQuantifier.length - 1] = true;
+      }
+    }
+  }
+  return false;
+}
+
 function checkSchemaNode(value: unknown, path: string, issues: ValidationIssue[], depth: number): void {
   if (depth > SCHEMA_DEPTH) {
     issues.push({ path, code: "too_deep", message: `schemas are limited to ${SCHEMA_DEPTH} levels` });
@@ -575,6 +643,10 @@ function checkSchemaNode(value: unknown, path: string, issues: ValidationIssue[]
   if (value.pattern !== undefined) {
     if (typeof value.pattern !== "string") {
       issues.push({ path: field(path, "pattern"), code: "wrong_type", message: "pattern must be a string" });
+    } else if (value.pattern.length > PATTERN_MAX_CHARS) {
+      issues.push({ path: field(path, "pattern"), code: "string_too_long", message: `pattern must be at most ${PATTERN_MAX_CHARS} characters` });
+    } else if (hasNestedQuantifier(value.pattern)) {
+      issues.push({ path: field(path, "pattern"), code: "bad_syntax", message: "pattern has a quantified group nested in another quantifier" });
     } else {
       try {
         new RegExp(value.pattern);
