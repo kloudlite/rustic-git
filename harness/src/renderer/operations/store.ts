@@ -155,8 +155,15 @@ export function createOperationStore(bridge: OperationRendererBridge) {
       // "" })`); once a caller supplies the real one, fill it in so `disposeSession` can find this
       // projection under the session that actually owns it, rather than leaving it stranded on
       // the empty placeholder forever.
-      if (held.sessionId === "" && owner.sessionId) held.sessionId = owner.sessionId;
-      if (held.workspaceId === undefined && owner.workspaceId !== undefined) held.workspaceId = owner.workspaceId;
+      let ownerFilled = false;
+      if (held.sessionId === "" && owner.sessionId) { held.sessionId = owner.sessionId; ownerFilled = true; }
+      if (held.workspaceId === undefined && owner.workspaceId !== undefined) { held.workspaceId = owner.workspaceId; ownerFilled = true; }
+      // `taskRows` filters by `sessionId`, a plain field, not a signal — a projection that was
+      // filtered out because it had no owner yet never had its `view()` read, so nothing re-runs
+      // the inspector's memo. Notify `entries()` so a caller reading it (`Inspector.tsx`'s
+      // `Tasks`) sees this projection become visible the moment the real owner is known, not on
+      // the next unrelated store change.
+      if (ownerFilled) setEntries([...projections.values()]);
       return held;
     }
     const [view, setView] = createSignal(createOperationView(operationId, Date.now()));

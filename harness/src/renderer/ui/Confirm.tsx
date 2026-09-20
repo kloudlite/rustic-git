@@ -1,4 +1,5 @@
 import { Show, createEffect, createUniqueId, onCleanup, type JSX } from "solid-js";
+import { Portal } from "solid-js/web";
 import { Button } from "./Button";
 
 /**
@@ -55,16 +56,23 @@ export function Confirm(props: { open: boolean; title: string; body: JSX.Element
   };
   return (
     <Show when={props.open}>
-      <div class="absolute inset-0 z-50 flex items-start justify-center bg-black/30 pt-[18vh]" onMouseDown={props.onNo}>
-        <div ref={dialog} role="dialog" aria-modal="true" aria-labelledby={titleId} class="w-[440px] max-w-[90vw] rounded-md border border-widget-line bg-overlay p-4 shadow-overlay" onMouseDown={(e) => e.stopPropagation()} onKeyDown={keyDown}>
-          <div id={titleId} class="text-base font-semibold text-fg-strong">{props.title}</div>
-          <div class="mt-2 text-sm leading-[20px] text-muted">{props.body}</div>
-          <div class="mt-4 flex justify-end gap-2">
-            <Button onClick={props.onNo}>Cancel</Button>
-            <Button variant="primary" disabled={props.disabled} onClick={props.onYes}>{props.danger}</Button>
+      {/* Chat.tsx wraps action rows in `[contain:layout_style]`, and `contain: layout` makes
+          that row the containing block for `fixed` AND `absolute` descendants, so without a
+          portal the backdrop covers one card instead of the window. `fixed` alone is NOT
+          enough — that containment is exactly what `fixed` is supposed to escape, and CSS
+          containment overrides it; both the portal and `fixed` are required. */}
+      <Portal>
+        <div class="fixed inset-0 z-50 flex items-start justify-center bg-black/30 pt-[18vh]" onMouseDown={props.onNo}>
+          <div ref={dialog} role="dialog" aria-modal="true" aria-labelledby={titleId} class="w-[440px] max-w-[90vw] rounded-md border border-widget-line bg-overlay p-4 shadow-overlay" onMouseDown={(e) => e.stopPropagation()} onKeyDown={keyDown}>
+            <div id={titleId} class="text-base font-semibold text-fg-strong">{props.title}</div>
+            <div class="mt-2 text-sm leading-[20px] text-muted">{props.body}</div>
+            <div class="mt-4 flex justify-end gap-2">
+              <Button onClick={props.onNo}>Cancel</Button>
+              <Button variant="primary" disabled={props.disabled} onClick={props.onYes}>{props.danger}</Button>
+            </div>
           </div>
         </div>
-      </div>
+      </Portal>
     </Show>
   );
 }

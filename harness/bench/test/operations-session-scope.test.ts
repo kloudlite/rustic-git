@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
+import { createRoot } from "solid-js";
 import { scenarioById } from "../../src/renderer/operations/fixtures/scenarios.ts";
 import { createOperationStore } from "../../src/renderer/operations/store.ts";
 
@@ -44,4 +45,28 @@ test("a projection opened before its session resolved (sessionId '') learns the 
   assert.equal(resolved.sessionId, "s-9");
   store.disposeSession("s-9");
   assert.equal(store.entries().length, 0, "disposeSession found it under the session it was filled in with");
+});
+
+test("filling in a placeholder sessionId notifies entries(), so a reactive taskRows() memo picks the projection up without an unrelated store change", () => {
+  const scenario = scenarioById("parallel-steps");
+  const store = createOperationStore({ loadSnapshot: async () => scenario.expected, loadEvents: async () => [] });
+  // `taskRows` filters by `projection.sessionId`, a plain field, not a signal, so a Solid memo
+  // built from its return value has nothing reactive to track unless the caller also reads
+  // `entries()` — exactly what `Inspector.tsx`'s `Tasks` listing does. Node's `solid-js` module
+  // resolves to the non-reactive server build outside a browser/vite condition, so this test
+  // exercises the same contract at the signal level rather than through `createMemo`'s actual
+  // recomputation: `entries()` must be called with a NEW array (a distinct reference — that is
+  // what `setEntries` does, and what a subscribed memo would re-run on) at the moment ownership
+  // resolves, not only on some later, unrelated store write.
+  createRoot(() => {
+    store.open(scenario.expected.operationId, { sessionId: "" });
+    assert.equal(store.taskRows("s-1", undefined).length, 0, "not yet owned by s-1");
+    // Captured AFTER the unowned open (which already calls `setEntries` once, for the initial
+    // creation) so this isolates the fill-in path specifically, not the creation path.
+    const beforeFillIn = store.entries();
+    store.open(scenario.expected.operationId, { sessionId: "s-1" });
+    assert.notStrictEqual(store.entries(), beforeFillIn, "entries() must have been notified for the memo to see the fill-in");
+    assert.equal(store.taskRows("s-1", undefined).length, 1);
+  });
+  store.dispose();
 });

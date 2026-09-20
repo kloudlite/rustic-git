@@ -1,5 +1,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
+import { readFileSync } from "node:fs";
+import { resolve } from "node:path";
 import {
   OPERATION_EVENT_PHASES,
   OPERATION_TRANSITIONS,
@@ -1226,4 +1228,12 @@ test("the envelope's own limits are reported, not hidden", () => {
   assert.equal(durable.steps[0].error?.retryable, true, "only the record says it is retryable");
   assert.match(errorRows(durable)[0].value, /retryable/);
   assert.ok((durable.steps[0].error?.message.length ?? 0) > 0, "the record carries the failure's words");
+});
+
+test("the operations barrel does not re-export the test fixtures", () => {
+  // `./fixtures/scenarios.ts` is 1168 lines of scenario data; every test imports it directly by
+  // path, so re-exporting it from `operations/index.ts` only shipped it in the production
+  // bundle for nothing (review M1). This is a source-level guard against it coming back.
+  const barrel = readFileSync(resolve(process.cwd(), "src/renderer/operations/index.ts"), "utf8");
+  assert.doesNotMatch(barrel, /fixtures\//);
 });
