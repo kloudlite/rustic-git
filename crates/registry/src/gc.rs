@@ -301,7 +301,12 @@ pub async fn reconcile_repo_owner(store: &Store, owner: &str) -> Result<usize> {
 /// abort, never be read as either old or fresh).
 async fn installed_before(store: &Store, active: &blob_state::BlobGeneration, cutoff: chrono::DateTime<chrono::Utc>) -> Result<Option<bool>> {
     if active.installed_at > 0 {
-        let installed_at = chrono::DateTime::<chrono::Utc>::from_timestamp_millis(active.installed_at).unwrap_or(cutoff);
+        // Keep-bias: an `installed_at` chrono cannot convert (out of its representable range) must
+        // read as UNKNOWN, never as "equal to the cutoff" — `.unwrap_or(cutoff)` made
+        // `installed_at <= cutoff` trivially true, sweeping a blob whose real age nobody checked.
+        let Some(installed_at) = chrono::DateTime::<chrono::Utc>::from_timestamp_millis(active.installed_at) else {
+            return Ok(Some(false));
+        };
         return Ok(Some(installed_at <= cutoff));
     }
     let meta = match store.os.head(&slatedb::object_store::path::Path::from(active.physical_key.as_str())).await {
@@ -512,6 +517,28 @@ mod tests {
         // A grace long enough to put the blob's real (recent) age before the cutoff.
         let n = sweep_owner(&store, "acme", Duration::from_secs(0)).await.unwrap();
         assert_eq!(n, 1, "the same record, judged by its own recent age, is old enough with grace ZERO");
+    }
+
+    /// Fixup: an `installed_at` chrono cannot convert (out of its representable range) must read
+    /// as UNKNOWN, not as "equal to the cutoff" — the old `.unwrap_or(cutoff)` made
+    /// `installed_at <= cutoff` trivially true, so an unconvertible timestamp swept a blob that
+    /// might be seconds old. Keep-bias: uncertainty keeps.
+    #[tokio::test]
+    async fn a_blob_whose_install_time_cannot_be_read_is_kept() {
+        let (_tmp, _os, store) = env().await;
+        let d = digest(b"unconvertible install time");
+        let (_, path) = blob_state::new_generation("acme", &d);
+        store.os.put(&path, PutPayload::from(b"unconvertible install time".to_vec())).await.unwrap();
+        let record = blob_state::BlobRecord {
+            nonce: "n".into(),
+            active: Some(blob_state::BlobGeneration { physical_key: path.to_string(), pins: Vec::new(), installed_at: i64::MAX }),
+            retired: Vec::new(),
+        };
+        store.os.put(&blob_state::state_path("acme", &d), PutPayload::from(serde_json::to_vec(&record).unwrap())).await.unwrap();
+
+        let n = sweep_owner(&store, "acme", Duration::from_secs(0)).await.unwrap();
+        assert_eq!(n, 0, "an unreadable install time must keep the blob, not sweep it");
+        assert!(store.os.head(&path).await.is_ok(), "the blob must still be here");
     }
 
     /// T3: a generation retired by a re-upload survives one sweep (the grace period), then goes.
