@@ -465,6 +465,20 @@ function planStep(view: OperationView, event: OperationEvent): StepPlan {
   }
   const effect = STEP_PHASE[event.phase];
   const existing = view.steps.find((step) => step.stepId === stepId);
+  // O01 has no "skipped" event phase: a step that depended on one that failed is recorded as
+  // an ordinary `progress` event carrying `decisionCode: "dependency_failed"`. Without this
+  // branch a `progress` event is a pure observation (`STEP_PHASE.progress.observe`) and the step
+  // would sit on "queued" — a step that will never run — until the next snapshot reload, which
+  // is exactly the silent state the owner rule refuses.
+  if (event.phase === "progress" && event.decisionCode === "dependency_failed") {
+    if (!existing || existing.state !== "queued") {
+      return {
+        ok: false,
+        repair: { need: "snapshot", reason: "unexpected_transition", message: `step ${stepId} was skipped from a state the view did not expect` },
+      };
+    }
+    return { ok: true, steps: replace(view.steps, applyStepEdge(observeStep(existing, event), "skipped", event)) };
+  }
   if (event.phase === "decision_recorded" && event.decisionCode !== "denied" && existing?.state === "queued") {
     return { ok: true, steps: replace(view.steps, observeStep(existing, event)) };
   }
