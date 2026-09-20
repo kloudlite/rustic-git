@@ -1,5 +1,6 @@
 use anyhow::{anyhow, Result};
-use k8s_openapi::api::{batch::v1::Job, core::v1::ConfigMap};
+use k8s_openapi::api::{batch::v1::Job, core::v1::{ConfigMap, Pod}};
+use k8s_openapi::apimachinery::pkg::apis::meta::v1::OwnerReference;
 use kube::{api::{Api, DeleteParams, PostParams, Preconditions}, ResourceExt};
 use std::time::{Duration, Instant};
 
@@ -8,6 +9,58 @@ const NAME: &str = "kloudlite-roll-coordination";
 
 fn active_phase(phase: Option<&str>) -> bool {
     !matches!(phase, Some("Succeeded" | "Failed"))
+}
+
+/// A live holder refused the lock — distinct from every other `acquire` failure so the fast suite
+/// (the only caller that may see this and keep going, R-1) can tell "somebody else has it" apart
+/// from "the cluster is unreachable", which must still fail closed. Carries the holder string
+/// (`ctx.rs` puts it straight into the skipped run's reason) rather than the ConfigMap, since the
+/// caller has no use for the object once it has decided not to take it.
+#[derive(Debug)]
+pub struct Held(pub String);
+
+impl std::fmt::Display for Held {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "roll coordination is held by {}", self.0)
+    }
+}
+
+impl std::error::Error for Held {}
+
+/// Is the pod or job named on an existing lock still able to finish and release it? `None` for
+/// either half of the pair means "nothing recorded" — a plain (non-job) lock has no job at all,
+/// and a lock this same function is deciding on has always been written with `owner_pod_uid`, so
+/// treat a missing pod uid as gone rather than as "unknown, so assume alive": a lock that predates
+/// this field would otherwise block the fleet forever, which is exactly the bug R-1 closes.
+async fn holder_is_live(client: &kube::Client, owner_pod_uid: Option<&str>, job_uid: Option<&str>) -> Result<bool> {
+    if let Some(job_uid) = job_uid {
+        let jobs: Api<Job> = Api::namespaced(client.clone(), NAMESPACE);
+        // A job that no longer exists at all cannot still be holding anything either.
+        let job = match jobs.list(&kube::api::ListParams::default()).await {
+            Ok(list) => list.items.into_iter().find(|j| j.uid().as_deref() == Some(job_uid)),
+            Err(e) => return Err(anyhow!("could not list jobs to judge roll lock holder: {e}")),
+        };
+        let Some(job) = job else { return Ok(false) };
+        let terminal = job
+            .status
+            .as_ref()
+            .and_then(|s| s.conditions.as_ref())
+            .is_some_and(|conds| conds.iter().any(|c| matches!(c.type_.as_str(), "Complete" | "Failed") && c.status == "True"));
+        return Ok(!terminal);
+    }
+    let Some(owner_pod_uid) = owner_pod_uid else { return Ok(false) };
+    let pods: Api<Pod> = Api::namespaced(client.clone(), NAMESPACE);
+    let pod = pods
+        .list(&kube::api::ListParams::default())
+        .await
+        .map_err(|e| anyhow!("could not list pods to judge roll lock holder: {e}"))?
+        .items
+        .into_iter()
+        .find(|p| p.uid().as_deref() == Some(owner_pod_uid));
+    Ok(match pod {
+        None => false,
+        Some(pod) => active_phase(pod.status.as_ref().and_then(|s| s.phase.as_deref())),
+    })
 }
 
 pub struct RollLock {
@@ -28,24 +81,100 @@ pub async fn client() -> Result<kube::Client> {
 pub async fn acquire(client: kube::Client, run_id: &str) -> Result<RollLock> {
     let api = Api::namespaced(client.clone(), NAMESPACE);
     let pod_uid = std::env::var("KLOUDLITE_POD_UID").unwrap_or_else(|_| "manual".into());
+    // Kubelet sets a pod's hostname to its own name by default — `roll.sh` already leans on the
+    // same `${HOSTNAME:-}` for its ownerReference, so this is not a new assumption.
+    let pod_name = std::env::var("HOSTNAME").ok().filter(|s| !s.is_empty());
     let job_name = std::env::var("KLOUDLITE_SLO_JOB_NAME").unwrap_or_default();
     let random = format!("{:032x}", rand::random::<u128>());
     let holder = format!("{pod_uid}/{run_id}/{random}");
     let mut data = [("holder".into(), holder)].into_iter().collect::<std::collections::BTreeMap<_, _>>();
+    // `owner_pod_uid` on EVERY lock, not only a job-owned one: a fast run's lock needs it just as
+    // much for `holder_is_live` to judge a takeover, and a plain "manual" run (no pod at all, a
+    // human at a shell) records the sentinel so takeover treats it as never live rather than
+    // panicking on a missing key.
+    if pod_uid != "manual" {
+        data.insert("owner_pod_uid".into(), pod_uid.clone());
+    }
     if !job_name.is_empty() {
-        let jobs: Api<Job> = Api::namespaced(client, NAMESPACE);
+        let jobs: Api<Job> = Api::namespaced(client.clone(), NAMESPACE);
         let job = jobs.get(&job_name).await.map_err(|e| anyhow!("could not inspect hourly probe job: {e}"))?;
         data.insert("job_name".into(), job_name);
         data.insert("job_uid".into(), job.uid().ok_or_else(|| anyhow!("hourly probe job has no uid"))?);
-        data.insert("owner_pod_uid".into(), pod_uid.clone());
     }
+    // So Kubernetes collects the lock itself when the holder pod is garbage-collected — belt to
+    // the takeover-on-AlreadyExists braces, not a replacement for it (a Job's pod is deleted on
+    // its own schedule, not the instant it goes terminal).
+    let owner_references = pod_name.as_ref().map(|name| {
+        vec![OwnerReference {
+            api_version: "v1".into(),
+            kind: "Pod".into(),
+            name: name.clone(),
+            uid: pod_uid.clone(),
+            controller: Some(true),
+            block_owner_deletion: Some(false),
+        }]
+    });
     let cm = ConfigMap {
-        metadata: kube::api::ObjectMeta { name: Some(NAME.into()), namespace: Some(NAMESPACE.into()), ..Default::default() },
-        data: Some(data),
+        metadata: kube::api::ObjectMeta {
+            name: Some(NAME.into()),
+            namespace: Some(NAMESPACE.into()),
+            owner_references: owner_references.clone(),
+            ..Default::default()
+        },
+        data: Some(data.clone()),
         ..Default::default()
     };
-    let created = api.create(&PostParams::default(), &cm).await.map_err(|e| anyhow!("roll coordination is held or unavailable: {e}"))?;
-    Ok(RollLock { api, uid: created.uid().ok_or_else(|| anyhow!("coordination lock has no uid"))?, resource_version: created.resource_version().ok_or_else(|| anyhow!("coordination lock has no resourceVersion"))? })
+    match api.create(&PostParams::default(), &cm).await {
+        Ok(created) => Ok(RollLock {
+            api,
+            uid: created.uid().ok_or_else(|| anyhow!("coordination lock has no uid"))?,
+            resource_version: created.resource_version().ok_or_else(|| anyhow!("coordination lock has no resourceVersion"))?,
+        }),
+        Err(kube::Error::Api(e)) if e.code == 409 => take_over(&api, client, &data, owner_references).await,
+        Err(e) => Err(anyhow!("roll coordination is held or unavailable: {e}")),
+    }
+}
+
+/// The existing lock's holder is gone or terminal (checked against the API, never age): replace it
+/// with OUR data, CAS'd on the uid/resourceVersion just read so two racing takeovers cannot both
+/// win — the loser's precondition fails and it falls back to reporting the (by-then new) holder as
+/// live, same as any other contended acquire.
+async fn take_over(
+    api: &Api<ConfigMap>,
+    client: kube::Client,
+    data: &std::collections::BTreeMap<String, String>,
+    owner_references: Option<Vec<OwnerReference>>,
+) -> Result<RollLock> {
+    let existing = api.get(NAME).await.map_err(|e| anyhow!("could not read existing roll lock: {e}"))?;
+    let existing_data = existing.data.clone().unwrap_or_default();
+    let live = holder_is_live(&client, existing_data.get("owner_pod_uid").map(String::as_str), existing_data.get("job_uid").map(String::as_str)).await?;
+    if live {
+        let holder = existing_data.get("holder").cloned().unwrap_or_else(|| "an unknown holder".into());
+        return Err(Held(holder).into());
+    }
+    let resource_version = existing.resource_version().ok_or_else(|| anyhow!("existing roll lock has no resourceVersion"))?;
+    let replace = ConfigMap {
+        metadata: kube::api::ObjectMeta {
+            name: Some(NAME.into()),
+            namespace: Some(NAMESPACE.into()),
+            resource_version: Some(resource_version),
+            owner_references,
+            ..Default::default()
+        },
+        data: Some(data.clone()),
+        ..Default::default()
+    };
+    // `replace` (PUT), not delete-then-create: the resourceVersion IS the precondition, and a
+    // delete-then-create window is exactly where a second dead-holder takeover would race this one.
+    let taken = api
+        .replace(NAME, &PostParams::default(), &replace)
+        .await
+        .map_err(|e| anyhow!("roll coordination takeover was refused (a racing takeover likely won): {e}"))?;
+    Ok(RollLock {
+        api: api.clone(),
+        uid: taken.uid().ok_or_else(|| anyhow!("coordination lock has no uid"))?,
+        resource_version: taken.resource_version().ok_or_else(|| anyhow!("coordination lock has no resourceVersion"))?,
+    })
 }
 
 pub async fn wait_for_group_owner(client: kube::Client, job_name: &str, timeout: Duration) -> Result<()> {

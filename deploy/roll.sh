@@ -40,10 +40,52 @@ wait_for_probes
 ROLL_RUN="roll-$(date -u +%s)-$RANDOM"
 POD_UID=$(kubectl -n kloudlite get pod "${HOSTNAME:-}" -o jsonpath='{.metadata.uid}' 2>/dev/null || true)
 HOLDER="${POD_UID:-operator}/$ROLL_RUN"
+# R-1: this script has no pod identity of its own to check against, so a takeover is judged
+# entirely from what the EXISTING lock names — never age. Mirrors `coordination::take_over` in
+# `bins/slo/src/coordination.rs`: a job-owned (hourly probe) lock is gone/terminal when its
+# `job_uid` names no Job with a True `Complete`/`Failed` condition, or names no Job at all; a
+# plain lock (another `roll.sh`, or a fast run) is gone when its `owner_pod_uid` (or, for a lock
+# this old script itself wrote before that field existed, the pod uid `holder` starts with) names
+# no live Pod.
+holder_is_live() {
+  local existing_json="$1"
+  local job_uid owner_pod_uid holder
+  job_uid=$(jq -r '.data.job_uid // empty' <<<"$existing_json")
+  owner_pod_uid=$(jq -r '.data.owner_pod_uid // empty' <<<"$existing_json")
+  holder=$(jq -r '.data.holder // empty' <<<"$existing_json")
+  if [ -n "$job_uid" ]; then
+    local job
+    job=$(kubectl -n kloudlite get jobs -o json | jq -c --arg uid "$job_uid" '.items[] | select(.metadata.uid == $uid)')
+    [ -z "$job" ] && return 1
+    jq -e '(.status.conditions // []) | any(.type == "Complete" or .type == "Failed"; .status == "True")' <<<"$job" >/dev/null && return 1
+    return 0
+  fi
+  local pod_uid="${owner_pod_uid:-${holder%%/*}}"
+  [ -z "$pod_uid" ] && return 1
+  kubectl -n kloudlite get pods -o json \
+    | jq -e --arg uid "$pod_uid" '.items[] | select(.metadata.uid == $uid and (.status.phase != "Succeeded" and .status.phase != "Failed"))' >/dev/null
+}
 LOCK_JSON=$(kubectl -n kloudlite create configmap kloudlite-roll-coordination \
-  --from-literal="holder=$HOLDER" -o json) || {
-  echo "roll coordination is held by another operation" >&2
-  exit 3
+  --from-literal="holder=$HOLDER" -o json 2>/dev/null) || {
+  EXISTING_JSON=$(kubectl -n kloudlite get configmap kloudlite-roll-coordination -o json) || {
+    echo "roll coordination is held or unavailable" >&2
+    exit 3
+  }
+  if holder_is_live "$EXISTING_JSON"; then
+    echo "roll coordination is held by $(jq -r '.data.holder // "an unknown holder"' <<<"$EXISTING_JSON")" >&2
+    exit 3
+  fi
+  EXISTING_UID=$(jq -r '.metadata.uid' <<<"$EXISTING_JSON")
+  EXISTING_RV=$(jq -r '.metadata.resourceVersion' <<<"$EXISTING_JSON")
+  # Replace (PUT), CAS'd on the resourceVersion just read — the same reason the Rust side uses
+  # `replace` rather than delete-then-create: a delete-then-create window is exactly where a
+  # second, racing takeover would land, and a PUT's precondition catches that race instead.
+  REPLACE_BODY=$(jq -n --arg uid "$EXISTING_UID" --arg rv "$EXISTING_RV" --arg holder "$HOLDER" \
+    '{apiVersion:"v1",kind:"ConfigMap",metadata:{name:"kloudlite-roll-coordination",namespace:"kloudlite",uid:$uid,resourceVersion:$rv},data:{holder:$holder}}')
+  LOCK_JSON=$(kubectl -n kloudlite replace -f - -o json <<<"$REPLACE_BODY") || {
+    echo "roll coordination takeover was refused (a racing takeover likely won)" >&2
+    exit 3
+  }
 }
 LOCK_UID=$(jq -r '.metadata.uid' <<<"$LOCK_JSON")
 LOCK_RV=$(jq -r '.metadata.resourceVersion' <<<"$LOCK_JSON")

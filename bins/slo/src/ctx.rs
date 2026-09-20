@@ -153,6 +153,12 @@ pub struct Ctx {
     pub beat: std::sync::Arc<std::sync::Mutex<Option<kloudlite_workspaces::history::slo::RunReport>>>,
     pub coordination: Option<crate::coordination::RollLock>,
     coordination_group: Option<String>,
+    /// Set only for the fast suite, only when `coordination::acquire` found a LIVE holder: the
+    /// fast suite ticks every five minutes underneath the hourly's up-to-55-minute hold, so a live
+    /// holder there is routine, not a failure the way it would be for every other suite (R-1 /
+    /// R-C1 — the old code failed `Ctx::new` outright and lost every fast sample in the window).
+    /// `main.rs` reads this to file a skipped run naming the holder instead of exiting `EXIT_CONFIG`.
+    pub coordination_held_by: Option<String>,
 }
 
 /// How long the run's single downgrade window stays open. One srv roll is minutes; this is
@@ -226,8 +232,20 @@ impl Ctx {
         let coordination_enabled = coordinate;
         let group_owner = parent_run && suite == Suite::Hourly && group.is_none_or(|index| index == 0);
         let coordination_group = group_owner.then(|| std::env::var("KLOUDLITE_SLO_JOB_NAME").unwrap_or_default()).filter(|name| !name.is_empty());
+        let mut coordination_held_by = None;
         let coordination = if parent_run && coordination_enabled && (suite != Suite::Hourly || group_owner) {
-            Some(crate::coordination::acquire(crate::coordination::client().await?, &effective_run_id).await?)
+            match crate::coordination::acquire(crate::coordination::client().await?, &effective_run_id).await {
+                Ok(lock) => Some(lock),
+                // Only the fast suite may read a live holder as routine rather than a failure — it
+                // ticks every 5 min underneath the hourly's up-to-55-minute hold, so this is the
+                // ordinary case, not an outage. Every other suite still fails closed: the `?`
+                // propagates a `Held` the same as any other `acquire` error.
+                Err(e) if suite == Suite::Fast && e.downcast_ref::<crate::coordination::Held>().is_some() => {
+                    coordination_held_by = Some(e.to_string());
+                    None
+                }
+                Err(e) => return Err(e),
+            }
         } else if parent_run && coordination_enabled && suite == Suite::Hourly && group.is_some() {
             let job_name = std::env::var("KLOUDLITE_SLO_JOB_NAME").map_err(|_| anyhow::anyhow!("hourly probe has no job name"))?;
             crate::coordination::wait_for_group_owner(crate::coordination::client().await?, &job_name, Duration::from_secs(120)).await?;
@@ -293,6 +311,7 @@ impl Ctx {
             cfg,
             coordination,
             coordination_group,
+            coordination_held_by,
         })
     }
 

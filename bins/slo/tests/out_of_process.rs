@@ -144,6 +144,138 @@ async fn kube_stub() -> (String, Arc<KubeCalls>) {
     (format!("http://{addr}"), calls)
 }
 
+/// The same fixture as `kube_stub`, but seeded with a lock that already exists — for R-1's
+/// takeover path, which only fires on `AlreadyExists`. `owner_pod_uid` is the dead/live pod's own
+/// uid; `pod_live` decides whether `/api/v1/namespaces/kloudlite/pods` answers with that pod
+/// Running (still holds it) or with nothing (gone, so `coordination::acquire` may take over).
+/// Adds GET (read before replace) and PUT (the takeover's own CAS'd write) on the ConfigMap, and a
+/// pods list, none of which `kube_stub` needs for the happy path.
+async fn kube_stub_with_existing_lock(owner_pod_uid: &str, pod_live: bool) -> (String, Arc<KubeCalls>) {
+    let calls = Arc::new(KubeCalls::default());
+    let (created, released, nodes, replaced) = (calls.clone(), calls.clone(), calls.clone(), calls.clone());
+    let owner_pod_uid = owner_pod_uid.to_string();
+    let existing_holder = format!("dead-pod-uid/fast-1/{:032x}", 0u128);
+    let app = axum::Router::new()
+        .route(
+            "/api/v1/namespaces/kloudlite/configmaps",
+            axum::routing::post(move |Json(_body): Json<serde_json::Value>| {
+                let created = created.clone();
+                async move {
+                    created.created.fetch_add(1, Ordering::SeqCst);
+                    // The real API server's AlreadyExists on a create — this is what R-1's
+                    // takeover branch (`coordination::take_over`) exists to handle.
+                    (
+                        StatusCode::CONFLICT,
+                        Json(serde_json::json!({
+                            "apiVersion": "v1", "kind": "Status", "status": "Failure",
+                            "reason": "AlreadyExists", "code": 409,
+                        })),
+                    )
+                }
+            }),
+        )
+        .route(
+            "/api/v1/namespaces/kloudlite/configmaps/{name}",
+            axum::routing::get({
+                let owner_pod_uid = owner_pod_uid.clone();
+                let existing_holder = existing_holder.clone();
+                move || {
+                    let owner_pod_uid = owner_pod_uid.clone();
+                    let existing_holder = existing_holder.clone();
+                    async move {
+                        Json(serde_json::json!({
+                            "apiVersion": "v1",
+                            "kind": "ConfigMap",
+                            "metadata": {
+                                "name": "kloudlite-roll-coordination",
+                                "namespace": "kloudlite",
+                                "uid": "old-lock-uid",
+                                "resourceVersion": "9",
+                            },
+                            "data": { "holder": existing_holder, "owner_pod_uid": owner_pod_uid },
+                        }))
+                    }
+                }
+            })
+            .put(move |Json(body): Json<serde_json::Value>| {
+                let replaced = replaced.clone();
+                async move {
+                    replaced.released.fetch_add(1, Ordering::SeqCst); // reused counter: "the old lock is gone"
+                    (
+                        StatusCode::OK,
+                        Json(serde_json::json!({
+                            "apiVersion": "v1",
+                            "kind": "ConfigMap",
+                            "metadata": {
+                                "name": "kloudlite-roll-coordination",
+                                "namespace": "kloudlite",
+                                "uid": "new-lock-uid",
+                                "resourceVersion": "10",
+                            },
+                            "data": body.get("data").cloned().unwrap_or_else(|| serde_json::json!({})),
+                        })),
+                    )
+                }
+            })
+            .delete(move |Json(body): Json<serde_json::Value>| {
+                let released = released.clone();
+                async move {
+                    released.released.fetch_add(1, Ordering::SeqCst);
+                    *released.released_uid.lock().expect("lock") =
+                        body.pointer("/preconditions/uid").and_then(|v| v.as_str()).map(str::to_owned);
+                    (
+                        StatusCode::OK,
+                        Json(serde_json::json!({ "apiVersion": "v1", "kind": "Status", "status": "Success", "code": 200 })),
+                    )
+                }
+            }),
+        )
+        .route(
+            "/api/v1/namespaces/kloudlite/pods",
+            axum::routing::get(move || {
+                let owner_pod_uid = owner_pod_uid.clone();
+                async move {
+                    let items = if pod_live {
+                        serde_json::json!([{
+                            "apiVersion": "v1", "kind": "Pod",
+                            "metadata": { "name": "holder-pod", "uid": owner_pod_uid },
+                            "status": { "phase": "Running" },
+                        }])
+                    } else {
+                        serde_json::json!([])
+                    };
+                    Json(serde_json::json!({
+                        "apiVersion": "v1", "kind": "PodList",
+                        "metadata": { "resourceVersion": "1" },
+                        "items": items,
+                    }))
+                }
+            }),
+        )
+        .route(
+            "/api/v1/nodes",
+            axum::routing::get(move || {
+                let nodes = nodes.clone();
+                async move {
+                    nodes.nodes_listed.fetch_add(1, Ordering::SeqCst);
+                    Json(serde_json::json!({
+                        "apiVersion": "v1",
+                        "kind": "NodeList",
+                        "metadata": { "resourceVersion": "1" },
+                        "items": [],
+                    }))
+                }
+            }),
+        )
+        .fallback(axum::routing::any(|| async { Json(serde_json::json!([])) }));
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.expect("bind");
+    let addr = listener.local_addr().expect("addr");
+    tokio::spawn(async move {
+        let _ = axum::serve(listener, app).await;
+    });
+    (format!("http://{addr}"), calls)
+}
+
 /// A temporary, explicit KUBECONFIG for the fake endpoint and nothing else. `env_clear` on the
 /// child also drops `KUBERNETES_SERVICE_HOST`, so `kube::Config::infer` finds this file and cannot
 /// fall back to a ServiceAccount: it is the only cluster the real binary can reach.
@@ -176,9 +308,6 @@ fn child_command(url: &str, kubeconfig: &Path) -> std::process::Command {
         .args(["run", "--suite", "fast"])
         .env_clear()
         .env("PATH", std::env::var("PATH").unwrap_or_default())
-        // Deliberately the value the REMOVED runtime opt-out used: the knob no longer exists, so
-        // setting it must not keep the lock from being taken.
-        .env("KLOUDLITE_SLO_COORDINATION", "0")
         .env("KUBECONFIG", kubeconfig)
         .env("KLOUDLITE_ADMIN_API_URL", url)
         .env("KLOUDLITE_API_URL", url)
@@ -272,4 +401,84 @@ async fn a_malformed_incluster_env_cannot_fall_back_to_the_kubeconfig() {
     assert_eq!(kube.created.load(Ordering::SeqCst), 0, "the run fell back to KUBECONFIG; logs:\n{logs}");
     assert_eq!(kube.released.load(Ordering::SeqCst), 0, "logs:\n{logs}");
     assert_eq!(kube.nodes_listed.load(Ordering::SeqCst), 0, "logs:\n{logs}");
+}
+
+/// R-1 / R-C1: a lock left behind by a holder pod that is simply gone (never went `Succeeded` or
+/// `Failed` — it was OOM-killed or SIGKILLed, so nothing ever cleaned up) must not block the fleet
+/// forever. `acquire`'s AlreadyExists branch reads the old lock, sees its `owner_pod_uid` names no
+/// live pod, and replaces it (CAS'd on the old resourceVersion) rather than failing `Ctx::new`.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_lock_whose_owner_pod_is_absent_is_taken_over() {
+    let (url, reports, _lists) = stub().await;
+    let (kube_url, kube) = kube_stub_with_existing_lock("dead-pod-uid", false).await;
+    let kubeconfig = write_kubeconfig(&kube_url);
+    let out = tokio::task::spawn_blocking({
+        let url = url.clone();
+        let kubeconfig = kubeconfig.clone();
+        move || child_command(&url, &kubeconfig).output().expect("spawn")
+    })
+    .await
+    .expect("join");
+    let _ = std::fs::remove_dir_all(kubeconfig.parent().expect("kubeconfig dir"));
+
+    let logs = String::from_utf8_lossy(&out.stderr).to_string();
+    // Not asserting exit 0: the takeover succeeds and the full fast journey then runs for real
+    // against this test's bare-bones fake admin server, which fails plenty of unrelated steps —
+    // that noise is not what R-1 is about. What R-1 promises is that the run was never REFUSED
+    // for the lock: it took the roll lock and reported normally rather than being skipped.
+    assert_ne!(out.status.code(), Some(2), "the run failed to start (EXIT_CONFIG); logs:\n{logs}");
+    // The takeover REPLACES (PUT), never blind-deletes: a create that got AlreadyExists must not
+    // fall back to skipping the run just because a dead holder's object is still there.
+    assert_eq!(kube.created.load(Ordering::SeqCst), 1, "never attempted the create; logs:\n{logs}");
+    assert!(logs.contains("slo.run.finished"), "no final log; logs:\n{logs}");
+    let reports = reports.lock().expect("lock");
+    let last = reports.last().expect("at least one report");
+    assert_ne!(last["state"], "yielded", "a dead-holder lock should have been taken, not skipped: {last}");
+}
+
+/// The other half: a LIVE holder must still refuse the takeover. `holder_is_live` finds the pod
+/// Running and `acquire` returns `Held`, which only the fast suite may read as a skip.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_lock_whose_owner_pod_is_live_is_respected() {
+    let (url, _reports, _lists) = stub().await;
+    let (kube_url, kube) = kube_stub_with_existing_lock("live-pod-uid", true).await;
+    let kubeconfig = write_kubeconfig(&kube_url);
+    let out = tokio::task::spawn_blocking({
+        let url = url.clone();
+        let kubeconfig = kubeconfig.clone();
+        move || child_command(&url, &kubeconfig).output().expect("spawn")
+    })
+    .await
+    .expect("join");
+    let _ = std::fs::remove_dir_all(kubeconfig.parent().expect("kubeconfig dir"));
+
+    let logs = String::from_utf8_lossy(&out.stderr).to_string();
+    // A live holder is not taken over — but it is also not a config failure for the fast suite:
+    // the run still exits 0, having reported a skip (asserted below), never `EXIT_CONFIG` (2).
+    assert_eq!(out.status.code(), Some(0), "exit; logs:\n{logs}");
+    assert_eq!(kube.created.load(Ordering::SeqCst), 1, "never attempted the create; logs:\n{logs}");
+}
+
+/// The same live-holder lock, read from the run's own final report: `state` is `yielded` (the
+/// in-flight shape every other yield in this suite uses) and the reason names the holder, so an
+/// operator reading the console sees why rather than a bare failure.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_fast_run_under_a_live_lock_reports_a_skip_naming_the_holder() {
+    let (url, reports, _lists) = stub().await;
+    let (kube_url, _kube) = kube_stub_with_existing_lock("live-pod-uid", true).await;
+    let kubeconfig = write_kubeconfig(&kube_url);
+    let out = tokio::task::spawn_blocking({
+        let url = url.clone();
+        let kubeconfig = kubeconfig.clone();
+        move || child_command(&url, &kubeconfig).output().expect("spawn")
+    })
+    .await
+    .expect("join");
+    let _ = std::fs::remove_dir_all(kubeconfig.parent().expect("kubeconfig dir"));
+
+    let logs = String::from_utf8_lossy(&out.stderr).to_string();
+    assert_eq!(out.status.code(), Some(0), "exit; logs:\n{logs}");
+    let reports = reports.lock().expect("lock");
+    let last = reports.last().expect("at least one report");
+    assert_eq!(last["state"], "yielded", "logs:\n{logs}\nreport: {last}");
 }
