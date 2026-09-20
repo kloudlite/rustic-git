@@ -14,12 +14,13 @@ export interface ExecutorStore {
   markOutcomeUnknown(operationId: string, stepId: string, input?: { summary?: string }): OperationSnapshot;
   reconcileStep(operationId: string, stepId: string, input: { conclusion: "succeeded" | "failed"; evidenceRefs?: string[]; error?: OperationError }): OperationSnapshot;
   cancelStep(operationId: string, stepId: string, input: { evidenceRefs: string[] }): OperationSnapshot;
+  skipStep(operationId: string, stepId: string, input?: { summary?: string }): OperationSnapshot;
   requireDecision(operationId: string, stepId: string, input: { decisionId: string; decisionClass: "user_authorization" | "user_preference"; question: string; payloadDigest: string }): OperationSnapshot;
   recordDecision(record: RecordedDecision, currentContext: TrustedActorContext): OperationSnapshot;
   resume(input: { request: { action: "resume"; operationId: string; decisionId: string; expectedRevision: number; resolution: { kind: "recorded_user_decision"; recordId: string } }; context: TrustedActorContext }): { outcome: "dispatch" | "refuse_step" | "supply_input"; snapshot: OperationSnapshot; dispatchToken?: DispatchToken };
   requestCancel(operationId: string, input?: { reason?: string }): OperationSnapshot;
   expire(operationId: string): OperationSnapshot;
-  settle(operationId: string): { snapshot: OperationSnapshot };
+  settle(operationId: string, options?: { settleFailed?: boolean }): { snapshot: OperationSnapshot };
   load(operationId: string): OperationSnapshot;
 }
 
@@ -62,6 +63,8 @@ export type RecoverInput = {
   signal?: AbortSignal;
 };
 
+export type RecoveryOutcome = { handled: RecoveryAction[]; deferred: RecoveryAction[] };
+
 export class OperationExecutor {
   #store: ExecutorStore;
   #registry: Pick<CapabilityRegistry, "get" | "prepare" | "dispatch">;
@@ -97,14 +100,23 @@ export class OperationExecutor {
     const controller = new AbortController();
     let cancellationRecorded = false;
     const cancellation = () => {
-      if (!cancellationRecorded) {
-        cancellationRecorded = true;
-        this.#store.requestCancel(input.operationId, { reason: "executor abort" });
+      try {
+        if (!cancellationRecorded) {
+          this.#store.requestCancel(input.operationId, { reason: "executor abort" });
+          cancellationRecorded = true;
+        }
+      } catch {
+        // Left unrecorded on purpose: the deadline timer or a later abort retries it, and
+        // settle/expire reconcile the durable state. Stopping the work must not depend on a write.
+      } finally {
+        controller.abort();
       }
-      controller.abort();
     };
     input.signal?.addEventListener("abort", cancellation, { once: true });
     const deadlineAt = this.#store.load(input.operationId).deadlineAt;
+    // The delay is bounded by the operation deadline, which the budget schema caps at
+    // 24h, far below the 2^31-1 ms at which Node clamps a timer (see the test "an
+    // operation deadline can never overflow a timer").
     const deadline = deadlineAt !== undefined && deadlineAt > Date.now() ? setTimeout(cancellation, deadlineAt - Date.now()) : undefined;
     try {
       let scheduled: ScheduledOperationResult;
@@ -151,7 +163,57 @@ export class OperationExecutor {
               question: prepared.approval.prompt,
               payloadDigest: prepared.approval.payloadDigest,
             });
-            const record = await approve(prepared.approval);
+            // Nothing waits forever: an unanswered approval holds a global concurrency
+            // slot and blocks every sibling step from starting (C-2), so the wait is
+            // raced against the step's own abort and the store's own decision expiry
+            // (never the locally computed bound: the store clock is authoritative).
+            const pendingDecision = waiting.pendingDecisions.find((entry) => entry.decisionId === decisionId)!;
+            const approvalAbort = new AbortController();
+            type Race =
+              | { via: "approval"; record: RecordedDecision }
+              | { via: "rejected"; error: unknown }
+              | { via: "abort" }
+              | { via: "expiry" };
+            let done = false;
+            let settle!: (result: Race) => void;
+            const race = new Promise<Race>((resolve) => { settle = resolve; });
+            const finish = (result: Race) => {
+              if (done) return;
+              done = true;
+              settle(result);
+            };
+            const onAbort = () => { finish({ via: "abort" }); approvalAbort.abort(); };
+            // The delay is bounded by the operation deadline, which the budget schema
+            // caps at 24h, far below the 2^31-1 ms at which Node clamps a timer (see the
+            // test "an operation deadline can never overflow a timer") — the pending
+            // decision's own expiry is clamped to that same deadline by requireDecision.
+            const expiryTimer = setTimeout(() => { finish({ via: "expiry" }); approvalAbort.abort(); }, Math.max(0, pendingDecision.expiresAt - Date.now() + 5));
+            let raceOutcome: Race;
+            try {
+              if (signal.aborted) onAbort();
+              else signal.addEventListener("abort", onAbort, { once: true });
+              approve(prepared.approval!, { signal: approvalAbort.signal }).then(
+                (record) => finish({ via: "approval", record }),
+                (error) => finish({ via: "rejected", error }),
+              );
+              raceOutcome = await race;
+            } finally {
+              clearTimeout(expiryTimer);
+              signal.removeEventListener("abort", onAbort);
+            }
+            if (raceOutcome.via === "rejected") throw raceOutcome.error;
+            if (raceOutcome.via === "abort") {
+              // The executor's `cancellation` closure already ran requestCancel, which
+              // cancels an awaiting_approval step and removes its pending decision.
+              return { outcome: "cancelled" };
+            }
+            if (raceOutcome.via === "expiry") {
+              this.#store.expire(input.operationId);
+              const afterExpiry = this.#store.load(input.operationId).steps.find((entry) => entry.stepId === stepId);
+              if (afterExpiry?.state === "cancelled") return { outcome: "cancelled" };
+              throw new Error("approval expiry disagreed with the store clock");
+            }
+            const record = raceOutcome.record;
             this.#store.recordDecision(record, input.context);
             const resumed = this.#store.resume({
               request: { action: "resume", operationId: input.operationId, decisionId, expectedRevision: waiting.revision, resolution: { kind: "recorded_user_decision", recordId: record.recordId } },
@@ -162,14 +224,21 @@ export class OperationExecutor {
             const running = resumed.snapshot.steps.find((entry) => entry.stepId === stepId)!;
             dispatchDeps = { ...deps, signal, dispatchToken: resumed.dispatchToken, dispatchOperationId: input.operationId, dispatchStepId: stepId, dispatchAttempt: running.attempts };
           }
+          this.#store.assertOwnership();
           let outcome = await this.#registry.dispatch(call.capability, args, dispatchDeps, call.capabilityVersion);
-          while (outcome.outcome === "failed" && outcome.error.retryable && descriptor.retry.class === "idempotent") {
+          while (outcome.outcome === "failed" && outcome.error.retryable && descriptor.retry.class === "idempotent" && !signal.aborted) {
             this.#store.recordStepOutcome(input.operationId, stepId, { outcome: "failed", error: outcome.error });
             const step = this.#store.load(input.operationId).steps.find((entry) => entry.stepId === stepId);
-            if (!step || step.attempts >= descriptor.retry.maxAttempts) break;
+            if (!step || step.attempts >= descriptor.retry.maxAttempts) {
+              // The failure is already recorded (above): #record must not record it again
+              // — the real store has only running -> failed, so a second call throws and
+              // replaces the provider's own error with that transition error.
+              return { outcome: "failed", error: new Error(outcome.error.message) };
+            }
             const retried = this.#store.retryStep(input.operationId, stepId, { retry: descriptor.retry, argDigest, idempotencyKey: `${input.operationId}/${stepId}` }, input.context);
             const running = retried.snapshot.steps.find((entry) => entry.stepId === stepId)!;
             dispatchDeps = { ...deps, signal, dispatchToken: retried.dispatchToken, dispatchOperationId: input.operationId, dispatchStepId: stepId, dispatchAttempt: running.attempts };
+            this.#store.assertOwnership();
             outcome = await this.#registry.dispatch(call.capability, args, dispatchDeps, call.capabilityVersion);
           }
           return this.#record(input, call, stepId, descriptor.effect, args, signal, outcome);
@@ -181,7 +250,20 @@ export class OperationExecutor {
         }
         throw error;
       }
-      const settled = deadlineAt !== undefined && Date.now() >= deadlineAt ? this.#store.expire(input.operationId) : this.#store.settle(input.operationId).snapshot;
+      // The scheduler marks a dependency-failed step "skipped" only in its own memory
+      // (`OperationScheduler`, per-call); record it durably so the operation's own step
+      // set agrees with what actually happened. A step already moved off "queued" by
+      // something else (for example a denied approval) is left alone.
+      for (const step of scheduled.steps) {
+        if (step.outcome !== "skipped") continue;
+        const stepId = stepIds.get(step.key);
+        if (!stepId) continue;
+        const durable = this.#store.load(input.operationId).steps.find((entry) => entry.stepId === stepId);
+        if (durable?.state === "queued") this.#store.skipStep(input.operationId, stepId);
+      }
+      // The scheduler has finished: nothing will ever retry in this execution, so every
+      // failed step is final regardless of what its own retry facts would otherwise allow.
+      const settled = deadlineAt !== undefined && Date.now() >= deadlineAt ? this.#store.expire(input.operationId) : this.#store.settle(input.operationId, { settleFailed: true }).snapshot;
       return this.#aggregate(settled, scheduled);
     } finally {
       if (deadline) clearTimeout(deadline);
@@ -189,14 +271,34 @@ export class OperationExecutor {
     }
   }
 
-  async recover(input: RecoverInput): Promise<void> {
+  async recover(input: RecoverInput): Promise<RecoveryOutcome> {
+    const handled: RecoveryAction[] = [];
+    const deferred: RecoveryAction[] = [];
     for (const action of input.actions) {
       this.#store.assertOwnership();
       if (action.operationId !== input.operationId) throw new Error(`recovery action belongs to ${action.operationId}`);
-      if (action.kind === "expire_decision" || action.kind === "expire_operation") {
-        this.#store.expire(input.operationId);
+      // Recovery execution was removed as unsafe (the executor team's own review); until
+      // it is built, deferral is reported, never hidden.
+      switch (action.kind) {
+        case "expire_decision":
+        case "expire_operation":
+          this.#store.expire(input.operationId);
+          handled.push(action);
+          break;
+        case "await_decision":
+        case "reconcile_step":
+        case "resume_abort":
+        case "dispatch_step":
+        case "retry_candidate":
+          deferred.push(action);
+          break;
+        default: {
+          const unreachable: never = action;
+          throw new Error(`unknown recovery action ${(unreachable as { kind: string }).kind}`);
+        }
       }
     }
+    return { handled, deferred };
   }
 
   async #record(input: ExecuteInput, call: ExactCall, stepId: string, effect: string, args: Record<string, JsonValue>, signal: AbortSignal, outcome: CapabilityDispatchResult): Promise<ScheduledStepResult> {

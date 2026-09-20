@@ -307,3 +307,30 @@ test("a blocked early step cannot starve later ready steps in the same operation
   assert.equal((await candidate).state, "completed");
   assert.equal(started.at(-1), "blocked");
 });
+
+test("a failed dependency skips its whole chain whatever the plan order (C-3 T6)", async () => {
+  // Calls are listed [C dependsOn B, B dependsOn A, A]: the chain's root is LAST in the
+  // list. A single skip-propagation pass over this order only catches B (A's direct
+  // dependent) on the tick it fails; C never gets a result and submit() never resolved
+  // before the fixpoint loop in #ready.
+  const scheduler = new OperationScheduler({ maxConcurrent: 3 });
+  const plan = operation(
+    "chain",
+    [
+      call("c", "read.one", { dependsOn: ["b"] }),
+      call("b", "read.two", { dependsOn: ["a"] }),
+      call("a", "read.one"),
+    ],
+    async ({ call: step }) => (step.key === "a" ? { outcome: "failed", error: new Error("a failed") } : assert.fail(`${step.key} must never run`)),
+  );
+  const result = await Promise.race([
+    scheduler.submit(plan),
+    new Promise<never>((_, reject) => setTimeout(() => reject(new Error("submit() did not resolve within 1s")), 1_000)),
+  ]);
+  assert.equal(result.state, "failed");
+  assert.deepEqual(result.steps.map((step) => [step.key, step.outcome]), [
+    ["c", "skipped"],
+    ["b", "skipped"],
+    ["a", "failed"],
+  ]);
+});

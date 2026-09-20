@@ -95,7 +95,7 @@ export type CapabilityApprovalRequest = {
 export type CapabilityDispatchDeps = {
   runtime?: CapabilityRuntime;
   /** The executor owns obtaining and persisting this record. */
-  approve?: (request: CapabilityApprovalRequest) => Promise<RecordedDecision>;
+  approve?: (request: CapabilityApprovalRequest, options?: { signal?: AbortSignal }) => Promise<RecordedDecision>;
   decision?: Omit<ResumeExpectation, "payloadDigest" | "now"> & { now?: number };
   /** O05-issued, one-shot authorization for this exact dispatch attempt. */
   dispatchToken?: DispatchToken;
@@ -975,16 +975,30 @@ export class CapabilityRegistry {
     const approvalRequired = descriptor.approval.required;
     const executionArgs = cloneJson(valid.value.args);
     let outcome;
+    let ran = false;
     try {
       outcome = await dispatchWithPolicy({
       capability,
       effect: descriptor.effect,
       approval: { required: approvalRequired, ...(approvalRequired === "none" ? {} : { obtain: async () => deps.dispatchToken !== undefined && deps.dispatchOperationId !== undefined && deps.dispatchStepId !== undefined && deps.dispatchAttempt !== undefined && this.dispatchAuthority.consume(deps.dispatchToken, { operationId: deps.dispatchOperationId, stepId: deps.dispatchStepId, capability, version: descriptor.version, payloadDigest: canonicalDigest(valid.value.args), attempt: deps.dispatchAttempt }) }) },
       inspect: () => definition.scopeCheck?.(valid.value.args),
-      run: async () => handler({ args: executionArgs, states: cloneStates(valid.value.states), signal: deps.signal }),
+      run: async () => {
+        ran = true;
+        return handler({ args: executionArgs, states: cloneStates(valid.value.states), signal: deps.signal });
+      },
       failed: (result) => result.ok ? undefined : result.error.code,
       });
     } catch (error) {
+      if (ran && descriptor.effect !== "read") {
+        return {
+          outcome: "failed",
+          capability,
+          version: descriptor.version,
+          code: "unknown_outcome",
+          error: { code: "unknown_outcome", message: "the handler stopped before reporting an outcome", retryable: false },
+        };
+      }
+      if (ran) return { outcome: "failed", capability, version: descriptor.version, code: "provider_failure", error: { code: "provider_failure", message: String((error as Error)?.message ?? error), retryable: true } };
       if (descriptor.approval.required === "none") return { outcome: "failed", capability, version: descriptor.version, code: "provider_failure", error: { code: "provider_failure", message: String((error as Error)?.message ?? error), retryable: true } };
       return { outcome: "refused", capability, version: descriptor.version, code: approvalFailure(error), reason: "the recorded decision did not authorize this dispatch" };
     }

@@ -8,6 +8,7 @@ import {
   ContractViolation,
   canonicalDigest,
   deriveDeduplicationKey,
+  isTerminalOperationState,
   validateCompactOperationResult,
   validateOperationSnapshot,
   type OperateRequest,
@@ -33,6 +34,7 @@ import {
   type StoreFs,
 } from "../src/operations/store.ts";
 import { DispatchAuthority } from "../src/operations/dispatch-authority.ts";
+import { applyTransition, settlePlan } from "../src/operations/state.ts";
 
 const FIXTURES = path.join(path.dirname(fileURLToPath(import.meta.url)), "fixtures", "operations-o05");
 const INSTRUCTION = "In src/config.ts, change the timeout to 30000.";
@@ -2337,4 +2339,382 @@ test("active operation history is not removable and terminal history is reclaime
   assert.deepEqual(store.operationIds(), []);
   assert.equal(fs.existsSync(logFile(root, operationId)), false);
   assert.deepEqual(reopened(root, clockFrom()).operationIds(), []);
+});
+
+// C-1: a commit that replay would refuse must never reach disk at all. Before the fix,
+// #apply appended and fsynced the frame and only THEN ran the equivalent of replay's
+// checks (#fold), so a call the API accepted could write a frame the log refused on the
+// next load — one bad file made the store constructor throw for every operation.
+test("recordDecision refuses a revision-conflicted approval before any byte is written (C-1 path A)", () => {
+  const { store, root, clock } = openStore();
+  const operationId = store.accept({ request: instruction(), context: context() }).snapshot.operationId;
+  queueEdit(store, operationId, "edit_config");
+  const waiting = store.requireDecision(operationId, "step-1", {
+    decisionId: "dec-a",
+    decisionClass: "user_authorization",
+    question: "Apply the change to src/config.ts: timeout 9000 -> 30000?",
+    payloadDigest: PAYLOAD_A,
+  });
+  // A sibling commit lands between the prompt and the answer: a second, independent
+  // step queued on the same operation. This bumps the operation's snapshot revision
+  // while leaving the pending decision's OWN revision (fixed at state.ts:438, when the
+  // question was raised) unchanged.
+  store.queueStep(operationId, { key: "read_config", capability: "file.read" });
+  const beforeSize = fs.statSync(logFile(root, operationId)).size;
+
+  // The decision cites the operation's now-current snapshot revision (what a caller
+  // that only reads the snapshot would naturally supply) rather than the pending
+  // decision's own revision.
+  const staleRecord = recordedDecision(waiting, {
+    decisionId: "dec-a",
+    payloadDigest: PAYLOAD_A,
+    revision: store.load(operationId).revision,
+  });
+  assert.notEqual(staleRecord.revision, waiting.pendingDecisions[0].revision, "the test setup must actually diverge the two revisions");
+
+  // Refused: recordDecision now binds to the pending decision's own revision, matching
+  // what replay has always demanded (store.ts #validateCommit / replayProblem, "recorded
+  // decision does not bind the predecessor pending decision").
+  assert.throws(() => store.recordDecision(staleRecord, context()), (error) => isStoreError(error, "revision_conflict"));
+
+  // Nothing was written: the log file is byte-for-byte the same size as before the
+  // refused call, because the pre-append validation runs before #append now, not after.
+  assert.equal(fs.statSync(logFile(root, operationId)).size, beforeSize);
+
+  // The store stays usable after a refused write: a further valid commit succeeds, citing
+  // the pending decision's own (unchanged) revision.
+  const record = recordedDecision(waiting, { decisionId: "dec-a", payloadDigest: PAYLOAD_A, revision: waiting.pendingDecisions[0].revision });
+  const recorded = store.recordDecision(record, context());
+  assert.equal(store.recordedDecisions(operationId).length, 1);
+  assert.equal(recorded.pendingDecisions.length, 1, "recordDecision stores the answer; resume is what consumes the pending question");
+
+  // C-2: the sibling commit's revision bump no longer strands the approval. resume binds
+  // to the pending decision's own (fixed) revision too, so the step dispatches even
+  // though the operation's current snapshot revision has moved on.
+  const resumed = store.resume({ request: resumeRequest(operationId, "dec-a", waiting.pendingDecisions[0].revision, "rec-1"), context: context() });
+  assert.equal(resumed.outcome, "dispatch");
+
+  // And a NEW store opened on the same directory constructs and loads the operation:
+  // the refused commit never poisoned the log for the next reader.
+  const reloaded = reopened(root, clock);
+  assert.equal(reloaded.load(operationId).steps.find((step) => step.stepId === "step-1")?.state, "running");
+});
+
+test("a decision citing the wrong revision is refused with revision_conflict and nothing is written (C-2)", () => {
+  const { store, root } = openStore();
+  const operationId = store.accept({ request: instruction(), context: context() }).snapshot.operationId;
+  queueEdit(store, operationId, "edit_config");
+  const waiting = store.requireDecision(operationId, "step-1", {
+    decisionId: "dec-c2a",
+    decisionClass: "user_authorization",
+    question: "Apply the change to src/config.ts: timeout 9000 -> 30000?",
+    payloadDigest: PAYLOAD_A,
+  });
+  const beforeSize = fs.statSync(logFile(root, operationId)).size;
+  const wrongRevision = recordedDecision(waiting, { decisionId: "dec-c2a", payloadDigest: PAYLOAD_A, revision: waiting.pendingDecisions[0].revision + 1 });
+  assert.throws(() => store.recordDecision(wrongRevision, context()), (error) => isStoreError(error, "revision_conflict"));
+  assert.equal(fs.statSync(logFile(root, operationId)).size, beforeSize);
+});
+
+test("a changed payload digest is refused at resume, and a second record for the same decision is refused (C-2)", () => {
+  const { store } = openStore();
+  const operationId = store.accept({ request: instruction(), context: context() }).snapshot.operationId;
+  queueEdit(store, operationId, "edit_config");
+  const waiting = store.requireDecision(operationId, "step-1", {
+    decisionId: "dec-c2b",
+    decisionClass: "user_authorization",
+    question: "Apply the change to src/config.ts: timeout 9000 -> 30000?",
+    payloadDigest: PAYLOAD_A,
+  });
+  const record = recordedDecision(waiting, { decisionId: "dec-c2b", payloadDigest: PAYLOAD_A, revision: waiting.pendingDecisions[0].revision });
+  store.recordDecision(record, context());
+
+  // The step is re-proposed with a new payload before the recorded decision is resumed
+  // (a retried propose bumped the approved args). The new pending question carries a
+  // different payload digest and a new revision; resuming the ORIGINAL record against it
+  // must refuse rather than dispatch a stale approval against new args.
+  const reproposed = store.requireDecision(operationId, "step-1", {
+    decisionId: "dec-c2b-retry",
+    decisionClass: "user_authorization",
+    question: "Apply the change to src/config.ts: timeout 9000 -> 45000?",
+    payloadDigest: PAYLOAD_B,
+  });
+  assert.throws(
+    () => store.resume({ request: resumeRequest(operationId, "dec-c2b", reproposed.pendingDecisions[0].revision, "rec-1"), context: context() }),
+    (error) => isStoreError(error, "decision_mismatch"),
+  );
+
+  // A second record for the same decisionId is refused (decision_replayed): recording an
+  // answer twice must not be possible even when the citation would otherwise check out.
+  assert.throws(() => store.recordDecision(record, context()), (error) => isStoreError(error, "decision_replayed"));
+});
+
+test("a backward clock step is clamped so the store never writes an unloadable log (C-1 path B)", () => {
+  const { store, root, clock } = openStore();
+  const operationId = store.accept({ request: instruction(), context: context() }).snapshot.operationId;
+  const first = queueEdit(store, operationId);
+  assert.equal(first.updatedAt, clock.now());
+
+  // NTP steps the clock backwards between two commits.
+  clock.advance(-5_000);
+  const second = store.queueStep(operationId, { key: "read_config", capability: "file.read" });
+
+  // The commit succeeds rather than writing a frame replay would refuse, and the
+  // snapshot's updatedAt is clamped forward rather than going backwards.
+  assert.equal(second.updatedAt >= first.updatedAt, true);
+
+  // A new store on the same directory constructs and loads it: the backward clock never
+  // produced an unloadable log.
+  const reloaded = reopened(root, clock);
+  assert.equal(reloaded.load(operationId).steps.length, 2);
+});
+
+test("applyTransition refuses a same-revision commit that changes the body", () => {
+  const { store } = openStore();
+  const operationId = store.accept({ request: instruction(), context: context() }).snapshot.operationId;
+  const snapshot = queueEdit(store, operationId);
+  // bumpRevision: false is the shape recordDecision always uses; a same-revision commit
+  // is meant to lay recorded evidence (a decision, a resolution) on top of the current
+  // lifecycle facts, never a second commit's worth of state change. Here it is exercised
+  // directly against applyTransition with a step transition as the body change, so the
+  // guard is pinned independently of any one caller's own narrower checks.
+  const result = applyTransition(snapshot, {
+    now: snapshot.updatedAt,
+    bumpRevision: false,
+    steps: [{ stepId: "step-1", to: "cancelled", trigger: "cancel_requested", cancelEvidence: ["no effect applied"] }],
+  });
+  assert.equal(result.ok, false);
+  if (result.ok) assert.fail("expected a failure");
+  assert.equal(result.error.code, "invalid_transition");
+});
+
+// C-3: every operation reaches a terminal state, even when a step failed.
+
+test("a failed step and a passed deadline settle the operation (C-3 T1)", () => {
+  const clock = clockFrom();
+  const { store, root } = openStore({ clock, capabilityMetadata: (capability) => ({ ...(testMetadata(capability)!), approval: "none" }) });
+  const operationId = store.accept({
+    request: instruction(),
+    context: context(),
+    budgets: { operationDeadlineMs: 1_000 },
+  }).snapshot.operationId;
+  queueEdit(store, operationId, "a");
+  queueEdit(store, operationId, "b");
+  store.startStep(operationId, "step-1", { argDigest: PAYLOAD_A });
+  store.recordStepOutcome(operationId, "step-1", {
+    outcome: "failed",
+    error: { code: "execution_failure", message: "did not complete", retryable: false },
+  });
+  clock.advance(1_000);
+  const expired = store.expire(operationId);
+  assert.equal(isTerminalOperationState(expired.state), true);
+  assert.notEqual(expired.state, "expired", "something ran and something failed: never hidden behind expired");
+  assert.equal(expired.steps.find((step) => step.key === "b")?.state, "cancelled");
+
+  // A second expire() does not throw and reports the same terminal state.
+  const second = store.expire(operationId);
+  assert.equal(second.state, expired.state);
+
+  const reloaded = reopened(root, clock);
+  assert.equal(reloaded.load(operationId).state, expired.state);
+});
+
+test("one success and one failure past the deadline is terminal and not expired (C-3 T2)", () => {
+  const clock = clockFrom();
+  const { store, root } = openStore({ clock, capabilityMetadata: (capability) => ({ ...(testMetadata(capability)!), approval: "none" }) });
+  const operationId = store.accept({
+    request: instruction(),
+    context: context(),
+    budgets: { operationDeadlineMs: 1_000 },
+  }).snapshot.operationId;
+  queueEdit(store, operationId, "ok");
+  queueEdit(store, operationId, "bad");
+  store.startStep(operationId, "step-1", { argDigest: PAYLOAD_A });
+  store.recordStepOutcome(operationId, "step-1", { outcome: "succeeded", evidenceRefs: ["done"] });
+  store.startStep(operationId, "step-2", { argDigest: PAYLOAD_B });
+  store.recordStepOutcome(operationId, "step-2", {
+    outcome: "failed",
+    error: { code: "execution_failure", message: "did not complete", retryable: false },
+  });
+  clock.advance(1_000);
+  const expired = store.expire(operationId);
+  assert.equal(isTerminalOperationState(expired.state), true);
+  assert.notEqual(expired.state, "expired");
+  const reloaded = reopened(root, clock);
+  assert.equal(reloaded.load(operationId).state, expired.state);
+});
+
+test("nothing ran and nothing failed expires (C-3 T3)", () => {
+  const clock = clockFrom();
+  const { store, root } = openStore({ clock, capabilityMetadata: (capability) => ({ ...(testMetadata(capability)!), approval: "none" }) });
+  const operationId = store.accept({
+    request: instruction(),
+    context: context(),
+    budgets: { operationDeadlineMs: 1_000 },
+  }).snapshot.operationId;
+  queueEdit(store, operationId, "a");
+  queueEdit(store, operationId, "b");
+  clock.advance(1_000);
+  const expired = store.expire(operationId);
+  assert.equal(expired.state, "expired");
+  const reloaded = reopened(root, clock);
+  assert.equal(reloaded.load(operationId).state, "expired");
+});
+
+test("settle finishes once no retry is left (C-3 T4)", () => {
+  const retry = { class: "idempotent" as const, maxAttempts: 2 };
+  const { store: notExhausted } = openStore({ capabilityMetadata: (capability) => ({ ...(testMetadata(capability)!), approval: "none", retry }) });
+  const opA = notExhausted.accept({ request: instruction(), context: context() }).snapshot.operationId;
+  queueEdit(notExhausted, opA, "a");
+  notExhausted.startStep(opA, "step-1", { argDigest: PAYLOAD_A });
+  notExhausted.recordStepOutcome(opA, "step-1", { outcome: "failed", error: { code: "execution_failure", message: "try again", retryable: true } });
+  assert.equal(notExhausted.settle(opA).snapshot.state, "running", "a retry is still available: not settled");
+  assert.equal(notExhausted.settle(opA, { settleFailed: true }).snapshot.state, "failed", "forcing settleFailed settles it anyway");
+
+  const { store: exhausted } = openStore({ capabilityMetadata: (capability) => ({ ...(testMetadata(capability)!), approval: "none", retry: { class: "idempotent" as const, maxAttempts: 1 } }) });
+  const opB = exhausted.accept({ request: instruction(), context: context({ toolCallId: "call-exhausted" }) }).snapshot.operationId;
+  queueEdit(exhausted, opB, "a");
+  exhausted.startStep(opB, "step-1", { argDigest: PAYLOAD_A });
+  exhausted.recordStepOutcome(opB, "step-1", { outcome: "failed", error: { code: "execution_failure", message: "no more attempts", retryable: true } });
+  assert.equal(exhausted.settle(opB).snapshot.state, "failed", "attempts already exhausted: settles on its own");
+  assert.equal(exhausted.settle(opB, { settleFailed: true }).snapshot.state, "failed");
+});
+
+test("skipStep records the dependency failure (C-3 T5)", () => {
+  const { store, root, clock } = openStore({ capabilityMetadata: (capability) => ({ ...(testMetadata(capability)!), approval: "none" }) });
+  const operationId = store.accept({ request: instruction(), context: context() }).snapshot.operationId;
+  queueEdit(store, operationId, "blocked");
+  const skipped = store.skipStep(operationId, "step-1");
+  assert.equal(skipped.steps[0].state, "skipped");
+  const progressEvents = store.events(operationId).filter((event) => event.phase === "progress" && event.decisionCode === "dependency_failed");
+  assert.equal(progressEvents.length, 1);
+
+  assert.throws(
+    () => store.skipStep(operationId, "step-1"),
+    (error) => isStoreError(error, "invalid_transition"),
+  );
+
+  // A new store on the same directory loads it: the transition replays cleanly.
+  const reloaded = reopened(root, clock);
+  assert.equal(reloaded.load(operationId).steps[0].state, "skipped");
+});
+
+test("a progress event alone does not legitimise a skip (C-3 T5b)", () => {
+  // A queued step forged straight to skipped with a plain progress event (no
+  // dependency_failed code) must be refused: only skipStep's own shape is accepted.
+  {
+    const { store, root, clock } = openStore({ capabilityMetadata: (capability) => ({ ...(testMetadata(capability)!), approval: "none" }) });
+    const operationId = store.accept({ request: instruction(), context: context() }).snapshot.operationId;
+    queueEdit(store, operationId, "a");
+    const file = logFile(root, operationId);
+    const records = readStoredRecords(file);
+    const forged = structuredClone(records[records.length - 1]);
+    forged.snapshot.revision += 1;
+    forged.snapshot.steps[0].state = "skipped";
+    forged.snapshot.lastSequence += 1;
+    forged.events = [
+      { operationId, sequence: forged.snapshot.lastSequence, at: forged.at, phase: "progress", revision: forged.snapshot.revision, stepId: "step-1", capability: forged.snapshot.steps[0].capability, summary: "no decisionCode here" },
+    ];
+    appendStoredRecord(file, forged);
+    assert.throws(() => reopened(root, clock), (error) => error instanceof OperationLogCorruptError);
+  }
+
+  // A running step forged to skipped with progress/dependency_failed must also be
+  // refused: the one dependency_failed edge in the transition table leaves "queued".
+  {
+    const { store, root, clock } = openStore({ capabilityMetadata: (capability) => ({ ...(testMetadata(capability)!), approval: "none" }) });
+    const operationId = store.accept({ request: instruction(), context: context() }).snapshot.operationId;
+    queueEdit(store, operationId, "a");
+    store.startStep(operationId, "step-1", { argDigest: PAYLOAD_A });
+    const file = logFile(root, operationId);
+    const records = readStoredRecords(file);
+    const forged = structuredClone(records[records.length - 1]);
+    forged.snapshot.revision += 1;
+    forged.snapshot.steps[0].state = "skipped";
+    forged.snapshot.lastSequence += 1;
+    forged.events = [
+      { operationId, sequence: forged.snapshot.lastSequence, at: forged.at, phase: "progress", revision: forged.snapshot.revision, stepId: "step-1", capability: forged.snapshot.steps[0].capability, decisionCode: "dependency_failed", summary: "forged from running" },
+    ];
+    appendStoredRecord(file, forged);
+    assert.throws(() => reopened(root, clock), (error) => error instanceof OperationLogCorruptError);
+  }
+});
+
+// Fixup: expired means nothing ran and nothing failed, whichever caller settles it —
+// not only when routed through expire()'s own cancel_requested restructuring.
+
+test("a failure that settles after the deadline is still a failure (F1)", () => {
+  const clock = clockFrom();
+  const retry = { class: "idempotent" as const, maxAttempts: 3 };
+  const { store } = openStore({ clock, capabilityMetadata: (capability) => ({ ...(testMetadata(capability)!), approval: "none", retry }) });
+  const operationId = store.accept({
+    request: instruction(),
+    context: context(),
+    budgets: { operationDeadlineMs: 1_000 },
+  }).snapshot.operationId;
+  queueEdit(store, operationId, "a");
+  store.startStep(operationId, "step-1", { argDigest: PAYLOAD_A });
+  // A retryable failure under max attempts stays "running": recordStepOutcome's own
+  // settleFailed (!retryAvailable) is false here, so nothing settles it yet.
+  const afterFailure = store.recordStepOutcome(operationId, "step-1", {
+    outcome: "failed",
+    error: { code: "execution_failure", message: "try again", retryable: true },
+  });
+  assert.equal(afterFailure.state, "running");
+  clock.advance(1_000);
+  // The DIRECT settle call this repro traced — not expire() — on a still-running
+  // operation past its deadline with a failed (retryable-but-not-yet-exhausted) step.
+  const settled = store.settle(operationId, { settleFailed: true });
+  assert.equal(settled.snapshot.state, "failed");
+});
+
+test("cancelled with nothing run past the deadline is an expiry (F2)", () => {
+  // NOTE (reported, not silently worked around): settledOutcome's "cancelled" target
+  // only ever requests the trigger cancel_settled, and OPERATION_TRANSITIONS has exactly
+  // one cancel_settled edge — cancel_requested -> cancelled. No state that has an
+  // outgoing deadline_reached -> expired edge (accepted/resolving/awaiting_approval/
+  // running/needs_input) also has a cancel_settled edge, and cancel_requested itself has
+  // no expired edge. So settlePlan's `outcome.to === "cancelled"` redirect branch was
+  // dead code even before this fixup (verified: canTransitionOperation(state,
+  // "cancelled", "cancel_settled") is false for every state that can reach "expired").
+  // What IS reachable, and is what expire()'s own first branch already uses, is
+  // requesting `deadline_reached` directly rather than through settledOutcome's
+  // auto-detected trigger. This test exercises that path via applyTransition, the same
+  // shape expire() constructs, to confirm CHANGE 1's guard still accepts a cancelled,
+  // nothing-else operation past its deadline.
+  const clock = clockFrom();
+  const { store } = openStore({ clock, capabilityMetadata: (capability) => ({ ...(testMetadata(capability)!), approval: "none" }) });
+  const operationId = store.accept({
+    request: instruction(),
+    context: context(),
+    budgets: { operationDeadlineMs: 1_000 },
+  }).snapshot.operationId;
+  const accepted = queueEdit(store, operationId, "a");
+  clock.advance(1_000);
+  const result = applyTransition(accepted, {
+    now: clock.now(),
+    operation: { to: "expired", trigger: "deadline_reached" },
+    steps: [{ stepId: accepted.steps[0].stepId, to: "cancelled", trigger: "cancel_requested" }],
+    events: [{ phase: "expired", decisionCode: "deadline_reached", summary: "The operation deadline passed before any step committed a change." }],
+  });
+  assert.equal(result.ok, true);
+  if (!result.ok) assert.fail("expected the transition to succeed");
+  assert.equal(result.snapshot.state, "expired");
+});
+
+test("cancelled after a success past the deadline is not an expiry (F3)", () => {
+  const clock = clockFrom();
+  const { store } = openStore({ clock, capabilityMetadata: (capability) => ({ ...(testMetadata(capability)!), approval: "none" }) });
+  const operationId = store.accept({
+    request: instruction(),
+    context: context(),
+    budgets: { operationDeadlineMs: 1_000 },
+  }).snapshot.operationId;
+  queueEdit(store, operationId, "ok");
+  queueEdit(store, operationId, "queued");
+  store.startStep(operationId, "step-1", { argDigest: PAYLOAD_A });
+  store.recordStepOutcome(operationId, "step-1", { outcome: "succeeded", evidenceRefs: ["done"] });
+  clock.advance(1_000);
+  const settled = store.settle(operationId, { settleFailed: true });
+  assert.notEqual(settled.snapshot.state, "expired");
 });

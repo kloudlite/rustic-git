@@ -40,10 +40,17 @@ listing every rejected path.
   permission grant; the store and dispatch adapter still authorize every read.
 - `RecordedDecision` is written only by the authenticated user UI or the trusted policy
   adapter, and binds actor, tenant, session, operation, step, payload digest, revision,
-  policy source, and expiry (`checkResumeAgainstRecord` enforces each). `resume` may cite
-  a record; it can never carry one. `additional_input` may not contain approval-looking
-  keys at any depth, and it can never resolve a `user_authorization`/`user_preference`
-  decision (`decisionClassesForResolution`).
+  policy source, and expiry (`checkResumeAgainstRecord` enforces each). The revision a
+  decision and its `resume` bind to is the revision **at which the question was raised**
+  (`PendingDecision.revision`, fixed at creation), never the operation's current snapshot
+  revision: an unrelated sibling step settling between the prompt and the answer must not
+  strand an otherwise-valid approval, and replay (`store.ts` `replayProblem`) already
+  demands exactly this binding, so a store-level check that disagreed with it could accept
+  a call that the next load would then refuse. What actually protects a changed payload
+  from a stale approval is the payload digest, which sibling progress cannot alter.
+  `resume` may cite a record; it can never carry one. `additional_input` may not contain
+  approval-looking keys at any depth, and it can never resolve a
+  `user_authorization`/`user_preference` decision (`decisionClassesForResolution`).
 - `checkResumeAgainstRecord` returns a `ResumeVerdict`: `ok` means the citation checked
   out, not that work may run. A matching `granted` record yields `requiredAction:
   "dispatch"`; a validly recorded **denial** yields `"refuse_step"` and
@@ -90,10 +97,37 @@ for the actual fact behind each trigger.
   through `reconcile_conclusive`; an uncertain write is never retried or cancelled away.
   Step terminal states are `succeeded`/`skipped`/`cancelled`; `failed` is settled but
   leaves only through `retry_allowed`, and only for a declared retry class.
+- A failed step is settled once no retry remains — the deadline has passed, or its own
+  retry facts (`error.retryable`, the capability's `retry.class`/`maxAttempts`, the
+  step's own `attempts`) say so, `OperationStore#failedStepsAreFinal` — never by adding
+  `failed` to the terminal step states, which would let a step already offered
+  `retry_allowed` disappear from settlement while still eligible to run again. `expired`
+  means nothing ran and nothing failed: a deadline passing with a succeeded or a failed
+  step among the steps is reported through settlement (`completed`/`partial`/`failed`),
+  never hidden behind `expired`. This holds for every caller that settles the operation,
+  not only `expire()`'s own restructuring — `settlePlan` (state.ts) never relabels a
+  `failed` or `partial` outcome as `expired`, whether reached through `expire()` or a
+  direct `settle()` call. A dependency failure is recorded durably as `skipped`
+  (`OperationStore#skipStep`, trigger `dependency_failed`, the one edge in
+  `STEP_TRANSITIONS` that leaves `queued`) backed by a `progress` event carrying
+  `decisionCode: "dependency_failed"` — `eventSupportsStepTransition` accepts exactly
+  that shape for a `skipped` destination, and only from `queued`, so a bare `progress`
+  event can never legitimise a skip on its own and a skip from any other state still
+  needs the denied-decision path.
 - A running step reaches `cancelled` only through `cancel_confirmed` (evidence that no
   effect was applied); `cancel_requested` alone is not an outcome. An operation holding
   unknown effects cannot expire — `reconciling` has no `deadline_reached` edge — so
   unresolved work stays visible until reconciliation is conclusive or a decision is made.
+- A recorded cancel revokes every unconsumed dispatch token of the steps it aborts; a
+  rejected outcome call leaves the token untouched.
+- An approval wait ends at the store's decision expiry or at cancellation, whichever
+  comes first, and a late answer dispatches nothing. An operation deadline is capped at
+  24 hours by the budget schema, so no timer derived from it can reach the 2^31-1 ms at
+  which Node clamps a delay.
+- `OperationExecutor.recover` carries out expiry only and returns what it deferred:
+  reconcile, abort, retry and re-dispatch after a restart are NOT built. Until they are,
+  an operation that was mid-dispatch at a crash stays non-terminal after restart, and the
+  caller is told so through `deferred` rather than the gap being silent.
 - Events replay monotonically by `sequence`; `validateEventSequence` refuses replays.
 - `OPERATE_REQUEST_SCHEMA` is emitted from the same descriptions the validator uses and
   carries the real bounds (`minLength`/`maxLength`/`pattern`/`minimum`/`maximum`/

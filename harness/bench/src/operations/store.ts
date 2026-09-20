@@ -598,7 +598,10 @@ function eventSupportsStepTransition(before: StepRecord, after: StepRecord, even
   if (after.state === "succeeded") return has("succeeded") || has("reconciled", "reconciled_succeeded");
   if (after.state === "failed") return has("failed") || has("reconciled", "reconciled_failed");
   if (after.state === "outcome_unknown") return has("unknown_outcome", "outcome_unknown");
-  if (after.state === "skipped") return has("decision_recorded", "denied");
+  // The transition table has exactly one dependency_failed edge and it leaves "queued",
+  // so this accepts exactly that: a bare progress event never legitimises a skip on its
+  // own, and a skip from any other state still needs the denied decision.
+  if (after.state === "skipped") return has("decision_recorded", "denied") || (before.state === "queued" && has("progress", "dependency_failed"));
   if (after.state === "cancelled") return has("cancelled") || events.some((event) => event.phase === "cancelled" || event.phase === "expired");
   return false;
 }
@@ -822,13 +825,34 @@ export class OperationStore {
     return compactView(this.#requireSnapshot(operationId));
   }
 
+  /**
+   * A failed step is final — no `retry_allowed` will ever be offered again — once the
+   * deadline has passed, or its own retry facts say so. Kept textually beside
+   * `recordStepOutcome`'s `retryAvailable` (store.ts, `recordStepOutcome`) so the two
+   * formulas cannot drift: `retryAvailable` there is
+   * `error?.retryable === true && retry.class === "idempotent" && step.attempts < retry.maxAttempts`;
+   * a step is final here whenever that same test is false (or the deadline forecloses a
+   * retry regardless of what the facts say).
+   */
+  #failedStepsAreFinal(snapshot: OperationSnapshot, deadlinePassed: boolean): boolean {
+    return snapshot.steps.every((step) => {
+      if (step.state !== "failed") return true;
+      if (deadlinePassed) return true;
+      const retry = this.#metadata(step.capability, step.capabilityVersion).retry;
+      return step.error?.retryable !== true || retry.class !== "idempotent" || step.attempts >= retry.maxAttempts;
+    });
+  }
+
   /** Records the truthful terminal state when the settled work supports one. */
-  settle(operationId: string): AppliedChange {
+  settle(operationId: string, options: { settleFailed?: boolean } = {}): AppliedChange {
     const now = this.#now();
-    const direct = this.#apply(operationId, { now, settle: true });
+    const snapshotBefore = this.#requireSnapshot(operationId);
+    const deadlinePassed = snapshotBefore.deadlineAt !== undefined && now >= snapshotBefore.deadlineAt;
+    const settleFailed = options.settleFailed ?? this.#failedStepsAreFinal(snapshotBefore, deadlinePassed);
+    const direct = this.#apply(operationId, { now, settle: true, settleFailed });
     if (direct.changed) return direct;
     const snapshot = direct.snapshot;
-    const target = settledState(snapshot);
+    const target = settledState(snapshot, settleFailed);
     // Some settled states have no direct edge out of a waiting state: the table routes
     // them through `cancel_requested` (a cancellation) or `resolving` (continued work).
     if (target === "cancelled" && canTransitionOperation(snapshot.state, "cancel_requested", "cancel_requested")) {
@@ -836,6 +860,7 @@ export class OperationStore {
         now,
         operation: { to: "cancel_requested", trigger: "cancel_requested" },
         settle: true,
+        settleFailed,
         events: [{ phase: "cancelled", decisionCode: "cancel_requested", summary: "Cancelling the remaining work." }],
       });
     }
@@ -844,6 +869,7 @@ export class OperationStore {
         now,
         operation: { to: "resolving", trigger: "resolve_started" },
         settle: true,
+        settleFailed,
         events: [{ phase: "resolving", summary: "Continuing after the pending question was resolved." }],
       });
     }
@@ -990,8 +1016,10 @@ export class OperationStore {
       snapshot: accepted,
       events: [{ operationId, sequence: 1, at: now, phase: "accepted", revision: 1, summary: "Operation accepted." }],
     };
+    const file = this.#file(operationId);
+    this.#assertCommitAcceptable(operationId, record, file);
     this.#append(operationId, record);
-    this.#fold(operationId, record, this.#file(operationId));
+    this.#fold(operationId, record, file);
     return { snapshot: accepted, replayed: false };
   }
 
@@ -1108,7 +1136,6 @@ export class OperationStore {
 
   /** Records an observed outcome after dispatch; never a substitute for one. */
   recordStepOutcome(operationId: string, stepId: string, input: StepOutcomeInput): OperationSnapshot {
-    this.#dispatchAuthority.invalidate(operationId, stepId);
     const snapshot = this.#requireSnapshot(operationId);
     const step = stepOf(snapshot, stepId);
     const error = input.outcome === "failed" ? validated(validateOperationError(input.error), "$.error") : undefined;
@@ -1129,7 +1156,7 @@ export class OperationStore {
             trigger: "result_failed",
             patch: { error },
           };
-    return this.#apply(operationId, {
+    const applied = this.#apply(operationId, {
       now: this.#now(),
       steps: [change],
       settle: true,
@@ -1145,7 +1172,11 @@ export class OperationStore {
           ...(input.elapsedMs !== undefined ? { elapsedMs: input.elapsedMs } : {}),
         },
       ],
-    }).snapshot;
+    });
+    // Validation happens above, in #apply: a refused call (no evidence, wrong step
+    // state) must never kill the live token of a step still about to dispatch.
+    this.#dispatchAuthority.invalidate(operationId, stepId);
+    return applied.snapshot;
   }
 
   /**
@@ -1153,7 +1184,6 @@ export class OperationStore {
    * through `reconcile_conclusive`: an unknown effect is never retried or cancelled away.
    */
   markOutcomeUnknown(operationId: string, stepId: string, input: { summary?: string } = {}): OperationSnapshot {
-    this.#dispatchAuthority.invalidate(operationId, stepId);
     const operation = this.#require(operationId);
     const snapshot = this.#requireSnapshot(operationId);
     const step = stepOf(snapshot, stepId);
@@ -1165,7 +1195,7 @@ export class OperationStore {
       since: now,
       ...(digest !== undefined ? { dispatchDigest: digest } : {}),
     };
-    return this.#apply(operationId, {
+    const applied = this.#apply(operationId, {
       now,
       steps: [{ stepId, to: "outcome_unknown", trigger: "outcome_unknown" }],
       addUnknownOutcomes: [outcome],
@@ -1181,7 +1211,11 @@ export class OperationStore {
           ...(digest !== undefined ? { argDigest: digest } : {}),
         },
       ],
-    }).snapshot;
+    });
+    // Validation happens above, in #apply: a refused call must never kill the live
+    // token of a step still about to dispatch.
+    this.#dispatchAuthority.invalidate(operationId, stepId);
+    return applied.snapshot;
   }
 
   /** Closes an unknown outcome with backend evidence instead of replaying the call. */
@@ -1308,13 +1342,12 @@ export class OperationStore {
 
   /** Cancels a running step only with evidence that no effect was applied. */
   cancelStep(operationId: string, stepId: string, input: CancelStepInput): OperationSnapshot {
-    this.#dispatchAuthority.invalidate(operationId, stepId);
     const snapshot = this.#requireSnapshot(operationId);
     const step = stepOf(snapshot, stepId);
     if (!input.evidenceRefs?.length) {
       throw new ContractViolation([{ path: "$.evidenceRefs", code: "missing_field", message: "a cancelled running step needs evidence" }]);
     }
-    return this.#apply(operationId, {
+    const applied = this.#apply(operationId, {
       now: this.#now(),
       steps: [
         {
@@ -1334,6 +1367,37 @@ export class OperationStore {
           decisionCode: "cancel_confirmed",
           summary: input.summary ?? `${step.capability} was cancelled before it applied an effect.`,
           evidenceRefs: input.evidenceRefs,
+        },
+      ],
+    });
+    // Validation happens above, in #apply: a refused call (missing evidence, wrong step
+    // state) must never kill the live token of a step still about to dispatch.
+    this.#dispatchAuthority.invalidate(operationId, stepId);
+    return applied.snapshot;
+  }
+
+  /**
+   * Durably records that a queued step is skipped because a step it depends on did not
+   * succeed (contracts.ts: `queued -> skipped` on `dependency_failed`). The scheduler
+   * already knows this in its own memory; this is what makes the durable step set agree.
+   */
+  skipStep(operationId: string, stepId: string, input: { summary?: string } = {}): OperationSnapshot {
+    const snapshot = this.#requireSnapshot(operationId);
+    const step = stepOf(snapshot, stepId);
+    if (step.state !== "queued") {
+      throw new OperationStoreError("invalid_transition", `step ${stepId} is ${step.state}; only a queued step can be skipped`);
+    }
+    return this.#apply(operationId, {
+      now: this.#now(),
+      steps: [{ stepId, to: "skipped", trigger: "dependency_failed" }],
+      settle: true,
+      events: [
+        {
+          phase: "progress",
+          stepId,
+          capability: step.capability,
+          decisionCode: "dependency_failed",
+          summary: input.summary ?? "Skipped: a step it depends on did not succeed.",
         },
       ],
     }).snapshot;
@@ -1434,8 +1498,14 @@ export class OperationStore {
     if (!pending) reject("decision_mismatch", `no pending decision ${decision.decisionId} in ${decision.operationId}`);
     if (pending.stepId !== decision.stepId) reject("decision_mismatch", "the decision names another step");
     if (pending.decisionClass !== decision.decisionClass) reject("decision_mismatch", "the decision answers another class of question");
-    if (decision.revision !== snapshot.revision) {
-      reject("revision_conflict", `the decision was recorded for revision ${decision.revision}; the operation is at ${snapshot.revision}`);
+    // Bind to the pending decision's OWN revision (fixed when the question was raised,
+    // state.ts:438), not the operation's current snapshot revision: replay demands exactly
+    // that binding (store.ts #validateCommit / replayProblem), and a sibling step settling
+    // between the prompt and the answer must not make a legal approval unrecordable (C-1
+    // path A / ruling 1). What actually protects a changed payload is the digest check below,
+    // which a sibling commit cannot alter.
+    if (decision.revision !== pending.revision) {
+      reject("revision_conflict", `the decision was recorded for revision ${decision.revision}; the pending question is at ${pending.revision}`);
     }
     const digest = operation.payloadDigests.get(decision.stepId);
     if (!digest) reject("validation_failure", `step ${decision.stepId} has no recorded approved payload`);
@@ -1490,13 +1560,17 @@ export class OperationStore {
     }
     const pending = snapshot.pendingDecisions.find((entry) => entry.decisionId === request.decisionId);
     if (!pending) throw new OperationStoreError("decision_mismatch", `no pending decision ${request.decisionId} in ${request.operationId}`);
-    if (pending.revision !== snapshot.revision) {
-      throw new OperationStoreError("revision_conflict", "the pending decision belongs to another revision");
-    }
-    if (request.expectedRevision !== snapshot.revision) {
+    // Bound to the revision the QUESTION was raised at (fixed, state.ts:438), not the
+    // operation's current snapshot revision: a sibling step settling between the prompt
+    // and the answer must not strand an approval (C-2, ruling 1). Replay already demands
+    // exactly this binding (store.ts #validateCommit / replayProblem, "recorded decision
+    // does not bind the predecessor pending decision"); what actually protects a changed
+    // payload from a stale approval is the digest check below, which sibling progress
+    // cannot alter.
+    if (request.expectedRevision !== pending.revision) {
       throw new OperationStoreError(
         "revision_conflict",
-        `expected revision ${request.expectedRevision}; the operation is at ${snapshot.revision}`,
+        `expected revision ${request.expectedRevision}; the pending question is at ${pending.revision}`,
       );
     }
     if (!resolutionCanResolve(request.resolution, pending.decisionClass)) {
@@ -1548,7 +1622,10 @@ export class OperationStore {
       decisionId: pending.decisionId,
       decisionClass: pending.decisionClass,
       payloadDigest,
-      revision: snapshot.revision,
+      // The recorded decision was bound to the pending question's own revision
+      // (recordDecision, C-1/C-2), not the operation's current snapshot revision, so the
+      // record is checked against that same fixed value here.
+      revision: pending.revision,
       now,
       expiryBound: snapshot.deadlineAt !== undefined ? Math.min(pending.expiresAt, snapshot.deadlineAt) : pending.expiresAt,
     };
@@ -1642,7 +1719,7 @@ export class OperationStore {
     const abortRequestedStepIds = snapshot.steps.filter((step) => step.state === "running").map((step) => step.stepId);
     const operation = operationChange(snapshot, "cancel_requested", "cancel_requested");
     if (!operation && !changes.length && !removed.length && !abortRequestedStepIds.length) return snapshot;
-    return this.#apply(operationId, {
+    const applied = this.#apply(operationId, {
       now: this.#now(),
       operation,
       steps: changes,
@@ -1656,12 +1733,20 @@ export class OperationStore {
           summary: input.summary ?? `Cancellation requested${input.reason !== undefined ? `: ${input.reason}` : "."}`,
         },
       ],
-    }).snapshot;
+    });
+    // Revoke every running step's token so a step already resumed but not yet consumed
+    // cannot dispatch its mutation after the person cancelled. A token already consumed
+    // is unaffected (invalidate is then a no-op): a handler already running keeps
+    // running and is handled by the existing abort path, not this one.
+    for (const stepId of abortRequestedStepIds) this.#dispatchAuthority.invalidate(operationId, stepId);
+    return applied.snapshot;
   }
 
   /**
    * Releases expired decisions, cancels what they blocked, and expires an operation
    * whose deadline passed only when nothing was committed and nothing is unknown.
+   * No change needed here for token revocation: expire() only acts when no step is
+   * running, and a queued or awaiting step holds no dispatch token to revoke.
    */
   expire(operationId: string): OperationSnapshot {
     let snapshot = this.#requireSnapshot(operationId);
@@ -1697,11 +1782,16 @@ export class OperationStore {
       const changes: StepChange[] = snapshot.steps
         .filter((step) => step.state === "queued")
         .map((step) => ({ stepId: step.stepId, to: "cancelled", trigger: "cancel_requested" }));
-      if (!snapshot.steps.some((step) => step.state === "succeeded") && canTransitionOperation(snapshot.state, "expired", "deadline_reached")) {
+      // `expired` means nothing ran and nothing failed (ruling 2): a succeeded OR a
+      // failed step both mean the operation did something, so both are reported through
+      // settlement (partial/failed/cancelled) rather than hidden behind `expired`.
+      const nothingRanOrFailed = !snapshot.steps.some((step) => step.state === "succeeded" || step.state === "failed");
+      if (nothingRanOrFailed && canTransitionOperation(snapshot.state, "expired", "deadline_reached")) {
         return this.#apply(operationId, {
           now,
           operation: { to: "expired", trigger: "deadline_reached" },
           steps: changes,
+          settleFailed: true,
           events: [
             {
               phase: "expired",
@@ -1711,25 +1801,25 @@ export class OperationStore {
           ],
         }).snapshot;
       }
-      if (snapshot.steps.some((step) => step.state === "succeeded")) {
-        // Committed effects are never hidden behind `expired`: cancel what is left and
-        // report the mixed result truthfully.
-        this.#apply(operationId, {
-          now,
-          operation: operationChange(snapshot, "cancel_requested", "cancel_requested"),
-          steps: changes,
-          settle: true,
-          events: [
-            {
-              phase: "cancelled",
-              decisionCode: "cancel_requested",
-              summary: "The operation deadline passed; queued work was cancelled and committed effects remain.",
-            },
-          ],
-        });
-      }
+      // Committed effects and failures are never hidden behind `expired`: cancel what is
+      // left and report the mixed result truthfully, settling any failed step whose
+      // retry the passed deadline has already foreclosed.
+      this.#apply(operationId, {
+        now,
+        operation: operationChange(snapshot, "cancel_requested", "cancel_requested"),
+        steps: changes,
+        settle: true,
+        settleFailed: true,
+        events: [
+          {
+            phase: "cancelled",
+            decisionCode: "cancel_requested",
+            summary: "The operation deadline passed; queued work was cancelled.",
+          },
+        ],
+      });
     }
-    return this.settle(operationId).snapshot;
+    return this.settle(operationId, { settleFailed: deadlinePassed ? true : undefined }).snapshot;
   }
 
   /** Selection rounds and generation calls are budgeted for the whole operation. */
@@ -2023,7 +2113,31 @@ export class OperationStore {
     this.#tornTails = this.#tornTails.filter((entry) => entry !== file);
   }
 
-  #fold(operationId: string, record: CommitRecord, file: string, format: "v1" | "v2" = "v2"): void {
+  /**
+   * The pre-append gate: runs `#validateCommit` and reports a refusal as a refused
+   * CALL, not log corruption — the log on disk is fine, it is this commit that would
+   * break replay. `OperationLogCorruptError` is reserved for `#fold` on load, where the
+   * bytes are already durable and something really is wrong with the file.
+   */
+  #assertCommitAcceptable(operationId: string, record: CommitRecord, file: string): void {
+    try {
+      this.#validateCommit(operationId, record, file);
+    } catch (error) {
+      if (error instanceof OperationLogCorruptError) {
+        throw new OperationStoreError("validation_failure", `refusing to write a commit replay would reject: ${error.message}`);
+      }
+      throw error;
+    }
+  }
+
+  /**
+   * The read-only half of accepting a commit: everything that decides whether a
+   * commit may be folded at all, with no mutation of store state. `#apply` and `accept`
+   * call this (through `#assertCommitAcceptable`) BEFORE `#append` so a commit replay
+   * would refuse never reaches disk (C-1); `#fold` calls it again on load, where it is
+   * also the corruption check for a log written by an earlier, buggier build.
+   */
+  #validateCommit(operationId: string, record: CommitRecord, file: string): void {
     if (record.snapshot.operationId !== operationId) {
       throw new OperationLogCorruptError(file, `the commit names ${record.snapshot.operationId}`, operationId);
     }
@@ -2082,6 +2196,13 @@ export class OperationStore {
         operationId,
       );
     }
+  }
+
+  #fold(operationId: string, record: CommitRecord, file: string, format: "v1" | "v2" = "v2"): void {
+    this.#validateCommit(operationId, record, file);
+    // #validateCommit already threw if a stored entry exists with no snapshot (the
+    // tombstone-conflict case), so a present entry here is always a full LoadedOperation.
+    const existing = this.#operations.get(operationId) as LoadedOperation | undefined;
     const operation: LoadedOperation =
       existing ?? {
         snapshot: record.snapshot,
@@ -2114,7 +2235,13 @@ export class OperationStore {
   #apply(operationId: string, input: StoreTransitionInput): AppliedChange {
     this.#assertWritable();
     const operation = this.#require(operationId);
-    const result = applyTransition(this.#requireSnapshot(operationId), input);
+    const previous = this.#requireSnapshot(operationId);
+    // A clock that steps backwards (NTP) must never produce updatedAt < previous.updatedAt:
+    // replay refuses that on load (C-1 path B), so clamp before the transition is computed,
+    // not after.
+    const now = Math.max(input.now, previous.updatedAt);
+    const clamped: StoreTransitionInput = now === input.now ? input : { ...input, now };
+    const result = applyTransition(previous, clamped);
     if (!result.ok) {
       throw new OperationStoreError(result.error.code, result.error.message, {
         missing: result.error.missing,
@@ -2125,17 +2252,29 @@ export class OperationStore {
     const record: CommitRecord = {
       v: COMMIT_FORMAT_VERSION,
       kind: "commit",
-      at: input.now,
-      turnRevision: input.turnRevision ?? operation.turnRevision,
+      at: now,
+      turnRevision: clamped.turnRevision ?? operation.turnRevision,
       snapshot: result.snapshot,
       events: result.events,
     };
-    if (input.decisions?.length) record.decisions = input.decisions;
-    if (input.resolutions?.length) record.resolutions = input.resolutions;
-    if (input.abortRequestedStepIds?.length) record.abortRequestedStepIds = input.abortRequestedStepIds;
+    if (clamped.decisions?.length) record.decisions = clamped.decisions;
+    if (clamped.resolutions?.length) record.resolutions = clamped.resolutions;
+    if (clamped.abortRequestedStepIds?.length) record.abortRequestedStepIds = clamped.abortRequestedStepIds;
+    // Validate the exact frame replay will see BEFORE any byte reaches disk (C-1 path A):
+    // a commit that fold would refuse on the next load must never be appended in the first
+    // place, so one bad write can never make the store constructor throw for everything.
+    this.#assertCommitAcceptable(operationId, record, operation.file);
     if (operation.format === "v1" && operation.snapshot !== undefined) this.#rewriteV2(operation);
     this.#append(operationId, record);
-    this.#fold(operationId, record, operation.file);
+    try {
+      this.#fold(operationId, record, operation.file);
+    } catch (error) {
+      // The frame is durable but the in-memory fold rejected it — this instance no
+      // longer knows the true state of this operation, so it refuses every further
+      // write rather than risk composing on top of a fact it never recorded.
+      this.#failedAppend = this.#failedAppend ?? (error as Error);
+      throw error;
+    }
     return { snapshot: result.snapshot, changed: true };
   }
 

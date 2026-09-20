@@ -171,7 +171,10 @@ export function settlePlan(snapshot: OperationSnapshot, now: number, settleFaile
   const outcome = settledOutcome(snapshot, settleFailed);
   if (!outcome) return undefined;
   const deadlinePassed = snapshot.deadlineAt !== undefined && now >= snapshot.deadlineAt;
-  if (deadlinePassed && (outcome.to === "cancelled" || outcome.to === "failed") && canTransitionOperation(snapshot.state, "expired", "deadline_reached")) {
+  // `expired` means nothing ran and nothing failed (ruling 2): a failed or partial
+  // outcome is never relabelled `expired`, whichever caller (settle or expire) settles it.
+  const nothingRanOrFailed = !snapshot.steps.some((step) => step.state === "succeeded" || step.state === "failed");
+  if (deadlinePassed && outcome.to === "cancelled" && nothingRanOrFailed && canTransitionOperation(snapshot.state, "expired", "deadline_reached")) {
     return { to: "expired", trigger: "deadline_reached" };
   }
   return outcome;
@@ -293,7 +296,7 @@ function operationGuard(previous: OperationSnapshot, candidate: OperationSnapsho
       if (candidate.pendingDecisions.length || candidate.unknownOutcomes.length) {
         return invalid("expiry cannot drop a pending decision or an unresolved outcome");
       }
-      return candidate.steps.every((step) => isTerminalStepState(step.state)) ? undefined : invalid("expiry waits for settled steps");
+      return candidate.steps.every((step) => isTerminalStepState(step.state) || step.state === "failed") ? undefined : invalid("expiry waits for settled steps");
     default:
       return undefined;
   }
@@ -424,6 +427,14 @@ export function applyTransition(previous: OperationSnapshot, input: TransitionIn
   const bodyChanged =
     finalState !== previous.state || stepsChanged || decisionsChanged || unknownChanged || usageChanged || deadlineChanged;
   if (!bodyChanged && newEvents.length === 0) return { ok: true, changed: false, snapshot: previous, events: [] };
+  // A same-revision commit is recorded evidence (a decision, a resolution) laid on top of
+  // the current lifecycle facts, never a second commit's worth of state change: replay
+  // refuses anything else it changed (store.ts replayProblem, "same-revision commit
+  // changed lifecycle facts"). Catching it here means a caller never gets to write a frame
+  // that the next load would then reject (C-1 path A/B shared root cause).
+  if (input.bumpRevision === false && bodyChanged) {
+    return failure(storeError("invalid_transition", "a same-revision commit may not change lifecycle facts"));
+  }
 
   const revision = input.bumpRevision === false ? previous.revision : previous.revision + 1;
   const effectiveOperation: OperationChange | undefined = plan ? { to: plan.to, trigger: plan.trigger } : requestedOperation;
