@@ -991,7 +991,7 @@ export class OperationStore {
       events: [{ operationId, sequence: 1, at: now, phase: "accepted", revision: 1, summary: "Operation accepted." }],
     };
     const file = this.#file(operationId);
-    this.#validateCommit(operationId, record, file);
+    this.#assertCommitAcceptable(operationId, record, file);
     this.#append(operationId, record);
     this.#fold(operationId, record, file);
     return { snapshot: accepted, replayed: false };
@@ -2032,11 +2032,28 @@ export class OperationStore {
   }
 
   /**
+   * The pre-append gate: runs `#validateCommit` and reports a refusal as a refused
+   * CALL, not log corruption — the log on disk is fine, it is this commit that would
+   * break replay. `OperationLogCorruptError` is reserved for `#fold` on load, where the
+   * bytes are already durable and something really is wrong with the file.
+   */
+  #assertCommitAcceptable(operationId: string, record: CommitRecord, file: string): void {
+    try {
+      this.#validateCommit(operationId, record, file);
+    } catch (error) {
+      if (error instanceof OperationLogCorruptError) {
+        throw new OperationStoreError("validation_failure", `refusing to write a commit replay would reject: ${error.message}`);
+      }
+      throw error;
+    }
+  }
+
+  /**
    * The read-only half of accepting a commit: everything that decides whether a
-   * commit may be folded at all, with no mutation of store state. `#apply` calls this
-   * BEFORE `#append` so a commit replay would refuse never reaches disk (C-1); `#fold`
-   * calls it again on load, where it is also the corruption check for a log written by
-   * an earlier, buggier build.
+   * commit may be folded at all, with no mutation of store state. `#apply` and `accept`
+   * call this (through `#assertCommitAcceptable`) BEFORE `#append` so a commit replay
+   * would refuse never reaches disk (C-1); `#fold` calls it again on load, where it is
+   * also the corruption check for a log written by an earlier, buggier build.
    */
   #validateCommit(operationId: string, record: CommitRecord, file: string): void {
     if (record.snapshot.operationId !== operationId) {
@@ -2164,7 +2181,7 @@ export class OperationStore {
     // Validate the exact frame replay will see BEFORE any byte reaches disk (C-1 path A):
     // a commit that fold would refuse on the next load must never be appended in the first
     // place, so one bad write can never make the store constructor throw for everything.
-    this.#validateCommit(operationId, record, operation.file);
+    this.#assertCommitAcceptable(operationId, record, operation.file);
     if (operation.format === "v1" && operation.snapshot !== undefined) this.#rewriteV2(operation);
     this.#append(operationId, record);
     try {
