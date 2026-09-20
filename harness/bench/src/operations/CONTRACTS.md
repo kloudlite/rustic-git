@@ -104,7 +104,10 @@ for the actual fact behind each trigger.
   `retry_allowed` disappear from settlement while still eligible to run again. `expired`
   means nothing ran and nothing failed: a deadline passing with a succeeded or a failed
   step among the steps is reported through settlement (`completed`/`partial`/`failed`),
-  never hidden behind `expired`. A dependency failure is recorded durably as `skipped`
+  never hidden behind `expired`. This holds for every caller that settles the operation,
+  not only `expire()`'s own restructuring — `settlePlan` (state.ts) never relabels a
+  `failed` or `partial` outcome as `expired`, whether reached through `expire()` or a
+  direct `settle()` call. A dependency failure is recorded durably as `skipped`
   (`OperationStore#skipStep`, trigger `dependency_failed`, the one edge in
   `STEP_TRANSITIONS` that leaves `queued`) backed by a `progress` event carrying
   `decisionCode: "dependency_failed"` — `eventSupportsStepTransition` accepts exactly

@@ -34,7 +34,7 @@ import {
   type StoreFs,
 } from "../src/operations/store.ts";
 import { DispatchAuthority } from "../src/operations/dispatch-authority.ts";
-import { applyTransition } from "../src/operations/state.ts";
+import { applyTransition, settlePlan } from "../src/operations/state.ts";
 
 const FIXTURES = path.join(path.dirname(fileURLToPath(import.meta.url)), "fixtures", "operations-o05");
 const INSTRUCTION = "In src/config.ts, change the timeout to 30000.";
@@ -2638,4 +2638,83 @@ test("a progress event alone does not legitimise a skip (C-3 T5b)", () => {
     appendStoredRecord(file, forged);
     assert.throws(() => reopened(root, clock), (error) => error instanceof OperationLogCorruptError);
   }
+});
+
+// Fixup: expired means nothing ran and nothing failed, whichever caller settles it —
+// not only when routed through expire()'s own cancel_requested restructuring.
+
+test("a failure that settles after the deadline is still a failure (F1)", () => {
+  const clock = clockFrom();
+  const retry = { class: "idempotent" as const, maxAttempts: 3 };
+  const { store } = openStore({ clock, capabilityMetadata: (capability) => ({ ...(testMetadata(capability)!), approval: "none", retry }) });
+  const operationId = store.accept({
+    request: instruction(),
+    context: context(),
+    budgets: { operationDeadlineMs: 1_000 },
+  }).snapshot.operationId;
+  queueEdit(store, operationId, "a");
+  store.startStep(operationId, "step-1", { argDigest: PAYLOAD_A });
+  // A retryable failure under max attempts stays "running": recordStepOutcome's own
+  // settleFailed (!retryAvailable) is false here, so nothing settles it yet.
+  const afterFailure = store.recordStepOutcome(operationId, "step-1", {
+    outcome: "failed",
+    error: { code: "execution_failure", message: "try again", retryable: true },
+  });
+  assert.equal(afterFailure.state, "running");
+  clock.advance(1_000);
+  // The DIRECT settle call this repro traced — not expire() — on a still-running
+  // operation past its deadline with a failed (retryable-but-not-yet-exhausted) step.
+  const settled = store.settle(operationId, { settleFailed: true });
+  assert.equal(settled.snapshot.state, "failed");
+});
+
+test("cancelled with nothing run past the deadline is an expiry (F2)", () => {
+  // NOTE (reported, not silently worked around): settledOutcome's "cancelled" target
+  // only ever requests the trigger cancel_settled, and OPERATION_TRANSITIONS has exactly
+  // one cancel_settled edge — cancel_requested -> cancelled. No state that has an
+  // outgoing deadline_reached -> expired edge (accepted/resolving/awaiting_approval/
+  // running/needs_input) also has a cancel_settled edge, and cancel_requested itself has
+  // no expired edge. So settlePlan's `outcome.to === "cancelled"` redirect branch was
+  // dead code even before this fixup (verified: canTransitionOperation(state,
+  // "cancelled", "cancel_settled") is false for every state that can reach "expired").
+  // What IS reachable, and is what expire()'s own first branch already uses, is
+  // requesting `deadline_reached` directly rather than through settledOutcome's
+  // auto-detected trigger. This test exercises that path via applyTransition, the same
+  // shape expire() constructs, to confirm CHANGE 1's guard still accepts a cancelled,
+  // nothing-else operation past its deadline.
+  const clock = clockFrom();
+  const { store } = openStore({ clock, capabilityMetadata: (capability) => ({ ...(testMetadata(capability)!), approval: "none" }) });
+  const operationId = store.accept({
+    request: instruction(),
+    context: context(),
+    budgets: { operationDeadlineMs: 1_000 },
+  }).snapshot.operationId;
+  const accepted = queueEdit(store, operationId, "a");
+  clock.advance(1_000);
+  const result = applyTransition(accepted, {
+    now: clock.now(),
+    operation: { to: "expired", trigger: "deadline_reached" },
+    steps: [{ stepId: accepted.steps[0].stepId, to: "cancelled", trigger: "cancel_requested" }],
+    events: [{ phase: "expired", decisionCode: "deadline_reached", summary: "The operation deadline passed before any step committed a change." }],
+  });
+  assert.equal(result.ok, true);
+  if (!result.ok) assert.fail("expected the transition to succeed");
+  assert.equal(result.snapshot.state, "expired");
+});
+
+test("cancelled after a success past the deadline is not an expiry (F3)", () => {
+  const clock = clockFrom();
+  const { store } = openStore({ clock, capabilityMetadata: (capability) => ({ ...(testMetadata(capability)!), approval: "none" }) });
+  const operationId = store.accept({
+    request: instruction(),
+    context: context(),
+    budgets: { operationDeadlineMs: 1_000 },
+  }).snapshot.operationId;
+  queueEdit(store, operationId, "ok");
+  queueEdit(store, operationId, "queued");
+  store.startStep(operationId, "step-1", { argDigest: PAYLOAD_A });
+  store.recordStepOutcome(operationId, "step-1", { outcome: "succeeded", evidenceRefs: ["done"] });
+  clock.advance(1_000);
+  const settled = store.settle(operationId, { settleFailed: true });
+  assert.notEqual(settled.snapshot.state, "expired");
 });
