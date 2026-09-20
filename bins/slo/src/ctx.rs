@@ -153,6 +153,12 @@ pub struct Ctx {
     pub beat: std::sync::Arc<std::sync::Mutex<Option<kloudlite_workspaces::history::slo::RunReport>>>,
     pub coordination: Option<crate::coordination::RollLock>,
     coordination_group: Option<String>,
+    /// Set only for the fast suite, only when `coordination::fast_peek` found a LIVE lock of kind
+    /// `roll` (ruling 3): the fast suite never holds the lock at all, so a live PROBE holder (e.g.
+    /// the hourly) is invisible to it and it runs normally — only a roll in progress makes it
+    /// yield. `main.rs` reads this to file a skipped run naming the roll instead of walking a
+    /// journey that a roll is about to interrupt.
+    pub coordination_held_by: Option<String>,
 }
 
 /// How long the run's single downgrade window stays open. One srv roll is minutes; this is
@@ -226,8 +232,18 @@ impl Ctx {
         let coordination_enabled = coordinate;
         let group_owner = parent_run && suite == Suite::Hourly && group.is_none_or(|index| index == 0);
         let coordination_group = group_owner.then(|| std::env::var("KLOUDLITE_SLO_JOB_NAME").unwrap_or_default()).filter(|name| !name.is_empty());
-        let coordination = if parent_run && coordination_enabled && (suite != Suite::Hourly || group_owner) {
-            Some(crate::coordination::acquire(crate::coordination::client().await?, &effective_run_id).await?)
+        let mut coordination_held_by = None;
+        // Ruling 3 (corrected 20 Sep): the fast suite never HOLDS the lock — it only peeks. A
+        // shared lock that a live hourly could hold for up to 3300 s silently reversed the 16 Sep
+        // fix that let fast run beside an hourly (8cd61d51); the lock's job is to keep a probe
+        // apart from a ROLL, never a probe apart from another probe. So fast reads via
+        // `fast_peek`, which answers `Some(holder)` only for a LIVE lock of kind `roll`, and
+        // creates nothing either way — every other suite still `acquire`s and holds as before.
+        let coordination = if parent_run && coordination_enabled && suite == Suite::Fast {
+            coordination_held_by = crate::coordination::fast_peek(crate::coordination::client().await?).await?;
+            None
+        } else if parent_run && coordination_enabled && (suite != Suite::Hourly || group_owner) {
+            crate::coordination::acquire(crate::coordination::client().await?, &effective_run_id, suite.as_str()).await.map(Some)?
         } else if parent_run && coordination_enabled && suite == Suite::Hourly && group.is_some() {
             let job_name = std::env::var("KLOUDLITE_SLO_JOB_NAME").map_err(|_| anyhow::anyhow!("hourly probe has no job name"))?;
             crate::coordination::wait_for_group_owner(crate::coordination::client().await?, &job_name, Duration::from_secs(120)).await?;
@@ -293,6 +309,7 @@ impl Ctx {
             cfg,
             coordination,
             coordination_group,
+            coordination_held_by,
         })
     }
 

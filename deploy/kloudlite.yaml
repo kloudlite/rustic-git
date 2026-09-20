@@ -1917,7 +1917,6 @@ data:
   # not hairpin, so from a pod the public address never answers (8 s timeout, verified
   # 2026-09-06), while the Service answers the same plain-HTTP request Cloudflare sends.
   KLOUDLITE_SLO_ORIGIN_IP: "ingress-nginx-controller.ingress-nginx.svc.cluster.local"
-  KLOUDLITE_SLO_COORDINATION: "1"
   # The ClickHouse host `drill.clickhouse.down` (monthly) denies the admin process egress to.
   # Empty: that drill skips, like `drill.redis.down` does without its own host.
   KLOUDLITE_SLO_CLICKHOUSE_HOST: ""

@@ -122,74 +122,90 @@ async fn parent(cfg: Config, kind: Suite) -> i32 {
     };
     tracing::info!(run_id = %c.run_id, suite = kind.as_str(), "slo.run.started");
     let started = Instant::now();
-    // The child needs the tmp directory to exist before its first stage; its own boot creates it
-    // too, but the parent reads `steps.json` out of it and must not depend on that ordering.
-    let _ = std::fs::create_dir_all(&c.tmp);
+    // The fast suite found a LIVE ROLL lock (R-1, ruling 3): no child to spawn and no steps to
+    // hand over. A live PROBE lock (the hourly, say) never sets this — fast does not even look at
+    // one, it just runs normally — so this only fires while a roll is actually in progress. Every
+    // other suite still fails `Ctx::new` outright on a live holder (`ctx.rs::build`), so
+    // `coordination_held_by` is only ever set here for `Suite::Fast`.
+    let held = c.coordination_held_by.clone();
+    // On the held-lock path there is no child at all: `child_stopped = true` since nothing is
+    // still running, and `child_code = 0` since a routine skip is not a process failure — the run
+    // itself is marked via `report_held`'s `SkipReason::InFlight` steps, which `run_state` below
+    // reads the same way it reads any other in-flight yield.
+    let (mut child_stopped, mut child_code) = (true, 0);
+    if let Some(holder) = &held {
+        kloudlite_slo::suite::report_held(&mut c, kind, holder).await;
+    } else {
+        // The child needs the tmp directory to exist before its first stage; its own boot creates
+        // it too, but the parent reads `steps.json` out of it and must not depend on that ordering.
+        let _ = std::fs::create_dir_all(&c.tmp);
 
-    let budget = budget(None);
-    let exe = std::env::current_exe().unwrap_or_else(|_| Path::new("kloudlite-slo").into());
-    let spawned = tokio::process::Command::new(exe)
-        .args([
-            "run",
-            "--suite",
-            kind.as_str(),
-            "--inner",
-            "--run-id",
-            &c.run_id,
-            "--budget-secs",
-            &budget.as_secs().to_string(),
-        ])
-        .spawn();
-    let mut child_stopped = false;
-    let child_code = match spawned {
-        // The kill is the backstop under the child's own budget: the child stops starting stages
-        // when the budget is spent, but a child wedged somewhere no ceiling covers would otherwise
-        // run until the CronJob's `activeDeadlineSeconds` killed the POD — losing teardown and the
-        // report with it, which is the one outcome the console cannot tell from "never fired".
-        Ok(mut ch) => match tokio::time::timeout(budget + KILL_SLACK, ch.wait()).await {
-            Ok(Ok(s)) => {
-                child_stopped = true;
-                s.code().unwrap_or(EXIT_FAILED)
-            }
-            Ok(Err(e)) => {
+        let budget = budget(None);
+        let exe = std::env::current_exe().unwrap_or_else(|_| Path::new("kloudlite-slo").into());
+        let spawned = tokio::process::Command::new(exe)
+            .args([
+                "run",
+                "--suite",
+                kind.as_str(),
+                "--inner",
+                "--run-id",
+                &c.run_id,
+                "--budget-secs",
+                &budget.as_secs().to_string(),
+            ])
+            .spawn();
+        child_stopped = false;
+        child_code = match spawned {
+            // The kill is the backstop under the child's own budget: the child stops starting
+            // stages when the budget is spent, but a child wedged somewhere no ceiling covers
+            // would otherwise run until the CronJob's `activeDeadlineSeconds` killed the POD —
+            // losing teardown and the report with it, which is the one outcome the console cannot
+            // tell from "never fired".
+            Ok(mut ch) => match tokio::time::timeout(budget + KILL_SLACK, ch.wait()).await {
+                Ok(Ok(s)) => {
+                    child_stopped = true;
+                    s.code().unwrap_or(EXIT_FAILED)
+                }
+                Ok(Err(e)) => {
+                    tracing::error!(error = %e, "slo.child.failed");
+                    EXIT_FAILED
+                }
+                Err(_) => {
+                    tracing::error!(budget_secs = budget.as_secs(), "slo.child.killed");
+                    child_stopped = match ch.kill().await {
+                        Ok(()) => true,
+                        Err(e) => {
+                            tracing::error!(error = %e, "slo.child.kill.failed");
+                            tokio::time::timeout(Duration::from_secs(30), ch.wait()).await.is_ok_and(|result| result.is_ok())
+                        }
+                    };
+                    EXIT_FAILED
+                }
+            },
+            Err(e) => {
+                // Nothing walked the journey, but the run still gets a row: a run that reports
+                // nothing is indistinguishable from one that never started.
                 tracing::error!(error = %e, "slo.child.failed");
+                child_stopped = true;
                 EXIT_FAILED
             }
-            Err(_) => {
-                tracing::error!(budget_secs = budget.as_secs(), "slo.child.killed");
-                child_stopped = match ch.kill().await {
-                    Ok(()) => true,
-                    Err(e) => {
-                        tracing::error!(error = %e, "slo.child.kill.failed");
-                        tokio::time::timeout(Duration::from_secs(30), ch.wait()).await.is_ok_and(|result| result.is_ok())
-                    }
-                };
-                EXIT_FAILED
-            }
-        },
-        Err(e) => {
-            // Nothing walked the journey, but the run still gets a row: a run that reports
-            // nothing is indistinguishable from one that never started.
-            tracing::error!(error = %e, "slo.child.failed");
-            child_stopped = true;
-            EXIT_FAILED
-        }
-    };
-    tracing::info!(code = child_code, "slo.child.completed");
-    // A child that died mid-journey may have left no failing step at all — its last stage never
-    // finished. The run is a failure regardless of what the step list says.
-    c.run_failed = child_code != 0;
+        };
+        tracing::info!(code = child_code, "slo.child.completed");
+        // A child that died mid-journey may have left no failing step at all — its last stage
+        // never finished. The run is a failure regardless of what the step list says.
+        c.run_failed = child_code != 0;
 
-    // Whatever the child managed to record. A missing or half-written file is an empty list —
-    // the report then carries only teardown, which is still a run the console can see failed.
-    c.steps = std::fs::read(c.steps_path())
-        .ok()
-        .and_then(|b| serde_json::from_slice::<Vec<StepReport>>(&b).ok())
-        .unwrap_or_default();
-    // And every name the child recorded, so teardown deletes by name what the prefix sweep
-    // cannot see (an environment's volume is named by the platform, not by us).
-    if let Some(state) = std::fs::read(c.state_path()).ok().and_then(|b| serde_json::from_slice(&b).ok()) {
-        c.state = state;
+        // Whatever the child managed to record. A missing or half-written file is an empty list —
+        // the report then carries only teardown, which is still a run the console can see failed.
+        c.steps = std::fs::read(c.steps_path())
+            .ok()
+            .and_then(|b| serde_json::from_slice::<Vec<StepReport>>(&b).ok())
+            .unwrap_or_default();
+        // And every name the child recorded, so teardown deletes by name what the prefix sweep
+        // cannot see (an environment's volume is named by the platform, not by us).
+        if let Some(state) = std::fs::read(c.state_path()).ok().and_then(|b| serde_json::from_slice(&b).ok()) {
+            c.state = state;
+        }
     }
 
     c.stage = TEARDOWN.to_string();
