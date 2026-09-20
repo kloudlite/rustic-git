@@ -11,6 +11,7 @@ import type { CapabilityDispatchResult } from "../src/operations/capabilities.ts
 import { OperationStore, type CapabilityMetadata } from "../src/operations/store.ts";
 import type { RecoveryAction } from "../src/operations/recovery.ts";
 import { capabilityRuntime } from "./operations-runtime-fixture.ts";
+import { DispatchAuthority, type DispatchToken } from "../src/operations/dispatch-authority.ts";
 
 const context: TrustedActorContext = {
   actorId: "actor-1", tenantId: "tenant-1", sessionId: "session-1", turnId: "turn-1", toolCallId: "call-1", turnRevision: 1, scope: { workspaceId: "ws-1" },
@@ -38,6 +39,7 @@ const callForRecovery = (key: string, capability = "read.item"): ExactCall => ({
 const dispatchFor = () => ({});
 
 class MemoryStore implements ExecutorStore {
+  authority = new DispatchAuthority();
   log: string[] = [];
   owned = true;
   steps = new Map<string, { state: string; effect: string; evidenceRefs?: string[]; error?: OperationError; attempts?: number }>();
@@ -49,14 +51,14 @@ class MemoryStore implements ExecutorStore {
   assertOwnership(): void { this.log.push("ownership"); if (!this.owned) throw new Error("not owned"); }
   queueStep(_operationId: string, input: { key?: string; capability: string }): OperationSnapshot { this.log.push(`queue:${input.key}`); this.steps.set(input.key!, { state: "queued", effect: input.capability.startsWith("write") ? "write" : "read" }); return this.snapshot(); }
   startStep(_operationId: string, stepId: string): OperationSnapshot { this.log.push("intent:" + stepId); const step = this.steps.get(stepId)!; step.state = "running"; step.attempts = (step.attempts ?? 0) + 1; return this.snapshot(); }
-  retryStep(_operationId: string, stepId: string): { snapshot: OperationSnapshot; authorizeDispatch: () => boolean } { this.log.push("retry:" + stepId); const step = this.steps.get(stepId)!; step.state = "running"; step.attempts = (step.attempts ?? 0) + 1; return { snapshot: this.snapshot(), authorizeDispatch: () => true }; }
+  retryStep(operationId: string, stepId: string): { snapshot: OperationSnapshot; dispatchToken: DispatchToken } { this.log.push("retry:" + stepId); const step = this.steps.get(stepId)!; step.state = "running"; step.attempts = (step.attempts ?? 0) + 1; return { snapshot: this.snapshot(), dispatchToken: this.authority.issue({ operationId, stepId, capability: step.effect === "write" ? "write.item" : "read.item", version: "1.0.0", payloadDigest: "sha256:" + "0".repeat(64), attempt: step.attempts }) }; }
   recordStepOutcome(_operationId: string, stepId: string, input: { outcome: "succeeded" | "failed"; evidenceRefs?: string[]; error?: OperationError }): OperationSnapshot { this.log.push(`outcome:${stepId}:${input.outcome}`); Object.assign(this.steps.get(stepId)!, { state: input.outcome, evidenceRefs: input.evidenceRefs, error: input.error }); return this.snapshot(); }
   markOutcomeUnknown(_operationId: string, stepId: string): OperationSnapshot { this.log.push(`unknown:${stepId}`); this.steps.get(stepId)!.state = "outcome_unknown"; this.state = "reconciling"; return this.snapshot(); }
   reconcileStep(_operationId: string, stepId: string, input: { conclusion: "succeeded" | "failed"; evidenceRefs?: string[]; error?: OperationError }): OperationSnapshot { this.log.push(`reconcile:${stepId}:${input.conclusion}`); Object.assign(this.steps.get(stepId)!, { state: input.conclusion, evidenceRefs: input.evidenceRefs, error: input.error }); this.state = "running"; return this.snapshot(); }
   cancelStep(_operationId: string, stepId: string, input: { evidenceRefs: string[] }): OperationSnapshot { this.log.push(`cancel:${stepId}`); Object.assign(this.steps.get(stepId)!, { state: "cancelled", evidenceRefs: input.evidenceRefs }); return this.snapshot(); }
   requireDecision(operationId: string, stepId: string, input: { decisionId: string; decisionClass: "user_authorization" | "user_preference"; question: string }): OperationSnapshot { this.log.push(`decision:${stepId}`); this.revision += 1; this.steps.get(stepId)!.state = "awaiting_approval"; this.pendingDecisions = [{ decisionId: input.decisionId, operationId, stepId, decisionClass: input.decisionClass, question: input.question, createdAt: 1, expiresAt: 100_000, revision: this.revision }]; return this.snapshot(); }
   recordDecision(_record: RecordedDecision): OperationSnapshot { this.log.push("decision-recorded"); return this.snapshot(); }
-  resume(input: { request: { decisionId: string; resolution: { recordId: string } } }): { outcome: "dispatch"; snapshot: OperationSnapshot; authorizeDispatch: () => boolean } { const pending = this.pendingDecisions.find((entry) => entry.decisionId === input.request.decisionId)!; this.log.push(`resume:${pending.stepId}`); this.pendingDecisions = []; this.steps.get(pending.stepId)!.state = "running"; return { outcome: "dispatch", snapshot: this.snapshot(), authorizeDispatch: () => true }; }
+  resume(input: { request: { operationId: string; decisionId: string; resolution: { recordId: string } } }): { outcome: "dispatch"; snapshot: OperationSnapshot; dispatchToken: DispatchToken } { const pending = this.pendingDecisions.find((entry) => entry.decisionId === input.request.decisionId)!; this.log.push(`resume:${pending.stepId}`); this.pendingDecisions = []; const step = this.steps.get(pending.stepId)!; step.state = "running"; step.attempts = (step.attempts ?? 0) + 1; return { outcome: "dispatch", snapshot: this.snapshot(), dispatchToken: this.authority.issue({ operationId: input.request.operationId, stepId: pending.stepId, capability: "write.item", version: "1.0.0", payloadDigest: "sha256:" + "1".repeat(64), attempt: step.attempts }) }; }
   requestCancel(_operationId: string): OperationSnapshot { this.log.push("cancel-requested"); for (const step of this.steps.values()) if (step.state === "queued") step.state = "cancelled"; return this.snapshot(); }
   expire(): OperationSnapshot { this.log.push("expire"); this.state = "expired"; return this.snapshot(); }
   settle(): { snapshot: OperationSnapshot } { if (this.settledState) this.state = this.settledState; return { snapshot: this.snapshot() }; }
@@ -87,6 +89,24 @@ function registry(store: MemoryStore, outcomes: CapabilityDispatchResult[], desc
   };
 }
 
+function approvedRegistry(store: MemoryStore): Pick<CapabilityRegistry, "get" | "prepare" | "dispatch"> {
+  const runtime = capabilityRuntime({ "environment.restore": async () => ({ ok: true, value: {} }) });
+  const real = new CapabilityRegistry(CAPABILITY_CONTRACTS, ["environment.restore"], store.authority);
+  return {
+    get: () => APPROVED_WRITE,
+    prepare: (_name, _args, deps) => ({ ok: true, approval: { capability: "write.item", version: "1.0.0", effect: "write", prompt: "Approve the exact write", args: {}, payloadDigest: "sha256:" + "1".repeat(64), expectation: { ...deps.decision!, payloadDigest: "sha256:" + "1".repeat(64), now: 10 } } }),
+    dispatch: async (name, _args, deps) => {
+      const token = deps.dispatchToken;
+      const allowed = token !== undefined && store.authority.consume(token, { operationId: deps.dispatchOperationId!, stepId: deps.dispatchStepId!, capability: name, version: "1.0.0", payloadDigest: "sha256:" + "1".repeat(64), attempt: deps.dispatchAttempt! });
+      if (!allowed) return { outcome: "refused", capability: name, version: "1.0.0", code: "permission_denied", reason: "unauthorized" };
+      store.log.push(`dispatch:${name}`);
+      void real;
+      void runtime;
+      return { outcome: "completed", capability: name, version: "1.0.0", result: {} };
+    },
+  };
+}
+
 test("persists intent before trusted O02 dispatch and keeps actor context out of arguments", async () => {
   const store = new MemoryStore();
   let trustedContext: TrustedActorContext | undefined;
@@ -100,26 +120,7 @@ test("persists intent before trusted O02 dispatch and keeps actor context out of
 test("approval-required mutations enter running only through the recorded O05 resume", async () => {
   const store = new MemoryStore();
   let approvals = 0;
-  const reg: Pick<CapabilityRegistry, "get" | "prepare" | "dispatch"> = {
-    get: (name) => name === "write.item" ? APPROVED_WRITE : undefined,
-    prepare: (_name, _args, deps) => ({
-      ok: true,
-      args: {},
-      states: {},
-      descriptor: APPROVED_WRITE,
-      approval: {
-        capability: "write.item", version: "1.0.0", effect: "write", prompt: "Approve the exact write", args: {},
-        payloadDigest: "sha256:" + "1".repeat(64),
-        expectation: { ...deps.decision!, payloadDigest: "sha256:" + "1".repeat(64), now: 10 },
-      },
-    }),
-    dispatch: async (name, _args, deps) => {
-      assert.ok(deps.authorizeDispatch);
-      assert.equal(deps.authorizeDispatch!({ capability: name, version: "1.0.0", payloadDigest: "sha256:" + "1".repeat(64) }), true);
-      store.log.push(`dispatch:${name}`);
-      return { outcome: "completed", capability: name, version: "1.0.0", result: {} };
-    },
-  };
+  const reg = approvedRegistry(store);
   const executor = new OperationExecutor({
     store,
     registry: reg,
@@ -141,14 +142,15 @@ test("approval-required mutations enter running only through the recorded O05 re
 });
 
 test("real O02 dispatch and O05 store enforce actor-bound approval before mutation", async () => {
-  const registry = new CapabilityRegistry(CAPABILITY_CONTRACTS, ["environment.restore"]);
+  const authority = new DispatchAuthority();
+  const registry = new CapabilityRegistry(CAPABILITY_CONTRACTS, ["environment.restore"], authority);
   const root = fs.mkdtempSync(path.join(os.tmpdir(), "operation-executor-"));
   const ownership = { ownerId: "executor-test", assertHeld: () => {} };
   const metadata = (name: string, version: string): CapabilityMetadata | undefined => {
     const found = registry.get(name);
     return found && (!version || found.version === version) ? { version: found.version, effect: found.effect, approval: found.approval.required, retry: found.retry, resourceKeys: found.resourceAccess.conflictKeys } : undefined;
   };
-  const store = new OperationStore({ root, ownership, now: Date.now, capabilityMetadata: metadata });
+  const store = new OperationStore({ root, ownership, now: Date.now, capabilityMetadata: metadata, dispatchAuthority: authority });
   const accepted = store.accept({ request: { instruction: "Restore devstack to snap-1" }, context }).snapshot;
   store.beginResolution(accepted.operationId);
   let mutations = 0;

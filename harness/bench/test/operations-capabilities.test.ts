@@ -13,7 +13,8 @@ import {
   createBenchCapabilityRuntime,
 } from "../src/operations/capabilities.ts";
 import type { CapabilityDefinition } from "../src/operations/capabilities.ts";
-import { checkResumeAgainstRecord, validateCapabilityDescriptor, validateRecordedDecision } from "../src/operations/contracts.ts";
+import { canonicalDigest, checkResumeAgainstRecord, validateCapabilityDescriptor, validateRecordedDecision } from "../src/operations/contracts.ts";
+import { DispatchAuthority } from "../src/operations/dispatch-authority.ts";
 import type { RecordedDecision, ResumeExpectation } from "../src/operations/contracts.ts";
 import { toJsonSchema } from "../src/operations/shape.ts";
 import type { Validation } from "../src/operations/shape.ts";
@@ -108,18 +109,21 @@ const approvedDispatch = async (
   overrides: Partial<RecordedDecision> = {},
   allowedPolicySources: readonly ("user_ui" | "trusted_policy")[] = ["user_ui"],
 ) => {
+  const authority = new DispatchAuthority();
   const deps = { runtime, decision: decisionExpectation(), allowedPolicySources };
   const prepared = registry.prepare(capability, args, deps);
   assert.equal(prepared.ok, true);
   if (!prepared.ok || !prepared.approval) assert.fail("expected an approval request");
   const record = grantedDecision(prepared.approval.expectation, overrides);
-  const authorizeDispatch = () => {
+  const authorized = (() => {
     const shaped = validateRecordedDecision(record);
     if (!shaped.ok || !allowedPolicySources.includes(record.policySource)) return false;
     const checked = checkResumeAgainstRecord(record, prepared.approval!.expectation);
     return checked.ok && checked.value.dispatchAuthorized;
-  };
-  return registry.dispatch(capability, args, { runtime, authorizeDispatch });
+  })();
+  const token = authority.issue({ operationId: prepared.approval.expectation.operationId, stepId: prepared.approval.expectation.stepId, capability, version: prepared.approval.version, payloadDigest: prepared.approval.payloadDigest, attempt: 1 });
+  const authorizedRegistry = new CapabilityRegistry(CAPABILITY_CONTRACTS, [capability], authority);
+  return authorizedRegistry.dispatch(capability, args, { runtime, dispatchToken: authorized ? token : ({} as typeof token), dispatchOperationId: prepared.approval.expectation.operationId, dispatchStepId: prepared.approval.expectation.stepId, dispatchAttempt: 1 });
 };
 
 test("every shipped contract is valid, and its published schema is its executable shape", () => {
@@ -420,7 +424,8 @@ test("an enabled read runs through its wired handler; a refusal or an error is n
 });
 
 test("a prepared denial refuses the step and runs nothing; a prepared grant runs it once", async () => {
-  const registry = new CapabilityRegistry(CAPABILITY_CONTRACTS, ["environment.restore"]);
+  const authority = new DispatchAuthority();
+  const registry = new CapabilityRegistry(CAPABILITY_CONTRACTS, ["environment.restore"], authority);
   const calls: string[] = [];
   const runtime = capabilityRuntime({ "environment.restore": async ({ args }) => (calls.push(`run:${String(args.id)}`), { ok: true, value: { id: args.id } }) });
   const args = { id: "devstack", snapshot: "snap-1" };
@@ -430,26 +435,28 @@ test("a prepared denial refuses the step and runs nothing; a prepared grant runs
   assert.equal(prepared.approval.prompt, "Restore snapshot snap-1 into environment devstack, in place");
   assert.match(prepared.approval.payloadDigest, /^sha256:[0-9a-f]{64}$/);
 
-  const denied = expectRefused(await registry.dispatch("environment.restore", args, { runtime, authorizeDispatch: () => false }));
+  const dispatch = (token: ReturnType<DispatchAuthority["issue"]>) => registry.dispatch("environment.restore", args, { runtime, dispatchToken: token, dispatchOperationId: "op-1", dispatchStepId: "step-1", dispatchAttempt: 1 });
+  const denied = expectRefused(await dispatch({} as ReturnType<DispatchAuthority["issue"]>));
   assert.equal(denied.code, "permission_denied");
   assert.equal(denied.reason, DECLINED);
   assert.equal(calls.filter((call) => call.startsWith("run:")).length, 0, "a denial never reaches the handler");
 
-  const granted = await registry.dispatch("environment.restore", args, { runtime, authorizeDispatch: () => true });
+  const granted = await dispatch(authority.issue({ operationId: "op-1", stepId: "step-1", capability: "environment.restore", version: "1.0.0", payloadDigest: prepared.approval.payloadDigest, attempt: 1 }));
   assert.equal(granted.outcome, "completed");
   assert.deepEqual(calls.filter((call) => call.startsWith("run:")), ["run:devstack"]);
 });
 
 test("an approval-required adapter needs a one-shot attempt authorization", async () => {
-  const registry = new CapabilityRegistry(CAPABILITY_CONTRACTS, ["environment.restore"]);
+  const authority = new DispatchAuthority();
+  const registry = new CapabilityRegistry(CAPABILITY_CONTRACTS, ["environment.restore"], authority);
   let runs = 0;
-  let checks = 0;
   const runtime = capabilityRuntime({ "environment.restore": async () => (runs += 1, { ok: true, value: { id: "devstack" } }) });
-  const authorizeDispatch = () => (checks += 1) === 1;
-  const deps = { runtime, authorizeDispatch };
+  const args = { id: "devstack", snapshot: "snap-1" };
+  const token = authority.issue({ operationId: "op-1", stepId: "step-1", capability: "environment.restore", version: "1.0.0", payloadDigest: canonicalDigest(args), attempt: 1 });
+  const deps = { runtime, dispatchToken: token, dispatchOperationId: "op-1", dispatchStepId: "step-1", dispatchAttempt: 1 };
 
-  assert.equal((await registry.dispatch("environment.restore", { id: "devstack", snapshot: "snap-1" }, deps)).outcome, "completed");
-  const replay = expectRefused(await registry.dispatch("environment.restore", { id: "devstack", snapshot: "snap-1" }, deps));
+  assert.equal((await registry.dispatch("environment.restore", args, deps)).outcome, "completed");
+  const replay = expectRefused(await registry.dispatch("environment.restore", args, deps));
   assert.equal(replay.code, "permission_denied");
   assert.equal(runs, 1);
 });
@@ -876,7 +883,10 @@ test("approval cannot mutate the payload that the handler executes", async () =>
   assert.equal(prepared.ok, true);
   if (!prepared.ok || !prepared.approval) assert.fail("expected an approval request");
   (prepared.approval.args as Record<string, unknown>).snapshot = "other-snapshot";
-  const result = await registry.dispatch("environment.restore", args, { runtime, authorizeDispatch: () => true });
+  const authority = new DispatchAuthority();
+  const authorized = new CapabilityRegistry(CAPABILITY_CONTRACTS, ["environment.restore"], authority);
+  const token = authority.issue({ operationId: "op-1", stepId: "step-1", capability: "environment.restore", version: "1.0.0", payloadDigest: canonicalDigest(args), attempt: 1 });
+  const result = await authorized.dispatch("environment.restore", args, { runtime, dispatchToken: token, dispatchOperationId: "op-1", dispatchStepId: "step-1", dispatchAttempt: 1 });
   assert.equal(result.outcome, "completed");
   assert.deepEqual(executed, { id: "devstack", snapshot: "snap-1" });
 });

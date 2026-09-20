@@ -74,6 +74,13 @@ test("plan validation rejects undeclared and mistyped output bindings", () => {
     call("bound", "read.bound", { dependsOn: ["source"], argsFrom: { id: { from: "source", output: "missing" } } }),
   ], (name) => capabilities.get(name));
   assert.equal(missing.ok, false);
+  if (!missing.ok) {
+    assert.deepEqual(missing.issues[0], {
+      path: "$.calls[1].argsFrom.id",
+      code: "unknown_dependency",
+      message: "source has no declared output missing",
+    });
+  }
 
   const typed = validateSchedulePlan([
     call("source"),
@@ -84,6 +91,34 @@ test("plan validation rejects undeclared and mistyped output bindings", () => {
     assert.ok(typed.issues.some((issue) => issue.code === "validation_failure"));
     assert.ok(typed.issues.every((issue) => issue.path.startsWith("$.calls[")));
   }
+});
+
+test("typed open-object outputs support compatible named bindings only", () => {
+  const source = {
+    ...descriptor("read.open"),
+    outputSchema: { type: "object" as const, additionalProperties: { type: "string" as const } },
+  };
+  const untyped = {
+    ...descriptor("read.untyped"),
+    outputSchema: { type: "object" as const, additionalProperties: true },
+  };
+  const stringTarget = {
+    ...descriptor("read.string-target"),
+    inputSchema: { type: "object" as const, properties: { id: { type: "string" as const } }, required: ["id"], additionalProperties: false },
+  };
+  const integerTarget = {
+    ...descriptor("read.integer-target"),
+    inputSchema: { type: "object" as const, properties: { id: { type: "integer" as const } }, required: ["id"], additionalProperties: false },
+  };
+  const typed = new Map([source, untyped, stringTarget, integerTarget].map((entry) => [entry.capability, entry]));
+  const bind = (sourceCapability: string, targetCapability: string) => validateSchedulePlan([
+    call("source", sourceCapability),
+    call("target", targetCapability, { dependsOn: ["source"], argsFrom: { id: { from: "source", output: "dynamic" } } }),
+  ], (name) => typed.get(name));
+
+  assert.equal(bind(source.capability, stringTarget.capability).ok, true);
+  assert.equal(bind(source.capability, integerTarget.capability).ok, false);
+  assert.equal(bind(untyped.capability, stringTarget.capability).ok, false);
 });
 
 test("validates selected nested binding schemas, numeric compatibility, required fields, and collisions", () => {

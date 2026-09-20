@@ -113,7 +113,7 @@ export function validateSchedulePlan(calls: readonly ExactCall[], descriptor: Sc
         const declaredOutput = sourceDescriptor.outputSchema.properties?.[binding.output]
           ?? (typeof sourceDescriptor.outputSchema.additionalProperties === "object" ? sourceDescriptor.outputSchema.additionalProperties : undefined);
         if (!declaredOutput) {
-          issues.push(issue("1calls[" + index + "].argsFrom." + name, "unknown_dependency", binding.from + " has no declared output " + binding.output));
+          issues.push(issue(`$.calls[${index}].argsFrom.${name}`, "unknown_dependency", `${binding.from} has no declared output ${binding.output}`));
           continue;
         }
         if (!target) continue;

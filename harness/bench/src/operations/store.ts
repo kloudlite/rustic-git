@@ -65,6 +65,7 @@ import {
   type TrustedActorContext,
   type UnknownOutcome,
 } from "./contracts.ts";
+import { DispatchAuthority, type DispatchToken } from "./dispatch-authority.ts";
 import { isRecord, type Validation } from "./shape.ts";
 import {
   applyTransition,
@@ -257,6 +258,7 @@ export type OperationStoreOptions = {
   ownership: ExclusiveOwnership;
   /** Trusted O02 seam. Every persisted security property comes from this descriptor. */
   capabilityMetadata: CapabilityMetadataSource;
+  dispatchAuthority: DispatchAuthority;
   fs?: StoreFs;
   now?: () => number;
   /** Test seam; the id is still validated before it can name a file. */
@@ -310,8 +312,7 @@ export type RetryStepInput = StartStepInput & {
   retry: RetryPolicy;
 };
 
-export type DispatchAuthorization = (claims: { capability: string; version: string; payloadDigest: string }) => boolean;
-export type RetryStepResult = { snapshot: OperationSnapshot; authorizeDispatch: DispatchAuthorization };
+export type RetryStepResult = { snapshot: OperationSnapshot; dispatchToken: DispatchToken };
 
 export type CancelStepInput = { evidenceRefs: string[]; summary?: string };
 
@@ -328,7 +329,7 @@ export type RequireDecisionInput = {
 export type ResumeInput = { request: ResumeRequest; context: TrustedActorContext };
 
 export type ResumeResult =
-  | { outcome: "dispatch"; snapshot: OperationSnapshot; stepId: string; decisionId: string; recordId: string; dispatchDigest: string; authorizeDispatch: DispatchAuthorization }
+  | { outcome: "dispatch"; snapshot: OperationSnapshot; stepId: string; decisionId: string; recordId: string; dispatchDigest: string; dispatchToken: DispatchToken }
   | { outcome: "supply_input"; snapshot: OperationSnapshot; decisionId: string; resolution: Extract<DecisionResolution, { kind: "additional_input" }> }
   | { outcome: "refuse_step"; snapshot: OperationSnapshot; stepId: string; decisionId: string; recordId: string };
 
@@ -702,6 +703,7 @@ export class OperationStore {
   #fs: StoreFs;
   #ownership: ExclusiveOwnership;
   #capabilityMetadata: CapabilityMetadataSource;
+  #dispatchAuthority: DispatchAuthority;
   #now: () => number;
   #generateId: () => string;
   #operations = new Map<string, StoredOperation>();
@@ -719,6 +721,7 @@ export class OperationStore {
     this.#fs = options.fs ?? nodeStoreFs;
     this.#ownership = options.ownership;
     this.#capabilityMetadata = options.capabilityMetadata;
+    this.#dispatchAuthority = options.dispatchAuthority;
     this.#now = options.now ?? (() => Date.now());
     this.#generateId = options.generateOperationId ?? (() => `op-${randomUUID()}`);
     this.#scan();
@@ -1105,6 +1108,7 @@ export class OperationStore {
 
   /** Records an observed outcome after dispatch; never a substitute for one. */
   recordStepOutcome(operationId: string, stepId: string, input: StepOutcomeInput): OperationSnapshot {
+    this.#dispatchAuthority.invalidate(operationId, stepId);
     const snapshot = this.#requireSnapshot(operationId);
     const step = stepOf(snapshot, stepId);
     const error = input.outcome === "failed" ? validated(validateOperationError(input.error), "$.error") : undefined;
@@ -1149,6 +1153,7 @@ export class OperationStore {
    * through `reconcile_conclusive`: an unknown effect is never retried or cancelled away.
    */
   markOutcomeUnknown(operationId: string, stepId: string, input: { summary?: string } = {}): OperationSnapshot {
+    this.#dispatchAuthority.invalidate(operationId, stepId);
     const operation = this.#require(operationId);
     const snapshot = this.#requireSnapshot(operationId);
     const step = stepOf(snapshot, stepId);
@@ -1297,11 +1302,13 @@ export class OperationStore {
         },
       ],
     });
-    return { snapshot: applied.snapshot, authorizeDispatch: this.#dispatchAuthorization(operationId, stepId, digest, applied.snapshot.steps.find((entry) => entry.stepId === stepId)!.attempts) };
+    const current = applied.snapshot.steps.find((entry) => entry.stepId === stepId)!;
+    return { snapshot: applied.snapshot, dispatchToken: this.#dispatchAuthority.issue({ operationId, stepId, capability: current.capability, version: current.capabilityVersion, payloadDigest: digest, attempt: current.attempts }) };
   }
 
   /** Cancels a running step only with evidence that no effect was applied. */
   cancelStep(operationId: string, stepId: string, input: CancelStepInput): OperationSnapshot {
+    this.#dispatchAuthority.invalidate(operationId, stepId);
     const snapshot = this.#requireSnapshot(operationId);
     const step = stepOf(snapshot, stepId);
     if (!input.evidenceRefs?.length) {
@@ -1619,19 +1626,7 @@ export class OperationStore {
       decisionId: pending.decisionId,
       recordId,
       dispatchDigest: payloadDigest,
-      authorizeDispatch: this.#dispatchAuthorization(snapshot.operationId, pending.stepId, payloadDigest, applied.snapshot.steps.find((entry) => entry.stepId === pending.stepId)!.attempts),
-    };
-  }
-
-  #dispatchAuthorization(operationId: string, stepId: string, digest: string, attempt: number): DispatchAuthorization {
-    let available = true;
-    return (claims) => {
-      if (!available) return false;
-      const snapshot = this.#requireSnapshot(operationId);
-      const step = stepOf(snapshot, stepId);
-      if (step.state !== "running" || step.attempts !== attempt || step.capability !== claims.capability || step.capabilityVersion !== claims.version || digest !== claims.payloadDigest) return false;
-      available = false;
-      return true;
+      dispatchToken: this.#dispatchAuthority.issue({ operationId: snapshot.operationId, stepId: pending.stepId, capability: step.capability, version: step.capabilityVersion, payloadDigest, attempt: applied.snapshot.steps.find((entry) => entry.stepId === pending.stepId)!.attempts }),
     };
   }
 

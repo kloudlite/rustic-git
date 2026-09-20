@@ -36,6 +36,7 @@ import type {
   RecordedDecision,
   ResumeExpectation,
 } from "./contracts.ts";
+import { DispatchAuthority, type DispatchToken } from "./dispatch-authority.ts";
 import { toJsonSchema } from "./shape.ts";
 import type { Fields, JsonValue, Node, ValidationIssue } from "./shape.ts";
 import {
@@ -97,7 +98,10 @@ export type CapabilityDispatchDeps = {
   approve?: (request: CapabilityApprovalRequest) => Promise<RecordedDecision>;
   decision?: Omit<ResumeExpectation, "payloadDigest" | "now"> & { now?: number };
   /** O05-issued, one-shot authorization for this exact dispatch attempt. */
-  authorizeDispatch?: (claims: { capability: string; version: string; payloadDigest: string }) => boolean;
+  dispatchToken?: DispatchToken;
+  dispatchOperationId?: string;
+  dispatchStepId?: string;
+  dispatchAttempt?: number;
   /** Trusted dispatch policy, never model input. An unlisted source cannot authorize this call. */
   allowedPolicySources?: readonly RecordedDecision["policySource"][];
   signal?: AbortSignal;
@@ -862,11 +866,13 @@ export type CapabilityPrepareResult =
 export class CapabilityRegistry {
   private readonly byName: Map<string, CapabilityDefinition>;
   private readonly enabled: Set<string>;
+  private readonly dispatchAuthority: DispatchAuthority;
 
-  constructor(definitions: readonly CapabilityDefinition[] = CAPABILITY_CONTRACTS, enabled: readonly string[] = INITIAL_READ_CAPABILITIES) {
+  constructor(definitions: readonly CapabilityDefinition[], enabled: readonly string[], dispatchAuthority: DispatchAuthority) {
     this.byName = new Map(definitions.map((definition) => [definition.descriptor.capability, definition]));
     if (this.byName.size !== definitions.length) throw new Error("two capability definitions share a name");
     this.enabled = new Set(enabled);
+    this.dispatchAuthority = dispatchAuthority;
     for (const name of this.enabled) {
       if (!this.byName.has(name)) throw new Error(`enabled capability ${name} is not in the registry`);
     }
@@ -973,7 +979,7 @@ export class CapabilityRegistry {
       outcome = await dispatchWithPolicy({
       capability,
       effect: descriptor.effect,
-      approval: { required: approvalRequired, ...(approvalRequired === "none" ? {} : { obtain: async () => deps.authorizeDispatch?.({ capability, version: descriptor.version, payloadDigest: canonicalDigest(valid.value.args) }) ?? false }) },
+      approval: { required: approvalRequired, ...(approvalRequired === "none" ? {} : { obtain: async () => deps.dispatchToken !== undefined && deps.dispatchOperationId !== undefined && deps.dispatchStepId !== undefined && deps.dispatchAttempt !== undefined && this.dispatchAuthority.consume(deps.dispatchToken, { operationId: deps.dispatchOperationId, stepId: deps.dispatchStepId, capability, version: descriptor.version, payloadDigest: canonicalDigest(valid.value.args), attempt: deps.dispatchAttempt }) }) },
       inspect: () => definition.scopeCheck?.(valid.value.args),
       run: async () => handler({ args: executionArgs, states: cloneStates(valid.value.states), signal: deps.signal }),
       failed: (result) => result.ok ? undefined : result.error.code,
@@ -995,7 +1001,7 @@ export class CapabilityRegistry {
 }
 
 /** The bench pilot's registry. Nothing may enable a capability that is not a read yet. */
-export const capabilityRegistry = new CapabilityRegistry();
+export const capabilityRegistry = new CapabilityRegistry(CAPABILITY_CONTRACTS, INITIAL_READ_CAPABILITIES, new DispatchAuthority());
 
 for (const name of INITIAL_READ_CAPABILITIES) {
   const descriptor = capabilityRegistry.get(name);
