@@ -14,12 +14,13 @@ export interface ExecutorStore {
   markOutcomeUnknown(operationId: string, stepId: string, input?: { summary?: string }): OperationSnapshot;
   reconcileStep(operationId: string, stepId: string, input: { conclusion: "succeeded" | "failed"; evidenceRefs?: string[]; error?: OperationError }): OperationSnapshot;
   cancelStep(operationId: string, stepId: string, input: { evidenceRefs: string[] }): OperationSnapshot;
+  skipStep(operationId: string, stepId: string, input?: { summary?: string }): OperationSnapshot;
   requireDecision(operationId: string, stepId: string, input: { decisionId: string; decisionClass: "user_authorization" | "user_preference"; question: string; payloadDigest: string }): OperationSnapshot;
   recordDecision(record: RecordedDecision, currentContext: TrustedActorContext): OperationSnapshot;
   resume(input: { request: { action: "resume"; operationId: string; decisionId: string; expectedRevision: number; resolution: { kind: "recorded_user_decision"; recordId: string } }; context: TrustedActorContext }): { outcome: "dispatch" | "refuse_step" | "supply_input"; snapshot: OperationSnapshot; dispatchToken?: DispatchToken };
   requestCancel(operationId: string, input?: { reason?: string }): OperationSnapshot;
   expire(operationId: string): OperationSnapshot;
-  settle(operationId: string): { snapshot: OperationSnapshot };
+  settle(operationId: string, options?: { settleFailed?: boolean }): { snapshot: OperationSnapshot };
   load(operationId: string): OperationSnapshot;
 }
 
@@ -163,10 +164,15 @@ export class OperationExecutor {
             dispatchDeps = { ...deps, signal, dispatchToken: resumed.dispatchToken, dispatchOperationId: input.operationId, dispatchStepId: stepId, dispatchAttempt: running.attempts };
           }
           let outcome = await this.#registry.dispatch(call.capability, args, dispatchDeps, call.capabilityVersion);
-          while (outcome.outcome === "failed" && outcome.error.retryable && descriptor.retry.class === "idempotent") {
+          while (outcome.outcome === "failed" && outcome.error.retryable && descriptor.retry.class === "idempotent" && !signal.aborted) {
             this.#store.recordStepOutcome(input.operationId, stepId, { outcome: "failed", error: outcome.error });
             const step = this.#store.load(input.operationId).steps.find((entry) => entry.stepId === stepId);
-            if (!step || step.attempts >= descriptor.retry.maxAttempts) break;
+            if (!step || step.attempts >= descriptor.retry.maxAttempts) {
+              // The failure is already recorded (above): #record must not record it again
+              // — the real store has only running -> failed, so a second call throws and
+              // replaces the provider's own error with that transition error.
+              return { outcome: "failed", error: new Error(outcome.error.message) };
+            }
             const retried = this.#store.retryStep(input.operationId, stepId, { retry: descriptor.retry, argDigest, idempotencyKey: `${input.operationId}/${stepId}` }, input.context);
             const running = retried.snapshot.steps.find((entry) => entry.stepId === stepId)!;
             dispatchDeps = { ...deps, signal, dispatchToken: retried.dispatchToken, dispatchOperationId: input.operationId, dispatchStepId: stepId, dispatchAttempt: running.attempts };
@@ -181,7 +187,20 @@ export class OperationExecutor {
         }
         throw error;
       }
-      const settled = deadlineAt !== undefined && Date.now() >= deadlineAt ? this.#store.expire(input.operationId) : this.#store.settle(input.operationId).snapshot;
+      // The scheduler marks a dependency-failed step "skipped" only in its own memory
+      // (`OperationScheduler`, per-call); record it durably so the operation's own step
+      // set agrees with what actually happened. A step already moved off "queued" by
+      // something else (for example a denied approval) is left alone.
+      for (const step of scheduled.steps) {
+        if (step.outcome !== "skipped") continue;
+        const stepId = stepIds.get(step.key);
+        if (!stepId) continue;
+        const durable = this.#store.load(input.operationId).steps.find((entry) => entry.stepId === stepId);
+        if (durable?.state === "queued") this.#store.skipStep(input.operationId, stepId);
+      }
+      // The scheduler has finished: nothing will ever retry in this execution, so every
+      // failed step is final regardless of what its own retry facts would otherwise allow.
+      const settled = deadlineAt !== undefined && Date.now() >= deadlineAt ? this.#store.expire(input.operationId) : this.#store.settle(input.operationId, { settleFailed: true }).snapshot;
       return this.#aggregate(settled, scheduled);
     } finally {
       if (deadline) clearTimeout(deadline);

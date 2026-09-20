@@ -293,7 +293,7 @@ function operationGuard(previous: OperationSnapshot, candidate: OperationSnapsho
       if (candidate.pendingDecisions.length || candidate.unknownOutcomes.length) {
         return invalid("expiry cannot drop a pending decision or an unresolved outcome");
       }
-      return candidate.steps.every((step) => isTerminalStepState(step.state)) ? undefined : invalid("expiry waits for settled steps");
+      return candidate.steps.every((step) => isTerminalStepState(step.state) || step.state === "failed") ? undefined : invalid("expiry waits for settled steps");
     default:
       return undefined;
   }

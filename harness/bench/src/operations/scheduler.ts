@@ -228,16 +228,30 @@ export class OperationScheduler {
 
   #ready(operation: QueuedOperation) {
     const activeKeys = new Set([...this.#running].filter((entry) => entry.operation === operation).map((entry) => entry.call.key));
+    // Propagate skips to a FIXPOINT before selecting anything: a single pass only catches
+    // a failed call's direct dependents, so a chain [C dependsOn B, B dependsOn A] with A
+    // failing left C without a result and submit() never resolved. Repeating until nothing
+    // changes catches every depth in one go, regardless of the calls' listed order.
+    let changed = true;
+    while (changed) {
+      changed = false;
+      for (const call of operation.spec.calls) {
+        if (operation.results.has(call.key) || activeKeys.has(call.key)) continue;
+        const dependencies = call.dependsOn ?? [];
+        const blocked = dependencies.some((key) => {
+          const result = operation.results.get(key);
+          return result !== undefined && result.outcome !== "succeeded";
+        });
+        if (blocked) {
+          operation.results.set(call.key, { outcome: "skipped" });
+          changed = true;
+        }
+      }
+    }
     for (const call of operation.spec.calls) {
       if (operation.results.has(call.key) || activeKeys.has(call.key)) continue;
       const dependencies = call.dependsOn ?? [];
-      if (dependencies.some((key) => operation.results.get(key)?.outcome !== "succeeded")) {
-        if (dependencies.some((key) => {
-          const result = operation.results.get(key);
-          return result !== undefined && result.outcome !== "succeeded";
-        })) operation.results.set(call.key, { outcome: "skipped" });
-        continue;
-      }
+      if (dependencies.some((key) => operation.results.get(key)?.outcome !== "succeeded")) continue;
       const descriptor = operation.spec.descriptor(call.capability)!;
       if (descriptor.effect === "read" ? operation.runningReads >= operation.spec.maxConcurrentReads : operation.runningMutations >= operation.spec.maxConcurrentMutations) continue;
       const lanes = this.#laneKeys(operation.spec.operationId, call, descriptor);

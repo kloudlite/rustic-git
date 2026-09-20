@@ -598,7 +598,10 @@ function eventSupportsStepTransition(before: StepRecord, after: StepRecord, even
   if (after.state === "succeeded") return has("succeeded") || has("reconciled", "reconciled_succeeded");
   if (after.state === "failed") return has("failed") || has("reconciled", "reconciled_failed");
   if (after.state === "outcome_unknown") return has("unknown_outcome", "outcome_unknown");
-  if (after.state === "skipped") return has("decision_recorded", "denied");
+  // The transition table has exactly one dependency_failed edge and it leaves "queued",
+  // so this accepts exactly that: a bare progress event never legitimises a skip on its
+  // own, and a skip from any other state still needs the denied decision.
+  if (after.state === "skipped") return has("decision_recorded", "denied") || (before.state === "queued" && has("progress", "dependency_failed"));
   if (after.state === "cancelled") return has("cancelled") || events.some((event) => event.phase === "cancelled" || event.phase === "expired");
   return false;
 }
@@ -822,13 +825,34 @@ export class OperationStore {
     return compactView(this.#requireSnapshot(operationId));
   }
 
+  /**
+   * A failed step is final — no `retry_allowed` will ever be offered again — once the
+   * deadline has passed, or its own retry facts say so. Kept textually beside
+   * `recordStepOutcome`'s `retryAvailable` (store.ts, `recordStepOutcome`) so the two
+   * formulas cannot drift: `retryAvailable` there is
+   * `error?.retryable === true && retry.class === "idempotent" && step.attempts < retry.maxAttempts`;
+   * a step is final here whenever that same test is false (or the deadline forecloses a
+   * retry regardless of what the facts say).
+   */
+  #failedStepsAreFinal(snapshot: OperationSnapshot, deadlinePassed: boolean): boolean {
+    return snapshot.steps.every((step) => {
+      if (step.state !== "failed") return true;
+      if (deadlinePassed) return true;
+      const retry = this.#metadata(step.capability, step.capabilityVersion).retry;
+      return step.error?.retryable !== true || retry.class !== "idempotent" || step.attempts >= retry.maxAttempts;
+    });
+  }
+
   /** Records the truthful terminal state when the settled work supports one. */
-  settle(operationId: string): AppliedChange {
+  settle(operationId: string, options: { settleFailed?: boolean } = {}): AppliedChange {
     const now = this.#now();
-    const direct = this.#apply(operationId, { now, settle: true });
+    const snapshotBefore = this.#requireSnapshot(operationId);
+    const deadlinePassed = snapshotBefore.deadlineAt !== undefined && now >= snapshotBefore.deadlineAt;
+    const settleFailed = options.settleFailed ?? this.#failedStepsAreFinal(snapshotBefore, deadlinePassed);
+    const direct = this.#apply(operationId, { now, settle: true, settleFailed });
     if (direct.changed) return direct;
     const snapshot = direct.snapshot;
-    const target = settledState(snapshot);
+    const target = settledState(snapshot, settleFailed);
     // Some settled states have no direct edge out of a waiting state: the table routes
     // them through `cancel_requested` (a cancellation) or `resolving` (continued work).
     if (target === "cancelled" && canTransitionOperation(snapshot.state, "cancel_requested", "cancel_requested")) {
@@ -836,6 +860,7 @@ export class OperationStore {
         now,
         operation: { to: "cancel_requested", trigger: "cancel_requested" },
         settle: true,
+        settleFailed,
         events: [{ phase: "cancelled", decisionCode: "cancel_requested", summary: "Cancelling the remaining work." }],
       });
     }
@@ -844,6 +869,7 @@ export class OperationStore {
         now,
         operation: { to: "resolving", trigger: "resolve_started" },
         settle: true,
+        settleFailed,
         events: [{ phase: "resolving", summary: "Continuing after the pending question was resolved." }],
       });
     }
@@ -1342,6 +1368,33 @@ export class OperationStore {
   }
 
   /**
+   * Durably records that a queued step is skipped because a step it depends on did not
+   * succeed (contracts.ts: `queued -> skipped` on `dependency_failed`). The scheduler
+   * already knows this in its own memory; this is what makes the durable step set agree.
+   */
+  skipStep(operationId: string, stepId: string, input: { summary?: string } = {}): OperationSnapshot {
+    const snapshot = this.#requireSnapshot(operationId);
+    const step = stepOf(snapshot, stepId);
+    if (step.state !== "queued") {
+      throw new OperationStoreError("invalid_transition", `step ${stepId} is ${step.state}; only a queued step can be skipped`);
+    }
+    return this.#apply(operationId, {
+      now: this.#now(),
+      steps: [{ stepId, to: "skipped", trigger: "dependency_failed" }],
+      settle: true,
+      events: [
+        {
+          phase: "progress",
+          stepId,
+          capability: step.capability,
+          decisionCode: "dependency_failed",
+          summary: input.summary ?? "Skipped: a step it depends on did not succeed.",
+        },
+      ],
+    }).snapshot;
+  }
+
+  /**
    * Records the pending question a step is waiting on. Re-issuing the same `decisionId`
    * with another payload digest supersedes the old binding, so a later approval of the
    * first payload is refused rather than silently reused.
@@ -1712,11 +1765,16 @@ export class OperationStore {
       const changes: StepChange[] = snapshot.steps
         .filter((step) => step.state === "queued")
         .map((step) => ({ stepId: step.stepId, to: "cancelled", trigger: "cancel_requested" }));
-      if (!snapshot.steps.some((step) => step.state === "succeeded") && canTransitionOperation(snapshot.state, "expired", "deadline_reached")) {
+      // `expired` means nothing ran and nothing failed (ruling 2): a succeeded OR a
+      // failed step both mean the operation did something, so both are reported through
+      // settlement (partial/failed/cancelled) rather than hidden behind `expired`.
+      const nothingRanOrFailed = !snapshot.steps.some((step) => step.state === "succeeded" || step.state === "failed");
+      if (nothingRanOrFailed && canTransitionOperation(snapshot.state, "expired", "deadline_reached")) {
         return this.#apply(operationId, {
           now,
           operation: { to: "expired", trigger: "deadline_reached" },
           steps: changes,
+          settleFailed: true,
           events: [
             {
               phase: "expired",
@@ -1726,25 +1784,25 @@ export class OperationStore {
           ],
         }).snapshot;
       }
-      if (snapshot.steps.some((step) => step.state === "succeeded")) {
-        // Committed effects are never hidden behind `expired`: cancel what is left and
-        // report the mixed result truthfully.
-        this.#apply(operationId, {
-          now,
-          operation: operationChange(snapshot, "cancel_requested", "cancel_requested"),
-          steps: changes,
-          settle: true,
-          events: [
-            {
-              phase: "cancelled",
-              decisionCode: "cancel_requested",
-              summary: "The operation deadline passed; queued work was cancelled and committed effects remain.",
-            },
-          ],
-        });
-      }
+      // Committed effects and failures are never hidden behind `expired`: cancel what is
+      // left and report the mixed result truthfully, settling any failed step whose
+      // retry the passed deadline has already foreclosed.
+      this.#apply(operationId, {
+        now,
+        operation: operationChange(snapshot, "cancel_requested", "cancel_requested"),
+        steps: changes,
+        settle: true,
+        settleFailed: true,
+        events: [
+          {
+            phase: "cancelled",
+            decisionCode: "cancel_requested",
+            summary: "The operation deadline passed; queued work was cancelled.",
+          },
+        ],
+      });
     }
-    return this.settle(operationId).snapshot;
+    return this.settle(operationId, { settleFailed: deadlinePassed ? true : undefined }).snapshot;
   }
 
   /** Selection rounds and generation calls are budgeted for the whole operation. */

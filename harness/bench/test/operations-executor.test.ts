@@ -5,7 +5,7 @@ import path from "node:path";
 import { test } from "node:test";
 import { OperationExecutor, type ExecutorStore, type ReconciliationResult } from "../src/operations/executor.ts";
 import { OperationScheduler } from "../src/operations/scheduler.ts";
-import type { CapabilityDescriptor, ExactCall, JsonValue, OperationError, OperationSnapshot, RecordedDecision, TrustedActorContext } from "../src/operations/contracts.ts";
+import { isTerminalOperationState, type CapabilityDescriptor, type ExactCall, type JsonValue, type OperationError, type OperationSnapshot, type RecordedDecision, type TrustedActorContext } from "../src/operations/contracts.ts";
 import { CAPABILITY_CONTRACTS, CapabilityRegistry } from "../src/operations/capabilities.ts";
 import type { CapabilityDispatchResult } from "../src/operations/capabilities.ts";
 import { OperationStore, type CapabilityMetadata } from "../src/operations/store.ts";
@@ -56,12 +56,13 @@ class MemoryStore implements ExecutorStore {
   markOutcomeUnknown(_operationId: string, stepId: string): OperationSnapshot { this.log.push(`unknown:${stepId}`); this.steps.get(stepId)!.state = "outcome_unknown"; this.state = "reconciling"; return this.snapshot(); }
   reconcileStep(_operationId: string, stepId: string, input: { conclusion: "succeeded" | "failed"; evidenceRefs?: string[]; error?: OperationError }): OperationSnapshot { this.log.push(`reconcile:${stepId}:${input.conclusion}`); Object.assign(this.steps.get(stepId)!, { state: input.conclusion, evidenceRefs: input.evidenceRefs, error: input.error }); this.state = "running"; return this.snapshot(); }
   cancelStep(_operationId: string, stepId: string, input: { evidenceRefs: string[] }): OperationSnapshot { this.log.push(`cancel:${stepId}`); Object.assign(this.steps.get(stepId)!, { state: "cancelled", evidenceRefs: input.evidenceRefs }); return this.snapshot(); }
+  skipStep(_operationId: string, stepId: string): OperationSnapshot { this.log.push(`skip:${stepId}`); Object.assign(this.steps.get(stepId)!, { state: "skipped" }); return this.snapshot(); }
   requireDecision(operationId: string, stepId: string, input: { decisionId: string; decisionClass: "user_authorization" | "user_preference"; question: string }): OperationSnapshot { this.log.push(`decision:${stepId}`); this.revision += 1; this.steps.get(stepId)!.state = "awaiting_approval"; this.pendingDecisions = [{ decisionId: input.decisionId, operationId, stepId, decisionClass: input.decisionClass, question: input.question, createdAt: 1, expiresAt: 100_000, revision: this.revision }]; return this.snapshot(); }
   recordDecision(_record: RecordedDecision): OperationSnapshot { this.log.push("decision-recorded"); return this.snapshot(); }
   resume(input: { request: { operationId: string; decisionId: string; resolution: { recordId: string } } }): { outcome: "dispatch"; snapshot: OperationSnapshot; dispatchToken: DispatchToken } { const pending = this.pendingDecisions.find((entry) => entry.decisionId === input.request.decisionId)!; this.log.push(`resume:${pending.stepId}`); this.pendingDecisions = []; const step = this.steps.get(pending.stepId)!; step.state = "running"; step.attempts = (step.attempts ?? 0) + 1; return { outcome: "dispatch", snapshot: this.snapshot(), dispatchToken: this.authority.issue({ operationId: input.request.operationId, stepId: pending.stepId, capability: "write.item", version: "1.0.0", payloadDigest: "sha256:" + "1".repeat(64), attempt: step.attempts }) }; }
   requestCancel(_operationId: string): OperationSnapshot { this.log.push("cancel-requested"); for (const step of this.steps.values()) if (step.state === "queued") step.state = "cancelled"; return this.snapshot(); }
   expire(): OperationSnapshot { this.log.push("expire"); this.state = "expired"; return this.snapshot(); }
-  settle(): { snapshot: OperationSnapshot } { if (this.settledState) this.state = this.settledState; return { snapshot: this.snapshot() }; }
+  settle(_operationId?: string, _options?: { settleFailed?: boolean }): { snapshot: OperationSnapshot } { if (this.settledState) this.state = this.settledState; return { snapshot: this.snapshot() }; }
   load(): OperationSnapshot { return this.snapshot(); }
   snapshot(): OperationSnapshot {
     return {
@@ -468,6 +469,107 @@ test("recovery expires operations but defers actions that need authoritative arg
   assert.equal(store.log.some((entry) => entry.startsWith("dispatch:")), false);
   assert.ok(store.log.includes("expire"));
   assert.ok(store.log.filter((entry) => entry === "ownership").length >= actions.length);
+});
+
+test("a failed dependency leaves a terminal durable operation (C-3 T7)", async () => {
+  const authority = new DispatchAuthority();
+  const registry = new CapabilityRegistry(CAPABILITY_CONTRACTS, ["bench.process.list", "workspace.list"], authority);
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "operation-executor-c3-t7-"));
+  const ownership = { ownerId: "executor-test", assertHeld: () => {} };
+  const metadata = (name: string, version: string): CapabilityMetadata | undefined => {
+    const found = registry.get(name);
+    return found && (!version || found.version === version) ? { version: found.version, effect: found.effect, approval: found.approval.required, retry: found.retry, resourceKeys: found.resourceAccess.conflictKeys } : undefined;
+  };
+  const store = new OperationStore({ root, ownership, now: Date.now, capabilityMetadata: metadata, dispatchAuthority: authority });
+  const accepted = store.accept({ request: { instruction: "List bench processes then workspaces" }, context }).snapshot;
+  const runtime = capabilityRuntime({
+    "bench.process.list": async () => ({ ok: false, error: { code: "execution_failure", message: "backend unavailable", retryable: false } }),
+    "workspace.list": async () => assert.fail("workspace.list must never run: its dependency failed"),
+  });
+  const executor = new OperationExecutor({
+    store,
+    registry,
+    scheduler: new OperationScheduler({ maxConcurrent: 2 }),
+    dispatchFor: () => ({ runtime }),
+  });
+  const result = await executor.execute({
+    operationId: accepted.operationId,
+    context,
+    calls: [
+      { key: "list", capability: "bench.process.list", capabilityVersion: "1.0.0", args: {} },
+      { key: "workspaces", capability: "workspace.list", capabilityVersion: "1.0.0", args: {}, dependsOn: ["list"] },
+    ],
+  });
+  assert.equal(isTerminalOperationState(result.state as never), true, JSON.stringify(result));
+  const snapshot = store.load(accepted.operationId);
+  assert.equal(isTerminalOperationState(snapshot.state), true);
+  assert.equal(snapshot.steps.find((step) => step.key === "list")?.state, "failed");
+  assert.equal(snapshot.steps.find((step) => step.key === "workspaces")?.state, "skipped");
+
+  const reopenedStore = new OperationStore({ root, ownership: { ownerId: "executor-test-2", assertHeld: () => {} }, now: Date.now, capabilityMetadata: metadata, dispatchAuthority: authority });
+  assert.equal(reopenedStore.load(accepted.operationId).state, snapshot.state);
+});
+
+test("an exhausted retry keeps the provider's error (C-3 T8)", async () => {
+  const authority = new DispatchAuthority();
+  const registry = new CapabilityRegistry(CAPABILITY_CONTRACTS, ["bench.process.list"], authority);
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "operation-executor-c3-t8-"));
+  const ownership = { ownerId: "executor-test", assertHeld: () => {} };
+  const metadata = (name: string, version: string): CapabilityMetadata | undefined => {
+    const found = registry.get(name);
+    return found && (!version || found.version === version) ? { version: found.version, effect: found.effect, approval: found.approval.required, retry: found.retry, resourceKeys: found.resourceAccess.conflictKeys } : undefined;
+  };
+  const store = new OperationStore({ root, ownership, now: Date.now, capabilityMetadata: metadata, dispatchAuthority: authority });
+  // Spy on recordStepOutcome directly: this is what would detect a third call for the
+  // step's terminal attempt even if the resulting invalid_transition throw were later
+  // swallowed somewhere upstream (the durable step's own error field is unaffected by a
+  // throw either way, since a rejected write never lands).
+  let recordStepOutcomeCalls = 0;
+  const realRecordStepOutcome = store.recordStepOutcome.bind(store);
+  store.recordStepOutcome = ((...args: Parameters<typeof realRecordStepOutcome>) => {
+    recordStepOutcomeCalls += 1;
+    return realRecordStepOutcome(...args);
+  }) as typeof store.recordStepOutcome;
+  const accepted = store.accept({ request: { instruction: "List bench processes" }, context }).snapshot;
+  let dispatches = 0;
+  const runtime = capabilityRuntime({
+    "bench.process.list": async () => {
+      dispatches += 1;
+      return { ok: false, error: { code: "execution_failure", message: `provider says no (attempt ${dispatches})`, retryable: true } };
+    },
+  });
+  const executor = new OperationExecutor({
+    store,
+    registry,
+    scheduler: new OperationScheduler({ maxConcurrent: 1 }),
+    dispatchFor: () => ({ runtime }),
+  });
+  const result = await executor.execute({
+    operationId: accepted.operationId,
+    context,
+    calls: [{ key: "list", capability: "bench.process.list", capabilityVersion: "1.0.0", args: {} }],
+  });
+  // bench.process.list's declared retry is idempotent/maxAttempts 2: one dispatch, one
+  // retry, both fail, then the loop returns directly instead of falling into #record.
+  assert.equal(dispatches, 2);
+  const failure = result.steps.find((step) => step.key === "list");
+  assert.equal(failure?.outcome, "failed");
+  assert.equal(result.failures.length, 1, JSON.stringify(result.failures));
+  assert.equal(result.failures[0]?.message, "provider says no (attempt 2)");
+
+  const snapshot = store.load(accepted.operationId);
+  const step = snapshot.steps.find((entry) => entry.key === "list");
+  assert.equal(step?.state, "failed");
+  assert.equal(step?.error?.message, "provider says no (attempt 2)");
+  assert.equal(isTerminalOperationState(snapshot.state), true);
+
+  // recordStepOutcome was called exactly twice for the two attempts (once per failure),
+  // never a third time for the same terminal attempt — a duplicate call throws
+  // invalid_transition (the real store has only running -> failed), which #record used
+  // to trigger by always recording the loop's own already-recorded last failure again.
+  assert.equal(recordStepOutcomeCalls, 2);
+  const failedEvents = store.events(accepted.operationId).filter((event) => event.stepId === step?.stepId && event.phase === "failed");
+  assert.equal(failedEvents.length, 2);
 });
 
 test("resume_abort never replays the original mutation without an abort adapter", async () => {

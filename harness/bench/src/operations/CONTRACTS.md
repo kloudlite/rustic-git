@@ -97,6 +97,20 @@ for the actual fact behind each trigger.
   through `reconcile_conclusive`; an uncertain write is never retried or cancelled away.
   Step terminal states are `succeeded`/`skipped`/`cancelled`; `failed` is settled but
   leaves only through `retry_allowed`, and only for a declared retry class.
+- A failed step is settled once no retry remains — the deadline has passed, or its own
+  retry facts (`error.retryable`, the capability's `retry.class`/`maxAttempts`, the
+  step's own `attempts`) say so, `OperationStore#failedStepsAreFinal` — never by adding
+  `failed` to the terminal step states, which would let a step already offered
+  `retry_allowed` disappear from settlement while still eligible to run again. `expired`
+  means nothing ran and nothing failed: a deadline passing with a succeeded or a failed
+  step among the steps is reported through settlement (`completed`/`partial`/`failed`),
+  never hidden behind `expired`. A dependency failure is recorded durably as `skipped`
+  (`OperationStore#skipStep`, trigger `dependency_failed`, the one edge in
+  `STEP_TRANSITIONS` that leaves `queued`) backed by a `progress` event carrying
+  `decisionCode: "dependency_failed"` — `eventSupportsStepTransition` accepts exactly
+  that shape for a `skipped` destination, and only from `queued`, so a bare `progress`
+  event can never legitimise a skip on its own and a skip from any other state still
+  needs the denied-decision path.
 - A running step reaches `cancelled` only through `cancel_confirmed` (evidence that no
   effect was applied); `cancel_requested` alone is not an outcome. An operation holding
   unknown effects cannot expire — `reconciling` has no `deadline_reached` edge — so

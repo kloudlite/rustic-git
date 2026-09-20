@@ -8,6 +8,7 @@ import {
   ContractViolation,
   canonicalDigest,
   deriveDeduplicationKey,
+  isTerminalOperationState,
   validateCompactOperationResult,
   validateOperationSnapshot,
   type OperateRequest,
@@ -2485,4 +2486,156 @@ test("applyTransition refuses a same-revision commit that changes the body", () 
   assert.equal(result.ok, false);
   if (result.ok) assert.fail("expected a failure");
   assert.equal(result.error.code, "invalid_transition");
+});
+
+// C-3: every operation reaches a terminal state, even when a step failed.
+
+test("a failed step and a passed deadline settle the operation (C-3 T1)", () => {
+  const clock = clockFrom();
+  const { store, root } = openStore({ clock, capabilityMetadata: (capability) => ({ ...(testMetadata(capability)!), approval: "none" }) });
+  const operationId = store.accept({
+    request: instruction(),
+    context: context(),
+    budgets: { operationDeadlineMs: 1_000 },
+  }).snapshot.operationId;
+  queueEdit(store, operationId, "a");
+  queueEdit(store, operationId, "b");
+  store.startStep(operationId, "step-1", { argDigest: PAYLOAD_A });
+  store.recordStepOutcome(operationId, "step-1", {
+    outcome: "failed",
+    error: { code: "execution_failure", message: "did not complete", retryable: false },
+  });
+  clock.advance(1_000);
+  const expired = store.expire(operationId);
+  assert.equal(isTerminalOperationState(expired.state), true);
+  assert.notEqual(expired.state, "expired", "something ran and something failed: never hidden behind expired");
+  assert.equal(expired.steps.find((step) => step.key === "b")?.state, "cancelled");
+
+  // A second expire() does not throw and reports the same terminal state.
+  const second = store.expire(operationId);
+  assert.equal(second.state, expired.state);
+
+  const reloaded = reopened(root, clock);
+  assert.equal(reloaded.load(operationId).state, expired.state);
+});
+
+test("one success and one failure past the deadline is terminal and not expired (C-3 T2)", () => {
+  const clock = clockFrom();
+  const { store, root } = openStore({ clock, capabilityMetadata: (capability) => ({ ...(testMetadata(capability)!), approval: "none" }) });
+  const operationId = store.accept({
+    request: instruction(),
+    context: context(),
+    budgets: { operationDeadlineMs: 1_000 },
+  }).snapshot.operationId;
+  queueEdit(store, operationId, "ok");
+  queueEdit(store, operationId, "bad");
+  store.startStep(operationId, "step-1", { argDigest: PAYLOAD_A });
+  store.recordStepOutcome(operationId, "step-1", { outcome: "succeeded", evidenceRefs: ["done"] });
+  store.startStep(operationId, "step-2", { argDigest: PAYLOAD_B });
+  store.recordStepOutcome(operationId, "step-2", {
+    outcome: "failed",
+    error: { code: "execution_failure", message: "did not complete", retryable: false },
+  });
+  clock.advance(1_000);
+  const expired = store.expire(operationId);
+  assert.equal(isTerminalOperationState(expired.state), true);
+  assert.notEqual(expired.state, "expired");
+  const reloaded = reopened(root, clock);
+  assert.equal(reloaded.load(operationId).state, expired.state);
+});
+
+test("nothing ran and nothing failed expires (C-3 T3)", () => {
+  const clock = clockFrom();
+  const { store, root } = openStore({ clock, capabilityMetadata: (capability) => ({ ...(testMetadata(capability)!), approval: "none" }) });
+  const operationId = store.accept({
+    request: instruction(),
+    context: context(),
+    budgets: { operationDeadlineMs: 1_000 },
+  }).snapshot.operationId;
+  queueEdit(store, operationId, "a");
+  queueEdit(store, operationId, "b");
+  clock.advance(1_000);
+  const expired = store.expire(operationId);
+  assert.equal(expired.state, "expired");
+  const reloaded = reopened(root, clock);
+  assert.equal(reloaded.load(operationId).state, "expired");
+});
+
+test("settle finishes once no retry is left (C-3 T4)", () => {
+  const retry = { class: "idempotent" as const, maxAttempts: 2 };
+  const { store: notExhausted } = openStore({ capabilityMetadata: (capability) => ({ ...(testMetadata(capability)!), approval: "none", retry }) });
+  const opA = notExhausted.accept({ request: instruction(), context: context() }).snapshot.operationId;
+  queueEdit(notExhausted, opA, "a");
+  notExhausted.startStep(opA, "step-1", { argDigest: PAYLOAD_A });
+  notExhausted.recordStepOutcome(opA, "step-1", { outcome: "failed", error: { code: "execution_failure", message: "try again", retryable: true } });
+  assert.equal(notExhausted.settle(opA).snapshot.state, "running", "a retry is still available: not settled");
+  assert.equal(notExhausted.settle(opA, { settleFailed: true }).snapshot.state, "failed", "forcing settleFailed settles it anyway");
+
+  const { store: exhausted } = openStore({ capabilityMetadata: (capability) => ({ ...(testMetadata(capability)!), approval: "none", retry: { class: "idempotent" as const, maxAttempts: 1 } }) });
+  const opB = exhausted.accept({ request: instruction(), context: context({ toolCallId: "call-exhausted" }) }).snapshot.operationId;
+  queueEdit(exhausted, opB, "a");
+  exhausted.startStep(opB, "step-1", { argDigest: PAYLOAD_A });
+  exhausted.recordStepOutcome(opB, "step-1", { outcome: "failed", error: { code: "execution_failure", message: "no more attempts", retryable: true } });
+  assert.equal(exhausted.settle(opB).snapshot.state, "failed", "attempts already exhausted: settles on its own");
+  assert.equal(exhausted.settle(opB, { settleFailed: true }).snapshot.state, "failed");
+});
+
+test("skipStep records the dependency failure (C-3 T5)", () => {
+  const { store, root, clock } = openStore({ capabilityMetadata: (capability) => ({ ...(testMetadata(capability)!), approval: "none" }) });
+  const operationId = store.accept({ request: instruction(), context: context() }).snapshot.operationId;
+  queueEdit(store, operationId, "blocked");
+  const skipped = store.skipStep(operationId, "step-1");
+  assert.equal(skipped.steps[0].state, "skipped");
+  const progressEvents = store.events(operationId).filter((event) => event.phase === "progress" && event.decisionCode === "dependency_failed");
+  assert.equal(progressEvents.length, 1);
+
+  assert.throws(
+    () => store.skipStep(operationId, "step-1"),
+    (error) => isStoreError(error, "invalid_transition"),
+  );
+
+  // A new store on the same directory loads it: the transition replays cleanly.
+  const reloaded = reopened(root, clock);
+  assert.equal(reloaded.load(operationId).steps[0].state, "skipped");
+});
+
+test("a progress event alone does not legitimise a skip (C-3 T5b)", () => {
+  // A queued step forged straight to skipped with a plain progress event (no
+  // dependency_failed code) must be refused: only skipStep's own shape is accepted.
+  {
+    const { store, root, clock } = openStore({ capabilityMetadata: (capability) => ({ ...(testMetadata(capability)!), approval: "none" }) });
+    const operationId = store.accept({ request: instruction(), context: context() }).snapshot.operationId;
+    queueEdit(store, operationId, "a");
+    const file = logFile(root, operationId);
+    const records = readStoredRecords(file);
+    const forged = structuredClone(records[records.length - 1]);
+    forged.snapshot.revision += 1;
+    forged.snapshot.steps[0].state = "skipped";
+    forged.snapshot.lastSequence += 1;
+    forged.events = [
+      { operationId, sequence: forged.snapshot.lastSequence, at: forged.at, phase: "progress", revision: forged.snapshot.revision, stepId: "step-1", capability: forged.snapshot.steps[0].capability, summary: "no decisionCode here" },
+    ];
+    appendStoredRecord(file, forged);
+    assert.throws(() => reopened(root, clock), (error) => error instanceof OperationLogCorruptError);
+  }
+
+  // A running step forged to skipped with progress/dependency_failed must also be
+  // refused: the one dependency_failed edge in the transition table leaves "queued".
+  {
+    const { store, root, clock } = openStore({ capabilityMetadata: (capability) => ({ ...(testMetadata(capability)!), approval: "none" }) });
+    const operationId = store.accept({ request: instruction(), context: context() }).snapshot.operationId;
+    queueEdit(store, operationId, "a");
+    store.startStep(operationId, "step-1", { argDigest: PAYLOAD_A });
+    const file = logFile(root, operationId);
+    const records = readStoredRecords(file);
+    const forged = structuredClone(records[records.length - 1]);
+    forged.snapshot.revision += 1;
+    forged.snapshot.steps[0].state = "skipped";
+    forged.snapshot.lastSequence += 1;
+    forged.events = [
+      { operationId, sequence: forged.snapshot.lastSequence, at: forged.at, phase: "progress", revision: forged.snapshot.revision, stepId: "step-1", capability: forged.snapshot.steps[0].capability, decisionCode: "dependency_failed", summary: "forged from running" },
+    ];
+    appendStoredRecord(file, forged);
+    assert.throws(() => reopened(root, clock), (error) => error instanceof OperationLogCorruptError);
+  }
 });
