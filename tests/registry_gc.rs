@@ -220,7 +220,9 @@ async fn a_stale_gc_version_cannot_retire_a_blob_that_was_pinned_and_released() 
     let snapshot = blob_state::candidates(&e.store.os, "acme").await.unwrap().pop().unwrap().2;
     blob_state::pin(&e.store.os, "acme", &d, "manifest").await.unwrap();
     blob_state::unpin(&e.store.os, "acme", &d, "manifest").await.unwrap();
-    assert!(blob_state::retire_if_unpinned(&e.store.os, "acme", &d, &snapshot).await.unwrap().is_none());
+    // Signature-only change for R-2's new `cutoff_millis` param — this call already unpinned
+    // before retiring, so any cutoff answers the same "still None" the assertion below checks.
+    assert!(blob_state::retire_if_unpinned(&e.store.os, "acme", &d, &snapshot, i64::MAX).await.unwrap().is_none());
     assert!(blob_state::resolve(&e.store.os, "acme", &d).await.unwrap().is_some());
 }
 

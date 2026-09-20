@@ -122,6 +122,141 @@ fn reference(s: &str) -> Option<Reference> {
     ok.then(|| Reference::Tag(s.to_string()))
 }
 
+/// Unpin every digest this publication pinned, concurrently, logging (never failing the caller)
+/// on any release that did not land. CHANGE 1: called on ALL FIVE exits after the first pin lands
+/// (pin error, probe error, MANIFEST_BLOB_UNKNOWN, manifest write error, success) — the three
+/// hand-written serial unpin loops this replaces each covered only their own exit, which is how
+/// the manifest-write failure exit ended up releasing nothing at all.
+async fn release_pins(os: &(dyn slatedb::object_store::ObjectStore + '_), owner: &str, pinned: &[Digest], publication: &str) {
+    if pinned.is_empty() {
+        return;
+    }
+    let results: Vec<(Digest, crate::Result<()>)> = futures::StreamExt::collect(futures::StreamExt::buffered(
+        futures::StreamExt::map(futures::stream::iter(pinned.to_vec()), move |bd| async move {
+            let r = blob_state::unpin(os, owner, &bd, publication).await;
+            (bd, r)
+        }),
+        crate::gc::STAT_CONCURRENCY,
+    ))
+    .await;
+    for (bd, r) in results {
+        if let Err(e) = r {
+            tracing::warn!(owner = %owner, digest = %bd, error = %e, "registry.blob.unpin.failed");
+        }
+    }
+}
+
+/// Why `pin_probe_write` did not land the manifest — mapped to the exact OCI response
+/// `put_manifest` used to build inline at each of the four failing exits. `pub` only because
+/// `pin_probe_write` is (see its own doc): a private handler's own error enum has no other reason
+/// to leave this module.
+pub enum PinFailure {
+    /// A `blob_state::pin` call errored (CAS exhaustion, a store error).
+    Pin(crate::Error),
+    /// A HEAD after pinning errored (not merely "not found" — that is `BlobUnknown`).
+    Probe(crate::Error),
+    /// Every digest probed cleanly but at least one blob this manifest names is not here.
+    BlobUnknown,
+    /// The manifest bytes themselves failed to write.
+    Write(crate::Error),
+}
+
+/// Everything between the first pin and the final release, extracted so it can be driven directly
+/// against a wrapped `ObjectStore` in a test (R-2 T4) — `put_manifest` is an axum handler with no
+/// seam in the existing HTTP test harness (`tests/common`) to inject a store failure mid-request,
+/// so this function IS that seam: pin every digest (CHANGE 2, concurrent and never
+/// short-circuiting), probe presence, write the manifest bytes, and release every pin ON EVERY
+/// EXIT (CHANGE 1) — including success, which is why the caller has nothing left to release.
+/// `pub` (not `pub(crate)`) so `tests/registry_manifests.rs` (a separate crate) can call it
+/// directly — the same reason `gc::referenced` is `pub` per its own module doc.
+pub async fn pin_probe_write(
+    os: &(dyn slatedb::object_store::ObjectStore + '_),
+    owner: &str,
+    name: &str,
+    d: &Digest,
+    digests: &[Digest],
+    body: &Bytes,
+) -> std::result::Result<(), PinFailure> {
+    let publication = blob_state::manifest_publication(owner, name, d);
+    // CHANGE 2: concurrent, never short-circuiting. A `for` loop that returns on the FIRST pin
+    // error is exactly how a pin leaks (R-2 / review Rust Important) — every earlier pin in the
+    // loop was never released. `buffered` runs all of them, in input order, and only after every
+    // one has answered does this decide what to do: build `pinned` from the successes, then (if
+    // any failed) release everything that DID land and report the first error.
+    let pin_results: Vec<(Digest, crate::Result<bool>)> = futures::StreamExt::collect(futures::StreamExt::buffered(
+        futures::StreamExt::map(futures::stream::iter(digests.to_vec()), {
+            let owner = owner.to_string();
+            let publication = publication.clone();
+            move |bd| {
+                let owner = owner.clone();
+                let publication = publication.clone();
+                async move {
+                    let r = blob_state::pin(os, &owner, &bd, &publication).await;
+                    (bd, r)
+                }
+            }
+        }),
+        crate::gc::STAT_CONCURRENCY,
+    ))
+    .await;
+    let pinned: Vec<Digest> = pin_results.iter().filter(|(_, r)| matches!(r, Ok(true))).map(|(bd, _)| bd.clone()).collect();
+    if let Some((_, Err(e))) = pin_results.into_iter().find(|(_, r)| r.is_err()) {
+        release_pins(os, owner, &pinned, &publication).await;
+        return Err(PinFailure::Pin(e));
+    }
+    // Concurrent, not serial: a 40-layer manifest was up to 80 sequential HEADs before the
+    // write. A digest is accepted as a blob only when this publication pinned its active
+    // generation. An unpinned digest may still be a child manifest in an index.
+    let probes: Vec<_> = digests
+        .iter()
+        .map(|bd| {
+            let owner = owner.to_string();
+            let name = name.to_string();
+            let pinned = pinned.clone();
+            let bd = bd.clone();
+            async move {
+            if pinned.iter().any(|p| p == &bd) {
+                let Some(path) = blob_state::resolve(os, &owner, &bd).await? else {
+                    return Ok(false);
+                };
+                return match os.head(&path).await {
+                    Ok(_) => Ok(true),
+                    Err(slatedb::object_store::Error::NotFound { .. }) => Ok(false),
+                    Err(e) => Err(e.into()),
+                };
+            }
+            match os.head(&manifest_path(&owner, &name, &bd)).await {
+                Ok(_) => Ok(true),
+                Err(slatedb::object_store::Error::NotFound { .. }) => Ok(false),
+                Err(e) => Err(e.into()),
+            }
+            }
+        })
+        .collect();
+    let present: Vec<crate::Result<bool>> =
+        futures::StreamExt::collect::<Vec<crate::Result<bool>>>(futures::StreamExt::buffered(futures::stream::iter(probes), crate::gc::STAT_CONCURRENCY)).await;
+    if let Some(error) = present.iter().find_map(|r| r.as_ref().err()) {
+        let msg = error.to_string();
+        release_pins(os, owner, &pinned, &publication).await;
+        return Err(PinFailure::Probe(crate::err(msg)));
+    }
+    if present.iter().any(|ok| matches!(ok, Ok(false))) {
+        release_pins(os, owner, &pinned, &publication).await;
+        return Err(PinFailure::BlobUnknown);
+    }
+    // The media type travels with the manifest: a GET must answer the same Content-Type the push
+    // declared, and the bytes themselves are not re-parsed to recover it.
+    if let Err(e) = os.put(&manifest_path(owner, name, d), PutPayload::from(body.clone())).await {
+        // CHANGE 1: this exit released NOTHING before R-2 — every earlier pin stayed held forever
+        // (the sweep skips any blob with a live pin, and a retried push mints a fresh publication
+        // nonce that never matches the leaked one).
+        release_pins(os, owner, &pinned, &publication).await;
+        return Err(PinFailure::Write(e.into()));
+    }
+    release_pins(os, owner, &pinned, &publication).await;
+    Ok(())
+}
+
 pub async fn put_manifest(
     State(app): State<Arc<App>>,
     Extension(trusted): Extension<Trusted>,
@@ -239,73 +374,17 @@ pub async fn put_manifest(
             }
         }
     }
-    let publication = blob_state::manifest_publication(&owner, &name, &d);
-    let mut pinned = Vec::new();
-    for bd in &digests {
-        match blob_state::pin(&app.store.os, &owner, bd, &publication).await {
-            Ok(true) => pinned.push(bd.clone()),
-            Ok(false) => {}
-            Err(e) => return crate::oci_internal(e),
-        }
-    }
-    // Concurrent, not serial: a 40-layer manifest was up to 80 sequential HEADs before the
-    // write. A digest is accepted as a blob only when this publication pinned its active
-    // generation. An unpinned digest may still be a child manifest in an index.
-    let probes: Vec<_> = digests
-        .iter()
-        .map(|bd| {
-            let app = app.clone();
-            let owner = owner.clone();
-            let name = name.clone();
-            let pinned = pinned.clone();
-            let bd = bd.clone();
-            async move {
-            if pinned.iter().any(|p| p == &bd) {
-                let Some(path) = blob_state::resolve(&app.store.os, &owner, &bd).await? else {
-                    return Ok(false);
-                };
-                return match app.store.os.head(&path).await {
-                    Ok(_) => Ok(true),
-                    Err(slatedb::object_store::Error::NotFound { .. }) => Ok(false),
-                    Err(e) => Err(e.into()),
-                };
-            }
-            match app.store.os.head(&manifest_path(&owner, &name, &bd)).await {
-                Ok(_) => Ok(true),
-                Err(slatedb::object_store::Error::NotFound { .. }) => Ok(false),
-                Err(e) => Err(e.into()),
-            }
-            }
-        })
-        .collect();
-    let present: Vec<crate::Result<bool>> =
-        futures::StreamExt::collect::<Vec<crate::Result<bool>>>(futures::StreamExt::buffered(futures::stream::iter(probes), crate::gc::STAT_CONCURRENCY)).await;
-    if let Some(error) = present.iter().find_map(|r| r.as_ref().err()) {
-        for bd in &pinned {
-            let _ = blob_state::unpin(&app.store.os, &owner, bd, &publication).await;
-        }
-        return crate::oci_internal(crate::err(error.to_string()));
-    }
-    if present.iter().any(|ok| matches!(ok, Ok(false))) {
-        for bd in &pinned {
-            let _ = blob_state::unpin(&app.store.os, &owner, bd, &publication).await;
-        }
-        return oci_err(StatusCode::NOT_FOUND, "MANIFEST_BLOB_UNKNOWN", "manifest references a blob this registry does not hold");
-    }
     let media = headers
         .get(header::CONTENT_TYPE)
         .and_then(|v| v.to_str().ok())
         .unwrap_or("application/vnd.oci.image.manifest.v1+json")
         .to_string();
-    // The media type travels with the manifest: a GET must answer the same Content-Type the push
-    // declared, and the bytes themselves are not re-parsed to recover it.
-    if let Err(e) = app.store.os.put(&manifest_path(&owner, &name, &d), PutPayload::from(body.clone())).await {
-        return crate::oci_internal(e.into());
-    }
-    for bd in &pinned {
-        if let Err(e) = blob_state::unpin(&app.store.os, &owner, bd, &publication).await {
-            tracing::warn!(owner = %owner, digest = %bd, error = %e, "registry.blob.unpin.failed");
-        }
+    if let Err(f) = pin_probe_write(&app.store.os, &owner, &name, &d, &digests, &body).await {
+        return match f {
+            PinFailure::Pin(e) | PinFailure::Probe(e) => crate::oci_internal(e),
+            PinFailure::BlobUnknown => oci_err(StatusCode::NOT_FOUND, "MANIFEST_BLOB_UNKNOWN", "manifest references a blob this registry does not hold"),
+            PinFailure::Write(e) => crate::oci_internal(e),
+        };
     }
     // One re-runnable unit, so the fence arm can replay the whole thing: every row this push
     // writes goes in ONE batch, and a retry has to rebuild it (a `WriteBatch` is consumed by the

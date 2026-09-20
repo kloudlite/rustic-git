@@ -295,6 +295,10 @@ pub async fn reconcile_repo_owner(store: &Store, owner: &str) -> Result<usize> {
 /// before its manifest exists is unreferenced for as long as the push takes.
 pub async fn sweep_owner(store: &Store, owner: &str, grace: Duration) -> Result<usize> {
     let cutoff = chrono::DateTime::<chrono::Utc>::from(std::time::SystemTime::now() - grace);
+    // The SAME cutoff, as millis, for `blob_state::has_live_pin`: a pin's own time (the
+    // publication string's `@…` suffix) is judged against the identical instant the generation's
+    // `installed_at` is, so a push mid-flight when the sweep started reads consistently on both.
+    let cutoff_millis = cutoff.timestamp_millis();
     let prefix = slatedb::object_store::path::Path::from(format!("blobs/{owner}"));
     let mut legacy = store.os.list(Some(&prefix));
     while let Some(meta) = futures::StreamExt::next(&mut legacy).await {
@@ -305,7 +309,9 @@ pub async fn sweep_owner(store: &Store, owner: &str, grace: Duration) -> Result<
     let candidates = blob_state::candidates(&store.os, owner).await?;
     let mut old_candidates = HashSet::new();
     for (digest, record, _) in &candidates {
-        let Some(active) = record.active.as_ref().filter(|active| active.pins.is_empty()) else { continue };
+        // A LEAKED pin (R-2: a push that died between pin and unpin) must age out, not block the
+        // blob forever — `has_live_pin` reads each pin's own `@time`, not just "is the list empty".
+        let Some(active) = record.active.as_ref().filter(|active| !blob_state::has_live_pin(active, cutoff_millis)) else { continue };
         let meta = match store.os.head(&slatedb::object_store::path::Path::from(active.physical_key.as_str())).await {
             Ok(meta) => meta,
             Err(slatedb::object_store::Error::NotFound { .. }) => continue,
@@ -331,7 +337,7 @@ pub async fn sweep_owner(store: &Store, owner: &str, grace: Duration) -> Result<
         for retired in &record.retired {
             blob_state::delete_retired(&store.os, owner, &digest, &retired.physical_key).await?;
         }
-        if keep.contains(&digest.to_string()) || record.active.as_ref().is_none_or(|a| !a.pins.is_empty()) {
+        if keep.contains(&digest.to_string()) || record.active.as_ref().is_none_or(|a| blob_state::has_live_pin(a, cutoff_millis)) {
             continue;
         }
         if !old_candidates.contains(&digest.to_string()) {
@@ -348,7 +354,7 @@ pub async fn sweep_owner(store: &Store, owner: &str, grace: Duration) -> Result<
         if installed_at > cutoff {
             continue;
         }
-        let Some(retired) = blob_state::retire_if_unpinned(&store.os, owner, &digest, &version).await? else { continue };
+        let Some(retired) = blob_state::retire_if_unpinned(&store.os, owner, &digest, &version, cutoff_millis).await? else { continue };
         blob_state::delete_retired(&store.os, owner, &digest, &retired).await?;
         n += 1;
     }
