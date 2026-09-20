@@ -1,3 +1,16 @@
+/**
+ * Evaluation CLI: runs the o10 corpus against baseline/current/proposed subjects and writes a
+ * report. Exit codes fall into four families, checked in this order, so a wrapper can tell "not
+ * even a valid run" from "ran, but the answer isn't green":
+ *   - 0: a clean run — the report was written and no attempt failed.
+ *   - 2: the arguments themselves were invalid (`argument_error`) — nothing ran.
+ *   - 3-9: the run could not complete at all (bad custody, corpus, oracle, pricing, bootstrap,
+ *     suite, or output failure) — the existing per-stage codes, unchanged.
+ *   - 10: at least one attempt's failure was counted in the report's totals — the run completed
+ *     and was written, but the totals line is non-empty; a wrapper must not treat this as green.
+ * 1 is never returned deliberately: it is what Node exits with on an uncaught exception, and
+ * reusing it here would make "bad arguments" indistinguishable from "crashed".
+ */
 import fs from "node:fs";
 import crypto from "node:crypto";
 import path from "node:path";
@@ -44,7 +57,10 @@ export type EvaluationBootstrap = {
 
 const VALUE_FLAGS = new Set(["--corpus", "--oracles", "--output", "--bootstrap", "--pricing", "--run-id"]);
 const REQUIRED_FLAGS = ["corpus", "oracles", "output", "bootstrap"] as const;
-const COMMITTED_ORACLE_DIR_NAMES = new Set(["src", "test", "fixtures"]);
+
+/** The run completed and was written, but at least one attempt's failure is in the totals. The
+ * first code after the existing 3-9 "could not complete" family — see the module docs above. */
+const EXIT_ATTEMPTS_FAILED = 10;
 
 function parseArgs(args: readonly string[]): CliOptions {
   const parsed: Record<string, string> = {};
@@ -76,9 +92,10 @@ function assertOracleCustody(file: string, repoRoot: string, allowedForTests: bo
   if (allowedForTests) return;
   const realFile = fs.realpathSync(file);
   const realRoot = fs.realpathSync(repoRoot);
-  if (!isWithin(realFile, realRoot)) return;
-  const segments = path.relative(realRoot, realFile).split(path.sep);
-  if (segments.some((segment) => COMMITTED_ORACLE_DIR_NAMES.has(segment))) throw new Error("oracle_custody_error");
+  // Any path inside the repository root is refused, exactly as assertBootstrapCustody already
+  // refuses any in-repo bootstrap path — a held-out oracle checked in outside src/test/fixtures
+  // (e.g. docs/oracles.json) used to pass this check; the whole repository is committed source.
+  if (isWithin(realFile, realRoot)) throw new Error("oracle_custody_error");
 }
 
 function assertBootstrapCustody(file: string, repoRoot: string, allowedForTests: boolean): void {
@@ -91,6 +108,26 @@ function assertBootstrapCustody(file: string, repoRoot: string, allowedForTests:
     if (typeof process.getuid === "function" && stat.uid !== process.getuid()) throw new Error("bootstrap_custody_error");
     if ((stat.mode & 0o022) !== 0) throw new Error("bootstrap_custody_error");
   }
+}
+
+/**
+ * The output path itself has no `allowedForTests` bypass (unlike oracle/bootstrap custody):
+ * every test in this suite already writes its report under a temp root, so there is nothing
+ * legitimate for a bypass to permit. A path that does not exist yet is fine — `atomicWriteJson`
+ * creates it; a path that exists and is not a regular file (a directory, a symlink, a fifo) is
+ * refused rather than silently clobbered or followed.
+ */
+function assertOutputCustody(file: string, repoRoot: string): void {
+  const resolvedFile = path.resolve(file);
+  const realRoot = fs.realpathSync(repoRoot);
+  if (isWithin(resolvedFile, realRoot)) throw new Error("output_custody_error");
+  let stat: fs.Stats;
+  try {
+    stat = fs.lstatSync(resolvedFile);
+  } catch {
+    return;
+  }
+  if (!stat.isFile()) throw new Error("output_custody_error");
 }
 
 function readJson(file: string): unknown {
@@ -184,6 +221,12 @@ export async function runEvaluationCli(args: readonly string[], deps: RunEvaluat
     stderr("bootstrap_custody_error");
     return 3;
   }
+  try {
+    assertOutputCustody(options.output, repoRoot);
+  } catch {
+    stderr("output_custody_error");
+    return 3;
+  }
 
   let corpus;
   let oracles;
@@ -255,7 +298,9 @@ export async function runEvaluationCli(args: readonly string[], deps: RunEvaluat
     return totals;
   }, {});
   stdout(`totals=failures:${Object.entries(failures).map(([code, count]) => `${code}:${count}`).join(",") || "none"}`);
-  return 0;
+  // A run that reached the report is not the same as a run a wrapper should treat as green: at
+  // least one attempt failed, so the exit code says so instead of looking identical to a clean run.
+  return Object.keys(failures).length ? EXIT_ATTEMPTS_FAILED : 0;
 }
 
 async function main(): Promise<void> {

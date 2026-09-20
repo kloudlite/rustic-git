@@ -7,6 +7,10 @@
  * bounds, and accounting only; executor policy lives in `contracts.ts`.
  */
 
+import * as vm from "node:vm";
+
+type VmContext = ReturnType<typeof vm.createContext>;
+
 export const JSON_LIMITS = {
   depth: 8,
   stringChars: 65_536,
@@ -513,6 +517,48 @@ export function withDefinitions(schema: JsonSchemaLike): JsonSchemaLike {
 
 const SCHEMA_TYPES: readonly string[] = ["object", "array", "string", "number", "integer", "boolean", "null"];
 
+/** A request-supplied `pattern` runs over model text (generation.ts:765); the cap refuses the
+ * worst inputs at validation, and `boundedPatternTest` bounds every execution regardless — a
+ * syntactic backtracking check was tried first and was either unsound or refused the codebase's
+ * own patterns (see module docs / the 20 Sep plan correction), so length is the only static gate
+ * left and the run-time bound is the real guarantee. */
+const PATTERN_MAX_CHARS = 256;
+
+/** How long one `pattern.test(value)` may run before it is treated as a validation failure.
+ * Measured 20 Sep: a catastrophic pattern is stopped at ~50ms; 1000 benign tests in a reused
+ * context cost ~48ms total — cheap enough to pay on every string field a schema pattern touches. */
+const PATTERN_TEST_TIMEOUT_MS = 50;
+
+let patternTestContext: VmContext | undefined;
+
+/**
+ * Runs `pattern.test(value)` under a wall-clock bound via `node:vm`, so a catastrophically
+ * backtracking pattern (accepted at validation because length alone cannot tell) can never block
+ * the event loop: `vm`'s `timeout` option interrupts synchronous script execution, which a plain
+ * `RegExp.test` call cannot be interrupted from. The RegExp itself is compiled outside the vm — a
+ * `SyntaxError` there is the existing "invalid regular expression" validation failure, not this
+ * one. The context is created once and its two bindings are cleared after every call so no
+ * previous pattern or value is retained between requests.
+ */
+export function boundedPatternTest(pattern: RegExp, value: string): boolean | "timeout" {
+  patternTestContext ??= vm.createContext({});
+  const ctx = patternTestContext as { re?: RegExp; s?: string };
+  ctx.re = pattern;
+  ctx.s = value;
+  try {
+    const script = new vm.Script("re.test(s)");
+    return script.runInContext(ctx, { timeout: PATTERN_TEST_TIMEOUT_MS }) as boolean;
+  } catch (err) {
+    // The timeout error is thrown from the vm's own realm, so it fails `instanceof Error` here —
+    // check `code` on whatever came back instead.
+    if (isRecord(err) && err.code === "ERR_SCRIPT_EXECUTION_TIMEOUT") return "timeout";
+    throw err;
+  } finally {
+    ctx.re = undefined;
+    ctx.s = undefined;
+  }
+}
+
 function checkSchemaNode(value: unknown, path: string, issues: ValidationIssue[], depth: number): void {
   if (depth > SCHEMA_DEPTH) {
     issues.push({ path, code: "too_deep", message: `schemas are limited to ${SCHEMA_DEPTH} levels` });
@@ -575,6 +621,8 @@ function checkSchemaNode(value: unknown, path: string, issues: ValidationIssue[]
   if (value.pattern !== undefined) {
     if (typeof value.pattern !== "string") {
       issues.push({ path: field(path, "pattern"), code: "wrong_type", message: "pattern must be a string" });
+    } else if (value.pattern.length > PATTERN_MAX_CHARS) {
+      issues.push({ path: field(path, "pattern"), code: "string_too_long", message: `pattern must be at most ${PATTERN_MAX_CHARS} characters` });
     } else {
       try {
         new RegExp(value.pattern);

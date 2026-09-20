@@ -1089,6 +1089,14 @@ export function createTypeSafeJudgmentAdapter(config: TypeSafeConfig): TypeSafeJ
           };
         } else if (typeof decision.authorizationRef === "string" && decision.authorizationRef.length <= 128 && QUESTION_ID_RE.test(decision.authorizationRef)) {
           authorizationRef = decision.authorizationRef;
+        } else {
+          // `authorized: true` with no well-formed authorizationRef is not a grant we can point
+          // back to; dispatching on it anyway would let an unattested decision through silently.
+          denial = {
+            code: "provider_input_unattested",
+            message: "the trusted provider-input policy authorized this request without a well-formed authorizationRef",
+            retryable: false,
+          };
         }
       }
     }
