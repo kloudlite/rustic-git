@@ -97,6 +97,10 @@ export class Kloudlite {
         "cargo", "build", "--profile", "dev-image", "--locked",
         "-p", "kl", "--target", "x86_64-unknown-linux-musl",
       ])
+      // /work/target is a cache mount, and a cache mount is never part of the container's
+      // snapshot — Container.file() on it fails with "cannot retrieve path from cache" (run 4).
+      // The binaries have to be copied onto the container's own filesystem first.
+      .withExec(["sh", "-c", "mkdir -p /out/musl && cp /work/target/dev-image/kloudlite /work/target/dev-image/kloudlite-api /work/target/dev-image/kloudlite-worker /work/target/dev-image/kloudlite-agent /work/target/dev-image/kloudlite-gateway /work/target/dev-image/kloudlite-builder-gate /work/target/dev-image/kloudlite-slo /work/target/dev-image/kl-connect /out/ && cp /work/target/x86_64-unknown-linux-musl/dev-image/kl /out/musl/kl"])
   }
 
   // Dockerfile `server` stage: three binaries, one unprivileged user, git/ssh/curl for the
@@ -108,9 +112,9 @@ export class Kloudlite {
       .withExec(["sh", "-c",
         "apt-get update && apt-get install -y --no-install-recommends ca-certificates openssh-client git curl " +
         "&& rm -rf /var/lib/apt/lists/*"])
-      .withFile("/usr/local/bin/kloudlite", built.file("/work/target/dev-image/kloudlite"))
-      .withFile("/usr/local/bin/kloudlite-api", built.file("/work/target/dev-image/kloudlite-api"))
-      .withFile("/usr/local/bin/kloudlite-worker", built.file("/work/target/dev-image/kloudlite-worker"))
+      .withFile("/usr/local/bin/kloudlite", built.file("/out/kloudlite"))
+      .withFile("/usr/local/bin/kloudlite-api", built.file("/out/kloudlite-api"))
+      .withFile("/usr/local/bin/kloudlite-worker", built.file("/out/kloudlite-worker"))
       .withExec(["sh", "-c",
         "useradd --system --uid 1001 --user-group --no-create-home --shell /usr/sbin/nologin kloudlite " +
         "&& mkdir -p /var/cache/kloudlite /var/lib/kloudlite " +
@@ -133,7 +137,7 @@ export class Kloudlite {
         "apt-get update && apt-get install -y --no-install-recommends " +
         "btrfs-progs util-linux ca-certificates git openssh-client nfs-common netbase " +
         "&& rm -rf /var/lib/apt/lists/*"])
-      .withFile("/usr/local/bin/kloudlite-agent", built.file("/work/target/dev-image/kloudlite-agent"))
+      .withFile("/usr/local/bin/kloudlite-agent", built.file("/out/kloudlite-agent"))
       .withEntrypoint(["kloudlite-agent"])
   }
 
@@ -146,7 +150,7 @@ export class Kloudlite {
       .withExec(["sh", "-c",
         "apt-get update && apt-get install -y --no-install-recommends ca-certificates libcap2-bin " +
         "&& rm -rf /var/lib/apt/lists/*"])
-      .withFile("/usr/local/bin/kloudlite-gateway", built.file("/work/target/dev-image/kloudlite-gateway"))
+      .withFile("/usr/local/bin/kloudlite-gateway", built.file("/out/kloudlite-gateway"))
       .withExec(["sh", "-c",
         "setcap cap_net_bind_service=+ep /usr/local/bin/kloudlite-gateway " +
         "&& apt-get purge -y libcap2-bin && apt-get autoremove -y"])
@@ -166,7 +170,7 @@ export class Kloudlite {
       .withExec(["sh", "-c",
         "apt-get update && apt-get install -y --no-install-recommends ca-certificates " +
         "&& rm -rf /var/lib/apt/lists/*"])
-      .withFile("/usr/local/bin/kloudlite-builder-gate", built.file("/work/target/dev-image/kloudlite-builder-gate"))
+      .withFile("/usr/local/bin/kloudlite-builder-gate", built.file("/out/kloudlite-builder-gate"))
       .withExec(["useradd", "--system", "--uid", "1001", "--user-group",
         "--no-create-home", "--shell", "/usr/sbin/nologin", "kloudlite"])
       .withUser("kloudlite")
@@ -196,8 +200,8 @@ export class Kloudlite {
         "chmod +x /usr/local/bin/crane /usr/local/bin/kubectl;",
         "rm -f /tmp/crane.tgz",
       ].join(" ")])
-      .withFile("/usr/local/bin/kloudlite-slo", built.file("/work/target/dev-image/kloudlite-slo"))
-      .withFile("/usr/local/bin/kl-connect", built.file("/work/target/dev-image/kl-connect"))
+      .withFile("/usr/local/bin/kloudlite-slo", built.file("/out/kloudlite-slo"))
+      .withFile("/usr/local/bin/kl-connect", built.file("/out/kl-connect"))
       .withExec(["useradd", "--system", "--uid", "1001", "--user-group",
         "--no-create-home", "--shell", "/usr/sbin/nologin", "kloudlite"])
       .withUser("kloudlite")
@@ -224,7 +228,7 @@ export class Kloudlite {
       )
       .withFile(
         "/usr/local/bin/kl",
-        built.file("/work/target/x86_64-unknown-linux-musl/dev-image/kl"),
+        built.file("/out/musl/kl"),
         { permissions: 0o755 },
       )
       .withFile("/etc/profile.d/kl-build.sh", source.file("deploy/workspace-image/kl-build.sh"))
