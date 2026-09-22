@@ -11,7 +11,8 @@ import { until } from "./wait.ts";
 // The bin itself, run as the pod runs it: through its shebang, not `node main.ts`.
 const BIN = path.join(path.dirname(fileURLToPath(import.meta.url)), "..", "src", "main.ts");
 const run = (args: string[], env: Record<string, string> = {}) => {
-  const c = spawn(BIN, args, { env: { ...process.env, KL_BENCH_IDLE_SECS: "", ...env } });
+  // The binary refuses to start without these; these tests never reach the engine, so dummy values suffice.
+  const c = spawn(BIN, args, { env: { ...process.env, KL_BENCH_IDLE_SECS: "", TYPESAFE_API_KEY: "test", JEVHARN_API_KEY: "test", ...env } });
   let out = "";
   c.stdout!.on("data", (d) => (out += d));
   c.stderr!.on("data", (d) => (out += d));
