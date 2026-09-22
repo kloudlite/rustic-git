@@ -50,7 +50,7 @@ pub(crate) fn ns_routes(ns: &str) -> Vec<Route> {
             "RoleBinding",
         ),
     ];
-    for p in ["default-deny", "allow-dns", "allow-same-namespace", "allow-internet-egress", "allow-gateway-ssh", "allow-bench-tools", "allow-builder-gate"] {
+    for p in ["default-deny", "allow-dns", "allow-same-namespace", "allow-internet-egress", "allow-gateway-ssh", "allow-bench-tools", "allow-bench-kompress", "allow-builder-gate"] {
         r.push(ok(
             format!("/apis/networking.k8s.io/v1/namespaces/{ns}/networkpolicies/{p}"),
             "networking.k8s.io/v1",

@@ -163,6 +163,9 @@ pub async fn apply_binding(b: &crd::OwnerBinding, ctx: &Arc<Ctx>) -> Result<Acti
         ensure(&policies, &k8s::allow_gateway_ingress(&ns, owner, &owner_ref), ctx).await?;
         // The owner's bench reaches their workspaces' tool server on the pod IP, this namespace only.
         ensure(&policies, &k8s::allow_bench_tools(&ns, owner, &owner_ref), ctx).await?;
+        // The bench's one egress hole to the region's Kompress service, unconditional (an
+        // unreachable ClusterIP when the region has none deployed costs nothing).
+        ensure(&policies, &k8s::allow_bench_kompress(&ns, owner, &owner_ref), ctx).await?;
         // The one egress hole to a builder: the gate, and nothing past it. Every workspace this
         // owner has shares this namespace, so this reaches all of them — same reasoning as the
         // gateway ingress hole just above.
