@@ -19,6 +19,11 @@ pub const PULL_SECRET: &str = "registry-pull";
 pub const USER_KEY_SECRET: &str = "user-key";
 
 
+/// The Secret holding the bench pod's engine credentials, one per owner namespace. Separate
+/// from `USER_KEY_SECRET` — see `bench_engine_secret`'s doc comment for why.
+pub const BENCH_ENGINE_SECRET: &str = "bench-engine";
+
+
 /// Where that key is mounted. Deliberately not `~/.ssh`: workspace images bring their own user and
 /// home directory, and `GIT_SSH_COMMAND` points at an absolute path that works whatever they are.
 pub const USER_KEY_PATH: &str = "/etc/kloudlite/ssh";
@@ -33,31 +38,7 @@ pub fn user_key_secret(
     m: &crate::api::OwnerMaterial,
     authorized_keys: &str,
     registry_token: &str,
-    engine: &BTreeMap<String, String>,
 ) -> Secret {
-    let mut data = BTreeMap::from([
-        ("id_ed25519".to_string(), private_openssh.to_string()),
-        // The public keys sshd admits are a CLUSTER fact now, projected per owner namespace as
-        // `OwnerKeys` and rendered to disk by every node's agent, so a key added in the UI reaches
-        // a running pod without a Secret rewrite per namespace. The entry below is TRANSITIONAL:
-        // pods of an agent that has not been upgraded yet still mount it, and it goes away in the
-        // release after every region's agent is on this build (spec §5 step 4).
-        ("authorized_keys".to_string(), authorized_keys.to_string()),
-        // Read by git as its SYSTEM config (`GIT_CONFIG_SYSTEM`), so `~/.gitconfig` still
-        // overrides it and a changed display name reaches running workspaces with the next
-        // Secret rewrite, no restart. git's own escaping: a name with a quote is quoted.
-        ("gitconfig".to_string(), gitconfig(&m.git_name, &m.git_email)),
-        // 24h, re-minted every `KEYS_RESYNC_SECS` beat by whoever calls this — rotation is
-        // just the next beat, no revocation code needed. `"*"` because authorization is
-        // re-checked per registry request against the image, never trusted from the scope.
-        ("registry-token".to_string(), registry_token.to_string()),
-    ]);
-    // The bench pod's engine credentials (TYPESAFE_API_KEY, JEVHARN_*), carried through this
-    // Secret rather than a new one per CLAUDE.md's "no new Secret objects" decision. Absent =
-    // not in `engine` = not written, never an empty string.
-    for (name, value) in engine {
-        data.insert(name.clone(), value.clone());
-    }
     Secret {
         // No ownerReference: the key belongs to the OWNER, not to any one workspace, so deleting
         // the workspace that happened to trigger its creation must not take it with them.
@@ -67,7 +48,45 @@ pub fn user_key_secret(
             labels: Some(labels(owner, "workspace")),
             ..Default::default()
         },
-        string_data: Some(data),
+        // The public keys sshd admits are a CLUSTER fact now, projected per owner namespace as
+        // `OwnerKeys` and rendered to disk by every node's agent, so a key added in the UI reaches
+        // a running pod without a Secret rewrite per namespace. The entry below is TRANSITIONAL:
+        // pods of an agent that has not been upgraded yet still mount it, and it goes away in the
+        // release after every region's agent is on this build (spec §5 step 4).
+        string_data: Some(BTreeMap::from([
+            ("id_ed25519".to_string(), private_openssh.to_string()),
+            ("authorized_keys".to_string(), authorized_keys.to_string()),
+            // Read by git as its SYSTEM config (`GIT_CONFIG_SYSTEM`), so `~/.gitconfig` still
+            // overrides it and a changed display name reaches running workspaces with the next
+            // Secret rewrite, no restart. git's own escaping: a name with a quote is quoted.
+            ("gitconfig".to_string(), gitconfig(&m.git_name, &m.git_email)),
+            // 24h, re-minted every `KEYS_RESYNC_SECS` beat by whoever calls this — rotation is
+            // just the next beat, no revocation code needed. `"*"` because authorization is
+            // re-checked per registry request against the image, never trusted from the scope.
+            ("registry-token".to_string(), registry_token.to_string()),
+        ])),
+        type_: Some("Opaque".to_string()),
+        ..Default::default()
+    }
+}
+
+
+/// The bench pod's engine credentials, one per owner namespace.
+///
+/// A SEPARATE Secret from `user-key`, not another key in it: `user-key` is mounted WHOLE (0444,
+/// no `items` filter — `k8s::workspace::user_key_volume`) into every workspace pod of that
+/// owner, so `TYPESAFE_API_KEY` living there would be readable from any person's workspace. This
+/// one is referenced only by the bench pod's env (`bench_engine_var`), by name+key, never mounted
+/// as a volume anywhere.
+pub fn bench_engine_secret(owner: &str, namespace: &str, engine: &BTreeMap<String, String>) -> Secret {
+    Secret {
+        metadata: ObjectMeta {
+            name: Some(BENCH_ENGINE_SECRET.to_string()),
+            namespace: Some(namespace.to_string()),
+            labels: Some(labels(owner, "workspace")),
+            ..Default::default()
+        },
+        string_data: Some(engine.clone()),
         type_: Some("Opaque".to_string()),
         ..Default::default()
     }

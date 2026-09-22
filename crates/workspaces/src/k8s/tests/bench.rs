@@ -39,6 +39,15 @@ fn a_bench_pod_mounts_only_its_own_folder_and_no_worktree() {
     assert_eq!(c.command.as_deref(), Some(&["harness-bench".to_string()][..]));
     assert!(c.volume_mounts.as_ref().unwrap().iter().any(|m| m.mount_path == "/bench"));
     assert_eq!(c.readiness_probe.as_ref().unwrap().timeout_seconds, Some(3), "a slow Node start must not flap the bench unready");
+    // The engine credentials come from the bench-only Secret, never user-key (mounted whole
+    // into every workspace pod), and are optional so a fleet without the Secret still starts.
+    let engine_names = ["TYPESAFE_API_KEY", "JEVHARN_API_KEY", "JEVHARN_MODEL", "JEVHARN_BASE_URL"];
+    for name in engine_names {
+        let ev = c.env.as_ref().unwrap().iter().find(|e| e.name == name).unwrap();
+        let sel = ev.value_from.as_ref().unwrap().secret_key_ref.as_ref().unwrap();
+        assert_eq!(sel.name, "bench-engine");
+        assert_eq!(sel.optional, Some(true));
+    }
 }
 
 #[test]

@@ -136,7 +136,7 @@ pub(crate) async fn write_user_key(s: &ApiState, c: &kube::Client, ns: &str, own
             return;
         }
     };
-    let secret = crate::k8s::user_key_secret(owner, ns, &private, &material, &authorized, &registry_token, &s.bench_engine);
+    let secret = crate::k8s::user_key_secret(owner, ns, &private, &material, &authorized, &registry_token);
     if let Err(e) = api
         .patch(
             crate::k8s::USER_KEY_SECRET,
@@ -146,5 +146,21 @@ pub(crate) async fn write_user_key(s: &ApiState, c: &kube::Client, ns: &str, own
         .await
     {
         tracing::warn!(%owner, error = %e, "key.install.failed");
+    }
+    // A separate Secret, never folded into user-key (that one is mounted whole into every
+    // workspace pod). Written only when there is something to write — no delete route exists
+    // on this api, so an empty map leaves whatever is already there alone.
+    if !s.bench_engine.is_empty() {
+        let engine_secret = crate::k8s::bench_engine_secret(owner, ns, &s.bench_engine);
+        if let Err(e) = api
+            .patch(
+                crate::k8s::BENCH_ENGINE_SECRET,
+                &kube::api::PatchParams::apply("kloudlite-api").force(),
+                &kube::api::Patch::Apply(&engine_secret),
+            )
+            .await
+        {
+            tracing::warn!(%owner, error = %e, "bench-engine.install.failed");
+        }
     }
 }

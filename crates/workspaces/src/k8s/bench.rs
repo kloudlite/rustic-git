@@ -28,16 +28,13 @@ pub fn bench_folder(pool: &str, team: &str, owner: &str) -> Result<String, Strin
 }
 
 
-/// The bench's one pod. `idle_secs` is the region's `benchIdleSecs`, stamped in at create so a
-/// live setting change never reaches a running pod mid-session — the same `Mark::Live`-vs-`Boot`
-/// split as everywhere else in `k8s`: this value takes effect only on the pod's next create.
-/// An env var pulling one engine credential out of `user-key`. `optional: true` — see the
-/// comment where these are used.
+/// An env var pulling one engine credential out of `BENCH_ENGINE_SECRET`. `optional: true` — see
+/// the comment where these are used.
 fn bench_engine_var(key: &str) -> EnvVar {
     EnvVar {
         name: key.to_string(),
         value_from: Some(EnvVarSource {
-            secret_key_ref: Some(SecretKeySelector { name: USER_KEY_SECRET.to_string(), key: key.to_string(), optional: Some(true) }),
+            secret_key_ref: Some(SecretKeySelector { name: BENCH_ENGINE_SECRET.to_string(), key: key.to_string(), optional: Some(true) }),
             ..Default::default()
         }),
         ..Default::default()
@@ -45,6 +42,9 @@ fn bench_engine_var(key: &str) -> EnvVar {
 }
 
 
+/// The bench's one pod. `idle_secs` is the region's `benchIdleSecs`, stamped in at create so a
+/// live setting change never reaches a running pod mid-session — the same `Mark::Live`-vs-`Boot`
+/// split as everywhere else in `k8s`: this value takes effect only on the pod's next create.
 pub fn bench_pod(b: &Bench, id: &str, pool: &str, runtime_class: Option<&str>, registry_host: &str, idle_secs: u64) -> Result<Pod, String> {
     let owner = &b.spec.owner;
     let team = &b.spec.team;
@@ -79,11 +79,11 @@ pub fn bench_pod(b: &Bench, id: &str, pool: &str, runtime_class: Option<&str>, r
                 },
                 var("HOME", HOME_DIR.to_string()),
                 var("LANG", "C.UTF-8".to_string()),
-                // The sys-1 engine's credentials, carried through the `user-key` Secret (no new
-                // Secret object per CLAUDE.md's decision). `optional: true` so a fleet without
-                // these entries still starts the pod — `harness/bench/src/runtime.ts::makeTurn`
-                // then reports "TYPESAFE_API_KEY is not set" itself rather than the pod hitting
-                // CreateContainerConfigError.
+                // The sys-1 engine's credentials, from the bench-only `bench-engine` Secret
+                // (never `user-key`, which every workspace pod mounts whole). `optional: true`
+                // so a fleet without these entries still starts the pod —
+                // `harness/bench/src/runtime.ts::makeTurn` then reports "TYPESAFE_API_KEY is not
+                // set" itself rather than the pod hitting CreateContainerConfigError.
                 bench_engine_var("TYPESAFE_API_KEY"),
                 bench_engine_var("JEVHARN_API_KEY"),
                 bench_engine_var("JEVHARN_MODEL"),

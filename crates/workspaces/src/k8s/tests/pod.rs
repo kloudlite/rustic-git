@@ -106,7 +106,7 @@ pub(crate) fn the_user_key_secret_carries_the_private_key_the_git_identity_and_t
         git_name: "Alice \"Al\" Liddell".into(),
         git_email: "alice@example.com".into(),
     };
-    let s = user_key_secret("alice", "ws-alice", "PRIVATE", &m, "ssh-ed25519 AAAA alice\n", "TOKEN", &BTreeMap::new());
+    let s = user_key_secret("alice", "ws-alice", "PRIVATE", &m, "ssh-ed25519 AAAA alice\n", "TOKEN");
     let data = s.string_data.unwrap();
     assert_eq!(data["id_ed25519"], "PRIVATE");
     // Who may ssh in is `OwnerKeys` now; this entry only keeps an old agent's pods working
@@ -115,16 +115,16 @@ pub(crate) fn the_user_key_secret_carries_the_private_key_the_git_identity_and_t
     // A quote in a name must not end git's string early.
     assert_eq!(data["gitconfig"], "[user]\n\tname = \"Alice \\\"Al\\\" Liddell\"\n\temail = \"alice@example.com\"\n");
     assert_eq!(data["registry-token"], "TOKEN");
-    assert!(!data.contains_key("TYPESAFE_API_KEY"), "empty engine map writes no bench-engine keys");
 }
 
 #[test]
-pub(crate) fn the_user_key_secret_carries_bench_engine_credentials_when_set() {
-    let m = crate::api::OwnerMaterial::default();
-    let engine = BTreeMap::from([("TYPESAFE_API_KEY".to_string(), "x".to_string())]);
-    let s = user_key_secret("alice", "ws-alice", "PRIVATE", &m, "", "TOKEN", &engine);
+pub(crate) fn the_bench_engine_secret_carries_whatever_is_set_and_nothing_else() {
+    let s = bench_engine_secret("alice", "ws-alice", &BTreeMap::from([("TYPESAFE_API_KEY".to_string(), "x".to_string())]));
     let data = s.string_data.unwrap();
     assert_eq!(data["TYPESAFE_API_KEY"], "x");
+
+    let empty = bench_engine_secret("alice", "ws-alice", &BTreeMap::new());
+    assert!(empty.string_data.unwrap().is_empty());
 }
 
 
