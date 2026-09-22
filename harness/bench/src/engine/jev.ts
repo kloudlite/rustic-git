@@ -7,6 +7,20 @@ export type Question =
 export type Ask = (state: unknown, questions: Record<string, Question>) => Promise<Record<string, Answer>>;
 
 import { addUsage } from "./usage.ts";
+import { compress } from "./headroom.ts";
+
+const MIN_CHARS = 800; // headroom's own gate; below it compress() is a no-op anyway, so this check is just to skip the walk
+
+// Trims what's sent to Jev the same way tool output is trimmed for the LLM: every long string field of state,
+// one level deep, goes through the same compressor. `questions` is the ask itself, never touched.
+function compressState(state: unknown): unknown {
+  if (typeof state !== "object" || state === null || Array.isArray(state)) return state;
+  const out: Record<string, unknown> = {};
+  for (const [k, v] of Object.entries(state as Record<string, unknown>)) {
+    out[k] = typeof v === "string" && v.length > MIN_CHARS ? compress(v).text : v;
+  }
+  return out;
+}
 
 export const choice = (instructions: string, criteria: Record<string, string>): Question =>
   ({ type: "choice", instructions, criteria });
@@ -20,7 +34,7 @@ export const ask: Ask = async (state, questions) => {
   const call = () => fetch("https://api.typesafe.ai/v1/systemone", {
     method: "POST",
     headers: { Authorization: `Bearer ${process.env.TYPESAFE_API_KEY}`, "Content-Type": "application/json" },
-    body: JSON.stringify({ state, model: "jev-latest", questions }),
+    body: JSON.stringify({ state: compressState(state), model: "jev-latest", questions }),
     signal: AbortSignal.timeout(10_000),
   }).catch((e) => e as Error);
   let res = await call();
