@@ -23,6 +23,7 @@ const clonePod = await fakeTools((cmd) => {
 });
 const deleted: string[] = [];
 const api = http.createServer((req, res) => {
+  if (req.method === "GET" && /\/v1\/workspaces\/m$/.test(req.url!)) return res.end(JSON.stringify({ id: "m", name: "main-tree" }));
   if (req.url!.includes("/tools")) return res.end(JSON.stringify({ address: req.url!.includes("/m/") ? mainPod.address : clonePod.address }));
   if (req.url!.includes("/clone")) { res.statusCode = 202; return res.end(JSON.stringify({ id: "c" })); }
   if (req.method === "DELETE") { deleted.push(req.url!); res.statusCode = 204; return res.end(); }
@@ -67,7 +68,7 @@ test("delegate clones, writes child user row then parent delegate row, and the c
   await settle();
   // the child answered: pushed once, parent got the answer with the commit, clone deleted, child closed
   assert.equal(pushes, 1);
-  assert.match(clonePod.execs.find((c) => c.startsWith("git push"))!, /ssh:\/\/kl@127\.0\.0\.1\/home\/kl\/m HEAD:feat\/x/);
+  assert.match(clonePod.execs.find((c) => c.startsWith("git push"))!, /ssh:\/\/kl@127\.0\.0\.1\/home\/kl\/workspaces\/main-tree HEAD:feat\/x/);
   const got = readRows(list.logFile(main)).find((r) => r.kind === "user" && r.from === sub.seq) as { text: string };
   assert.match(got.text, /feature landed[\s\S]*abc123/);
   assert.deepEqual(deleted, ["/v1/workspaces/c"]);

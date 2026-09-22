@@ -42,6 +42,7 @@ export class Platform {
   }
 
   async tools(ws: string) { return ((await this.call("GET", `/v1/workspaces/${encodeURIComponent(ws)}/tools`)) as { address: string }).address; }
+  async name(ws: string) { return ((await this.call("GET", `/v1/workspaces/${encodeURIComponent(ws)}`)) as { name: string }).name; }
   async clone(ws: string, name: string) { return ((await this.call("POST", `/v1/workspaces/${encodeURIComponent(ws)}/clone`, { name })) as { id: string }).id; }
   async remove(ws: string) { await this.call("DELETE", `/v1/workspaces/${encodeURIComponent(ws)}`); }
 }

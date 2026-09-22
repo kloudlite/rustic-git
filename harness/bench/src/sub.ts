@@ -71,7 +71,9 @@ export class Subs {
     const parent = this.list.bySeq(row.parent!)!;
     const clone = row.workspace!, mainWs = parent.workspace!;
     const mainIp = (await this.platform.tools(mainWs)).replace(/:\d+$/, "");
-    const push = async () => text(await remote(clone, "exec", { cmd: `git push ssh://kl@${mainIp}/home/kl/${mainWs} HEAD:${row.target}`, timeout_ms: 120_000 }));
+    const mainName = await this.platform.name(mainWs);
+    // /home/kl is the owner's shared NFS home; the tree is /home/kl/workspaces/<name>, never the id
+    const push = async () => text(await remote(clone, "exec", { cmd: `git push ssh://kl@${mainIp}/home/kl/workspaces/${mainName} HEAD:${row.target}`, timeout_ms: 120_000 }));
     let out = await push();
     const retried = readRows(child.file).some((r) => r.kind === "user" && r.text.startsWith("rebase onto main"));
     if (NON_FF.test(out) && !retried) {

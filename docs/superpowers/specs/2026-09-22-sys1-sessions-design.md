@@ -131,7 +131,9 @@ order, each step a log row so a crash resumes at the right step:
    the parent's `delegate` row.
 2. The child's turn runs on the clone over 7788. It commits on a branch `sub/{seq}` in the clone.
 3. On the child's `turn.end`, push from the clone pod into main's pod: `exec` in the clone of
-   `git push ssh://kl@{main podIP}/home/kl/{ws} sub/{seq}:{main's working branch}`. Two platform
+   `git push ssh://kl@{main podIP}/home/kl/workspaces/{name} sub/{seq}:{main's working branch}`. The
+   path is the workspace's `name` from `GET /v1/workspaces/{id}`, because `/home/kl` is the owner's
+   region-shared home and holds every workspace tree under `workspaces/`. Two platform
    changes, both small:
    - every workspace's prelude sets `git config --global receive.denyCurrentBranch updateInstead`,
      so it holds for every repo; safe because main never has uncommitted edits;
