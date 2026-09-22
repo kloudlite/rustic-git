@@ -475,6 +475,10 @@ pub const CATALOGUE: &[Slo] = &[
     // The whole chain: `/v1`'s address, `allow-bench-tools`, the tool server on the pod IP and the
     // thread file.
     Slo { id: "bench.workspace.tool_roundtrip", feature: "Benches", sli: "A workspace session on the bench runs `exec echo` in a workspace through its tool server, and the turn lands under `/bench/workspaces/{ws}/`", target: bound(180_000), suite: Suite::Hourly, stage: "14 · Experience" },
+    // The whole delegation chain end to end: top opens a main by workspace, sends it a
+    // `delegate to` instruction, the main hands it to a sub in a cloned workspace, and the
+    // sub's push lands back on main's branch.
+    Slo { id: "bench.delegate", feature: "Benches", sli: "top → main → sub: the push lands on main's branch, the clone is gone, the child is closed", target: bound(600_000), suite: Suite::Hourly, stage: "14 · Experience" },
 
     // Weekly
     Slo { id: "git.push.large", feature: "Git hosting", sli: "Push of a large commit succeeds — 90 MiB over HTTP, under Cloudflare's 100 MB upload cap, and 100 MiB over SSH, which has no proxy in front of it", target: avail(99.9), suite: Suite::Weekly, stage: "12 · Weekly" },
@@ -575,7 +579,7 @@ mod tests {
     fn every_bench_id_is_catalogued() {
         for id in ["bench.create", "bench.start.p95", "bench.tunnel", "bench.idle.wake",
                    "bench.session.roundtrip", "bench.exchange.both_views", "bench.two_clients",
-                   "bench.survives.reschedule", "bench.workspace.tool_roundtrip"] {
+                   "bench.survives.reschedule", "bench.workspace.tool_roundtrip", "bench.delegate"] {
             assert!(find(id).is_some(), "{id} missing from CATALOGUE");
         }
     }

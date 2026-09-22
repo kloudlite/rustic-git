@@ -96,6 +96,7 @@ pub const IDS: &[&str] = &[
     "bench.exchange.both_views",
     "bench.two_clients",
     "bench.workspace.tool_roundtrip",
+    "bench.delegate",
     "feed.experience",
     "home.persists",
 ];
@@ -185,6 +186,9 @@ pub async fn run(c: &mut Ctx) {
             // One call: the wake runs first, with every client gone, then the four session ids.
             "bench.idle.wake" => super::bench::hourly(c).await,
             "bench.session.roundtrip" | "bench.exchange.both_views" | "bench.two_clients" | "bench.workspace.tool_roundtrip" => {}
+            // bench.delegate is recorded by hourly() itself (it calls delegate() internally after
+            // the sleep/wake journey), same wiring as the other bench.* ids above.
+            "bench.delegate" => {}
             _ => c.skip(id, "not implemented yet"),
         }
     }

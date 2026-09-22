@@ -41,6 +41,9 @@ const WAKE_CEILING: Duration = Duration::from_secs(540);
 const IDLE_GRACE: Duration = Duration::from_secs(60);
 /// A start's wait, from `kl-connect bench`'s own `BENCH_START_WAIT`.
 const START_WAIT: Duration = Duration::from_secs(90);
+/// `bench.delegate`: target 600 s — the whole top -> main -> sub chain, including a clone,
+/// a real turn and a push back.
+const DELEGATE_CEILING: Duration = Duration::from_secs(600);
 
 pub const STUB: &str = "bench image is the stub";
 pub const NO_DELETE_GRANT: &str = "no pod-delete grant for the probe";
@@ -99,6 +102,25 @@ async fn forward(c: &Ctx) -> Result<(Child, u16)> {
 async fn through(port: u16, path: &str) -> Result<(u16, String)> {
     let mut s = tokio::net::TcpStream::connect(("127.0.0.1", port)).await?;
     s.write_all(format!("GET {path} HTTP/1.1\r\nhost: bench\r\nconnection: close\r\n\r\n").as_bytes()).await?;
+    let mut buf = Vec::new();
+    s.read_to_end(&mut buf).await?;
+    split_response(&String::from_utf8_lossy(&buf))
+}
+
+/// One raw HTTP/1.1 POST through the forward, JSON body: `(status, body)`. `bench.delegate` is
+/// the first caller that needs anything but a GET, so this is new rather than a `through`
+/// parameter nobody else would pass.
+async fn through_post(port: u16, path: &str, body: &Value) -> Result<(u16, String)> {
+    let payload = body.to_string();
+    let mut s = tokio::net::TcpStream::connect(("127.0.0.1", port)).await?;
+    s.write_all(
+        format!(
+            "POST {path} HTTP/1.1\r\nhost: bench\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{payload}",
+            payload.len()
+        )
+        .as_bytes(),
+    )
+    .await?;
     let mut buf = Vec::new();
     s.read_to_end(&mut buf).await?;
     split_response(&String::from_utf8_lossy(&buf))
@@ -250,14 +272,123 @@ pub async fn hourly(c: &mut Ctx) {
             if woke {
                 c.demote_to_skip("bench.idle.wake", STUB);
             }
+            c.skip("bench.delegate", STUB);
             return SESSION_IDS.iter().for_each(|id| c.skip(id, STUB));
         }
-        None => return SESSION_IDS.iter().for_each(|id| c.skip(id, "the bench could not be reached before the sleep")),
+        None => {
+            c.skip("bench.delegate", "the bench could not be reached before the sleep");
+            return SESSION_IDS.iter().for_each(|id| c.skip(id, "the bench could not be reached before the sleep"));
+        }
         Some(false) => {}
     }
     // ponytail: the four journeys need a harness-bench RPC WebSocket client the probe does not
     // carry yet; skipped (never passed) until the real image ships and the client lands with it.
     SESSION_IDS.iter().for_each(|id| c.skip(id, "the probe has no harness-bench RPC client yet"));
+    // bench.delegate needs only plain HTTP through the same tunnel `bench.tunnel` already opens
+    // (create/send/children, plus a POST `through` never needed before) — no RPC WebSocket, so
+    // it is not blocked by the gap above.
+    delegate(c).await;
+}
+
+/// `bench.delegate`: top opens a main by workspace, sends it a `delegate to <ws>: ...`
+/// instruction, the main hands the work to a sub in a cloned workspace, and the sub's push lands
+/// back on main's branch. Judged on OUTPUT throughout (`ws_exec` into the main workspace's tool
+/// server, a real `GET /v1/workspaces/{clone}` 404, the child row's own `state`), never on a bare
+/// "the call didn't error".
+async fn delegate(c: &mut Ctx) {
+    let name = format!("{}-delegate", c.prefix());
+    c.step("bench.delegate", DELEGATE_CEILING, move |c| {
+        let name = name.clone();
+        async move {
+            let ws = super::experience_ws::create(c, &name, json!({"packages": []})).await?;
+            c.state.extra_workspaces.push(ws.clone());
+
+            let (_child, port) = forward(c).await?;
+
+            // Open a main session on the workspace — the real route is `/workspaces/{ws}/session`,
+            // not `/sessions/workspaces/{ws}` (the latter does not exist in harness-bench).
+            let (status, body) = through_post(port, &format!("/workspaces/{ws}/session"), &json!({})).await?;
+            if status != 200 {
+                bail!("POST /workspaces/{ws}/session answered {status}: {}", super::clip(&body));
+            }
+
+            // The top session always exists (a bench refuses ever having zero, and auto-recreates
+            // one on archive) — found by scanning the session list for tier == "top", never minted
+            // here.
+            let (status, list) = through(port, "/sessions").await?;
+            if status != 200 {
+                bail!("GET /sessions answered {status}: {}", super::clip(&list));
+            }
+            let rows: Vec<Value> = serde_json::from_str(&list).context("GET /sessions did not answer a JSON array")?;
+            let top = rows
+                .iter()
+                .find(|r| r.get("tier").and_then(Value::as_str) == Some("top"))
+                .and_then(|r| r.get("id").and_then(Value::as_str))
+                .ok_or_else(|| anyhow!("no tier=\"top\" session in {}", super::clip(&list)))?
+                .to_string();
+
+            let text = format!("delegate to {ws}: create hello.txt containing hi and commit it");
+            let (status, body) = through_post(port, &format!("/sessions/{top}/send"), &json!({"text": text})).await?;
+            if status != 200 {
+                bail!("POST /sessions/{top}/send answered {status}: {}", super::clip(&body));
+            }
+
+            // Find the main's own session (opened above by workspace) to poll its children.
+            let (status, list2) = through(port, "/sessions").await?;
+            if status != 200 {
+                bail!("GET /sessions answered {status}: {}", super::clip(&list2));
+            }
+            let rows2: Vec<Value> = serde_json::from_str(&list2).context("GET /sessions did not answer a JSON array")?;
+            let main_id = rows2
+                .iter()
+                .find(|r| r.get("workspace").and_then(Value::as_str) == Some(ws.as_str()))
+                .and_then(|r| r.get("id").and_then(Value::as_str))
+                .ok_or_else(|| anyhow!("no session for workspace {ws} in {}", super::clip(&list2)))?
+                .to_string();
+
+            // Poll children until one closes — the sub finished and pushed back.
+            let deadline = Instant::now() + DELEGATE_CEILING - Duration::from_secs(60);
+            let clone_ws = loop {
+                let (status, kids) = through(port, &format!("/sessions/{main_id}/children")).await?;
+                if status != 200 {
+                    bail!("GET /sessions/{main_id}/children answered {status}: {}", super::clip(&kids));
+                }
+                let kids: Vec<Value> = serde_json::from_str(&kids).context("children did not answer a JSON array")?;
+                if let Some(child) = kids.iter().find(|k| k.get("state").and_then(Value::as_str) == Some("closed")) {
+                    break child.get("workspace").and_then(Value::as_str).map(str::to_string);
+                }
+                if Instant::now() >= deadline {
+                    bail!("no child closed within {} s; children: {}", DELEGATE_CEILING.as_secs(), super::clip(&serde_json::to_string(&kids).unwrap_or_default()));
+                }
+                tokio::time::sleep(Duration::from_secs(3)).await;
+            };
+            let clone_ws = clone_ws.ok_or_else(|| anyhow!("the closed child named no workspace"))?;
+
+            // Assert on OUTPUT: the commit landed on main's branch, through the main workspace's
+            // own tool server (same `/tools/exec` shape as `ide.exec`), never a bare "no error".
+            let (code, out, err) = super::workspace::ws_exec(
+                c,
+                &ws,
+                "curl -sf -X POST http://127.0.0.1:7788/tools/exec -H 'content-type: application/json' -d '{\"cmd\":\"git log -1 --format=%s\"}'",
+                Duration::from_secs(30),
+            )
+            .await?;
+            if code != 0 || !out.contains("create hello.txt") {
+                bail!("main's tool server exec did not show the commit ({code}): {} {}", out.trim(), err.trim());
+            }
+
+            // The clone is gone: the workspace it lived in is a real 404, not merely absent from
+            // a list.
+            let (status, body) = raw(c, reqwest::Method::GET, &api(c, &format!("/v1/workspaces/{clone_ws}")), &c.probe_jwt, None, &[]).await?;
+            if status != reqwest::StatusCode::NOT_FOUND {
+                bail!("GET /v1/workspaces/{clone_ws} answered {status}, not 404: {}", super::clip(&body));
+            }
+
+            Ok(())
+        }
+        .boxed()
+    })
+    .await;
 }
 
 /// The session list and the first session's message total, as read through the forward.
