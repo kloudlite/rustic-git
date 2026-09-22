@@ -30,8 +30,8 @@
 # per the 2026-09-22 ruling), `attach/` (the rendered resolv.conf) and `keys/` (the projected
 # `authorized_keys`, one FILE per owner namespace, keyed by the pod's owner label or its team
 # label). `keys/` is additionally scoped to the pod's own `kloudlite.io/owner` label, because that
-# path is keyed BY OWNER — a builder bug naming another owner is a whole other person's dotfiles
-# and shell history. `vol/` and `attach/` are keyed
+# path is keyed BY OWNER — a builder bug naming another owner mounts a whole other person's
+# `authorized_keys`, which means SSH access into their workspace. `vol/` and `attach/` are keyed
 # by volume and workspace id, not by owner, so CEL has nothing to compare there and the pod builders
 # remain the only thing keeping tenants apart on those two; that residual is deliberate and known.
 # A pod with no owner label is refused outright — `k8s::meta` stamps it on every object this system
