@@ -7,6 +7,10 @@ FROM node:24-bookworm-slim AS deps
 WORKDIR /opt/harness
 COPY harness/package.json harness/package-lock.json ./
 RUN npm ci --omit=dev
+# The bench's own deps (the sys-1 engine: ai, @ai-sdk/*, @sinclair/typebox) live in bench/package.json,
+# not the harness root — the fleet's first 228b7610 bench died at import with ERR_MODULE_NOT_FOUND.
+COPY harness/bench/package.json harness/bench/package-lock.json ./bench/
+RUN cd bench && npm ci --omit=dev
 
 # Node 24: .ts type stripping is unflagged, and it is what the bench suite ran on.
 FROM node:24-bookworm-slim
@@ -25,6 +29,7 @@ RUN chmod 0755 /usr/local/bin/kl
 COPY harness/package.json harness/package-lock.json /opt/harness/
 COPY --from=deps /opt/harness/node_modules /opt/harness/node_modules
 COPY harness/bench/package.json /opt/harness/bench/package.json
+COPY --from=deps /opt/harness/bench/node_modules /opt/harness/bench/node_modules
 COPY harness/bench/src /opt/harness/bench/src
 COPY harness/pi /opt/harness/pi
 # Node resolves the symlink, so bench/package.json's "type":"module" applies.
