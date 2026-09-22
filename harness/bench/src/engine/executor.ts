@@ -7,6 +7,7 @@ import { TOOLS, procIds, TALK, RESPONSES, runTool, plainValue, ACT, DECIDE, type
 import { tryRemote } from "./remote.ts";
 import { child, root, MAX_DEPTH, JEV_FRAME_CAP, type Envelope } from "./task.ts";
 import { pickBlocks, formatBlocks } from "./pick.ts";
+import { compress } from "./headroom.ts";
 import { freeFromLiterals } from "./router.ts";
 import type { Summarise } from "./sections.ts";
 
@@ -65,7 +66,10 @@ const PICK_SKIP = ["read"]; // read already picks
 
 // Any large tool output (grep hits, command output, a process log, a diff) is cut down to the parts relevant to the step, with line numbers,
 // before it reaches the LLM: its tokens are resent on every later turn. Nothing relevant found, or Jev down: the output goes back as it was.
+// headroom compresses first (structural: json/search/diff/log shape), jev picks second (semantic: what this step needs) on whatever's left.
 async function relevant(out: string, tool: string, instruction: string, deps: ActDeps, ind: string): Promise<string> {
+  const c = compress(out, instruction);
+  out = c.text;
   if (out.length <= PICK_OVER || PICK_SKIP.includes(tool) || /^(blocked|failed|denied|error)/.test(out)) return out;
   const { blocks } = await pickBlocks(deps.ask, out, instruction, { trace: (l) => deps.log?.(`${ind}  ${l}`) });
   const picked = formatBlocks(`${tool} output`, blocks);

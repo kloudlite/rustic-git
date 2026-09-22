@@ -5,6 +5,7 @@ import { createDeepSeek } from "@ai-sdk/deepseek";
 import { createOpenAICompatible } from "@ai-sdk/openai-compatible";
 import type { Llm, LlmMessage, LlmTool } from "./executor.ts";
 import { trackUsage } from "./usage.ts";
+import { compress, RETRIEVE_TOOL } from "./headroom.ts";
 
 export const LLM_TIMEOUT_MS = 180_000;
 const MAX_STEPS = 40; // a session that never submits stops here
@@ -30,13 +31,18 @@ export const makeAiSdkLlm = (pick: () => { provider: string; id: string; model: 
   const { provider, id, model } = pick();
   const kind = tools.at(-1)?.name.replace("submit_", "") ?? "oneshot";
   let terminated = false;
-  const sdkTools = Object.fromEntries(tools.map((t: LlmTool) => [t.name, tool({
+  let lastPrompt = "";
+  const allTools = tools.some((t) => t.name === "retrieve") ? tools : [...tools, RETRIEVE_TOOL];
+  const sdkTools = Object.fromEntries(allTools.map((t: LlmTool) => [t.name, tool({
     description: t.description,
     inputSchema: jsonSchema(t.parameters as never),
     execute: async (input: unknown, o: { toolCallId: string }) => {
       const r = await t.execute(o.toolCallId, input);
       if (r.terminate) terminated = true;
-      return r.content.map((c) => c.text).join("\n");
+      const joined = r.content.map((c) => c.text).join("\n");
+      const { text, strategy, before, after } = compress(joined, lastPrompt);
+      if (strategy !== "pass") console.error(JSON.stringify({ msg: "headroom.saved", tool: t.name, strategy, before, after }));
+      return text;
     },
   })]));
   const history: ModelMessage[] = [];
@@ -45,6 +51,7 @@ export const makeAiSdkLlm = (pick: () => { provider: string; id: string; model: 
     model: { provider, id },
     messages,
     prompt: async (text) => {
+      lastPrompt = text;
       history.push({ role: "user", content: text });
       try {
         const r = await generateText({
