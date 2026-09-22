@@ -27,6 +27,7 @@ const benchTool = (name: string, description: string, params: { name: string; de
 
 export class Session {
   running = false;
+  current?: number;
   onAnswer?: (s: Session, end: Extract<Row, { kind: "turn.end" }>) => Promise<void>;
   private ctl?: AbortController;
   readonly row: SessionRow;
@@ -70,6 +71,7 @@ export class Session {
     this.running = true;
     this.ctl = new AbortController();
     const turn = nextTurn(rows);
+    this.current = turn;
     append(this.file, { kind: "turn.start", ts: Date.now(), turn });
     const prompt = pending.map((r) => (r.from === "person" ? r.text : `[from session ${r.from}]\n${r.text}`)).join("\n\n");
     const user: User = { tell: (m) => this.hooks.tell(this, m), ask: (q) => this.hooks.askPerson(this, q) };
