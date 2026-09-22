@@ -45,7 +45,7 @@ spec:
         - name: kompress
           # `pin.sh` rewrites this to `:<sha>@sha256:<digest>` — the placeholder is here only so
           # the file parses and applies before the first pin.
-          image: ghcr.io/kloudlite/kloudlite-kompress:228b76107d07dbdb4ccc7bd0ed6634ea9f5c6008@sha256:d395b918f32b6939aed353fd20f4d7ff03eca041b39b2dca5b422a5fe3ededc5
+          image: ghcr.io/kloudlite/kloudlite-kompress:684ef591fcf11f47f3c3252d1faf27bd7b000541@sha256:9db2e8d79741c2850575d6cdf792172408a39f35220a16d3d4a9a0b96227e729
           imagePullPolicy: IfNotPresent
           ports:
             - name: http
