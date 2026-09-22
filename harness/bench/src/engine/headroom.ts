@@ -67,12 +67,12 @@ function cell(v: unknown): string {
   return typeof v === "string" ? v : JSON.stringify(v);
 }
 
-function asTable(items: unknown[]): Compressed | undefined {
+function asTable(items: unknown[], original: string): Compressed | undefined {
   const keys = sameKeySet(items);
   if (!keys) return undefined;
   const lines = [`keys: ${keys.join(", ")}`, ...items.map((it) => keys.map((k) => cell((it as Record<string, unknown>)[k])).join(" | "))];
   const text = lines.join("\n");
-  return { text, strategy: "table", before: text.length, after: text.length };
+  return { text, strategy: "table", before: original.length, after: text.length };
 }
 
 function words(s: string): Set<string> {
@@ -117,7 +117,7 @@ function tryJsonArray(text: string, query: string): Compressed | undefined {
   try { parsed = JSON.parse(text.trim()); } catch { return undefined; }
   const items = asArray(parsed);
   if (!items) return undefined;
-  const table = asTable(items);
+  const table = asTable(items, text);
   if (table) return table;
   const { kept, strategy } = smartSample(items, query);
   const body = JSON.stringify(kept);
@@ -226,9 +226,8 @@ export function compress(text: string, query = ""): Compressed {
     return pass(text);
   }
 
-  if (result.strategy === "table") return result; // lossless — nothing to retrieve, no size gate
-
   if (result.after >= result.before * 0.8) return pass(text); // overhead would exceed savings
+  if (result.strategy === "table") return result; // lossless — nothing to retrieve
 
   const hash = remember(text);
   return { ...result, hash, text: result.text + marker(result.before, result.after, hash) };
