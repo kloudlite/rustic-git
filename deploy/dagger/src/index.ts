@@ -21,9 +21,9 @@ const NODE_IMAGE = "node:22-bookworm-slim@sha256:d649c27dae7ba0137b3cef5dd75baa4
 
 @object()
 export class Kloudlite {
-  // The rust container both check() and build() start from: apt deps clippy needs to link
+  // The rust container check() and compiled() start from: apt deps clippy needs to link
   // (openssl, git's own build has none here — this is compiling OUR crates), plus musl-tools for
-  // the `kl` cross-build build() does later on the same container.
+  // the `kl` cross-build compiled() does later on the same container.
   private rustBase(source: Directory): Container {
     return dag
       .container()
@@ -34,11 +34,11 @@ export class Kloudlite {
         "pkg-config", "libssl-dev", "clang", "cmake", "python3", "musl-tools",
       ])
       .withExec(["rustup", "component", "add", "clippy"])
-      // In the base, not build(): a deterministic exec is a cached layer, so the musl target is
+      // In the base, not compiled(): a deterministic exec is a cached layer, so the musl target is
       // downloaded once per engine, not once per build.
       .withExec(["rustup", "target", "add", "x86_64-unknown-linux-musl"])
       // Three caches, each named for what it holds and shared by every stage that touches it:
-      // crate downloads, git dependencies, and the compiled target dir — check() and build()
+      // crate downloads, git dependencies, and the compiled target dir — check() and compiled()
       // compile into the same tree (debug and dev-image are separate subdirs), so a green gate
       // warms the build that follows it.
       .withMountedCache("/usr/local/cargo/registry", dag.cacheVolume("kloudlite-cargo-registry"))
@@ -88,9 +88,8 @@ export class Kloudlite {
   }
 
   // Compiles the dev-image profile once; the image* methods below each pull their own binaries
-  // out of this Container rather than re-running cargo, matching build()'s old role of staging a
-  // Directory for dag.container().build() — the binaries are the only thing that crosses from
-  // compile into image.
+  // out of this Container rather than re-running cargo — the binaries are the only thing that
+  // crosses from compile into image.
   private compiled(source: Directory): Container {
     return this.rustBase(source)
       .withExec(["cargo", "build", "--profile", "dev-image", "--locked", "--bins"])
@@ -98,30 +97,6 @@ export class Kloudlite {
         "cargo", "build", "--profile", "dev-image", "--locked",
         "-p", "kl", "--target", "x86_64-unknown-linux-musl",
       ])
-  }
-
-  // Kept only so the report step in the images brief has a Directory to diff against; no longer
-  // used by publish(), which builds images directly from `compiled()`'s Container.
-  @func()
-  build(@argument({ ignore: IGNORE }) source: Directory): Directory {
-    const built = this.compiled(source)
-    const bins = [
-      "kloudlite", "kloudlite-api", "kloudlite-worker", "kloudlite-agent",
-      "kloudlite-gateway", "kloudlite-builder-gate", "kloudlite-slo", "kl-connect",
-    ]
-    let ctx = dag
-      .directory()
-      .withFile("Dockerfile", source.file("Dockerfile"))
-      .withFile(".dockerignore", source.file(".dockerignore"))
-      .withDirectory("deploy/workspace-image", source.directory("deploy/workspace-image"))
-    for (const b of bins) {
-      ctx = ctx.withFile(`target/dev-image/${b}`, built.file(`/work/target/dev-image/${b}`))
-    }
-    ctx = ctx.withFile(
-      "target/x86_64-unknown-linux-musl/dev-image/kl",
-      built.file("/work/target/x86_64-unknown-linux-musl/dev-image/kl"),
-    )
-    return ctx
   }
 
   // Dockerfile `server` stage: three binaries, one unprivileged user, git/ssh/curl for the
