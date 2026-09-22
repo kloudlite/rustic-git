@@ -325,10 +325,6 @@ fi
 NODE_IP=$(kubectl get node "$E2E_NODE" -o jsonpath='{.status.addresses[?(@.type=="InternalIP")].address}')
 [ -n "$NODE_IP" ] || fail "node $E2E_NODE has no InternalIP; the seeding init container has nothing to clone from"
 
-# Without this the agent never mounts {pool}/homes and every workspace parks on HomeNotReady
-# (lib.rs's run: unset means "no shared home on this node", fail closed) — the real Service the
-# cluster's own agents point at (deploy/k3s/agent-daemonset.yaml), reachable here because this
-# runs against the real k3s cluster, just with a loopback pool standing in for the node's btrfs.
 # WS_REPLICA_SECS: the pull/retire beat, 300 s by default. The orphan-byte sweep and the
 # unreferenced-volume collection (and its age floor) both ride it, so every reclaim assertion in
 # this script would time out at the default; 20 s here, and every such wait below is at least
@@ -339,7 +335,6 @@ WS_GIT_SSH_HOST="$NODE_IP" \
 WS_GIT_SSH_PORT="$SERVER_SSH_PORT" \
 WS_REGION="$REGION_ID" \
 WS_POOL="$MOUNT" \
-WS_HOMES_EXPORT="zerofs.kloudlite-system.svc:/" \
 WS_SYNC_SECS="5" \
 WS_REPLICA_SECS="20" \
 HOSTNAME="ws-e2e-agent" \
@@ -535,6 +530,10 @@ sudo bash -c "printf 'hello from ws_e2e' > '$(live_dir "$WS_ID")/hello.txt'"
 [ -f "$(live_dir "$WS_ID")/hello.txt" ] || fail "write into live did not land"
 kubectl -n "$WS_NS" exec "$WS_ID" -- grep -q 'hello from ws_e2e' /home/kl/workspaces/e2e-ws/hello.txt \
   || fail "workspace pod $WS_ID does not see the host's write into its live hostPath"
+
+log "checking the source tree landed under ~/workspace"
+kubectl -n "$WS_NS" exec "$WS_ID" -- test -d /home/kl/workspace \
+  || fail "workspace pod $WS_ID has no ~/workspace after create"
 
 # ---------------------------------------------------------------------------
 # Sync points: the beat (WS_SYNC_SECS, set to 5 above for this run) cuts a transient snapshot

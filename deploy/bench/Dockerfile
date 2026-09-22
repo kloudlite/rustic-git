@@ -37,8 +37,9 @@ RUN chmod 0755 /opt/harness/bench/src/main.ts \
     && ln -s /opt/harness/bench/src/main.ts /usr/local/bin/harness-bench
 
 # node:24-bookworm-slim already ships uid/gid 1000 as `node` — reuse it rather than useradd a
-# second uid 1000. harness-bench writes only /bench, $HOME and /tmp, all mounts in the pod.
-RUN mkdir -p /bench /home/kl && chown 1000:1000 /bench /home/kl
+# second uid 1000. harness-bench writes only ~/bench inside the home volume, $HOME and /tmp, all
+# mounts in the pod.
+RUN mkdir -p /home/kl && chown 1000:1000 /home/kl
 
 USER 1000:1000
 WORKDIR /home/kl

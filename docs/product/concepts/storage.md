@@ -16,7 +16,9 @@ A working copy has exactly one node that runs it. Other nodes hold replicas: the
 
 ## Home
 
-`/home/kl` is one directory per person per region on a shared NFS export, mounted into every workspace of yours. It is not snapshotted, not quota-bounded, and never moves; a second region has its own.
+`/home/kl` is the workspace's own btrfs volume, not shared with any other workspace. Existing
+workspaces from before this change are not migrated. A clone or restore carries the whole home,
+credentials included; it is always your own workspace.
 
 ## Quota
 
@@ -24,7 +26,7 @@ A working copy has exactly one node that runs it. Other nodes hold replicas: the
 
 ## Regions
 
-A region is one Kubernetes cluster with its own nodes, home export, and nixpkgs pin. Nothing replicates across regions. See [Regions](../platform/regions.md).
+A region is one Kubernetes cluster with its own nodes and nixpkgs pin. Nothing replicates across regions. See [Regions](../platform/regions.md).
 
 ## What this means for you
 

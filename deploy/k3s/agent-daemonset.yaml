@@ -69,12 +69,6 @@ spec:
         prometheus.io/port: "9464"
         prometheus.io/path: /metrics
     spec:
-      # `nsenter -t 1` in mount_homes needs to SEE pid 1, so the agent shares the host's pid
-      # namespace. Deliberately NOT hostNetwork: the shared-home mount must live in the node's
-      # network namespace to outlive an agent restart, but the POD must stay in its own, or the
-      # `agent-peer` NetworkPolicy — the only thing restricting the peer listener on 8444 to other
-      # agents — stops applying to it. hostPID buys the first without giving up the second.
-      hostPID: true
       serviceAccountName: kloudlite-agent
       # Only nodes that carry a btrfs pool. The control plane has none and must not run this.
       nodeSelector:
@@ -154,14 +148,6 @@ spec:
                   fieldPath: spec.nodeName
             - name: WS_POOL
               value: /wspool-prod
-            # The region's shared-home NFS export —
-            # `run()` mounts it at `{pool}/homes` once at agent startup, before the controller
-            # starts. Unset means this node serves no shared home (fail closed, see lib.rs).
-            # Azure Files Premium (NFS 4.1), account kloudlite-homes in rustic-git-k3s, reachable
-            # only from the `nodes` subnet through its service endpoint. Per region: the homes are
-            # region-local by design, so each region gets its own share.
-            - name: WS_HOMES_EXPORT
-              value: kloudlitegithomes.file.core.windows.net:/kloudlitegithomes/homes
             # The platform registry's external host, no scheme — the same value
             # `registry::auth::realm()`'s `KLOUDLITE_EXTERNAL_URL` resolves the host half of
             # (`deploy/kloudlite.yaml`'s `https://cr.khost.dev`). The agent has no route to that

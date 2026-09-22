@@ -1065,10 +1065,10 @@ export class Subs {
 Push command run in the clone through `remote(clone, "exec", …)`:
 
 ```
-git push -o receive.denyCurrentBranch=updateInstead ssh://kl@{mainIP}/home/kl/workspaces/{name} HEAD:{branch}
+git push -o receive.denyCurrentBranch=updateInstead ssh://kl@{mainIP}/home/kl/workspace HEAD:{branch}
 ```
 
-(`-o` is a push option and does not set receiver config; the receiver-side config is Task 11. Keep only `git push ssh://kl@{mainIP}/home/kl/workspaces/{name} HEAD:{branch}` — drop `-o`.) `{branch}` = main's working branch, read once at spawn via `remote(main, "exec", {cmd: "git rev-parse --abbrev-ref HEAD"})` and stored on the sub's row as `target` (the existing field). `{mainIP}` = `platform.tools(main.workspace)` minus `:7788`.
+(`-o` is a push option and does not set receiver config; the receiver-side config is Task 11. Keep only `git push ssh://kl@{mainIP}/home/kl/workspace HEAD:{branch}` — drop `-o`.) `{branch}` = main's working branch, read once at spawn via `remote(main, "exec", {cmd: "git rev-parse --abbrev-ref HEAD"})` and stored on the sub's row as `target` (the existing field). `{mainIP}` = `platform.tools(main.workspace)` minus `:7788`.
 
 - [ ] **Step 1: Failing tests**
 
@@ -1232,7 +1232,7 @@ export class Subs {
     const clone = row.workspace!, mainWs = parent.workspace!;
     const mainIp = (await this.platform.tools(mainWs)).replace(/:\d+$/, "");
     const mainName = await this.platform.name(mainWs);
-    const push = async () => text(await remote(clone, "exec", { cmd: `git push ssh://kl@${mainIp}/home/kl/workspaces/${mainName} HEAD:${row.target}`, timeout_ms: 120_000 }));
+    const push = async () => text(await remote(clone, "exec", { cmd: `git push ssh://kl@${mainIp}/home/kl/workspace HEAD:${row.target}`, timeout_ms: 120_000 }));
     let out = await push();
     const retried = readRows(child.file).some((r) => r.kind === "user" && r.text.startsWith("rebase onto main"));
     if (NON_FF.test(out) && !retried) {
@@ -1467,7 +1467,7 @@ In the dev pod: `cargo clippy --workspace --all-targets -- -D warnings 2>&1 | ta
 
 - [ ] **Step 6: Exercise on the fleet before commit**
 
-Ship with `deploy/dev/dev-push.sh --aks` (memory: fast dev loop), then from a clone pod's `exec`: `git push ssh://kl@<main pod IP>/home/kl/workspaces/<name> HEAD:<branch>` must succeed and `git -C /home/kl/workspaces/<name> log -1` on main must show the commit. Paste both lines into the commit body.
+Ship with `deploy/dev/dev-push.sh --aks` (memory: fast dev loop), then from a clone pod's `exec`: `git push ssh://kl@<main pod IP>/home/kl/workspace HEAD:<branch>` must succeed and `git -C /home/kl/workspace log -1` on main must show the commit. Paste both lines into the commit body.
 
 - [ ] **Step 7: Commit**
 

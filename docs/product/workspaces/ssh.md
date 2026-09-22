@@ -15,7 +15,7 @@ Write an ssh config once so `ssh api` and every editor work:
 kl-connect ws ssh-config
 # Wrote ~/.ssh/kloudlite_config (3 workspaces).
 ssh api
-scp ./fixture.sql api:/home/kl/workspaces/api/
+scp ./fixture.sql api:/home/kl/workspace/
 ```
 
 The file is included from `~/.ssh/config` and holds one `Host {name}` block per workspace with a `ProxyCommand kl-connect ws proxy {id}`. Re-run it after creating a workspace.
@@ -25,8 +25,8 @@ The file is included from `~/.ssh/config` and holds one `Host {name}` block per 
 An agent runs commands over the same ssh, using a key on the account it acts for:
 
 ```bash
-ssh -o BatchMode=yes api 'cd ~/workspaces/api && pnpm test'
-rsync -az ./patch/ api:/home/kl/workspaces/api/
+ssh -o BatchMode=yes api 'cd ~/workspace && pnpm test'
+rsync -az ./patch/ api:/home/kl/workspace/
 ```
 
 See [Agent tools](../agent-tools/exec.md).

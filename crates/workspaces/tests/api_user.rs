@@ -1619,8 +1619,8 @@ async fn an_environment_with_an_unusable_name_or_service_is_refused() {
     assert!(s.rec.sent("POST", &format!("{API}/environments")).is_empty(), "nothing written");
 }
 
-/// A name is a directory in the person's shared home, so it is unique per (owner, team): the
-/// second `web` is refused, and refused from `spec`, not from the object's name.
+/// A workspace `name` is unique per (owner, team): the second `web` is refused, and refused from
+/// `spec`, not from the object's name.
 #[tokio::test]
 async fn a_second_workspace_with_the_same_name_in_the_same_team_is_refused() {
     let taken = json!({

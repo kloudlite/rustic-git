@@ -252,7 +252,7 @@ pub fn valid_segment_label(s: &str) -> bool {
 ///
 /// `/v1` checks these on write, but `/v1` is not the only writer: a restored backup, a migration
 /// or an operator with kubectl produces a spec no handler ever saw, and the agent's own builders
-/// splice these into a root `/bin/sh -c` prelude and into `{pool}/homes/{owner}`. Same rule, same
+/// splice these into a root `/bin/sh -c` prelude and into `{pool}/vol/{id}`. Same rule, same
 /// reason, as `git_init_container`'s repo/branch re-check.
 pub fn validate_ws_spec(spec: &crate::crd::WorkspaceSpec) -> Result<(), String> {
     if !valid_ws_name(&spec.name) {

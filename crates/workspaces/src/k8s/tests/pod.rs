@@ -561,7 +561,7 @@ pub(crate) fn the_default_image_runs_sshd_with_its_own_host_key_and_the_owners_k
     // In the platform file, not the seeded `.zshrc`: a home seeded before this line existed
     // never gets a second seed, and without `compinit` zsh falls back to its primitive
     // completer, which appends the match to the word instead of replacing it ("cacargo").
-    // The dump goes to the per-node cache dir, never the shared home.
+    // The dump goes under the workspace's own home volume, same as everything else here.
     assert!(prelude.contains("autoload -Uz compinit && compinit -d"), "{prelude}");
     // The build profile: files, not env, so it runs as a subprocess of both rc files rather
     // than needing to be sourced — see kl-build.sh's own doc for why.

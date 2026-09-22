@@ -6,13 +6,12 @@ A workspace is one running pod with your source tree, a Nix profile of the packa
 
 | Path | What | Persists |
 |---|---|---|
-| `/home/kl/workspaces/{name}` | Your tree, a btrfs subvolume sized by `quota_gb` | Across stop and start; snapshotted by push; replicated |
-| `/home/kl/workspaces/{name}/.cache` | Every cache: build output (`CARGO_TARGET_DIR`, `GOCACHE`), package stores (npm, pnpm, bun, yarn, pip, uv, deno, Go modules, Maven, Composer, NuGet), toolchains (`RUSTUP_HOME`, the cargo registry), browsers, editor servers (VS Code, Cursor, Zed, Windsurf, JetBrains) | With the tree: a clone or a restore arrives warm |
-| `/home/kl` | Your home for the region: dotfiles, editor settings, credentials (`~/.cargo`, `~/.gradle`) | Across every workspace of yours in the region |
-| `~/.local-cache/tmp`, `~/.local/state` | Temporary files and shell history | Per node; nothing worth keeping |
+| `/home/kl` | The workspace's own btrfs volume, sized by `quota_gb`; this workspace's home, not shared with any other | Across stop and start; snapshotted by push; replicated |
+| `/home/kl/workspace` | Your source tree | With the home: a clone or a restore arrives warm |
+| `/home/kl/workspace/.cache` | Every cache: build output (`CARGO_TARGET_DIR`, `GOCACHE`), package stores (npm, pnpm, bun, yarn, pip, uv, deno, Go modules, Maven, Composer, NuGet), toolchains (`RUSTUP_HOME`, the cargo registry), browsers, editor servers (VS Code, Cursor, Zed, Windsurf, JetBrains) | With the home: a clone or a restore arrives warm |
 | `PATH` | The packages in `packages`, plus a base set | Rebuilt from the spec on every start |
 
-**The standard: a workspace carries its caches.** Everything a tool would cache — build output, downloaded packages, toolchains, editor servers — lives under `.cache/` inside the workspace directory, so it is snapshotted by push, replicated on the sync beat, and present the moment a clone, a restore or a start on another node comes up. The home holds small configuration and follows you to every workspace. Nothing rebuildable is left behind on a node.
+**The standard: a workspace carries its caches.** Everything a tool would cache — build output, downloaded packages, toolchains, editor servers — lives under `.cache/` inside the home volume, so it is snapshotted by push, replicated on the sync beat, and present the moment a clone or a restore comes up. A clone or restore carries the whole home, credentials included; it is always your own workspace, never shared with another. Nothing rebuildable is left behind on a node.
 
 What the platform places inside the tree — `.cache/`, `graft/`, `.direnv/` — is ignored by git through `~/.config/git/ignore`, never through a repository's own `.gitignore`.
 
@@ -47,7 +46,7 @@ A workspace is placed on one node in its region. Its tree is replicated to other
 
 ## Seeding from a repository
 
-`repo` and `branch` on create run a clone inside the pod with your platform ssh key, into `/home/kl/workspaces/{name}`. No credential is minted or stored for it.
+`repo` and `branch` on create run a clone inside the pod with your platform ssh key, into `/home/kl/workspace`. No credential is minted or stored for it.
 
 ## Next steps
 

@@ -26,9 +26,9 @@ Name, region, disk, packages, and an optional repository to clone.
 
 | Field | Required | Meaning |
 |---|---|---|
-| `name` | yes | 1–63 characters of letters, digits, `.`, `_`, `-`. Unique per owner; it is also the tree's directory name under `/home/kl/workspaces` |
+| `name` | yes | 1–63 characters of letters, digits, `.`, `_`, `-`. Unique per owner |
 | `region` | yes | A region id from `GET /v1/regions` |
-| `quota_gb` | yes | Disk for the tree. Default in the console is 20 |
+| `quota_gb` | yes | Disk for the workspace's home volume (mounted whole at `/home/kl`; your tree is `/home/kl/workspace`). Default in the console is 20 |
 | `image` | no | Container image; default `ghcr.io/kloudlite/kloudlite-workspace` |
 | `repo`, `branch` | no | Cloned into the tree on first start with your platform ssh key |
 | `packages` | no | nixpkgs attributes, `attr` or `attr@version` — see [Packages](packages.md) |
