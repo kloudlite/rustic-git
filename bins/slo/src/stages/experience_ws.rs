@@ -430,8 +430,10 @@ async fn push_then_restore(c: &mut Ctx, src: &str, name: &str) -> Result<String>
 /// `HOME_CACHE_DIR` and `~/.local/state` at `HOME_STATE_DIR`, both on the per-(owner, node)
 /// `homecache` subvolume, so this reads them back from inside the pod.
 async fn cache_is_local(c: &Ctx, ws: &str) -> Result<()> {
-    let cache = kloudlite_workspaces::k8s::HOME_CACHE_DIR;
-    let state = kloudlite_workspaces::k8s::HOME_STATE_DIR;
+    // removed in Task 3: HOME_CACHE_DIR/HOME_STATE_DIR are gone with the homecache volume;
+    // Task 3 removes this probe's premise (there is no separate cache mount to find).
+    let cache = "/home/kl/.cache";
+    let state = "/home/kl/.local/state";
     // `readlink -f` on the state dir would compare the path to ITSELF — `HOME_STATE_DIR` IS
     // `/home/kl/.local/state` — so it is the MOUNT that is read instead: the homecache subvolume
     // is bind-mounted there under its own subPath, and a state directory that is merely a
@@ -460,7 +462,9 @@ async fn cache_is_local(c: &Ctx, ws: &str) -> Result<()> {
 /// line of its own.
 fn state_is_local(out: &str, _cache: &str, state: &str) -> Result<()> {
     let lines: Vec<&str> = out.lines().map(str::trim).filter(|l| !l.is_empty()).collect();
-    let ws = kloudlite_workspaces::k8s::WORKSPACES_DIR;
+    // removed in Task 3: WORKSPACES_DIR is gone with the per-name subdir; Task 3 removes this
+    // probe's premise (the tree is the whole home now, not a subdir of it).
+    let ws = "/home/kl/workspaces";
     match lines.first() {
         Some(v) if v.starts_with(ws) && v.ends_with("/.cache/xdg") => {}
         other => return Err(anyhow!("XDG_CACHE_HOME is {other:?}, not `{ws}/<name>/.cache/xdg`")),
@@ -581,10 +585,10 @@ async fn seed_failed_condition(c: &Ctx, id: &str) -> Result<()> {
 
 /// The subject of the checked-out clone's last commit, compared to the one this run pushed.
 ///
-/// The path is `k8s::workspace_dir(name)` — the seeder clones into the workspace's own subvolume,
-/// which is mounted at `~/workspaces/{name}`, NOT into a directory named after the repo.
-async fn clone_subject(c: &Ctx, id: &str, name: &str) -> Result<()> {
-    let dir = kloudlite_workspaces::k8s::workspace_dir(name);
+/// The path is `k8s::WORKSPACE_DIR` — the seeder clones into the workspace's own volume, the whole
+/// home now, NOT into a directory named after the repo.
+async fn clone_subject(c: &Ctx, id: &str, _name: &str) -> Result<()> {
+    let dir = kloudlite_workspaces::k8s::WORKSPACE_DIR;
     let script = format!("git -C {dir} rev-parse HEAD");
     let (code, out, err) = ws_exec(c, id, &script, EXEC).await?;
     if code != 0 {
@@ -944,15 +948,12 @@ mod tests {
         assert!(state_is_local(&old, cache, state).is_err());
     }
 
-    /// `ws.seeded` reads the clone from the workspace's own subvolume — `~/workspaces/{name}` —
-    /// and compares it to the subject stage 2 pushed. Both halves are literals somewhere else in
+    /// `ws.seeded` reads the clone from the workspace's own volume — the whole home now — and
+    /// compares it to the subject stage 2 pushed. Both halves are literals somewhere else in
     /// the tree, so this is what catches either one moving.
     #[test]
     fn the_seed_check_reads_the_workspace_directory_and_stage_twos_subject() {
-        assert_eq!(
-            kloudlite_workspaces::k8s::workspace_dir("run-fast-1-seed"),
-            "/home/kl/workspaces/run-fast-1-seed"
-        );
+        assert_eq!(kloudlite_workspaces::k8s::WORKSPACE_DIR, "/home/kl/workspace");
         assert_eq!(BASE_BRANCH, "main");
         // `git.push.ok` commits with `-m seed`; if that changes, this test is the reminder.
         let git = include_str!("git.rs");

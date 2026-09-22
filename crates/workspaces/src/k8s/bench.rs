@@ -1,6 +1,6 @@
 //! The bench pod: one container, no btrfs worktree, no sshd — a bench has no volume, so nothing
 //! here has a subvolume path, a homecache, a host key Secret or a git seed init container. What
-//! IS carried from a workspace: the shared home (`home_volume`), the `user-key` Secret projected
+//! IS carried from a workspace: the shared home (removed in Task 4), the `user-key` Secret projected
 //! the same way, the attach `resolv.conf`, and the hardened security context. `harness-bench`
 //! itself owns the model runtime and the idle clock; this module only shapes the pod around it.
 
@@ -120,7 +120,9 @@ pub fn bench_pod(b: &Bench, id: &str, pool: &str, runtime_class: Option<&str>, r
             ..Default::default()
         }],
         volumes: Some(vec![
-            home_volume(pool, owner),
+            // removed in Task 4: bench still carries the old shared-NFS home shape;
+            // Task 4 reshapes the bench onto its own volume.
+            host_dir("home", format!("{pool}/homes/{owner}")),
             Volume { name: "bench-folder".to_string(), host_path: Some(HostPathVolumeSource { path: folder, type_: Some("Directory".into()) }), ..Default::default() },
             user_key_volume(true),
             attach_volume(pool, id),

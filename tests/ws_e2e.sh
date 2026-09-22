@@ -827,8 +827,8 @@ OTHER_CODE=$(curl -sS -o /dev/null -w '%{http_code}' -X POST "$BASE/v1/workspace
 [ "$OTHER_CODE" = "404" ] || fail "a second user's session mint must 404, got $OTHER_CODE"
 
 log "checking the registered key landed in the pod's authorized_keys"
-kubectl -n "$WS_NS" exec "$WS_ID" -- ls /home/kl/.ssh/authorized_keys >/dev/null \
-  || fail "no /home/kl/.ssh/authorized_keys in the workspace pod"
+kubectl -n "$WS_NS" exec "$WS_ID" -- ls /etc/kloudlite/authorized_keys >/dev/null \
+  || fail "no /etc/kloudlite/authorized_keys in the workspace pod"
 
 # The negative half: a peer workspace pod is not `app=kloudlite-gateway` in `kloudlite-system`, so the
 # default-deny-plus-gateway-hole NetworkPolicy must refuse it on port 22 — `kl` above only proved
