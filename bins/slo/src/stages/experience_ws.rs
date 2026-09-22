@@ -267,7 +267,7 @@ const SEED_CONTAINER: &str = "git-seed";
 /// B, restored from A's push, and absent from C, a fresh workspace of the same owner.
 ///
 /// The last id in the stage, because it asserts something about what everything before it did:
-/// since Task 1/3/4/5, `/home/kl` IS the workspace's own btrfs volume, no separate mount, no
+/// since the 2026-09-22 ruling, `/home/kl` IS the workspace's own btrfs volume, no separate mount, no
 /// shared NFS home — so what proves the home travels WITH the workspace (not with the owner) is a
 /// restore that carries the dotfile, and a fresh, unrelated create that does NOT.
 pub async fn home_travels(c: &mut Ctx) {
