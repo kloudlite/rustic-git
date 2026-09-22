@@ -24,6 +24,7 @@ export class Subs {
   }
 
   async delegate(from: Session, target: string, instruction: string): Promise<string> {
+    if (from.row.tier === "top") return this.toMain(from, target, instruction);
     if (target) {
       const child = this.list.bySeq(Number(target));
       if (!child || child.parent !== from.row.seq || child.state !== "open") {
@@ -55,12 +56,22 @@ export class Subs {
     return `delegated to ${row.seq}, waiting`;
   }
 
+  private toMain(from: Session, name: string, instruction: string) {
+    const mains = this.list.all().filter((s) => s.tier === "main" && s.state !== "closed");
+    const m = mains.find((s) => s.workspace === name || s.name === name);
+    if (!m) return `error: no main named ${name}; mains: ${mains.map((s) => s.workspace).join(", ") || "none"}`;
+    this.sched.get(m.seq)!.receive(from.row.seq, instruction);
+    append(from.file, { kind: "delegate", ts: Date.now(), turn: from.current ?? -1, child: m.seq, instruction });
+    this.sched.kick();
+    return `delegated to ${m.workspace}, waiting`;
+  }
+
   async finish(child: Session, end: Extract<Row, { kind: "turn.end" }>) {
     const row = child.row;
     const parent = this.list.bySeq(row.parent!)!;
     const clone = row.workspace!, mainWs = parent.workspace!;
     const mainIp = (await this.platform.tools(mainWs)).replace(/:\d+$/, "");
-    const push = async () => text(await remote(clone, "exec", { cmd: `git push ssh://kl@${mainIp}/home/kl/${mainWs} HEAD:${row.target}` }));
+    const push = async () => text(await remote(clone, "exec", { cmd: `git push ssh://kl@${mainIp}/home/kl/${mainWs} HEAD:${row.target}`, timeout_ms: 120_000 }));
     let out = await push();
     const retried = readRows(child.file).some((r) => r.kind === "user" && r.text.startsWith("rebase onto main"));
     if (NON_FF.test(out) && !retried) {

@@ -88,3 +88,18 @@ test("a non-fast-forward push is retried once after a rebase instruction", async
   assert.equal(list.bySeq(sub.seq)?.state, "closed");
   rejectFirst = false;
 });
+
+test("a top-tier session delegates to a main by workspace name", async () => {
+  const { list, sched, subs, main } = world();
+  const top = list.create(undefined, { tier: "top", state: "open" });
+  const topSession = sched.get(top.seq) ?? (sched.boot(), sched.get(top.seq)!);
+  const got = await subs.delegate(topSession, "m", "review the pr");
+  assert.match(got, /delegated to m, waiting/);
+  const topRows = readRows(list.logFile(top));
+  assert.ok(topRows.some((r) => r.kind === "delegate" && r.child === main.seq));
+  const mainRows = readRows(list.logFile(main));
+  assert.ok(mainRows.some((r) => r.kind === "user" && r.from === top.seq && r.text === "review the pr"));
+
+  const missing = await subs.delegate(topSession, "no-such-workspace", "do it");
+  assert.match(missing, /error: no main named no-such-workspace/);
+});
