@@ -38,10 +38,10 @@ export const ALWAYS_CONFIRM = ["bash", "kill_shell"];
 export type Decision = { kind: "run" | "confirm"; tool: Tool; destructive: boolean; confidence?: number; soft?: boolean } | { kind: "none"; confidence?: number };
 
 // Always the same bytes: Jev warms per question block (a new block costs ~1.2s, a seen one ~0.35s), so nothing per call goes in here; what varies goes in the state.
-export function chooserQuestions(): Record<string, Question> {
+export function chooserQuestions(tools: Tool[] = TOOLS): Record<string, Question> {
   return {
     tool: choice("Which single tool carries out the instruction?", {
-      ...Object.fromEntries(TOOLS.map((t) => [t.name, t.description])),
+      ...Object.fromEntries(tools.map((t) => [t.name, t.description])),
       none: "No single tool does this: it is several steps at once (restart a server = stop it, then start it; fix something, then check it), or a question that needs thinking rather than an action",
     }),
     // The shell is always there when no tool fits. Narrow on purpose: a compound step or a decision must stay "none" and go back to the planner.
@@ -50,14 +50,14 @@ export function chooserQuestions(): Record<string, Question> {
   };
 }
 
-export function decide(answers: Record<string, Answer>): Decision {
+export function decide(answers: Record<string, Answer>, tools: Tool[] = TOOLS): Decision {
   const t = answers.tool as ChoiceAnswer;
-  const tool = TOOLS.find((x) => x.name === t.choice);
+  const tool = tools.find((x) => x.name === t.choice);
   // Low confidence with "none" barely in the running is a split between two real tools (bash_output or bash), not a missing tool: the top one is confirmed.
   const destructive = (answers.destructive as NoulAnswer).noul >= 0.5;
   if (!tool || (t.confidence < ASK && (t.probabilities?.none ?? 1) > NONE_SPLIT)) {
     // Last resort: no tool fits, but one shell command does it. bash always asks first, so a wrong call costs one "no".
-    const bash = TOOLS.find((x) => x.name === "bash");
+    const bash = tools.find((x) => x.name === "bash");
     // A weak top pick of bash is still bash: seen live, "create a branch feature/health" scored bash 0.45, shell 0.13, was skipped, and the commit landed on master.
     if (bash && (tool === bash || ((answers.shell as NoulAnswer | undefined)?.noul ?? 0) >= SHELL)) return { kind: "confirm", tool: bash, destructive, confidence: t.confidence };
     return { kind: "none", confidence: t.confidence };

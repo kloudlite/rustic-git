@@ -10,7 +10,7 @@ import { pickBlocks, formatBlocks } from "./pick.ts";
 import { freeFromLiterals } from "./router.ts";
 import type { Summarise } from "./sections.ts";
 
-export type ActDeps = { ask: Ask; cwd: string; readOnly?: boolean; think?: (question: string) => Promise<string>; log?: (text: string) => void; approve?: (tool: string, args: Record<string, string>, destructive: boolean) => Promise<boolean>; user?: User; generate?: (prompt: string, envelope: Envelope) => Promise<string> };
+export type ActDeps = { ask: Ask; cwd: string; readOnly?: boolean; think?: (question: string) => Promise<string>; log?: (text: string) => void; approve?: (tool: string, args: Record<string, string>, destructive: boolean) => Promise<boolean>; user?: User; generate?: (prompt: string, envelope: Envelope) => Promise<string>; tools?: Tool[] };
 export type ActInput = { instruction: string; detail?: string; params?: Record<string, string>; command?: string };
 export type ActOpts = { signal?: AbortSignal };
 
@@ -102,14 +102,14 @@ export function makeAct(deps: ActDeps, context: () => unknown, envelope?: () => 
       const without = SELF_LOOKUPS.includes(parent.generateTool ?? "") && parent.depth < MAX_READ_DEPTH ? undefined : parent.generateTool;
       // A step that carries its own literal command is picked alone. Seen live: after a write step, the earlier steps pulled it to write (0.82) and the test output was written to a file named "-".
       const alone = !!command;
-      const answers = await deps.ask({ instruction, context: alone ? {} : seen }, { ...chooserQuestions(), ...(deps.readOnly ? READ_GATE : {}) });
+      const answers = await deps.ask({ instruction, context: alone ? {} : seen }, { ...chooserQuestions(deps.tools ?? TOOLS), ...(deps.readOnly ? READ_GATE : {}) });
       if (deps.readOnly) {
         const changes = (answers.changes as NoulAnswer).noul, costly = (answers.costly as NoulAnswer).noul;
         if (changes >= DECIDE) { deps.log?.(`${ind}jev: a change, rejected in reading mode (${changes.toFixed(2)})`); return READ_ONLY; }
         // Not a change, but it consumes time and resources: the user decides whether the plan is worth it.
         if (costly >= DECIDE) { deps.log?.(`${ind}jev: costly lookup (${costly.toFixed(2)})${deps.approve ? ": asking the user" : ""}`); if (!deps.approve) return READ_ONLY; escalated = true; }
       }
-      const d = decide(answers);
+      const d = decide(answers, deps.tools ?? TOOLS);
       if (deps.readOnly && d.kind !== "none" && NOT_LOOKUPS.includes(d.tool.name)) {
         // Only run can serve a plan (its output is information), so only run goes to the user; writing, stopping, talking and thinking are rejected.
         if (!deps.approve || d.tool.name !== "bash") { deps.log?.(`${ind}jev: ${d.tool.name} refused in reading mode`); return READ_ONLY; }
@@ -117,7 +117,7 @@ export function makeAct(deps: ActDeps, context: () => unknown, envelope?: () => 
       }
       if (d.kind === "none") {
         deps.log?.(`${ind}jev: no tool matched`);
-        return `No tool matches. Available: ${TOOLS.map((t) => `${t.name} (${t.description})`).join("; ")}. Rephrase as one concrete step; if it is an action no tool covers, make it a bash step with the exact command in its command field; if it only decides something, it is not a step.`;
+        return `No tool matches. Available: ${(deps.tools ?? TOOLS).map((t) => `${t.name} (${t.description})`).join("; ")}. Rephrase as one concrete step; if it is an action no tool covers, make it a bash step with the exact command in its command field; if it only decides something, it is not a step.`;
       }
       const conf = d.confidence !== undefined ? ` (${d.confidence.toFixed(2)})` : "";
       deps.log?.(`${ind}jev: ${d.tool.name}${conf}`);
@@ -876,13 +876,13 @@ export async function runPlan(deps: PlanDeps, task: string, done: string[] = [],
   return `done: ${results.at(-1)?.split("\n").slice(1).filter((l, i) => i > 0 || !l.startsWith("[")).join("\n").replace(/^done: /, "") ?? ""}`;
 }
 
-export type RunTaskDeps = { llm: Llm; ask: Ask; cwd: string; steer?: () => { lines: string[]; stop: boolean }; log: (text: string) => void; approve?: (tool: string, args: Record<string, string>, destructive: boolean) => Promise<boolean>; user?: User; context: () => string };
+export type RunTaskDeps = { llm: Llm; ask: Ask; cwd: string; steer?: () => { lines: string[]; stop: boolean }; log: (text: string) => void; approve?: (tool: string, args: Record<string, string>, destructive: boolean) => Promise<boolean>; user?: User; context: () => string; tools?: Tool[]; readOnly?: boolean };
 
 // Carries out a typed line as a task: plans it, runs each step through Jev-gated tool calls, and drafts a message
 // to the user for whatever Jev cannot settle. `done` holds a tool call already run for this line (main's own direct
 // call, before it was judged incomplete), so the plan continues from it instead of starting over.
 export function runTask(deps: RunTaskDeps, line: string, title: string, done: string[] = []): Promise<string> {
-  const actDeps = { llm: deps.llm, ask: deps.ask, cwd: deps.cwd, log: deps.log, approve: deps.approve, user: deps.user };
+  const actDeps = { llm: deps.llm, ask: deps.ask, cwd: deps.cwd, log: deps.log, approve: deps.approve, user: deps.user, tools: deps.tools, readOnly: deps.readOnly };
   // context() gives every closed section as a label+summary and the open section in full, uncut: the same view a
   // fresh task and a continued one both start from, since there is no separate running session to carry it forward.
   const task = `${deps.context()}\n\n${line}`;
