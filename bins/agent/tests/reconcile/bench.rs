@@ -85,7 +85,8 @@ fn has_cond(st: &serde_json::Value, t: &str, status: &str, reason: &str) -> bool
 #[tokio::test]
 async fn a_bench_on_a_node_without_the_share_parks_and_starts_no_pod() {
     let tmp = homes_pool();
-    let (ctx, rec) = ctx_without_homes_export(tmp.path(), up_to_the_pod(not_found(pod_path())));
+    let (mut ctx, rec) = ctx(tmp.path(), up_to_the_pod(not_found(pod_path())));
+    Arc::get_mut(&mut ctx).unwrap().homes_export = None;
     kloudlite_agent::controller::reconcile_bench(Arc::new(bench(serde_json::json!({}), placed())), ctx).await.unwrap();
     assert!(has_cond(&last_status(&rec), "Ready", "False", "FolderNotReady"), "{}", last_status(&rec));
     assert!(rec.sent("POST", &pods_path()).is_empty() && !rec.calls().iter().any(|c| c.starts_with("POST") && c.contains("/pods")));
@@ -94,7 +95,7 @@ async fn a_bench_on_a_node_without_the_share_parks_and_starts_no_pod() {
 #[tokio::test]
 async fn a_running_bench_makes_its_folder_and_one_pod() {
     let tmp = homes_pool();
-    let (ctx, rec) = ctx_with_homes_export(tmp.path(), up_to_the_pod(not_found(pod_path())), Arc::new(FakeNix::default()), Some("unused".into()));
+    let (ctx, rec) = ctx(tmp.path(), up_to_the_pod(not_found(pod_path())));
     kloudlite_agent::controller::reconcile_bench(Arc::new(bench(serde_json::json!({}), placed())), ctx).await.unwrap();
     assert!(tmp.path().join("homes/.benches/acme/alice").is_dir());
     let sent = rec.sent("POST", &pods_path());
@@ -106,9 +107,10 @@ async fn a_running_bench_makes_its_folder_and_one_pod() {
 
 #[tokio::test]
 async fn an_idle_exit_removes_the_pod_and_only_a_later_wake_brings_it_back() {
+    let mk = ctx;
     let tmp = homes_pool();
     let exited = get(pod_path(), pod_json(&["harness-bench"], "Succeeded", false, Some(0)));
-    let (ctx, rec) = ctx_with_homes_export(tmp.path(), up_to_the_pod(exited), Arc::new(FakeNix::default()), Some("unused".into()));
+    let (ctx, rec) = mk(tmp.path(), up_to_the_pod(exited));
     kloudlite_agent::controller::reconcile_bench(Arc::new(bench(serde_json::json!({}), placed())), ctx).await.unwrap();
     assert_eq!(rec.calls().iter().filter(|c| **c == format!("DELETE {}", pod_path())).count(), 1);
     let st = last_status(&rec);
@@ -118,12 +120,12 @@ async fn an_idle_exit_removes_the_pod_and_only_a_later_wake_brings_it_back() {
     assert!(st.get("podRef").is_none(), "{st}");
 
     // Second pass: asleep, nobody asked.
-    let (ctx, rec) = ctx_with_homes_export(tmp.path(), up_to_the_pod(not_found(pod_path())), Arc::new(FakeNix::default()), Some("unused".into()));
+    let (ctx, rec) = mk(tmp.path(), up_to_the_pod(not_found(pod_path())));
     kloudlite_agent::controller::reconcile_bench(Arc::new(bench(serde_json::json!({}), st.clone())), ctx).await.unwrap();
     assert!(!rec.calls().iter().any(|c| c.starts_with("POST") && c.contains("/pods") || c.starts_with("DELETE")), "{:?}", rec.calls());
 
     // Third pass: a wake one second after the exit.
-    let (ctx, rec) = ctx_with_homes_export(tmp.path(), up_to_the_pod(not_found(pod_path())), Arc::new(FakeNix::default()), Some("unused".into()));
+    let (ctx, rec) = mk(tmp.path(), up_to_the_pod(not_found(pod_path())));
     let want = ctx.settings.load().bench_idle_secs.to_string();
     kloudlite_agent::controller::reconcile_bench(Arc::new(bench(serde_json::json!({"wakeAt": "2026-09-13T10:00:01Z"}), st)), ctx).await.unwrap();
     let sent = rec.sent("POST", &pods_path());
@@ -135,15 +137,16 @@ async fn an_idle_exit_removes_the_pod_and_only_a_later_wake_brings_it_back() {
 
 #[tokio::test]
 async fn stopping_a_bench_leaves_no_pod_at_all() {
+    let mk = ctx;
     let tmp = homes_pool();
     let running = get(pod_path(), pod_json(&["harness-bench"], "Running", true, None));
-    let (ctx, rec) = ctx_with_homes_export(tmp.path(), up_to_the_pod(running), Arc::new(FakeNix::default()), Some("unused".into()));
+    let (ctx, rec) = mk(tmp.path(), up_to_the_pod(running));
     let stopped = bench(serde_json::json!({"desiredState": "stopped"}), placed());
     kloudlite_agent::controller::reconcile_bench(Arc::new(stopped.clone()), ctx).await.unwrap();
     assert_eq!(rec.calls().iter().filter(|c| **c == format!("DELETE {}", pod_path())).count(), 1);
     assert!(rec.sent("POST", &pods_path()).is_empty());
 
-    let (ctx, rec) = ctx_with_homes_export(tmp.path(), up_to_the_pod(not_found(pod_path())), Arc::new(FakeNix::default()), Some("unused".into()));
+    let (ctx, rec) = mk(tmp.path(), up_to_the_pod(not_found(pod_path())));
     kloudlite_agent::controller::reconcile_bench(Arc::new(stopped), ctx).await.unwrap();
     assert!(rec.sent("POST", &pods_path()).is_empty());
     let st = last_status(&rec);
@@ -201,7 +204,7 @@ async fn a_pod_left_on_a_dead_node_is_force_deleted() {
         "apiVersion": "v1", "kind": "Node", "metadata": {"name": "n-dead"},
         "status": {"conditions": [{"type": "Ready", "status": "False", "lastTransitionTime": rfc3339_ago(3600)}]}
     })));
-    let (ctx, rec) = ctx_with_homes_export(tmp.path(), routes, Arc::new(FakeNix::default()), Some("unused".into()));
+    let (ctx, rec) = ctx(tmp.path(), routes);
     kloudlite_agent::controller::reconcile_bench(Arc::new(bench(serde_json::json!({}), placed())), ctx).await.unwrap();
     let del = rec.sent("DELETE", &pod_path());
     assert_eq!(del.len(), 1, "{:?}", rec.calls());
@@ -219,7 +222,7 @@ async fn a_pod_on_a_live_other_node_is_not_forced() {
         "apiVersion": "v1", "kind": "Node", "metadata": {"name": "n-live"},
         "status": {"conditions": [{"type": "Ready", "status": "True", "lastTransitionTime": rfc3339_ago(3600)}]}
     })));
-    let (ctx, rec) = ctx_with_homes_export(tmp.path(), routes, Arc::new(FakeNix::default()), Some("unused".into()));
+    let (ctx, rec) = ctx(tmp.path(), routes);
     kloudlite_agent::controller::reconcile_bench(Arc::new(bench(serde_json::json!({}), placed())), ctx).await.unwrap();
     assert!(rec.sent("DELETE", &pod_path()).is_empty(), "{:?}", rec.calls());
 }
@@ -227,6 +230,7 @@ async fn a_pod_on_a_live_other_node_is_not_forced() {
 /// I5: an attached bench gets both halves of the grant, the environment side owned by the Environment.
 #[tokio::test]
 async fn an_attached_bench_gets_both_halves_of_the_grant() {
+    let mk = ctx;
     let tmp = homes_pool();
     let np = |ns: &str| kloudlite_workspaces::kube_test::patch(
         format!("/apis/networking.k8s.io/v1/namespaces/{ns}/networkpolicies/attach-{BENCH}"),
@@ -234,7 +238,7 @@ async fn an_attached_bench_gets_both_halves_of_the_grant() {
     );
     let mut routes = up_to_the_pod(not_found(pod_path()));
     routes.extend([np(&ns()), np(&crd::env_namespace("env-abc")), env_route("env-abc", "r1")]);
-    let (ctx, rec) = ctx_with_homes_export(tmp.path(), routes, Arc::new(FakeNix::default()), Some("unused".into()));
+    let (ctx, rec) = mk(tmp.path(), routes);
     kloudlite_agent::controller::reconcile_bench(Arc::new(bench(serde_json::json!({"attachedEnvironment": "env-abc"}), placed())), ctx).await.unwrap();
     let egress = rec.sent("PATCH", &format!("/apis/networking.k8s.io/v1/namespaces/{}/networkpolicies/attach-{BENCH}", ns()));
     assert_eq!(egress.len(), 1, "{:?}", rec.calls());
@@ -246,7 +250,7 @@ async fn an_attached_bench_gets_both_halves_of_the_grant() {
 
     // Detach: the bench side goes by name, the environment side by the recorded id.
     let st = last_status(&rec);
-    let (ctx, rec) = ctx_with_homes_export(tmp.path(), up_to_the_pod(not_found(pod_path())), Arc::new(FakeNix::default()), Some("unused".into()));
+    let (ctx, rec) = mk(tmp.path(), up_to_the_pod(not_found(pod_path())));
     kloudlite_agent::controller::reconcile_bench(Arc::new(bench(serde_json::json!({}), st)), ctx).await.unwrap();
     let calls = rec.calls();
     assert!(calls.contains(&format!("DELETE /apis/networking.k8s.io/v1/namespaces/{}/networkpolicies/attach-{BENCH}", ns())), "{calls:?}");

@@ -235,9 +235,8 @@ pub struct Ctx {
     /// startup. A second, hand-maintained copy of a label the scheduler already reads is a second
     /// thing that can be wrong — see `k8s::placement`.
     pub has_pool: bool,
-    /// `WS_HOMES_EXPORT`: `None` means this node has no shared-home NFS mount, and every
-    /// workspace reconcile parks on `HomeNotReady` rather than starting a pod that would hostPath
-    /// an empty local dir in the home's place.
+    /// `WS_HOMES_EXPORT`: `None` means this node has no shared-home NFS mount. Only `Bench` still
+    /// reads this (Task 4 removes it); a workspace no longer needs the shared home.
     pub homes_export: Option<String>,
     /// `WS_REGISTRY_HOST`, threaded into every pod's `k8s::PodContext` — see `Config::registry_host`.
     pub registry_host: String,

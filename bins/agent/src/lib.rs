@@ -43,8 +43,8 @@ pub struct Config {
     /// watches only objects whose `spec.nodeName` equals it.
     pub node: String,
     /// `WS_HOMES_EXPORT`, e.g. `<account>.file.core.windows.net:/<account>/homes` — the region's shared-home NFS
-    /// export. Unset means no shared home on this node: workspace reconciles that need it park on
-    /// HomeNotReady (fail closed, same shape as WS_PEER_SECRET gating the peer listener).
+    /// export. Only `Bench` still uses this (Task 4 removes it); a workspace's home is its own
+    /// volume now.
     pub homes_export: Option<String>,
     /// `WS_REGISTRY_HOST`: the platform registry's external host (no scheme), the same value
     /// `registry::auth::realm()`'s host half resolves to on the api tier — the agent has no route

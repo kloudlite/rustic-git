@@ -162,22 +162,13 @@ fn ctx(pool: &std::path::Path, routes: Vec<Route>) -> (Arc<Ctx>, Recorder) {
 }
 
 /// The one constructor: every test's profile root is a directory under its own pool tempdir, so no
-/// test can reach the node's real `/nix` and none of them race each other over it.
+/// test can reach the node's real `/nix` and none of them race each other over it. `homes_export`
+/// is set to a literal address (never a name: the agent resolves the export host at boot, and a
+/// name that happens to resolve on a laptop (`test`) is NXDOMAIN inside the cluster, where these
+/// tests also run — 160 of them failed there on "Name or service not known") because `Bench` still
+/// reads it (Task 4 removes it); a workspace test that needs it unset sets that field inline.
 fn ctx_full(pool: &std::path::Path, routes: Vec<Route>, nix: Arc<FakeNix>) -> (Arc<Ctx>, Recorder) {
-    // A literal address, never a name: the agent resolves the export host at boot, and a name
-    // that happens to resolve on a laptop (`test`) is NXDOMAIN inside the cluster, where these
-    // tests also run — 160 of them failed there on "Name or service not known".
-    ctx_with_homes_export(pool, routes, nix, Some("127.0.0.1:/".into()))
-}
-
-/// The `WS_HOMES_EXPORT`-unset variant: a node with no shared-home mount, which every workspace
-/// reconcile must park on rather than start a pod against.
-fn ctx_without_homes_export(pool: &std::path::Path, routes: Vec<Route>) -> (Arc<Ctx>, Recorder) {
-    ctx_with_homes_export(pool, routes, Arc::new(FakeNix::default()), None)
-}
-
-fn ctx_with_homes_export(pool: &std::path::Path, routes: Vec<Route>, nix: Arc<FakeNix>, homes_export: Option<String>) -> (Arc<Ctx>, Recorder) {
-    ctx_on_node("node-a", pool, routes, nix, homes_export)
+    ctx_on_node("node-a", pool, routes, nix, Some("127.0.0.1:/".into()))
 }
 
 /// The same fixture as some OTHER node — what the hand-off half of a capacity decline needs: one

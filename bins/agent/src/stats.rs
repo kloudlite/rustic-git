@@ -106,7 +106,7 @@ pub fn spawn_stats(pool: String, client: kube::Client, node: String) {
                     // in a False condition's reason, and these three are the waits an operator is
                     // paged about. Recomputed whole every beat (zeroes included) — a gauge that is
                     // only ever incremented keeps reporting a queue that has since drained.
-                    for reason in ["HomeNotReady", "NodeDead", "AwaitingReplica"] {
+                    for reason in ["NodeDead", "AwaitingReplica"] {
                         let n = list
                             .items
                             .iter()

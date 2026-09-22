@@ -75,17 +75,11 @@ pub fn parse_generation(subvolume_show: &str) -> Option<u64> {
 
 pub struct Engine {
     pub pool: Pool,
-    /// Sampled once at construction, not re-probed per call: a degradation (no btrfs on PATH, not
-    /// root) is a fact about this process's whole lifetime, not a per-reconcile coin flip, and a
-    /// field makes it a state `ensure_homecache` reads rather than a probe it could answer
-    /// differently between its own existence check and its create call.
-    has_btrfs: bool,
 }
 
 impl Engine {
     pub fn new(pool: Pool) -> Engine {
-        let has_btrfs = super::have_btrfs();
-        Engine { pool, has_btrfs }
+        Engine { pool }
     }
 
     /// Bare `{pool}/vol/{id}/live` subvolume creation — shared by `init` (a workspace) and
@@ -110,49 +104,6 @@ impl Engine {
         Ok(())
     }
 
-    /// `{pool}/homecache/{owner}`: the node-local half of the shared-home split (spec
-    /// 2026-09-01) — caches (editor servers, package manager state) that must never leave this
-    /// node and are disposable by contract, so no qgroup limit here (unlike `set_quota`, which
-    /// caps volumes that ARE the tenant's durable data). A btrfs subvolume, not a plain dir, so
-    /// deleting it later is one `btrfs subvolume delete` instead of a `rm -rf` racing writers.
-    pub fn ensure_homecache(&self, owner: &str, uid: u32) -> Result<(), EngErr> {
-        let root = self.pool.root.join("homecache").join(owner);
-        std::fs::create_dir_all(root.parent().unwrap()).map_err(EngErr::io)?;
-        // ponytail: the agent is root-only and btrfs is always present in production (it's a
-        // privileged DaemonSet, see CLAUDE.md); a dev/test pool gets a plain directory instead of
-        // a subvolume so the reconcile loop converges without either — this function's real
-        // subvolume path is exercised by `engine_ops.rs`'s btrfs-gated test. Loud, not silent: a
-        // production node that ever took this branch (btrfs missing from PATH, a bad image) needs
-        // to show up in logs, because the `is_subvolume` guard below is itself skipped in that
-        // state and would otherwise let a plain dir sit there unnoticed.
-        if !root.exists() {
-            if self.has_btrfs {
-                run(&["btrfs", "subvolume", "create", path_str(&root)?])?;
-            } else {
-                tracing::warn!(path = %root.display(), reason = "no-btrfs-root", "homecache.not_subvolume");
-                std::fs::create_dir(&root).map_err(EngErr::io)?;
-            }
-        } else if self.has_btrfs && !is_subvolume(&root) {
-            // Only reachable once btrfs/root come back after a node ran this reconcile without
-            // them (the branch above just warned and left a plain dir) — self-heal is a `rm -rf`,
-            // never an automatic convert, because the cache is disposable by contract but this
-            // function does not know if it is mid-write.
-            return Err(EngErr::other(format!(
-                "{}: exists but is not a btrfs subvolume (left by a reconcile without btrfs/root); \
-                 disposable by contract — rm -rf it and this reconcile will recreate it",
-                root.display()
-            )));
-        }
-        let chown_ok = unsafe { libc::geteuid() } == 0;
-        for d in ["cache", "vscode-server", "cursor-server", "state"] {
-            let p = root.join(d);
-            std::fs::create_dir_all(&p).map_err(EngErr::io)?;
-            if chown_ok {
-                std::os::unix::fs::chown(&p, Some(uid), Some(uid)).map_err(EngErr::io)?;
-            }
-        }
-        Ok(())
-    }
 
     /// Cap `id`'s live subvolume at `quota_gb` with a btrfs qgroup limit — the only thing that
     /// stops one tenant writing the whole pool to ENOSPC and taking every sibling down with it.
@@ -330,35 +281,6 @@ mod tests {
 
     fn engine(root: &std::path::Path) -> Engine {
         Engine::new(Pool::new(root))
-    }
-
-    /// The degradation path: forced via the private field rather than gated on the real
-    /// `have_btrfs()`, so this runs (and proves the fallback works) on every machine, not just a
-    /// btrfs box — the real subvolume path is `engine_ops.rs`'s `have_btrfs()`-gated test.
-    #[test]
-    fn ensure_homecache_falls_back_to_a_plain_dir_without_btrfs() {
-        let tmp = tempfile::tempdir().unwrap();
-        let mut e = engine(tmp.path());
-        e.has_btrfs = false;
-        e.ensure_homecache("alice", 12345).unwrap();
-        let root = e.pool.root.join("homecache/alice");
-        assert!(root.is_dir());
-        for d in ["cache", "vscode-server", "cursor-server", "state"] {
-            assert!(root.join(d).is_dir(), "{d}");
-        }
-    }
-
-    /// The self-heal case the review flagged: a plain dir left by a degraded reconcile must not
-    /// wedge forever once btrfs/root come back — the error has to name the fix.
-    #[test]
-    fn ensure_homecache_names_the_remedy_once_a_plain_dir_meets_real_btrfs() {
-        let tmp = tempfile::tempdir().unwrap();
-        let mut e = engine(tmp.path());
-        e.has_btrfs = false;
-        e.ensure_homecache("alice", 12345).unwrap(); // leaves a plain dir, as above
-        e.has_btrfs = true; // the node's btrfs/root came back
-        let err = e.ensure_homecache("alice", 12345).unwrap_err();
-        assert!(err.0.contains("rm -rf"), "{}", err.0);
     }
 
     #[test]

@@ -1,10 +1,9 @@
-//! The `Workspace` reconciler: profile, host key, home, worktree, attachment and the one pod.
-//! Split out of `controller.rs` unchanged.
+//! The `Workspace` reconciler: profile, host key, worktree, attachment and the one pod. Split out
+//! of `controller.rs` unchanged.
 //!
-//! The module map: `profile` (nix packages), `conditions`, `replicas`, `home` (the NFS home),
-//! `seed` (the git seed container), `lifecycle` (stop, delete, migrate), `status` (the status
-//! write, labels, resolv.conf, host key). `apply_workspace` and the two reconcile entry points
-//! stay here.
+//! The module map: `profile` (nix packages), `conditions`, `replicas`, `seed` (the git seed
+//! container), `lifecycle` (stop, delete, migrate), `status` (the status write, labels,
+//! resolv.conf, host key). `apply_workspace` and the two reconcile entry points stay here.
 
 use super::stop::{replicated_condition, running_condition, stop_name, stop_push, StopPush};
 use super::{my_node, conditions_eq, create_if_absent, delete_ignoring_404, ensure, heal_labels, owner_ref_of_kind, resolve_volume, settle, stopped_condition, wake_on_finish, write_status, Ctx, Done, Outcome, ReconcileErr, Resolved, RETRY, TICK};
@@ -34,12 +33,10 @@ mod conditions;
 
 mod replicas;
 
-mod home;
 mod seed;
 pub(crate) use profile::*;
 pub use conditions::*;
 pub(crate) use replicas::*;
-pub(crate) use home::*;
 pub(crate) use seed::*;
 
 
@@ -201,36 +198,6 @@ pub async fn apply_workspace(w: &crd::Workspace, ctx: &Arc<Ctx>) -> Result<Actio
         write_ws_status(w, st, ctx).await?;
         return Ok(Action::requeue(TICK));
     }
-    // The shared home replaces the home Volume (spec 2026-09-01): the agent makes the two mount
-    // sources exist before kubelet needs them. `{pool}/homes/{owner}` is NFS — mkdir is the whole
-    // materialize. The cache subvolume is local and disposable. Both idempotent, so every reconcile
-    // may call them. No WS_HOMES_EXPORT on this node: park, fail closed — a pod started anyway
-    // would hostPath an empty local dir and the person's dotfiles would silently not be theirs.
-    let Some(export) = ctx.homes_export.as_deref() else {
-        let st = crd::WorkspaceStatus {
-            phase: crd::Phase::Creating,
-            observed_generation: None,
-            volume_ref: Some(id),
-            conditions: ws_conditions(&prev, crd::condition("Ready", false, "HomeNotReady", "this node has no shared-home mount (WS_HOMES_EXPORT)", gen)),
-            ..prev
-        };
-        write_ws_status(w, st, ctx).await?;
-        return Ok(Action::requeue(TICK));
-    };
-    // `spawn_blocking`, exactly as the `ensure_homecache` call below: `mount_homes` runs
-    // `timeout -s KILL 5 ls`, `umount -f -l` and `timeout -s KILL 60 nsenter … mount`, all
-    // synchronous — up to ~65 s of a reactor thread that every other workspace on this node shares.
-    let (pool, export_owned, owner) = (ctx.pool.clone(), export.to_string(), w.spec.owner.clone());
-    super::timed("shared_home", &id, tokio::task::spawn_blocking(move || ensure_shared_home(&pool, &export_owned, &owner, k8s::SSH_UID as u32)))
-        .await
-        .map_err(|e| ReconcileErr(e.to_string()))?
-        .map_err(ReconcileErr)?;
-    let (engine, owner) = (ctx.engine.clone(), w.spec.owner.clone());
-    super::timed("homecache", &id, tokio::task::spawn_blocking(move || engine.ensure_homecache(&owner, k8s::SSH_UID as u32)))
-        .await
-        .map_err(|e| ReconcileErr(e.to_string()))?
-        .map_err(|e| ReconcileErr(e.0))?;
-
     // Who may ssh in arrives as `OwnerKeys`, rendered to this node by `controller::keys`. The pod
     // mounts that file as a `type: File` hostPath, so starting one before it exists is a pod the
     // kubelet refuses with an opaque mount error; park until the projection has reached this node.

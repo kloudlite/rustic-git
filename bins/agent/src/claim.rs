@@ -420,13 +420,6 @@ async fn decide(ctx: &Arc<Ctx>, name: &str, p: &Parts<'_>, phase: crd::Phase, ge
         // placement step at all.
         return Ok(Decline);
     }
-    // A node with no `WS_HOMES_EXPORT` cannot serve `/home/kl` at all, and nothing ever un-places a
-    // live node's claim — so claiming here parks the object at `HomeNotReady` permanently instead
-    // of leaving it for a node that can serve it. Refusing keeps it visibly unplaced, which a peer
-    // picks up on its own unplaced watch.
-    if ctx.homes_export.is_none() {
-        return Ok(Decline);
-    }
     // A node being retired takes no new work: the label is the operator's decision and the claim
     // is where it has to bite, or a drain never finishes because new workspaces keep landing.
     let me = Api::<Node>::all(ctx.client.clone()).get_opt(&ctx.node).await?;

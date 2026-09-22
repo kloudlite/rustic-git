@@ -34,7 +34,6 @@ async fn main() {
         // absent until the first parked workspace reads as `unknown`, which is the opposite of the
         // `0` it means. Histograms stay untouched, per `Kind::Histogram`'s doc.
         ("workspace_start_duration_seconds", Histogram, &[]),
-        ("workspaces_waiting", Gauge, &[("reason", "HomeNotReady")]),
         ("workspaces_waiting", Gauge, &[("reason", "NodeDead")]),
         ("workspaces_waiting", Gauge, &[("reason", "AwaitingReplica")]),
         ("snapshot_transfer_duration_seconds", Histogram, &[]),

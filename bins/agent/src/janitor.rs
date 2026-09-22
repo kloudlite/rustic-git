@@ -186,7 +186,7 @@ fn janitor_sweep_attach(pool: &std::path::Path, min_age: std::time::Duration, be
 /// region's NFS export, and therefore on S3, and it has no quota (the per-home btrfs qgroup went
 /// away with the per-node home volume). This warning is its ONLY replacement, so the number is a
 /// tripwire, not a limit: configs never come near 100 MB, and a home that does means a tool cache
-/// escaped `login_env`'s redirection onto the node-local `homecache` volume and is now paying
+/// escaped `login_env`'s redirection onto the workspace's own local cache and is now paying
 /// network I/O and object-store bytes for something disposable.
 ///
 /// Warns only — the janitor never deletes anything inside a person's home.
