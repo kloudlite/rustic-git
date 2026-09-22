@@ -1,0 +1,96 @@
+# The Kompress model service.
+#
+# A separate process from the fleet's own binaries because it is a Python model, not a Rust
+# service: chopratejas/kompress-v2-base is baked into the image at build time (owner ruling
+# 2026-09-22: "I don't want to download this during runtime"), so this pod needs no egress at
+# all — no object store, no directory, no other service. `bench_pod` in the agent points a
+# bench's `KL_KOMPRESS_URL` at the ClusterIP below when the region's `kompressUrl` setting names
+# it; `allow_bench_kompress` is the one NetworkPolicy hole that lets a bench reach it.
+#
+# In `kloudlite-system` alongside the builder gate (the namespace already exists there; both are
+# declared so either file applies alone). k3s only, applied by hand — this is not in
+# `deploy/kloudlite.yaml` because the model service runs once per region, not once per fleet tier.
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: kloudlite-system
+  labels:
+    pod-security.kubernetes.io/enforce: privileged
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: kloudlite-kompress
+  namespace: kloudlite-system
+  labels:
+    app: kloudlite-kompress
+spec:
+  replicas: 1
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      app: kloudlite-kompress
+  template:
+    metadata:
+      labels:
+        app: kloudlite-kompress
+    spec:
+      nodeSelector:
+        kloudlite.io/pool: "true"
+      tolerations:
+        - key: kloudlite.io/role
+          operator: Exists
+      containers:
+        - name: kompress
+          # `pin.sh` rewrites this to `:<sha>@sha256:<digest>` — the placeholder is here only so
+          # the file parses and applies before the first pin.
+          image: ghcr.io/kloudlite/kloudlite-kompress:228b76107d07dbdb4ccc7bd0ed6634ea9f5c6008@sha256:d395b918f32b6939aed353fd20f4d7ff03eca041b39b2dca5b422a5fe3ededc5
+          imagePullPolicy: IfNotPresent
+          ports:
+            - name: http
+              containerPort: 8787
+          readinessProbe:
+            httpGet:
+              path: /healthz
+              port: 8787
+            initialDelaySeconds: 20
+            periodSeconds: 10
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: 8787
+            initialDelaySeconds: 20
+            periodSeconds: 10
+          resources:
+            requests:
+              cpu: "1"
+              memory: 1536Mi
+            limits:
+              cpu: "2"
+              memory: 3Gi
+          securityContext:
+            runAsNonRoot: true
+            runAsUser: 1001
+            readOnlyRootFilesystem: true
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop: ["ALL"]
+          volumeMounts:
+            - { name: tmp, mountPath: /tmp }
+      volumes:
+        - name: tmp
+          emptyDir: {}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: kloudlite-kompress
+  namespace: kloudlite-system
+spec:
+  selector:
+    app: kloudlite-kompress
+  ports:
+    - name: http
+      port: 8787
+      targetPort: 8787
