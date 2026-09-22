@@ -5,12 +5,11 @@ import { Writable } from "./guard.ts";
 import { Procs, Tasks } from "./ledger.ts";
 import { Platform } from "./platform.ts";
 import { setBackend, httpBackend } from "./engine/remote.ts";
-import { readRows, type Row } from "./rows.ts";
+import { append, readRows, type Row } from "./rows.ts";
 import { Scheduler } from "./scheduler.ts";
 import { Session, type Turn } from "./session.ts";
 import { Subs } from "./sub.ts";
 import { SessionList, type SessionRow } from "./sessions.ts";
-import { readJson, replaceJson } from "./log.ts";
 
 export type BenchEvent = { type: string; [k: string]: unknown };
 export type BenchOpts = { dir: string; readOnly: boolean; model: string; turn: Turn; platform?: Platform; extDir?: string };
@@ -45,7 +44,6 @@ export class Bench {
   readonly subs: Subs;
   private opts: BenchOpts;
   private listeners = new Set<(ev: BenchEvent) => void>();
-  private btwSeq = new Map<string, number>();
   /** A person-facing `ask_user` with no parent: resolved by the next `send()` on that session instead of another user row. */
   private asks = new Map<number, (answer: string) => void>();
 
@@ -126,7 +124,10 @@ export class Bench {
     }
     return new Promise((resolve) => {
       this.asks.set(s.row.seq, resolve);
-      this.emit({ type: "row", session: s.row.id, row: { kind: "turn.step", ts: Date.now(), turn: s.current ?? -1, step: `ask:${question}` } });
+      // The brief mandates the row; the event alone is not the record.
+      const row: Row = { kind: "turn.step", ts: Date.now(), turn: s.current ?? -1, step: `ask:${question}` };
+      append(s.file, row);
+      this.emit({ type: "row", session: s.row.id, row });
     });
   }
 
@@ -317,29 +318,14 @@ export class Bench {
     this.emit({ type: "procs", rows: this.procs.all() });
   }
 
-  /** A one-question, read-only fork over a session's own rows: no engine call, no side effect. */
-  async btw(session: string, question: string): Promise<{ id: string; question: string; entries: unknown[]; at: number }> {
-    this.refuse(true);
-    const s = this.sessions.get(session);
-    if (s && !isBench(s)) throw new Error("btw is only for bench sessions");
-    if (!s) throw new Error(`no session ${session}`);
-    const file = this.sessions.logFile(s);
-    if (!fs.existsSync(file)) throw new Error("this session has no file yet; say something first");
-    const dir = path.join(this.opts.dir, "btw", session);
-    const n = Math.max(this.btwSeq.get(session) ?? 0, fs.existsSync(dir) ? fs.readdirSync(dir).length : 0) + 1;
-    this.btwSeq.set(session, n);
-    const id = `btw-${n}`;
-    const answer = { id, question, entries: readRows(file), at: Date.now() };
-    this.writable.run(() => replaceJson(path.join(dir, `${id}.json`), answer));
-    return answer;
+  /** Replay is not a feature (recorded by the controller): the bench runs the sys-1 engine now.
+   *  Routes stay wired so the old electron UI gets this error, not a 404 route-not-found. */
+  async btw(_session: string, _question: string): Promise<{ id: string; question: string; entries: unknown[]; at: number }> {
+    throw new Error("btw is gone; the bench runs the sys-1 engine");
   }
 
-  listBtw(session: string): { id: string; question: string; entries: unknown[]; at: number }[] {
-    if (!this.sessions.get(session)) throw new Error(`no session ${session}`);
-    const dir = path.join(this.opts.dir, "btw", session);
-    if (!fs.existsSync(dir)) return [];
-    return fs.readdirSync(dir).filter((f) => f.endsWith(".json")).map((f) => readJson(path.join(dir, f), null)).filter((x) => x !== null)
-      .sort((a, b) => (a as { at: number }).at - (b as { at: number }).at) as { id: string; question: string; entries: unknown[]; at: number }[];
+  listBtw(_session: string): { id: string; question: string; entries: unknown[]; at: number }[] {
+    throw new Error("btw is gone; the bench runs the sys-1 engine");
   }
 
   /** Session files copy in once by name; rows merge idempotently; loose files copy in and get no row. */
