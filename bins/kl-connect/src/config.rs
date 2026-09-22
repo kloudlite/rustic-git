@@ -130,11 +130,7 @@ pub fn pin_host_key(id: &str, host_key: &str) -> Result<(), String> {
 
 #[cfg(test)]
 mod tests {
-    /// `KL_CONFIG_DIR`, `HOME` and `XDG_CONFIG_HOME` are process-global, and cargo runs tests in
-    /// parallel threads: every test that sets one holds this first, or they interleave and read
-    /// each other's directory. Poisoning is irrelevant — a panicking test leaves stale env, not a
-    /// corrupt lock — so the guard is taken back from a poisoned mutex rather than unwrapped.
-    static ENV: std::sync::Mutex<()> = std::sync::Mutex::new(());
+    use crate::test_env::ENV;
 
     /// The finding: `pin_host_key` filtered out any existing line for the id and appended whatever
     /// the api just returned, so a changed key was adopted silently on every connect. Chained with

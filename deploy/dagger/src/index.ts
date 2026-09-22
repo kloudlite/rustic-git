@@ -33,7 +33,15 @@ export class Kloudlite {
         "pkg-config", "libssl-dev", "clang", "cmake", "python3", "musl-tools",
       ])
       .withExec(["rustup", "component", "add", "clippy"])
+      // In the base, not build(): a deterministic exec is a cached layer, so the musl target is
+      // downloaded once per engine, not once per build.
+      .withExec(["rustup", "target", "add", "x86_64-unknown-linux-musl"])
+      // Three caches, each named for what it holds and shared by every stage that touches it:
+      // crate downloads, git dependencies, and the compiled target dir — check() and build()
+      // compile into the same tree (debug and dev-image are separate subdirs), so a green gate
+      // warms the build that follows it.
       .withMountedCache("/usr/local/cargo/registry", dag.cacheVolume("kloudlite-cargo-registry"))
+      .withMountedCache("/usr/local/cargo/git", dag.cacheVolume("kloudlite-cargo-git"))
       .withMountedCache("/work/target", dag.cacheVolume("kloudlite-cargo-target"))
       .withEnvVariable("CARGO_TARGET_DIR", "/work/target")
       .withEnvVariable("CARGO_INCREMENTAL", "0")
@@ -63,6 +71,9 @@ export class Kloudlite {
       .from("oven/bun:1")
       .withMountedDirectory("/work/src", source)
       .withWorkdir("/work/src/web")
+      // node_modules is IGNOREd on upload, so every run installs; bun's global cache makes
+      // that a link step rather than a download.
+      .withMountedCache("/root/.bun/install/cache", dag.cacheVolume("kloudlite-bun"))
       .withExec(["bun", "install", "--frozen-lockfile"])
       .withExec(["bun", "run", "typecheck"])
       .withExec(["bun", "run", "lint"])
@@ -77,7 +88,6 @@ export class Kloudlite {
   @func()
   build(@argument({ ignore: IGNORE }) source: Directory): Directory {
     const built = this.rustBase(source)
-      .withExec(["rustup", "target", "add", "x86_64-unknown-linux-musl"])
       .withExec(["cargo", "build", "--profile", "dev-image", "--locked", "--bins"])
       .withExec([
         "cargo", "build", "--profile", "dev-image", "--locked",

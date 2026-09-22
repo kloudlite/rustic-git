@@ -13,6 +13,18 @@ mod proxy;
 mod sshconfig;
 mod ws;
 
+/// `KL_CONFIG_DIR`, `HOME` and `XDG_CONFIG_HOME` are process-global, and cargo runs tests in
+/// parallel threads: every test that sets one holds this first, or they interleave and read each
+/// other's directory. ONE lock for the whole binary — `config` and `bench` each had their own,
+/// which excluded nothing between them and only passed under nextest's process-per-test.
+/// Poisoning is irrelevant — a panicking test leaves stale env, not a corrupt lock — so the guard
+/// is taken back from a poisoned mutex rather than unwrapped. A std mutex held across an await is
+/// fine here: `#[tokio::test]` is a current-thread runtime.
+#[cfg(test)]
+mod test_env {
+    pub static ENV: std::sync::Mutex<()> = std::sync::Mutex::new(());
+}
+
 use clap::{Parser, Subcommand};
 
 #[derive(Parser)]
