@@ -16,7 +16,7 @@ import { parseArgs } from "node:util";
 
 const { values: a } = parseArgs({
   options: {
-    dir: { type: "string", default: "/bench" },
+    dir: { type: "string", default: "/home/kl/bench" },
     // The pod IP: the gateway dials it, and the platform's NetworkPolicy admits only the gateway.
     host: { type: "string", default: "0.0.0.0" },
     port: { type: "string", default: "7789" },

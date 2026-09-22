@@ -1,31 +1,18 @@
-//! The bench pod: one container, no btrfs worktree, no sshd — a bench has no volume, so nothing
-//! here has a subvolume path, a homecache, a host key Secret or a git seed init container. What
-//! IS carried from a workspace: the shared home (removed in Task 4), the `user-key` Secret projected
-//! the same way, the attach `resolv.conf`, and the hardened security context. `harness-bench`
-//! itself owns the model runtime and the idle clock; this module only shapes the pod around it.
+//! The bench pod: one container, no sshd, no git seed init container — a bench never clones a
+//! repo, so nothing here has a host key Secret. What it now shares with a workspace (2026-09-22:
+//! the bench got its own Volume) is the whole shape of `/home/kl`: one hostPath `live` at
+//! `HOME_DIR`, the `user-key` Secret projected the same way, the attach `resolv.conf`, and the
+//! hardened security context. `harness-bench` itself owns the model runtime and the idle clock;
+//! this module only shapes the pod around it.
 
 use super::*;
 use crate::crd::{Bench, BenchAccess};
 use k8s_openapi::api::core::v1::{EnvVarSource, ExecAction, ObjectFieldSelector, SecretKeySelector};
 
 pub const BENCH_PORT: u16 = 7789;
-pub const BENCH_DIR: &str = "/bench";
+pub const BENCH_DIR: &str = "/home/kl/bench";
 pub const BENCH_CONTAINER: &str = "bench";
 pub const BENCH_POD: &str = "bench";
-
-
-/// `{pool}/homes/.benches/{team}/{owner}` — under the region-shared home export, never on a
-/// node's local btrfs: a bench has no volume, so there is nothing for a per-node hostPath to
-/// pin. `.benches` keeps this out of the flat `{pool}/homes/{owner}` namespace a workspace's own
-/// home occupies. Every segment goes through `model::validate_mount`, the same check a bind mount
-/// gets, because this becomes a `hostPath` the same way: `team`/`owner` come from the CRD, not
-/// from a client body /v1 has already checked, so nothing here may assume they are already safe.
-pub fn bench_folder(pool: &str, team: &str, owner: &str) -> Result<String, String> {
-    for segment in [team, owner] {
-        model::validate_mount(&model::Mount { folder: segment.to_string(), path: BENCH_DIR.to_string() })?;
-    }
-    Ok(format!("{pool}/homes/.benches/{team}/{owner}"))
-}
 
 
 /// An env var pulling one engine credential out of `BENCH_ENGINE_SECRET`. `optional: true` — see
@@ -48,13 +35,15 @@ fn bench_engine_var(key: &str) -> EnvVar {
 pub fn bench_pod(b: &Bench, id: &str, pool: &str, runtime_class: Option<&str>, registry_host: &str, idle_secs: u64, kompress_url: &str) -> Result<Pod, String> {
     let owner = &b.spec.owner;
     let team = &b.spec.team;
-    let folder = bench_folder(pool, team, owner)?;
     let ns = crate::crd::ws_namespace(owner, team);
 
-    let command = match b.spec.access {
-        BenchAccess::Full => vec!["harness-bench".to_string()],
-        BenchAccess::ReadOnly => vec!["harness-bench".to_string(), "--read-only".to_string()],
+    // The bench's Volume is checked out but empty until now, so `harness-bench` itself must not
+    // assume `KL_BENCH_DIR` exists — one `mkdir -p` ahead of it, same as a workspace's `mkdir $H/…`.
+    let inner = match b.spec.access {
+        BenchAccess::Full => "harness-bench",
+        BenchAccess::ReadOnly => "harness-bench --read-only",
     };
+    let command = vec!["sh".to_string(), "-c".to_string(), format!("mkdir -p \"$KL_BENCH_DIR\" && exec {inner}")];
     let var = |n: &str, v: String| EnvVar { name: n.into(), value: Some(v), ..Default::default() };
 
     let mut env = vec![
@@ -64,6 +53,7 @@ pub fn bench_pod(b: &Bench, id: &str, pool: &str, runtime_class: Option<&str>, r
         var("KL_MODEL", b.spec.model.clone()),
         var("KL_REGISTRY_HOST", registry_host.to_string()),
         var("KL_BENCH_IDLE_SECS", idle_secs.to_string()),
+        var("KL_BENCH_DIR", BENCH_DIR.to_string()),
     ];
     // Empty means no Kompress service in this region; the engine client falls back to the
     // rule-based compressors when `KL_KOMPRESS_URL` is unset entirely.
@@ -99,8 +89,7 @@ pub fn bench_pod(b: &Bench, id: &str, pool: &str, runtime_class: Option<&str>, r
             command: Some(command),
             env: Some(env),
             volume_mounts: Some(vec![
-                VolumeMount { name: "home".to_string(), mount_path: HOME_DIR.to_string(), mount_propagation: Some("HostToContainer".to_string()), ..Default::default() },
-                VolumeMount { name: "bench-folder".to_string(), mount_path: BENCH_DIR.to_string(), ..Default::default() },
+                VolumeMount { name: "live".to_string(), mount_path: HOME_DIR.to_string(), mount_propagation: Some("HostToContainer".to_string()), ..Default::default() },
                 VolumeMount { name: "user-key".to_string(), mount_path: USER_KEY_PATH.to_string(), read_only: Some(true), ..Default::default() },
                 VolumeMount { name: "attach".into(), mount_path: "/etc/resolv.conf".into(), read_only: Some(true), ..Default::default() },
                 VolumeMount { name: "tmp".to_string(), mount_path: "/tmp".to_string(), ..Default::default() },
@@ -120,10 +109,7 @@ pub fn bench_pod(b: &Bench, id: &str, pool: &str, runtime_class: Option<&str>, r
             ..Default::default()
         }],
         volumes: Some(vec![
-            // removed in Task 4: bench still carries the old shared-NFS home shape;
-            // Task 4 reshapes the bench onto its own volume.
-            host_dir("home", format!("{pool}/homes/{owner}")),
-            Volume { name: "bench-folder".to_string(), host_path: Some(HostPathVolumeSource { path: folder, type_: Some("Directory".into()) }), ..Default::default() },
+            live_worktree_volume(pool, id, id),
             user_key_volume(true),
             attach_volume(pool, id),
             Volume { name: "tmp".to_string(), empty_dir: Some(Default::default()), ..Default::default() },

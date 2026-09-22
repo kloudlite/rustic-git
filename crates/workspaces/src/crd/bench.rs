@@ -1,5 +1,6 @@
-//! `Bench`: a person's bench in one team; no volume, no sshd, no region of its own; the folder is
-//! on the region share; it sleeps when idle; see the spec.
+//! `Bench`: a person's bench in one team; no sshd, no region of its own (a team is bound to one);
+//! its own Volume holds `/home/kl` (2026-09-22, same shape as a workspace's); it sleeps when idle;
+//! see the spec.
 
 use super::*;
 
@@ -66,8 +67,6 @@ pub struct BenchStatus {
 }
 
 
-pub const FOLDER_READY: &str = "FolderReady";
-pub const FOLDER_NOT_READY: &str = "FolderNotReady";
 pub const FOLDER_LOCKED: &str = "FolderLocked";
 pub const BENCH_IDLE: &str = "Idle";
 

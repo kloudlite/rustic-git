@@ -1,12 +1,14 @@
-//! The `Bench` reconciler: a person's bench on one team, placed by the claim like any parent but
-//! holding no volume. What it converges is small — the folder on the region share, the attach
-//! `resolv.conf`, the gateway-only ingress policy, and at most one pod — and what it decides is
-//! mostly the pod's lifecycle: `harness-bench` keeps the idle clock and exits 0 when nobody has
-//! used it for `benchIdleSecs`; this pass turns that exit into `Idle` and creates no pod again until
-//! `/v1` stamps a `wakeAt` later than the exit. `idleSince` is the container's own `finishedAt`, never
-//! this node's clock, so a replayed pass writes the identical status.
+//! The `Bench` reconciler: a person's bench on one team, placed by the claim like any parent.
+//! Its own `Volume` (2026-09-22) holds `/home/kl`, resolved the same way a workspace's is
+//! (`resolve_volume`, one replica — a bench's data is disposable). What it converges beyond that
+//! is small — the attach `resolv.conf`, the gateway-only ingress policy, and at most one pod —
+//! and what it decides is mostly the pod's lifecycle: `harness-bench` keeps the idle clock and
+//! exits 0 when nobody has used it for `benchIdleSecs`; this pass turns that exit into `Idle` and
+//! creates no pod again until `/v1` stamps a `wakeAt` later than the exit. `idleSince` is the
+//! container's own `finishedAt`, never this node's clock, so a replayed pass writes the identical
+//! status.
 
-use super::{delete_ignoring_404, ensure, heal_labels, my_node, owner_ref_of_kind, replaced, write_status, Ctx, ReconcileErr, TICK};
+use super::{delete_ignoring_404, ensure, heal_labels, my_node, owner_ref_of_kind, replaced, resolve_volume, write_status, Ctx, ReconcileErr, Resolved, TICK};
 use k8s_openapi::api::core::v1::{ContainerStateTerminated, Node, Pod, Secret};
 use k8s_openapi::api::networking::v1::NetworkPolicy;
 use kube::runtime::controller::Action;
@@ -76,7 +78,7 @@ pub(crate) fn bench_state(b: &crd::Bench, pod: Option<&Pod>) -> PodVerdict {
         .as_ref()
         .and_then(|s| s.containers.iter().find(|c| c.name == k8s::BENCH_CONTAINER))
         .and_then(|c| c.command.as_ref())
-        .is_some_and(|cmd| cmd.iter().any(|a| a == "--read-only"));
+        .is_some_and(|cmd| cmd.iter().any(|a| a.contains("--read-only")));
     if read_only != (b.spec.access == BenchAccess::ReadOnly) {
         return PodVerdict::Replace;
     }
@@ -154,7 +156,8 @@ async fn attach_grants(
 }
 
 pub async fn reconcile_bench(b: Arc<crd::Bench>, ctx: Arc<Ctx>) -> Result<Action, ReconcileErr> {
-    // No finalizer: the pod is ownerReference-collected and the folder outlives the bench on purpose.
+    // No finalizer: the pod and the Volume are both ownerReference-collected, so Kubernetes GC
+    // takes them down with the Bench.
     if b.meta().deletion_timestamp.is_some() {
         return Ok(Action::await_change());
     }
@@ -176,24 +179,39 @@ pub async fn reconcile_bench(b: Arc<crd::Bench>, ctx: Arc<Ctx>) -> Result<Action
         return Ok(Action::requeue(TICK));
     }
 
-    // Only the bench still needs the shared home; Task 4 removes it along with this gate.
-    let Some(export) = ctx.homes_export.clone() else {
-        let c = cond("Ready", false, crd::FOLDER_NOT_READY, "this node has no shared-home mount (WS_HOMES_EXPORT)");
-        write(&b, crd::BenchStatus { phase: Phase::Creating, conditions: with(&prev, c), ..prev }, &ctx).await?;
-        return Ok(Action::requeue(TICK));
+    // The bench's own Volume, resolved the same way a workspace's is: one replica, not
+    // `DEFAULT_REPLICAS` — a bench's data is disposable, so a durability copy is just more bytes
+    // to GC when the bench dies.
+    let storage = Some(crd::WorkspaceStorage { quota_gb: crd::BENCH_DISK_GB, source: None });
+    let vol = match super::timed(
+        "resolve_volume",
+        &name,
+        resolve_volume(&*b, &owner, &team, &ctx.region, &storage, &prev.node_name.clone(), &prev.conditions.clone(), gen, 1, &ctx),
+    )
+    .await?
+    {
+        Resolved::Ready(v) => *v,
+        Resolved::Settled(a) => return Ok(a),
+        Resolved::Wait { volume_ref: _, phase, cond, action } => {
+            // `BenchStatus` carries no `volumeRef`; the conditions and phase are enough for a
+            // parent that holds no worktrees of its own.
+            write(&b, crd::BenchStatus { phase, conditions: with(&prev, cond), ..prev }, &ctx).await?;
+            return Ok(action);
+        }
     };
-    let (pool, t, o) = (ctx.pool.clone(), team.clone(), owner.clone());
-    let folder = super::timed("bench_folder", &name, tokio::task::spawn_blocking(move || {
-        ensure_bench_folder(&pool, &export, &t, &o, k8s::SSH_UID as u32)
+    let (engine, vol_id, wt_id, quota_gb) = (ctx.engine.clone(), vol.name_any(), name.clone(), vol.spec.quota_gb);
+    let result = super::timed("checkout", &name, tokio::task::spawn_blocking(move || {
+        engine.checkout(&vol_id, None, &wt_id)?;
+        engine.set_quota_worktree(&vol_id, &wt_id, quota_gb)?;
+        Ok::<_, kloudlite_workspaces::engine::ops::EngErr>(())
     }))
     .await
     .map_err(|e| ReconcileErr(e.to_string()))?;
-    if let Err(why) = folder {
-        let c = cond(crd::FOLDER_READY, false, crd::FOLDER_NOT_READY, &why);
-        write(&b, crd::BenchStatus { phase: Phase::Creating, conditions: with(&prev, c), ..prev }, &ctx).await?;
-        return Ok(Action::requeue(TICK));
+    match result {
+        Ok(()) => {}
+        Err(e) if e.0 == kloudlite_workspaces::engine::snapshot::WORKTREE_EXISTS => {}
+        Err(e) => return Err(ReconcileErr(e.0)),
     }
-    prev.conditions = with(&prev, cond(crd::FOLDER_READY, true, "Ready", "the bench folder exists on the region share"));
 
     let ns = crd::ws_namespace(&owner, &team);
     let (pool, id, ns_owned, env_ns) = (ctx.pool.clone(), name.clone(), ns.clone(), b.spec.attached_environment.as_deref().map(crd::env_namespace));
@@ -277,47 +295,10 @@ pub async fn reconcile_bench(b: Arc<crd::Bench>, ctx: Arc<Ctx>) -> Result<Action
     }
 }
 
-/// `{pool}/homes/.benches/{team}/{owner}`: re-verifies the share, then mkdir; the team directory
-/// root-owned 0755, the person's directory uid 1000 mode 0700 so another person's bench pod cannot
-/// read it. Segments go through `k8s::bench_folder` (Task 3) so the agent and the pod builder can
-/// never disagree on the path. Only the bench still needs this; Task 4 removes it.
-pub(crate) fn ensure_bench_folder(pool: &str, export: &str, team: &str, owner: &str, uid: u32) -> Result<(), String> {
-    if crate::may_mount() {
-        crate::mount_homes(pool, export)?;
-    }
-    let folder = kloudlite_workspaces::k8s::bench_folder(pool, team, owner)?;
-    let dir = std::path::PathBuf::from(&folder);
-    let team_dir = crate::homes_root(pool).join(".benches").join(team);
-    std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
-    if unsafe { libc::geteuid() } == 0 {
-        std::os::unix::fs::chown(&dir, Some(uid), Some(uid)).map_err(|e| e.to_string())?;
-    }
-    use std::os::unix::fs::PermissionsExt;
-    std::fs::set_permissions(&team_dir, std::fs::Permissions::from_mode(0o755)).map_err(|e| e.to_string())?;
-    std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o700)).map_err(|e| e.to_string())?;
-    Ok(())
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
     use k8s_openapi::api::core::v1::{Container, ContainerState, ContainerStatus, PodCondition, PodSpec, PodStatus};
-
-    #[test]
-    fn a_bench_folder_is_made_on_the_share_private_and_refuses_an_escaping_segment() {
-        let tmp = tempfile::tempdir().unwrap();
-        let pool = tmp.path().display().to_string();
-        std::fs::create_dir_all(crate::homes_root(&pool)).unwrap();
-        ensure_bench_folder(&pool, "unused", "acme", "alice", 1000).unwrap();
-        let dir = crate::homes_root(&pool).join(".benches/acme/alice");
-        assert!(dir.is_dir());
-        use std::os::unix::fs::PermissionsExt;
-        assert_eq!(std::fs::metadata(&dir).unwrap().permissions().mode() & 0o777, 0o700);
-        ensure_bench_folder(&pool, "unused", "acme", "alice", 1000).unwrap();
-        assert!(ensure_bench_folder(&pool, "unused", "..", "alice", 1000).is_err());
-        assert!(ensure_bench_folder(&pool, "unused", "acme", "../bob", 1000).is_err());
-        assert!(!crate::homes_root(&pool).join("bob").exists());
-    }
 
     const FINISHED_AT: &str = "2026-09-13T10:00:00Z";
 

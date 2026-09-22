@@ -112,9 +112,8 @@ async fn a_converged_workspace_does_not_re_apply_its_children_on_the_next_pass()
     assert_eq!(converged.len(), 2, "never saw two converged passes: {:?}", rec.calls());
 }
 
-/// A workspace's home is its own volume now (2026-09-22): a node with no `WS_HOMES_EXPORT` (only
-/// `Bench` still reads that) reaches the pod-write step exactly the same as one with the export
-/// set, and its status reason is never `HomeNotReady`.
+/// A workspace's home is its own volume now (2026-09-22): there is no shared-home mount left to
+/// gate on, so a fresh workspace reaches the pod-write step directly.
 #[tokio::test]
 async fn a_workspace_starts_without_a_homes_export() {
     let tmp = tempfile::tempdir().unwrap();

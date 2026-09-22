@@ -91,7 +91,6 @@ async fn a_parent_a_full_node_declined_is_claimed_by_a_node_with_room() {
             binding_route(),
         ],
         Arc::new(FakeNix::default()),
-        Some("127.0.0.1:/".into()),
     );
     kloudlite_agent::claim::claim_workspace(&w, &roomy).await.unwrap();
     let sent = roomy_rec.sent("PUT", WS_STATUS);

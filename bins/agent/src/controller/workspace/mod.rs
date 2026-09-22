@@ -143,7 +143,7 @@ pub async fn apply_workspace(w: &crd::Workspace, ctx: &Arc<Ctx>) -> Result<Actio
     let vol = match super::timed(
         "resolve_volume",
         &wsname,
-        resolve_volume(w, &w.spec.owner, &w.spec.team, &w.spec.region, &w.spec.storage, &prev.node_name.clone(), &prev.conditions.clone(), gen, ctx),
+        resolve_volume(w, &w.spec.owner, &w.spec.team, &w.spec.region, &w.spec.storage, &prev.node_name.clone(), &prev.conditions.clone(), gen, crd::DEFAULT_REPLICAS, ctx),
     )
     .await?
     {

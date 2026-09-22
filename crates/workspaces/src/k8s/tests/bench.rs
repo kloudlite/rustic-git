@@ -1,9 +1,9 @@
-//! Tests for the bench pod builder: its own folder, no worktree, the read-only harness for a
-//! departed member, and the gateway-only ingress policy.
+//! Tests for the bench pod builder: its own `/home/kl` Volume mount, no bench-folder or NFS home
+//! left, the read-only harness for a departed member, and the gateway-only ingress policy.
 
 use super::*;
 use crate::crd::{Bench, BenchAccess, BenchSpec, BenchStatus};
-use crate::k8s::{bench_folder, bench_ingress_policy, bench_pod};
+use crate::k8s::{bench_ingress_policy, bench_pod, BENCH_DIR};
 
 fn fixture_bench(owner: &str, team: &str, state: DesiredState) -> Bench {
     let mut b = Bench::new(
@@ -25,19 +25,28 @@ fn fixture_bench(owner: &str, team: &str, state: DesiredState) -> Bench {
 }
 
 #[test]
-fn a_bench_pod_mounts_only_its_own_folder_and_no_worktree() {
+fn a_bench_pod_mounts_exactly_its_own_live_worktree_at_home() {
     let b = fixture_bench("alice", "acme", DesiredState::Running);
     let p = bench_pod(&b, "bench-1", "/wspool", None, "cr.example", 300, "").unwrap();
     assert_eq!(p.metadata.namespace.as_deref(), Some(crate::crd::ws_namespace("alice", "acme").as_str()));
     let spec = p.spec.unwrap();
-    let paths: Vec<String> = spec.volumes.as_ref().unwrap().iter()
-        .filter_map(|v| v.host_path.as_ref().map(|h| h.path.clone())).collect();
-    assert!(paths.contains(&"/wspool/homes/.benches/acme/alice".to_string()));
-    assert!(paths.contains(&"/wspool/homes/alice".to_string()));
-    assert!(!paths.iter().any(|p| p.contains("/vol/") || p.contains("homecache") || p.ends_with("/.benches") || p.ends_with("/acme")));
+    let vols = spec.volumes.as_ref().unwrap();
+    let paths: Vec<String> = vols.iter().filter_map(|v| v.host_path.as_ref().map(|h| h.path.clone())).collect();
+    assert!(paths.contains(&"/wspool/vol/bench-1/live/bench-1".to_string()), "{paths:?}");
+    assert!(!paths.iter().any(|p| p.contains("homes") || p.contains(".benches")), "no shared-home path left: {paths:?}");
+    assert!(vols.iter().all(|v| v.name != "home" && v.name != "bench-folder"));
+    assert!(vols.iter().any(|v| v.name == "tmp" && v.empty_dir.is_some()));
+
     let c = &spec.containers[0];
-    assert_eq!(c.command.as_deref(), Some(&["harness-bench".to_string()][..]));
-    assert!(c.volume_mounts.as_ref().unwrap().iter().any(|m| m.mount_path == "/bench"));
+    assert_eq!(
+        c.command.as_deref(),
+        Some(&["sh".to_string(), "-c".to_string(), "mkdir -p \"$KL_BENCH_DIR\" && exec harness-bench".to_string()][..])
+    );
+    let mounts = c.volume_mounts.as_ref().unwrap();
+    assert!(mounts.iter().any(|m| m.name == "live" && m.mount_path == "/home/kl"));
+    assert!(mounts.iter().all(|m| m.name != "bench-folder" && m.name != "home"));
+    let bench_dir_env = c.env.as_ref().unwrap().iter().find(|e| e.name == "KL_BENCH_DIR").unwrap();
+    assert_eq!(bench_dir_env.value.as_deref(), Some(BENCH_DIR));
     assert_eq!(c.readiness_probe.as_ref().unwrap().timeout_seconds, Some(3), "a slow Node start must not flap the bench unready");
     // The engine credentials come from the bench-only Secret, never user-key (mounted whole
     // into every workspace pod), and are optional so a fleet without the Secret still starts.
@@ -56,7 +65,7 @@ fn a_departed_members_bench_runs_the_reader_and_every_bench_may_exit_idle() {
     b.spec.access = crate::crd::BenchAccess::ReadOnly;
     let spec = bench_pod(&b, "bench-1", "/wspool", None, "cr", 420, "").unwrap().spec.unwrap();
     let c = &spec.containers[0];
-    assert_eq!(c.command.as_ref().unwrap().last().map(String::as_str), Some("--read-only"));
+    assert_eq!(c.command.as_ref().unwrap().last().map(String::as_str), Some("mkdir -p \"$KL_BENCH_DIR\" && exec harness-bench --read-only"));
     assert_eq!(spec.restart_policy.as_deref(), Some("OnFailure"), "exit 0 is idle and must not restart");
     let idle = c.env.as_ref().unwrap().iter().find(|e| e.name == "KL_BENCH_IDLE_SECS").unwrap();
     assert_eq!(idle.value.as_deref(), Some("420"));
@@ -73,14 +82,6 @@ fn kompress_url_env_is_present_only_when_the_region_set_one() {
     let c = &with.spec.unwrap().containers[0];
     let ev = c.env.as_ref().unwrap().iter().find(|e| e.name == "KL_KOMPRESS_URL").unwrap();
     assert_eq!(ev.value.as_deref(), Some("http://kloudlite-kompress.kloudlite-system:8787"));
-}
-
-#[test]
-fn a_folder_segment_that_escapes_is_refused_before_it_becomes_a_hostpath() {
-    assert!(bench_folder("/wspool", "..", "alice").is_err());
-    assert!(bench_folder("/wspool", "acme", "a/b").is_err());
-    assert!(bench_folder("/wspool", "acme", ".").is_err());
-    assert!(bench_pod(&fixture_bench("alice", "../x", DesiredState::Running), "b", "/wspool", None, "cr", 300, "").is_err());
 }
 
 #[test]

@@ -63,7 +63,6 @@ pub fn spawn_janitor(pool: String, nix: Arc<dyn nix::Nix>, client: kube::Client)
 
 /// One sweep of the pool: (attach dirs reclaimed, profile index entries reclaimed).
 fn janitor_beat(pool: &str, benches: Option<&std::collections::HashSet<String>>) -> (usize, usize) {
-    warn_oversized_homes(std::path::Path::new(pool));
     let attach = benches.map_or(0, |b| janitor_sweep_attach(std::path::Path::new(pool), SWEEP_MIN_AGE, b));
     let profiles = janitor_sweep_profiles(std::path::Path::new(nix::PROFILES_DIR), SWEEP_MIN_AGE);
     (attach, profiles)
@@ -181,39 +180,6 @@ fn janitor_sweep_attach(pool: &std::path::Path, min_age: std::time::Duration, be
     }
     swept
 }
-
-/// A shared home holds configs — dotfiles, keys, shell config — and nothing else: it is on the
-/// region's NFS export, and therefore on S3, and it has no quota (the per-home btrfs qgroup went
-/// away with the per-node home volume). This warning is its ONLY replacement, so the number is a
-/// tripwire, not a limit: configs never come near 100 MB, and a home that does means a tool cache
-/// escaped `login_env`'s redirection onto the workspace's own local cache and is now paying
-/// network I/O and object-store bytes for something disposable.
-///
-/// Warns only — the janitor never deletes anything inside a person's home.
-/// ponytail: a full recursive walk of every home each beat; if homes ever get big enough for that
-/// to cost real IO, keep per-owner sizes from `btrfs qgroup`/`du --max-depth=1` instead.
-fn warn_oversized_homes(pool: &std::path::Path) {
-    for (owner, bytes) in oversized_homes(pool) {
-        tracing::warn!(%owner, bytes, "home.oversized");
-    }
-}
-
-/// The `(owner, bytes)` pairs `warn_oversized_homes` reports — split out so the threshold is
-/// testable on a plain tmpdir, no NFS and no btrfs.
-fn oversized_homes(pool: &std::path::Path) -> Vec<(String, u64)> {
-    let Ok(entries) = std::fs::read_dir(crate::homes_root(pool.to_string_lossy().as_ref())) else { return Vec::new() };
-    entries
-        .flatten()
-        .filter(|e| e.file_type().map(|t| t.is_dir()).unwrap_or(false))
-        .filter_map(|e| {
-            let bytes = dir_bytes(&e.path());
-            (bytes > HOME_WARN_BYTES).then(|| (e.file_name().to_string_lossy().into_owned(), bytes))
-        })
-        .collect()
-}
-
-/// See `warn_oversized_homes`: a tripwire on a home holding something other than configs.
-const HOME_WARN_BYTES: u64 = 100 * 1024 * 1024;
 
 /// The store size past which the janitor triggers a `nix-collect-garbage` sweep.
 const NIX_GC_HIGH_BYTES: u64 = 60 * 1024 * 1024 * 1024;
@@ -503,23 +469,6 @@ mod janitor_tests {
 
         assert_eq!(janitor_sweep_attach(tmp.path(), std::time::Duration::ZERO, &benches), 1);
         assert!(live.exists() && !gone.exists());
-    }
-
-    /// The sole replacement for the deleted per-home quota: a home holding more than configs is
-    /// a cache that escaped the env redirection onto the node-local volume, and now costs NFS and
-    /// S3 bytes. Warn-only, so the check is the list it warns from.
-    #[test]
-    fn the_home_size_alarm_fires_only_past_the_threshold() {
-        let tmp = tempfile::tempdir().unwrap();
-        let homes = tmp.path().join("homes");
-        std::fs::create_dir_all(homes.join("alice")).unwrap();
-        std::fs::create_dir_all(homes.join("bob")).unwrap();
-        std::fs::write(homes.join("alice").join("gitconfig"), b"[user]").unwrap();
-        std::fs::write(homes.join("bob").join("blob"), vec![0u8; HOME_WARN_BYTES as usize + 1]).unwrap();
-
-        let over = oversized_homes(tmp.path());
-        assert_eq!(over.len(), 1, "{over:?}");
-        assert_eq!(over[0].0, "bob");
     }
 
     /// An entry no workspace's `current` resolves to, older than the bound, is reclaimable.

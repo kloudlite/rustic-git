@@ -94,6 +94,11 @@ pub const BUILDER_SYSTEM: &str = "builder";
 pub const BUILDER_CACHE_GB: u64 = 50;
 
 
+/// A bench's own Volume quota, in GB. A bench's data is disposable (no history, no durability
+/// replica) so this is small and, like `BUILDER_CACHE_GB`, a constant until a region needs its own.
+pub const BENCH_DISK_GB: u64 = 20;
+
+
 /// `bld-{slug}` — the builder environment's id, deterministic from the owner slug so a build
 /// gate can name it without a lookup.
 pub fn builder_id(slug: &str) -> String {

@@ -132,6 +132,7 @@ pub async fn apply_environment(e: &crd::Environment, ctx: &Arc<Ctx>) -> Result<A
         &prev.node_name.clone(),
         &prev.conditions.clone(),
         gen,
+        crd::DEFAULT_REPLICAS,
         ctx,
     )
     .await?

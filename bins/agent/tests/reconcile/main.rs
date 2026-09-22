@@ -162,18 +162,14 @@ fn ctx(pool: &std::path::Path, routes: Vec<Route>) -> (Arc<Ctx>, Recorder) {
 }
 
 /// The one constructor: every test's profile root is a directory under its own pool tempdir, so no
-/// test can reach the node's real `/nix` and none of them race each other over it. `homes_export`
-/// is set to a literal address (never a name: the agent resolves the export host at boot, and a
-/// name that happens to resolve on a laptop (`test`) is NXDOMAIN inside the cluster, where these
-/// tests also run — 160 of them failed there on "Name or service not known") because `Bench` still
-/// reads it (Task 4 removes it); a workspace test that needs it unset sets that field inline.
+/// test can reach the node's real `/nix` and none of them race each other over it.
 fn ctx_full(pool: &std::path::Path, routes: Vec<Route>, nix: Arc<FakeNix>) -> (Arc<Ctx>, Recorder) {
-    ctx_on_node("node-a", pool, routes, nix, Some("127.0.0.1:/".into()))
+    ctx_on_node("node-a", pool, routes, nix)
 }
 
 /// The same fixture as some OTHER node — what the hand-off half of a capacity decline needs: one
 /// node with no room, and a second one that takes the parent it left unplaced.
-fn ctx_on_node(node: &str, pool: &std::path::Path, mut routes: Vec<Route>, nix: Arc<FakeNix>, homes_export: Option<String>) -> (Arc<Ctx>, Recorder) {
+fn ctx_on_node(node: &str, pool: &std::path::Path, mut routes: Vec<Route>, nix: Arc<FakeNix>) -> (Arc<Ctx>, Recorder) {
     // Every reconcile now unconditionally may ask "does this volume have snapshots yet"
     // (`claim::placement`/`has_snapshots`, the checkout/migrate step) — a call no test fixture
     // needed before the snapshot model became the only model (Task 8). Appended AFTER the caller's
@@ -255,7 +251,6 @@ fn ctx_on_node(node: &str, pool: &std::path::Path, mut routes: Vec<Route>, nix: 
             pool.to_string_lossy().into(),
             "r1".into(),
             true,
-            homes_export,
             "registry.kloudlite.io".into(),
             nix,
             profiles,

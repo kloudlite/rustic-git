@@ -455,6 +455,7 @@ pub async fn ensure_child_volume<P>(
     storage: &crd::WorkspaceStorage,
     node: &str,
     kind: &str,
+    replicas: u32,
     ctx: &Arc<Ctx>,
 ) -> Result<crd::Volume, ReconcileErr>
 where
@@ -475,7 +476,10 @@ where
             node_name: node.to_string(),
             region: region.to_string(),
             quota_gb: storage.quota_gb,
-            replicas: crd::DEFAULT_REPLICAS,
+            // The Bench passes 1: no durability replica, unlike a workspace/environment's
+            // `DEFAULT_REPLICAS` — a bench's data is disposable, and a second copy would just be
+            // more bytes to GC when the bench dies.
+            replicas,
             source: storage.source.clone(),
             // A fresh child is materialized from `source`; an in-place restore is a later wish the
             // parent's gate writes once, and never part of a create.
@@ -722,6 +726,9 @@ pub(crate) async fn resolve_volume<P>(
     // The parent's current conditions, so a settle here keeps the ones later passes read back.
     prev_conditions: &[Condition],
     gen: i64,
+    // Forwarded to `ensure_child_volume` on a fresh create only; an existing Volume's replicas
+    // never changes here.
+    replicas: u32,
     ctx: &Arc<Ctx>,
 ) -> Result<Resolved, ReconcileErr>
 where
@@ -787,7 +794,7 @@ where
                 });
         }
         None => {
-            ensure_child_volume(&parent.name_any(), parent, owner, team, region, s, node_name, &api_kind.to_lowercase(), ctx)
+            ensure_child_volume(&parent.name_any(), parent, owner, team, region, s, node_name, &api_kind.to_lowercase(), replicas, ctx)
                 .await?
         }
     };
@@ -1026,7 +1033,7 @@ mod tests {
         let (ctx, rec) = test_ctx(tmp.path(), "node-a", routes);
         let parent: crd::Workspace = serde_json::from_value(parent_json).unwrap();
         let storage = Some(crd::WorkspaceStorage { quota_gb: 5, source: None });
-        let out = resolve_volume(&parent, "alice", "", "r1", &storage, "node-a", &[], 1, &ctx).await.unwrap();
+        let out = resolve_volume(&parent, "alice", "", "r1", &storage, "node-a", &[], 1, 1, &ctx).await.unwrap();
         match &out {
             Resolved::Wait { cond, .. } => assert_eq!(cond.reason, "NodeLeaving"),
             _ => panic!("a retiring node waits rather than resolving the volume here: {:?}", rec.calls()),
@@ -1089,7 +1096,7 @@ mod tests {
             source: Some(VolumeSource::CloneOf { volume: "vol-1".into(), commit: Some("sync-vol-1-bbbb".into()) }),
         });
 
-        let out = resolve_volume(&parent, "alice", "", "r1", &storage, "node-b", &[], 1, &ctx).await.unwrap();
+        let out = resolve_volume(&parent, "alice", "", "r1", &storage, "node-b", &[], 1, 1, &ctx).await.unwrap();
 
         assert!(matches!(out, Resolved::Settled(_)), "the loser settles by un-placing, not by waiting on an error");
         let sent = rec.sent("PUT", "/apis/kloudlite.io/v1alpha1/workspaces/ws-2/status").remove(0);

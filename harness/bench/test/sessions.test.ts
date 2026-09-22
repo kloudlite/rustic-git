@@ -14,7 +14,7 @@ test("create numbers after the highest seq and persists", () => {
   const s2 = a.create();
   assert.equal(s1.id, "s-1");
   assert.equal(s2.name, "session 2");
-  a.update("s-1", { archived: true, file: "/bench/sessions/x.jsonl" });
+  a.update("s-1", { archived: true, file: "/home/kl/bench/sessions/x.jsonl" });
   const b = new SessionList(d);
   assert.deepEqual(b.all().map((s) => [s.id, s.archived]), [["s-1", true], ["s-2", false]]);
 });

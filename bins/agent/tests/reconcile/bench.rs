@@ -1,10 +1,12 @@
-//! The bench reconciler, its claim and its dead-node release, against the mocked API server.
+//! The bench reconciler, its claim, its own volume, and its dead-node release, against the mocked
+//! API server.
 
 use super::*;
 use kloudlite_workspaces::kube_test::{get, not_found};
 
 const BENCH: &str = "bench-1";
 const BENCH_STATUS: &str = "/apis/kloudlite.io/v1alpha1/benches/bench-1/status";
+const VOL_PATH: &str = "/apis/kloudlite.io/v1alpha1/volumes/bench-1";
 const FINISHED_AT: &str = "2026-09-13T10:00:00Z";
 
 fn ns() -> String {
@@ -38,11 +40,29 @@ fn placed() -> serde_json::Value {
     serde_json::json!({"phase": "starting", "nodeName": "node-a"})
 }
 
-/// Binding, namespace, policy apply, user-key and the status write: everything before the pod.
+/// The bench's own Volume, already `Ready` — one replica, `BENCH_DISK_GB` quota, owned by this Bench.
+fn ready_volume_json() -> serde_json::Value {
+    serde_json::json!({
+        "apiVersion": "kloudlite.io/v1alpha1", "kind": "Volume",
+        "metadata": {"name": BENCH, "uid": "vol-uid-1",
+                     "ownerReferences": [{"apiVersion": "kloudlite.io/v1alpha1", "kind": "Bench", "name": BENCH,
+                                          "uid": "bench-uid", "controller": true, "blockOwnerDeletion": true}]},
+        "spec": {"owner": "alice", "team": "acme", "nodeName": "node-a", "region": "r1", "quotaGb": crd::BENCH_DISK_GB, "replicas": 1},
+        "status": {"phase": "ready", "subvolumePresent": true},
+    })
+}
+
+fn get_ready_volume() -> Route {
+    get(VOL_PATH, ready_volume_json())
+}
+
+/// Binding, namespace, the Volume (already ready), policy apply, user-key and the status write:
+/// everything before the pod.
 fn up_to_the_pod(pod: Route) -> Vec<Route> {
     vec![
         ready_binding(),
         get(format!("/api/v1/namespaces/{}", ns()), serde_json::json!({"apiVersion": "v1", "kind": "Namespace", "metadata": {"name": ns()}})),
+        get_ready_volume(),
         kloudlite_workspaces::kube_test::patch(
             format!("/apis/networking.k8s.io/v1/namespaces/{}/networkpolicies/bench-{BENCH}", ns()),
             serde_json::json!({"apiVersion": "networking.k8s.io/v1", "kind": "NetworkPolicy", "metadata": {"name": format!("bench-{BENCH}")}}),
@@ -68,9 +88,12 @@ fn pod_json(command: &[&str], phase: &str, ready: bool, terminated: Option<i32>)
     })
 }
 
-fn homes_pool() -> tempfile::TempDir {
+/// A pool whose worktree for this bench already exists, so `Engine::checkout` converges on
+/// `WORKTREE_EXISTS` instead of shelling out to a real `btrfs subvolume create` this test
+/// environment doesn't have — the same trick `ws_ctx_with_nix` uses for a workspace.
+fn bench_pool() -> tempfile::TempDir {
     let tmp = tempfile::tempdir().unwrap();
-    std::fs::create_dir_all(tmp.path().join("homes")).unwrap();
+    std::fs::create_dir_all(tmp.path().join(format!("vol/{BENCH}/live/{BENCH}"))).unwrap();
     tmp
 }
 
@@ -82,33 +105,62 @@ fn has_cond(st: &serde_json::Value, t: &str, status: &str, reason: &str) -> bool
     st["conditions"].as_array().is_some_and(|cs| cs.iter().any(|c| c["type"] == t && c["status"] == status && c["reason"] == reason))
 }
 
+/// TDD for Task 4: a Bench resolves its own Volume — named after it, one replica, owned by it —
+/// and the pod is written only once that Volume answers Ready.
 #[tokio::test]
-async fn a_bench_on_a_node_without_the_share_parks_and_starts_no_pod() {
-    let tmp = homes_pool();
-    let (mut ctx, rec) = ctx(tmp.path(), up_to_the_pod(not_found(pod_path())));
-    Arc::get_mut(&mut ctx).unwrap().homes_export = None;
-    kloudlite_agent::controller::reconcile_bench(Arc::new(bench(serde_json::json!({}), placed())), ctx).await.unwrap();
-    assert!(has_cond(&last_status(&rec), "Ready", "False", "FolderNotReady"), "{}", last_status(&rec));
-    assert!(rec.sent("POST", &pods_path()).is_empty() && !rec.calls().iter().any(|c| c.starts_with("POST") && c.contains("/pods")));
+async fn a_bench_creates_a_volume_named_after_it_before_its_pod() {
+    let tmp = tempfile::tempdir().unwrap();
+    let (ctx, rec) = ctx(
+        tmp.path(),
+        vec![
+            ready_binding(),
+            get(format!("/api/v1/namespaces/{}", ns()), serde_json::json!({"apiVersion": "v1", "kind": "Namespace", "metadata": {"name": ns()}})),
+            not_found(VOL_PATH),
+            kloudlite_workspaces::kube_test::post(
+                "/apis/kloudlite.io/v1alpha1/volumes",
+                serde_json::json!({"apiVersion": "kloudlite.io/v1alpha1", "kind": "Volume", "metadata": {"name": BENCH},
+                                   "spec": {"owner": "alice", "team": "acme", "nodeName": "node-a", "region": "r1",
+                                            "quotaGb": crd::BENCH_DISK_GB, "replicas": 1}}),
+            ),
+            kloudlite_workspaces::kube_test::patch(BENCH_STATUS, bench_json(serde_json::json!({}), placed())),
+        ],
+    );
+    let action = kloudlite_agent::controller::reconcile_bench(Arc::new(bench(serde_json::json!({}), placed())), ctx).await.unwrap();
+    assert_eq!(action, kube::runtime::controller::Action::requeue(std::time::Duration::from_secs(15)));
+
+    let sent = rec.sent("POST", "/apis/kloudlite.io/v1alpha1/volumes");
+    assert_eq!(sent.len(), 1, "{:?}", rec.calls());
+    assert_eq!(sent[0]["metadata"]["name"], BENCH, "the Volume is named after the Bench");
+    assert_eq!(sent[0]["spec"]["replicas"], 1, "a bench's data is disposable: no durability replica");
+    let refs = sent[0]["metadata"]["ownerReferences"].as_array().expect("an ownerReference");
+    assert_eq!(refs[0]["kind"], "Bench");
+    assert_eq!(refs[0]["name"], BENCH);
+    assert!(!rec.calls().iter().any(|c| c.contains("/pods")), "no pod before the volume is ready: {:?}", rec.calls());
 }
 
 #[tokio::test]
-async fn a_running_bench_makes_its_folder_and_one_pod() {
-    let tmp = homes_pool();
+async fn a_running_bench_makes_its_volume_and_one_pod() {
+    let tmp = bench_pool();
     let (ctx, rec) = ctx(tmp.path(), up_to_the_pod(not_found(pod_path())));
     kloudlite_agent::controller::reconcile_bench(Arc::new(bench(serde_json::json!({}), placed())), ctx).await.unwrap();
-    assert!(tmp.path().join("homes/.benches/acme/alice").is_dir());
     let sent = rec.sent("POST", &pods_path());
     assert_eq!(sent.len(), 1, "{:?}", rec.calls());
-    assert_eq!(sent[0]["spec"]["containers"][0]["command"], serde_json::json!(["harness-bench"]));
+    assert_eq!(
+        sent[0]["spec"]["containers"][0]["command"],
+        serde_json::json!(["sh", "-c", "mkdir -p \"$KL_BENCH_DIR\" && exec harness-bench"])
+    );
     let vols = sent[0]["spec"]["volumes"].as_array().unwrap();
-    assert!(vols.iter().any(|v| v["hostPath"]["path"].as_str().is_some_and(|p| p.ends_with("/.benches/acme/alice"))), "{vols:?}");
+    assert!(
+        vols.iter().any(|v| v["hostPath"]["path"].as_str().is_some_and(|p| p.ends_with(&format!("/vol/{BENCH}/live/{BENCH}")))),
+        "{vols:?}"
+    );
+    assert!(!vols.iter().any(|v| v["name"] == "home" || v["name"] == "bench-folder"), "{vols:?}");
 }
 
 #[tokio::test]
 async fn an_idle_exit_removes_the_pod_and_only_a_later_wake_brings_it_back() {
     let mk = ctx;
-    let tmp = homes_pool();
+    let tmp = bench_pool();
     let exited = get(pod_path(), pod_json(&["harness-bench"], "Succeeded", false, Some(0)));
     let (ctx, rec) = mk(tmp.path(), up_to_the_pod(exited));
     kloudlite_agent::controller::reconcile_bench(Arc::new(bench(serde_json::json!({}), placed())), ctx).await.unwrap();
@@ -138,7 +190,7 @@ async fn an_idle_exit_removes_the_pod_and_only_a_later_wake_brings_it_back() {
 #[tokio::test]
 async fn stopping_a_bench_leaves_no_pod_at_all() {
     let mk = ctx;
-    let tmp = homes_pool();
+    let tmp = bench_pool();
     let running = get(pod_path(), pod_json(&["harness-bench"], "Running", true, None));
     let (ctx, rec) = mk(tmp.path(), up_to_the_pod(running));
     let stopped = bench(serde_json::json!({"desiredState": "stopped"}), placed());
@@ -196,7 +248,7 @@ async fn a_bench_on_a_dead_node_is_released_for_another_node() {
 /// I1: the old pod pinned to a dead node is force-deleted (grace 0) so this node can create one.
 #[tokio::test]
 async fn a_pod_left_on_a_dead_node_is_force_deleted() {
-    let tmp = homes_pool();
+    let tmp = bench_pool();
     let mut stranded = pod_json(&["harness-bench"], "Running", false, None);
     stranded["spec"]["nodeName"] = serde_json::json!("n-dead");
     let mut routes = up_to_the_pod(get(pod_path(), stranded));
@@ -214,7 +266,7 @@ async fn a_pod_left_on_a_dead_node_is_force_deleted() {
 /// I1's other half: a pod on a LIVE other node is left alone (the folder lock fences it).
 #[tokio::test]
 async fn a_pod_on_a_live_other_node_is_not_forced() {
-    let tmp = homes_pool();
+    let tmp = bench_pool();
     let mut elsewhere = pod_json(&["harness-bench"], "Running", false, None);
     elsewhere["spec"]["nodeName"] = serde_json::json!("n-live");
     let mut routes = up_to_the_pod(get(pod_path(), elsewhere));
@@ -231,7 +283,7 @@ async fn a_pod_on_a_live_other_node_is_not_forced() {
 #[tokio::test]
 async fn an_attached_bench_gets_both_halves_of_the_grant() {
     let mk = ctx;
-    let tmp = homes_pool();
+    let tmp = bench_pool();
     let np = |ns: &str| kloudlite_workspaces::kube_test::patch(
         format!("/apis/networking.k8s.io/v1/namespaces/{ns}/networkpolicies/attach-{BENCH}"),
         serde_json::json!({"apiVersion": "networking.k8s.io/v1", "kind": "NetworkPolicy", "metadata": {"name": format!("attach-{BENCH}")}}),
