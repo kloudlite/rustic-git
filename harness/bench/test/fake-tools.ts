@@ -21,7 +21,13 @@ export async function fakeTools(exec: Fake["exec"] = () => ({ exit_code: 0, stdo
         case "edit": { const f = a.files[0]; const cur = files.get(f.path) ?? ""; if (!cur.includes(f.edits[0].old)) return err(400, "old not found"); files.set(f.path, cur.replace(f.edits[0].old, f.edits[0].new)); return ok({ path: f.path, applied: 1 }); }
         case "glob": return ok({ cwd: ".", paths: [...files.keys()], truncated: false });
         case "grep": return ok({ matches: [...files].flatMap(([p, c]) => c.split("\n").map((t, i) => ({ path: p, line: i + 1, text: t })).filter((m) => m.text.includes(a.pattern))) });
-        case "exec": execs.push(a.cmd); return a.detach ? ok({ id: "p1" }) : ok(fake.exec(a.cmd));
+        case "exec": {
+          execs.push(a.cmd);
+          if (a.detach) return ok({ id: "p1" });
+          let out: ReturnType<Fake["exec"]>;
+          try { out = fake.exec(a.cmd); } catch (e) { return err(500, (e as Error).message); }
+          return ok(out);
+        }
         case "process_output": return ok({ stdout: "", stderr: "", next: 0 });
         case "process_kill": return ok({ ok: true });
         case "process_list": return ok({ processes: [] });

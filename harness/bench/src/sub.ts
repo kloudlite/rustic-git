@@ -70,23 +70,27 @@ export class Subs {
     const row = child.row;
     const parent = this.list.bySeq(row.parent!)!;
     const clone = row.workspace!, mainWs = parent.workspace!;
-    const mainIp = (await this.platform.tools(mainWs)).replace(/:\d+$/, "");
-    const mainName = await this.platform.name(mainWs);
-    // /home/kl is the owner's shared NFS home; the tree is /home/kl/workspaces/<name>, never the id
-    const push = async () => text(await remote(clone, "exec", { cmd: `git push ssh://kl@${mainIp}/home/kl/workspaces/${mainName} HEAD:${row.target}`, timeout_ms: 120_000 }));
-    let out = await push();
-    const retried = readRows(child.file).some((r) => r.kind === "user" && r.text.startsWith("rebase onto main"));
-    if (NON_FF.test(out) && !retried) {
-      // main moved under us: one retry through the child, then it reports failure itself
-      child.receive(row.parent!, `rebase onto main and push again: the push was rejected.\n${out}`);
-      child.onAnswer = (c, e) => this.finish(c, e);
-      this.sched.kick();
-      return;
+    try {
+      const mainIp = (await this.platform.tools(mainWs)).replace(/:\d+$/, "");
+      const mainName = await this.platform.name(mainWs);
+      // /home/kl is the owner's shared NFS home; the tree is /home/kl/workspaces/<name>, never the id
+      const push = async () => text(await remote(clone, "exec", { cmd: `git push ssh://kl@${mainIp}/home/kl/workspaces/${mainName} HEAD:${row.target}`, timeout_ms: 120_000 }));
+      let out = await push();
+      const retried = readRows(child.file).some((r) => r.kind === "user" && r.text.startsWith("rebase onto main"));
+      if (NON_FF.test(out) && !retried) {
+        // main moved under us: one retry through the child, then it reports failure itself
+        child.receive(row.parent!, `rebase onto main and push again: the push was rejected.\n${out}`);
+        child.onAnswer = (c, e) => this.finish(c, e);
+        this.sched.kick();
+        return;
+      }
+      const commit = text(await remote(clone, "exec", { cmd: "git rev-parse HEAD" })).trim();
+      const pushed = !/exit \d/.test(out);
+      const answer = pushed ? `${end.answer}\n\npushed ${commit} to ${row.target}` : `${end.answer}\n\npush failed:\n${out}`;
+      this.sched.get(parent.seq)!.receive(row.seq, answer, end.turn); // step 4 before step 5: the answer is never lost to a crash
+    } catch (e) {
+      this.sched.get(parent.seq)!.receive(row.seq, `${end.answer}\n\npush failed:\n${(e as Error).message}`, end.turn);
     }
-    const commit = text(await remote(clone, "exec", { cmd: "git rev-parse HEAD" })).trim();
-    const pushed = !/exit \d/.test(out);
-    const answer = pushed ? `${end.answer}\n\npushed ${commit} to ${row.target}` : `${end.answer}\n\npush failed:\n${out}`;
-    this.sched.get(parent.seq)!.receive(row.seq, answer, end.turn); // step 4 before step 5: the answer is never lost to a crash
     try {
       await this.platform.remove(clone);
     } catch (e) {
