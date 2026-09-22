@@ -260,6 +260,7 @@ export async function compressWithModel(text: string, query = ""): Promise<Compr
     });
     if (!res.ok) return c;
     const body = (await res.json()) as { compressed: string; original_tokens: number; compressed_tokens: number; compression_ratio: number };
+    if (typeof body.compressed !== "string" || body.compressed_tokens >= body.original_tokens * 0.8) return c; // same size gate as the rules
     const hash = remember(text);
     return {
       text: body.compressed + marker(body.original_tokens, body.compressed_tokens, hash),
