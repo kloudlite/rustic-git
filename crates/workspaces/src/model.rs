@@ -231,9 +231,9 @@ pub fn validate_services(services: &[Service]) -> Result<(), String> {
 /// so this is a security boundary and not a tidiness rule. Same alphabet as `valid_segment`,
 /// capped at 63 so a name can never be the reason a DNS label has to be truncated.
 pub fn valid_ws_name(name: &str) -> bool {
-    // The name is also the directory the workspace mounts at inside the person's home
-    // (`~/workspaces/<name>`), so `.` and `..` — otherwise legal by the character rule — would
-    // mount a workspace over the home itself.
+    // The name identifies the workspace's own volume, mounted whole as the home
+    // (source at `~/workspace` inside it), so `.` and `..` — otherwise legal by the character
+    // rule — would collide with reserved path segments.
     !name.is_empty()
         && name.len() <= 63
         && name.bytes().all(|b| b.is_ascii_alphanumeric() || matches!(b, b'.' | b'_' | b'-'))

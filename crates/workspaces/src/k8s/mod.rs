@@ -161,8 +161,8 @@ pub const SSHD_DIR: &str = "/etc/ssh";
 /// Who you are inside a workspace. Not root: sshd refuses root outright (`PermitRootLogin no`),
 /// so a leaked key is a shell as an ordinary user, and everything a person writes lands owned
 /// by an ordinary user. There is no sudo — root is `kubectl exec`, and installing software is
-/// `spec.packages`. The uid is fixed so `~/workspaces/<name>` keeps its owner across pod restarts and
-/// image changes.
+/// `spec.packages`. The uid is fixed so the home keeps its owner across pod restarts and image
+/// changes.
 pub const SSH_USER: &str = "kl";
 /// Where the workspace's own btrfs volume is mounted, in full, as the home: no shared NFS home,
 /// no per-node cache volume, one subvolume that IS `/home/kl` (2026-09-22 ruling: "this will

@@ -60,9 +60,6 @@ pub(super) fn login_env(name: &str, owner: &str, registry_host: &str) -> Vec<Env
 /// What the default image runs before sshd, as root, on every container start. The image
 /// (Dockerfile `workspace` stage) already carries the accounts, the chroot dir and the greeting;
 /// this is only what depends on the mounts: seeding the rc files, owning the volume, exec.
-/// `~/workspaces` is this pod's own emptyDir, mounted over the shared home, so the workspace
-/// mount point inside it never lands in the home and no pod lists a sibling's; root only has to
-/// hand that emptyDir to `kl` (a mount point cannot be a symlink, so root may chown it).
 /// The platform's shell config lives in `/etc` (container filesystem, rewritten every start,
 /// never inside the person's home): an interactive login lands in the workspace, and starship
 /// shows the directory, not `user@pod` — inside the workspace that directory IS its name — unless
@@ -77,15 +74,14 @@ pub(super) fn login_env(name: &str, owner: &str, registry_host: &str) -> Vec<Env
 /// supply them (its libstdc++ is glibc-linked). Best effort: no network at boot is not a
 /// reason to refuse the shell.
 /// `adduser -D` writes `!` as the password, which sshd reads as "account locked" and refuses
-/// even a valid key; `*` is "no password" and is not locked. `~/workspaces/<id>` is chowned every
-/// start because the seeder clones it as root and a restore can bring back files owned by
-/// anyone. `exec` so sshd is pid 1 and gets the kubelet's TERM.
+/// even a valid key; `*` is "no password" and is not locked. `exec` so sshd is pid 1 and gets the
+/// kubelet's TERM.
 ///
-/// Root chowns only mountpoints and the directories the kubelet made to hold them, never a path
-/// the person could have replaced: `$H`, `$H/workspaces`, and `~/.cargo` with `~/.cargo/registry`.
-/// The last two are the exception and exist because the kubelet creates the missing PARENT of a
-/// subPath mount as root:root 0755 — leaving `CARGO_HOME` on the shared home (which is the point:
-/// `credentials.toml` and `config.toml` must survive) but unwritable, and the mount point itself
+/// Root chowns the whole volume (`chown -Rh`, non-recursive would leave a root-owned git-seed
+/// checkout or a restored file owned by anyone unwritable by `kl`) before handing off to `su`:
+/// `-R` without `-L`/`-H` never follows a symlink and `-h` re-owns the link itself, so a person's
+/// own symlink under `$H` is untouched and the walk never leaves the volume. Nothing else is
+/// mounted under `$H`.
 /// Everything below `$H` — the mkdirs, the rc seeds — runs as `kl` via `su`, because the volume IS
 /// the home now and the person owns every byte of it between starts: `mv ~/.config x; ln -s /etc
 /// ~/.config` would otherwise make the next start `chown` and write through `/etc` as root, and
@@ -106,7 +102,7 @@ pub(super) fn prelude(_name: &str) -> String {
     format!(
         "set -e\n\
          H=/home/{SSH_USER}\n\
-         chown {SSH_UID}:{SSH_UID} $H\n\
+         chown -Rh {SSH_UID}:{SSH_UID} $H\n\
          mkdir -p /etc/fish/conf.d\n\
          printf '%s\\n' '[[ -o interactive ]] || return 0' '[ \"$PWD\" = \"$HOME\" ] && [ -d \"$KL_WORKSPACE\" ] && cd \"$KL_WORKSPACE\"' '[ -e \"$HOME/.config/starship.toml\" ] || export STARSHIP_CONFIG=/etc/starship.toml' 'mkdir -p \"${{XDG_CACHE_HOME:-$HOME/.cache}}/zsh\"' 'autoload -Uz compinit && compinit -d \"${{XDG_CACHE_HOME:-$HOME/.cache}}/zsh/zcompdump\"' 'zstyle \":completion:*\" menu select' '[ -r /etc/profile.d/kl-build.sh ] && sh /etc/profile.d/kl-build.sh' > /etc/zshrc\n\
          printf '%s\\n' 'status is-interactive; or exit' 'if test \"$PWD\" = \"$HOME\" -a -d \"$KL_WORKSPACE\"; cd \"$KL_WORKSPACE\"; end' 'test -e \"$HOME/.config/starship.toml\"; or set -gx STARSHIP_CONFIG /etc/starship.toml' 'test -r /etc/profile.d/kl-build.sh; and sh /etc/profile.d/kl-build.sh' > /etc/fish/conf.d/kl.fish\n\
@@ -116,7 +112,7 @@ pub(super) fn prelude(_name: &str) -> String {
          set -e\n\
          export PATH={path}\n\
          H=/home/{SSH_USER}\n\
-         mkdir -p $H/workspace $H/.cargo/registry $H/.config/fish $H/.config/zsh $H/.config/git $H/.cache/tmp $H/.local/state\n\
+         mkdir -p $H/workspace $H/.cargo $H/.config/fish $H/.config/zsh $H/.config/git $H/.local/state\n\
          grep -qF '# kloudlite: derived state' $H/.config/git/ignore 2>/dev/null || cat /etc/kloudlite/gitignore-global >> $H/.config/git/ignore\n\
          git config --global receive.denyCurrentBranch updateInstead\n\
          [ -e $H/.config/zsh/.zshrc ] || printf 'export PATH={path}\\neval \"$(dircolors -b)\"\\nzstyle \":completion:*\" list-colors \"${{(s.:.)LS_COLORS}}\"\\nalias ls=\"ls --color=auto\" grep=\"grep --color=auto\"\\neval \"$(starship init zsh)\"\\n' > $H/.config/zsh/.zshrc\n\
@@ -488,16 +484,6 @@ pub fn workspace_pod(
                 ..Default::default()
             }),
             volume_mounts: Some(vec![
-                // Listed before the workspace mount for the reader; the kubelet orders by path
-                // depth and `workspace_dir(name)` is under `HOME_DIR`, so the order is implied either way.
-                //
-                // `HostToContainer` is load-bearing, not hygiene: this binds a path INSIDE the
-                // node's shared-home NFS mount, and with the default (`None`) the bind is resolved
-                // once at pod start and never again. Replace that mount on the node — a ZeroFS
-                // restart, an agent remount, the stale-mount repair in `mount_homes` — and every
-                // already-running pod keeps pointing at the detached one, where every access fails
-                // "Network is unreachable" until someone recreates the pod. Observed exactly that
-                // way. Propagation lets a running pod follow the node's remount instead.
                 // The whole home is the workspace's own worktree volume now (2026-09-22 ruling):
                 // one mount, no subPath, no propagation — there is no separate node-side home
                 // mount left to remount out from under a running pod.

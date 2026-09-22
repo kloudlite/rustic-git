@@ -100,9 +100,9 @@ pub fn mine<K: Owned>(items: Vec<K>, owners: &[String]) -> Vec<K> {
     items.into_iter().filter(|k| owners.iter().any(|o| o == k.owner())).collect()
 }
 
-/// A name is unique per (owner, team): it is also the directory the workspace mounts at inside
-/// the person's shared home (`~/workspaces/<name>`), and two workspaces on one path would be two
-/// workspaces one editor session cannot tell apart. The selector narrows the list; the decision
+/// A name is unique per (owner, team): source lives at `~/workspace` inside the workspace's own
+/// volume, one volume per workspace, so the name only has to be unique for listing and lookup, not
+/// for a shared mount path. The selector narrows the list; the decision
 /// reads `spec` (labels are a view). ponytail: a Workspace written by another path without its
 /// labels is invisible here until the controller re-stamps them — a window of one reconcile.
 pub(crate) async fn refuse_taken_name(c: &kube::Client, owner: &str, team: &str, name: &str) -> Result<(), Response> {

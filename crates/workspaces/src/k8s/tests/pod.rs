@@ -505,18 +505,17 @@ pub(crate) fn the_default_image_runs_sshd_with_its_own_host_key_and_the_owners_k
     assert!(sshd_config("dev", "acme", "registry.kloudlite.io").contains("StrictModes no\n"));
     // The account sshd lets in: fixed uid, unlocked, owning the volume; and the key it reads.
     let prelude = &cmd[2];
-    // Root's part ends where `su` begins. Below `$H` the person owns the tree between starts
-    // (it is their volume, not a fresh mountpoint), so root touches only its own mountpoint —
-    // no `-R` walk, since the volume already carries the owner's uid from a previous start.
-    assert!(!prelude.contains("chown -R"), "{prelude}");
+    // Root's part ends where `su` begins. The git-seed init container clones as root and a
+    // restore can bring back files owned by anyone, so root re-owns the whole volume before
+    // handing off, not just its own mountpoint.
     let su_at = prelude.lines().position(|l| l.starts_with("su kl -s /bin/sh <<'SEED'")).expect("seed runs as kl");
     let root: Vec<&str> = prelude.lines().take(su_at).collect();
-    assert!(root.contains(&"chown 1000:1000 $H"), "{root:?}");
+    assert!(root.contains(&"chown -Rh 1000:1000 $H"), "{root:?}");
     for l in &root {
         // Root writes only to /etc (the container's own filesystem) and its own mountpoint.
         assert!(!l.contains("$H/"), "root must not write under $H: {l}");
         assert!(!l.contains("> /home"), "root must not write under the home: {l}");
-        assert!(!l.starts_with("chown") || *l == "chown 1000:1000 $H", "root chown below the mountpoint: {l}");
+        assert!(!l.starts_with("chown") || *l == "chown -Rh 1000:1000 $H", "root chown below $H: {l}");
     }
     let seed_end = prelude.lines().position(|l| l == "SEED").expect("heredoc terminator at column 0");
     assert!(prelude.lines().skip(su_at + 1).take(seed_end - su_at - 1).any(|l| l.starts_with("mkdir -p $H/")), "{prelude}");
