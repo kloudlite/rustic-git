@@ -43,8 +43,12 @@ export GHCR_TOKEN=${DECODED#*:}
 VERB=ship
 [ "$NO_GATE" = 1 ] && VERB=publish
 
+# Interactive: dagger's own step tree. Piped to a file: one line per step with its output
+# (`--progress plain -v`), not the bare "N steps running" heartbeat plain mode prints alone.
+PROGRESS=(); [ -t 1 ] || PROGRESS=(--progress plain -v)
+
 cd "$SRC"
-dagger -m deploy/dagger call "$VERB" \
+dagger "${PROGRESS[@]}" -m deploy/dagger call "$VERB" \
   --source "$SRC" --tag "$TAG" --ghcr-user "$GHCR_USER" --ghcr-token env://GHCR_TOKEN
 
 unset GHCR_TOKEN

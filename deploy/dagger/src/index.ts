@@ -74,6 +74,10 @@ export class Kloudlite {
       // node_modules is IGNOREd on upload, so every run installs; bun's global cache makes
       // that a link step rather than a download.
       .withMountedCache("/root/.bun/install/cache", dag.cacheVolume("kloudlite-bun"))
+      // The install itself and turbo's task cache persist too, so an unchanged lockfile is a
+      // no-op install and an untouched package's typecheck/lint/test are cache hits.
+      .withMountedCache("/work/src/web/node_modules", dag.cacheVolume("kloudlite-web-node-modules"))
+      .withMountedCache("/work/src/web/.turbo", dag.cacheVolume("kloudlite-web-turbo"))
       .withExec(["bun", "install", "--frozen-lockfile"])
       .withExec(["bun", "run", "typecheck"])
       .withExec(["bun", "run", "lint"])
