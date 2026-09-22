@@ -20,7 +20,7 @@ spec:
   storageClassName: managed-csi-premium
   resources:
     requests:
-      storage: 256Gi
+      storage: 512Gi
 ---
 apiVersion: apps/v1
 kind: Deployment
@@ -127,6 +127,19 @@ spec:
           volumeMounts:
             - { name: work, mountPath: /work }
             - { name: buildkit-sock, mountPath: /run/buildkit }
+        # Dagger's own engine (it cannot share buildkitd: it runs its own patched BuildKit).
+        # The laptop's dagger CLI drives it over kubectl exec; state lives on the work disk
+        # next to buildkit's so a pod restart keeps the layer and cargo caches warm.
+        - name: dagger-engine
+          image: registry.dagger.io/engine:v0.21.7
+          securityContext: { privileged: true }
+          resources:
+            requests: { cpu: "2", memory: 2Gi }
+            limits: { cpu: "8", memory: 8Gi }
+          volumeMounts:
+            # /var/lib/dagger is the documented state path; a subPath of the work disk, not a
+            # second PVC — same pod, same RWO disk, no extra premium volume to pay for.
+            - { name: work, mountPath: /var/lib/dagger, subPath: dagger }
       volumes:
         - name: buildkit-sock
           emptyDir: {}
