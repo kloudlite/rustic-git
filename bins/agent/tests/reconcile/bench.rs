@@ -105,7 +105,7 @@ fn has_cond(st: &serde_json::Value, t: &str, status: &str, reason: &str) -> bool
     st["conditions"].as_array().is_some_and(|cs| cs.iter().any(|c| c["type"] == t && c["status"] == status && c["reason"] == reason))
 }
 
-/// TDD for Task 4: a Bench resolves its own Volume — named after it, one replica, owned by it —
+/// A Bench resolves its own Volume — named after it, one replica, owned by it —
 /// and the pod is written only once that Volume answers Ready.
 #[tokio::test]
 async fn a_bench_creates_a_volume_named_after_it_before_its_pod() {
