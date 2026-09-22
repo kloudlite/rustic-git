@@ -20,7 +20,7 @@ spec:
   storageClassName: managed-csi-premium
   resources:
     requests:
-      storage: 256Gi
+      storage: 512Gi
 ---
 apiVersion: apps/v1
 kind: Deployment
