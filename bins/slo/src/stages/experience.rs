@@ -9,7 +9,7 @@
 //! `IDS` is the addendum's own table order: identity and packages, then teams (create → invite →
 //! role → shared repo → workspace → remove → delete), then the repo and PR verbs, then
 //! environments, then the volume/quota/admin reads, and the two whole-journey observations
-//! (`feed.experience`, `home.persists`) last, because both assert something about what everything
+//! (`feed.experience`, `home.travels`) last, because both assert something about what everything
 //! BEFORE them did.
 //!
 //! A few arms are empty (`{}`): several ids are one journey on one object — the packages pair, the
@@ -98,7 +98,7 @@ pub const IDS: &[&str] = &[
     "bench.workspace.tool_roundtrip",
     "bench.delegate",
     "feed.experience",
-    "home.persists",
+    "home.travels",
 ];
 
 /// One arm per id, walked in `IDS` order. The `_` arm is what keeps a run exactly-once complete
@@ -122,7 +122,7 @@ pub async fn run(c: &mut Ctx) {
             "ide.exec" => {}
             "ws.seed.failed" => super::experience_ws::seed_failed(c).await,
             "key.platform.regenerate" => super::experience_ws::platform_key(c).await,
-            "home.persists" => super::experience_ws::home_persists(c).await,
+            "home.travels" => super::experience_ws::home_travels(c).await,
             "team.create" => super::experience_teams::create(c).await,
             "team.invite.accept" => super::experience_teams::invite_accept(c).await,
             "team.role.set" => super::experience_teams::role_set(c).await,

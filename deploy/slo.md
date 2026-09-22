@@ -148,7 +148,7 @@ first destructive stage.
 | `ws.packages.update` | Workspaces | `POST …/packages/update` answers with the lock unchanged for an exact pin | 99.9 % | hourly | 14 · Experience |
 | `ws.packages.pin.lockshape` | Workspaces | The lock names a nixpkgs revision and a store path | 99.9 % | hourly | 14 · Experience |
 | `ws.seeded` | Workspaces | A workspace created from a repo and branch has that clone checked out, and its doc names them | 95 % ≤ 240000 ms | hourly | 14 · Experience |
-| `ws.cache.travels` | Workspaces | A file written under `{ws}/.cache` before a push is present in a workspace restored from that push | 95 % ≤ 240000 ms | hourly | 14 · Experience |
+| `ws.cache.travels` | Workspaces | A file written under `~/.cache` before a push is present in a workspace restored from that push | 95 % ≤ 240000 ms | hourly | 14 · Experience |
 | `ide.serve.up` | Workspaces | `kl ide serve` inside a fresh workspace answers /healthz within 240 s of the create | 95 % ≤ 240000 ms | hourly | 14 · Experience |
 | `ide.exec` | Workspaces | An exec through the workspace's own tool API runs as `kl` and answers exit code 0 | 99.9 % | hourly | 14 · Experience |
 | `ws.seed.failed` | Workspaces | A workspace seeded from a repository that does not exist reports `SeedFailed` rather than staying `Creating` | 95 % ≤ 240000 ms | hourly | 14 · Experience |
@@ -177,7 +177,7 @@ first destructive stage.
 | `admin.stop.workspace` | Admin | An admin stop is visible to the owner as `stopped` | 99.9 % ≤ 30000 ms | hourly | 14 · Experience |
 | `superadmin.grant` | Security | Granting superadmin adds the account to the roster and revoking takes it off | 100 % | hourly | 14 · Experience |
 | `feed.experience` | Pull requests | The feed shows the team and repo events of this run | 99.9 % ≤ 30000 ms | hourly | 14 · Experience |
-| `home.persists` | Workspaces | A file written in one workspace is read from a fresh workspace's home, with the cache and state directories still local | 99.9 % | hourly | 14 · Experience |
+| `home.travels` | Workspaces | A dotfile and a file under ~/workspace written before a push are present in a workspace restored from it, and absent from a fresh workspace of the same owner | 99.9 % | hourly | 14 · Experience |
 | `id.username` | Identity | A second username claim is refused as already set, and a malformed handle is rejected | 99.9 % | hourly | 14 · Experience |
 | `id.cli.tokens` | Identity | A CLI token is listed and, once revoked, is refused | 99.9 % | hourly | 14 · Experience |
 | `id.profile.upsert` | Identity | A profile upsert is saved and read back | 99.9 % ≤ 5000 ms | hourly | 14 · Experience |

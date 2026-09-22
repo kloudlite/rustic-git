@@ -189,7 +189,7 @@ awk '$2 == "/home/kl" { print $3 }' /proc/mounts 2>/dev/null || true"#;
 /// through its gofer, where the same mount reads as `v9fs`/`9p`. Requiring "nfs" failed every
 /// run on a gVisor node while the export was mounted perfectly well.
 ///
-/// That the bytes are really the SHARED home — not merely some mount — is `home.persists`' job
+/// That the bytes are really the SHARED home — not merely some mount — is `home.travels`'s job
 /// (hourly): a file written in one workspace read back from a fresh one, possibly on another node,
 /// which no single-pod check can stand in for.
 fn home_is_shared(out: &str) -> Result<()> {
