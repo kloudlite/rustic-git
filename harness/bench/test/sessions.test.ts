@@ -54,3 +54,16 @@ test("remove drops the row", () => {
   assert.equal(a.all().length, 0);
   assert.throws(() => a.update("s-1", {}), /no session s-1/);
 });
+
+test("tree fields persist and children are found by parent seq", () => {
+  const d = fs.mkdtempSync(path.join(os.tmpdir(), "tree-"));
+  const l = new SessionList(d);
+  const top = l.create(undefined, { tier: "top", state: "open" });
+  const main = l.create(undefined, { tier: "main", state: "open", workspace: "ws1" });
+  const sub = l.create(undefined, { tier: "sub", state: "open", parent: main.seq, workspace: "ws1-c1" });
+  assert.deepEqual(l.children(main.seq).map((s) => s.seq), [sub.seq]);
+  assert.equal(l.bySeq(top.seq)?.tier, "top");
+  assert.equal(l.logFile(sub), path.join(d, "sessions", `${sub.seq}.jsonl`));
+  const again = new SessionList(d);
+  assert.equal(again.bySeq(sub.seq)?.parent, main.seq);
+});

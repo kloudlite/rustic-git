@@ -1,9 +1,14 @@
+import fs from "node:fs";
 import path from "node:path";
 import { readJson, replaceJson } from "./log.ts";
 
 export type SessionKind = "bench" | "workspace" | "ephemeral";
-/** `kind` absent is a bench session. `target` is the workspace whose tool server runs a thread's tools. */
-export type SessionRow = { id: string; name: string; seq: number; file?: string; created: number; lastActive: number; archived: boolean; model?: string; kind?: SessionKind; workspace?: string; target?: string };
+/**
+ * `kind` absent is a bench session. `target` is the workspace whose tool server runs a thread's tools.
+ * `parent`/`tier`/`state` describe the sys-1 session tree: `parent` is the owning row's seq, `tier`
+ * places a row as the top bench session, a main per-workspace session, or a sub-session spawned under one.
+ */
+export type SessionRow = { id: string; name: string; seq: number; file?: string; created: number; lastActive: number; archived: boolean; model?: string; kind?: SessionKind; workspace?: string; target?: string; parent?: number; tier?: "top" | "main" | "sub"; state?: "open" | "closed" };
 
 type Stored = SessionRow[] | { nextSeq: number; rows: SessionRow[] };
 
@@ -17,8 +22,11 @@ export class SessionList {
   private file: string;
   private rows: SessionRow[];
   private nextSeq: number;
+  private dir: string;
   constructor(dir: string) {
+    this.dir = dir;
     this.file = path.join(dir, "sessions.json");
+    fs.mkdirSync(path.join(dir, "sessions"), { recursive: true });
     const stored = readJson<Stored>(this.file, []);
     if (Array.isArray(stored)) {
       this.rows = stored;
@@ -37,14 +45,23 @@ export class SessionList {
   get(id: string): SessionRow | undefined {
     return this.rows.find((r) => r.id === id);
   }
-  create(model?: string): SessionRow {
+  create(model?: string, extra: Partial<SessionRow> = {}): SessionRow {
     const seq = Math.max(this.nextSeq, Math.max(0, ...this.rows.map((r) => r.seq)) + 1);
     this.nextSeq = seq + 1;
     const now = Date.now();
-    const row: SessionRow = { id: `s-${seq}`, name: `session ${seq}`, seq, created: now, lastActive: now, archived: false, model };
+    const row: SessionRow = { id: `s-${seq}`, name: `session ${seq}`, seq, created: now, lastActive: now, archived: false, model, ...extra };
     this.rows.push(row);
     this.save();
     return { ...row };
+  }
+  bySeq(seq: number): SessionRow | undefined {
+    return this.rows.find((r) => r.seq === seq);
+  }
+  children(seq: number): SessionRow[] {
+    return this.rows.filter((r) => r.parent === seq).sort((a, b) => a.seq - b.seq);
+  }
+  logFile(row: SessionRow): string {
+    return path.join(this.dir, "sessions", `${row.seq}.jsonl`);
   }
   update(id: string, patch: Partial<SessionRow>): SessionRow {
     const r = this.get(id);
