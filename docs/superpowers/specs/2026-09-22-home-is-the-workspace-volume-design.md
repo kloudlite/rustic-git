@@ -29,7 +29,7 @@ Everything in the tree is snapshotted, pushed, replicated, cloned and restored a
 is no travels/stays split and no per-workspace exclusion list: **nothing the platform mints lives in
 the volume.** The things that must not travel are already mounts over the tree, and stay so:
 
-- `/home/kl/.ssh/authorized_keys` — hostPath `type: File` from `{pool}/keys/{owner}/authorized_keys` (unchanged).
+- `/etc/kloudlite/authorized_keys` — hostPath `type: File` from `{pool}/keys/{owner}/authorized_keys`; sshd's generated `AuthorizedKeysFile` names it. It moved out of `~/.ssh` because nothing but the volume may be mounted at or below `/home/kl` (owner ruling 23 Sep: "the entire home directory is the btrfs mount. nothing else like sub mount").
 - `/etc/resolv.conf` — hostPath file from `{pool}/attach/{ws}/resolv.conf` (unchanged).
 - the `user-key` Secret at `USER_KEY_PATH` (unchanged).
 - `/tmp` — an `emptyDir`; `TMPDIR` is unset (tools default to `/tmp`).
