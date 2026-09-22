@@ -3,6 +3,7 @@ import assert from "node:assert/strict";
 import { fakeTools } from "./fake-tools.ts";
 import { setBackend, httpBackend, remote } from "../src/engine/remote.ts";
 import { TOOLS, runTool } from "../src/engine/index.ts";
+import { setBgWaitMs } from "../src/engine/tools.ts";
 
 const fake = await fakeTools((cmd) => ({ exit_code: cmd.includes("false") ? 1 : 0, stdout: `ran ${cmd}`, stderr: "" }));
 after(() => fake.close());
@@ -32,4 +33,22 @@ test("read, write, edit, glob, grep go to the pod by their own names", async () 
 test("a missing file is a tool result the model can read", async () => {
   const out = await runTool("ws1", tool("read"), { path: "none.txt" });
   assert.match(out, /no such file/);
+});
+
+test("bash background sends detach and returns the process id", async () => {
+  const out = await runTool("ws1", tool("bash"), { command: "echo bg", background: "true" });
+  assert.match(out, /started in background as p1/);
+});
+
+test("a foreground timeout tells the model to rerun in the background", async () => {
+  const slow = await fakeTools((cmd) => ({ exit_code: 0, stdout: `ran ${cmd}`, stderr: "", timed_out: true }));
+  setBackend("ws2", httpBackend(slow.address));
+  setBgWaitMs(1);
+  try {
+    const out = await runTool("ws2", tool("bash"), { command: "sleep 100" });
+    assert.match(out, /rerun with background: true/);
+  } finally {
+    setBgWaitMs(10000);
+    slow.close();
+  }
 });

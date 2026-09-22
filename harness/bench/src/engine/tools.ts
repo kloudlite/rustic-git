@@ -1,4 +1,4 @@
-import { dirname, basename, matchesGlob, join } from "node:path";
+import { dirname, basename, matchesGlob } from "node:path";
 import { child, chain, type Envelope } from "./task.ts";
 import { choice, noul, type Ask, type ChoiceAnswer, type NoulAnswer } from "./jev.ts";
 import { pickBlocks } from "./pick.ts";
@@ -35,19 +35,18 @@ export type Tool = { name: string; description: string; brief?: string; shows?: 
 
 export const RESPONSES = ["done", "failed", "blocked", "other"];
 
-// Async so a long command never blocks the main session. Failing commands are results, not exceptions
-// (the pod's own rule, mirrored by tryRemote). Quoted into one `sh -c` line since the pod's exec tool takes a command string.
+// Quoted into one shell line where a command is built from parts, since the pod's exec tool takes a command string.
 const q = (s: string) => `'${s.replace(/'/g, "'\\''")}'`;
-async function sh(cwd: string, file: string, args: string[]): Promise<string> {
-  return text(await tryRemote(cwd, "exec", { cmd: [file, ...args].map(q).join(" ") }));
-}
 
 export let BG_WAIT_MS = 10000;
 export const setBgWaitMs = (ms: number) => { BG_WAIT_MS = ms; };
 
 // Background processes are tracked by the pod now, not here: candidates and the planner's "what's running" line both
-// come from process_output with no id, which the pod answers with a listing (its own bash_output shape).
-export const procIds = async (cwd: string) => text(await tryRemote(cwd, "process_output", {})).split("\n").filter(Boolean);
+// come from process_list.
+export const procIds = async (cwd: string) => {
+  const r = await tryRemote(cwd, "process_list", {});
+  return typeof r === "string" ? [] : ((r as { processes: { id: string }[] }).processes ?? []).map((p) => p.id);
+};
 
 const PROMPT_FILES = 60; // project paths shown to the params writer, so it knows what it can read before it writes a value
 // ponytail: cached per cwd for CACHE_MS, so 2-3 candidate calls in one tool call share a single git ls-files/package.json read; can read up to 2s stale after a write.
@@ -223,6 +222,7 @@ export const TOOLS: Tool[] = [
     params: [
       { name: "command", description: "package.json script to run, or \"other\" for a shell command", kind: "closed", candidates: async (cwd) => [...(await scripts(cwd)), "other"], requiredUnless: (a) => !a.shell },
       { name: "shell", description: "the exact shell command, in the foreground: no &, nohup, pkill or kill. A long-running command is moved to the background and tracked automatically; a tracked process is stopped with kill_shell, never from here", kind: "free", requiredUnless: (a) => !a.command || a.command === "other" },
+      { name: "background", description: "start a long-running server or watcher; answers its process id", kind: "closed", candidates: async () => ["true", "false"], requiredUnless: () => false },
     ],
     outcomes: ["succeeded", "failed", "started"],
     messages: { succeeded: "Succeeded:\n{tail}", failed: "Failed:\n{tail}", started: "Started in background:\n{tail}" },
@@ -235,7 +235,16 @@ export const TOOLS: Tool[] = [
         command = script ? script.command : a.command;
       }
       if (!command) throw new Error(`no package.json script "${a.command.split(":")[0]}"`);
-      return text(await tryRemote(cwd, "exec", { cmd: command, timeout_ms: BG_WAIT_MS }));
+      if (a.background === "true") {
+        const r = await tryRemote(cwd, "exec", { cmd: command, detach: true });
+        return typeof r === "string" ? r : `started in background as ${(r as { id: string }).id}`;
+      }
+      const r = await tryRemote(cwd, "exec", { cmd: command, timeout_ms: BG_WAIT_MS });
+      const out = text(r);
+      // A foreground call that timed out is not a failure to report as one: the model needs to know it can rerun in the background.
+      return typeof r === "object" && r !== null && (r as { timed_out?: boolean }).timed_out
+        ? `${out}\n(timed out after ${BG_WAIT_MS}ms; rerun with background: true if this was meant to keep running)`
+        : out;
     } },
   // One tool for looking at code: a named file, or "all files" for a concept search. grep does exact text/regex search.
   { name: "read", shows: "numbered lines (N: text) of the file; a very large file as an outline of its definitions, to be read again by line range", description: "Read, find, get or show code or text: a whole file, a route, function, section or answer inside a file, or which files hold a concept the instruction names when the file is not known. For an exact text or regex, grep does that.", brief: "Read a file, or find which files hold a concept",

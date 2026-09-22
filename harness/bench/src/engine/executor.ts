@@ -127,7 +127,7 @@ export function makeAct(deps: ActDeps, context: () => unknown, envelope?: () => 
       }
       const names = d.tool.params.map((p) => p.name);
       // A backticked literal in the step is the tool's one free param (read's exact search text), as on main's path.
-      const given = { ...freeFromLiterals(d.tool, instruction, deps.cwd), ...Object.fromEntries(Object.entries(params).filter(([k]) => names.includes(k))) };
+      const given = { ...freeFromLiterals(d.tool, instruction), ...Object.fromEntries(Object.entries(params).filter(([k]) => names.includes(k))) };
       // A task takes no input: a confirm decision with no approve hook wired is denied, not silently run.
       const approve = d.kind === "confirm" || escalated ? (deps.approve ? (args: Record<string, string>) => deps.approve!(d.tool.name, args, d.destructive) : async () => false) : undefined;
       let built = given;

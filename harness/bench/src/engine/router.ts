@@ -52,7 +52,7 @@ export function pickDuring(answers: Record<string, Answer>): During {
 }
 
 // Only tools with exactly one free parameter can be driven by the user's literal text.
-export function freeFromLiterals(tool: Tool, instruction: string, cwd?: string): Record<string, string> {
+export function freeFromLiterals(tool: Tool, instruction: string): Record<string, string> {
   // A backticked literal is never file content: "add `/health`" must not write "/health" over the file.
   const free = tool.params.filter((p) => p.kind === "free" && p.literal !== false);
   const literal = instruction.match(/`([^`]+)`/)?.[1];
