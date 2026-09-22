@@ -20,14 +20,11 @@ COPY . .
 # behind a node_modules/.bun/<pkg>@<ver> symlink, which Next's file tracer cannot
 # follow, so the standalone output silently omits transitive deps (@swc/helpers)
 # and the server dies at startup with MODULE_NOT_FOUND.
-# BuildKit cache mounts (Dagger and buildx both honour them): bun's download cache and Next's
-# compiler cache survive across builds, so a source-only change is a link and an incremental
-# build rather than a cold install and full compile.
-RUN --mount=type=cache,target=/root/.bun/install/cache bun install --frozen-lockfile --linker=hoisted
+RUN bun install --frozen-lockfile --linker=hoisted
 
 FROM deps AS build
 ENV NEXT_TELEMETRY_DISABLED=1
-RUN --mount=type=cache,target=/src/apps/web/.next/cache node node_modules/next/dist/bin/next build apps/web
+RUN node node_modules/next/dist/bin/next build apps/web
 
 # Same libc as the build stage: the standalone output carries native modules
 # (sharp, shiki's oniguruma) compiled against it.
