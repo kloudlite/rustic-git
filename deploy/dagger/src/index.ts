@@ -241,6 +241,40 @@ export class Kloudlite {
       .withEnvVariable("DO_NOT_TRACK", "1")
   }
 
+  // deploy/bench/Dockerfile: harness-bench from its TypeScript source under Node 24 type
+  // stripping, pi from the harness's own lockfile, and the musl kl. npm's cache is a named
+  // volume so a lockfile-unchanged rebuild never re-downloads.
+  private imageBench(source: Directory, built: Container): Container {
+    const deps = dag
+      .container()
+      .from("node:24-bookworm-slim")
+      .withMountedCache("/root/.npm", dag.cacheVolume("kloudlite-npm"))
+      .withWorkdir("/opt/harness")
+      .withFile("package.json", source.file("harness/package.json"))
+      .withFile("package-lock.json", source.file("harness/package-lock.json"))
+      .withExec(["npm", "ci", "--omit=dev"])
+    return dag
+      .container()
+      .from("node:24-bookworm-slim")
+      .withExec(["sh", "-c",
+        "apt-get update && apt-get install -y --no-install-recommends ca-certificates util-linux " +
+        "&& rm -rf /var/lib/apt/lists/*"])
+      .withFile("/usr/local/bin/kl", built.file("/out/musl/kl"), { permissions: 0o755 })
+      .withFile("/opt/harness/package.json", source.file("harness/package.json"))
+      .withFile("/opt/harness/package-lock.json", source.file("harness/package-lock.json"))
+      .withDirectory("/opt/harness/node_modules", deps.directory("/opt/harness/node_modules"))
+      .withFile("/opt/harness/bench/package.json", source.file("harness/bench/package.json"))
+      .withDirectory("/opt/harness/bench/src", source.directory("harness/bench/src"))
+      .withDirectory("/opt/harness/pi", source.directory("harness/pi"))
+      .withExec(["sh", "-c",
+        "chmod 0755 /opt/harness/bench/src/main.ts " +
+        "&& ln -s /opt/harness/bench/src/main.ts /usr/local/bin/harness-bench " +
+        "&& mkdir -p /bench /home/kl && chown 1000:1000 /bench /home/kl"])
+      .withUser("1000:1000")
+      .withWorkdir("/home/kl")
+      .withEntrypoint([])
+  }
+
   // web/Dockerfile `deps`+`build` stages: bun installs (owns the lockfile), node runs `next
   // build` (bun SIGILLs under GitHub's runners for this step) (web/Dockerfile lines 6-19).
   private webBuild(webCtx: Directory): Container {
@@ -300,6 +334,7 @@ export class Kloudlite {
       [() => this.imageBuilderGate(built), "kloudlite-builder-gate"],
       [() => this.imageSlo(built), "kloudlite-slo"],
       [() => this.imageWorkspace(source, built), "kloudlite-workspace"],
+      [() => this.imageBench(source, built), "kloudlite-bench"],
     ]
 
     for (const [make, image] of IMAGE_BUILDERS) {
