@@ -48,6 +48,11 @@ pub mod defaults {
     pub fn quota_gb_ceiling() -> u32 {
         500
     }
+    /// Empty = off — a region with no Kompress service deployed stamps no env var into any bench
+    /// pod, and the client (`harness/bench/src/engine/headroom.ts`) fails open the same way.
+    pub fn kompress_url() -> String {
+        String::new()
+    }
     pub fn git_init_image() -> String {
         // Matches the agent's own pre-settings fallback (`bins/agent/src/controller/mod.rs`) —
         // this is a required init container image, not an optional one, so the built-in default
@@ -128,6 +133,10 @@ pub struct ClusterSettingsSpec {
     /// k8s `runtimeClassName` for tenant pods (e.g. `gvisor`); `None` = host kernel. **Boot**.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub runtime_class: Option<String>,
+    /// URL of the region's Kompress service the bench engine POSTs plain text to; empty = off.
+    /// Stamped into a bench pod at create.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub kompress_url: Option<String>,
 }
 
 
@@ -163,6 +172,7 @@ pub const CLUSTER_SETTING_META: &[(&str, kloudlite_core::settings::Mark, &[&str]
     ("defaultImage", kloudlite_core::settings::Mark::Boot, &["kloudlite-agent"]),
     ("gitInitImage", kloudlite_core::settings::Mark::Boot, &["kloudlite-agent"]),
     ("runtimeClass", kloudlite_core::settings::Mark::Boot, &["kloudlite-agent"]),
+    ("kompressUrl", kloudlite_core::settings::Mark::Live, &[]),
 ];
 
 #[cfg(test)]

@@ -5,7 +5,7 @@ import { createDeepSeek } from "@ai-sdk/deepseek";
 import { createOpenAICompatible } from "@ai-sdk/openai-compatible";
 import type { Llm, LlmMessage, LlmTool } from "./executor.ts";
 import { trackUsage } from "./usage.ts";
-import { compress, RETRIEVE_TOOL } from "./headroom.ts";
+import { compressWithModel, RETRIEVE_TOOL } from "./headroom.ts";
 
 export const LLM_TIMEOUT_MS = 180_000;
 const MAX_STEPS = 40; // a session that never submits stops here
@@ -40,7 +40,7 @@ export const makeAiSdkLlm = (pick: () => { provider: string; id: string; model: 
       const r = await t.execute(o.toolCallId, input);
       if (r.terminate) terminated = true;
       const joined = r.content.map((c) => c.text).join("\n");
-      const { text, strategy, before, after } = compress(joined, lastPrompt);
+      const { text, strategy, before, after } = await compressWithModel(joined, lastPrompt);
       if (strategy !== "pass") console.error(JSON.stringify({ msg: "headroom.saved", tool: t.name, strategy, before, after }));
       return text;
     },

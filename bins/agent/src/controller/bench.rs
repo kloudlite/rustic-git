@@ -230,7 +230,8 @@ pub async fn reconcile_bench(b: Arc<crd::Bench>, ctx: Arc<Ctx>) -> Result<Action
     match bench_state(&b, pod.as_ref()) {
         PodVerdict::Create => {
             let idle_secs = ctx.settings.load().bench_idle_secs;
-            let p = k8s::bench_pod(&b, &name, &ctx.pool, ctx.runtime_class.as_deref(), &ctx.registry_host, idle_secs).map_err(ReconcileErr)?;
+            let kompress_url = ctx.settings.load().kompress_url.clone();
+            let p = k8s::bench_pod(&b, &name, &ctx.pool, ctx.runtime_class.as_deref(), &ctx.registry_host, idle_secs, &kompress_url).map_err(ReconcileErr)?;
             super::create_if_absent(&pods, &p).await?;
             let c = cond("Ready", false, "Starting", "the bench pod is starting");
             write(&b, crd::BenchStatus { phase: Phase::Starting, pod_ref, idle_since: None, conditions: with(&prev, c), ..prev }, &ctx).await?;

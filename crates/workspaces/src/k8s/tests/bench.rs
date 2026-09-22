@@ -27,7 +27,7 @@ fn fixture_bench(owner: &str, team: &str, state: DesiredState) -> Bench {
 #[test]
 fn a_bench_pod_mounts_only_its_own_folder_and_no_worktree() {
     let b = fixture_bench("alice", "acme", DesiredState::Running);
-    let p = bench_pod(&b, "bench-1", "/wspool", None, "cr.example", 300).unwrap();
+    let p = bench_pod(&b, "bench-1", "/wspool", None, "cr.example", 300, "").unwrap();
     assert_eq!(p.metadata.namespace.as_deref(), Some(crate::crd::ws_namespace("alice", "acme").as_str()));
     let spec = p.spec.unwrap();
     let paths: Vec<String> = spec.volumes.as_ref().unwrap().iter()
@@ -54,7 +54,7 @@ fn a_bench_pod_mounts_only_its_own_folder_and_no_worktree() {
 fn a_departed_members_bench_runs_the_reader_and_every_bench_may_exit_idle() {
     let mut b = fixture_bench("alice", "acme", DesiredState::Running);
     b.spec.access = crate::crd::BenchAccess::ReadOnly;
-    let spec = bench_pod(&b, "bench-1", "/wspool", None, "cr", 420).unwrap().spec.unwrap();
+    let spec = bench_pod(&b, "bench-1", "/wspool", None, "cr", 420, "").unwrap().spec.unwrap();
     let c = &spec.containers[0];
     assert_eq!(c.command.as_ref().unwrap().last().map(String::as_str), Some("--read-only"));
     assert_eq!(spec.restart_policy.as_deref(), Some("OnFailure"), "exit 0 is idle and must not restart");
@@ -63,11 +63,24 @@ fn a_departed_members_bench_runs_the_reader_and_every_bench_may_exit_idle() {
 }
 
 #[test]
+fn kompress_url_env_is_present_only_when_the_region_set_one() {
+    let b = fixture_bench("alice", "acme", DesiredState::Running);
+    let without = bench_pod(&b, "bench-1", "/wspool", None, "cr", 300, "").unwrap();
+    let c = &without.spec.unwrap().containers[0];
+    assert!(c.env.as_ref().unwrap().iter().all(|e| e.name != "KL_KOMPRESS_URL"));
+
+    let with = bench_pod(&b, "bench-1", "/wspool", None, "cr", 300, "http://kloudlite-kompress.kloudlite-system:8787").unwrap();
+    let c = &with.spec.unwrap().containers[0];
+    let ev = c.env.as_ref().unwrap().iter().find(|e| e.name == "KL_KOMPRESS_URL").unwrap();
+    assert_eq!(ev.value.as_deref(), Some("http://kloudlite-kompress.kloudlite-system:8787"));
+}
+
+#[test]
 fn a_folder_segment_that_escapes_is_refused_before_it_becomes_a_hostpath() {
     assert!(bench_folder("/wspool", "..", "alice").is_err());
     assert!(bench_folder("/wspool", "acme", "a/b").is_err());
     assert!(bench_folder("/wspool", "acme", ".").is_err());
-    assert!(bench_pod(&fixture_bench("alice", "../x", DesiredState::Running), "b", "/wspool", None, "cr", 300).is_err());
+    assert!(bench_pod(&fixture_bench("alice", "../x", DesiredState::Running), "b", "/wspool", None, "cr", 300, "").is_err());
 }
 
 #[test]

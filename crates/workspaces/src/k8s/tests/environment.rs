@@ -339,6 +339,20 @@ pub(crate) fn only_bench_pods_in_the_namespace_reach_the_tool_port() {
 
 
 #[test]
+pub(crate) fn only_bench_pods_reach_the_regions_kompress_service() {
+    let np = allow_bench_kompress("wt-alice-acme", "alice", &owner_ref());
+    let spec = np.spec.unwrap();
+    assert_eq!(spec.pod_selector.unwrap().match_labels.unwrap()[KIND_LABEL], "bench");
+    let rule = &spec.egress.unwrap()[0];
+    let to = rule.to.as_ref().unwrap();
+    assert_eq!(to.len(), 1);
+    assert_eq!(to[0].namespace_selector.as_ref().unwrap().match_labels.as_ref().unwrap()["kubernetes.io/metadata.name"], "kloudlite-system");
+    assert_eq!(to[0].pod_selector.as_ref().unwrap().match_labels.as_ref().unwrap()["app"], "kloudlite-kompress");
+    assert_eq!(rule.ports.as_ref().unwrap()[0].port, Some(IntOrString::Int(8787)));
+}
+
+
+#[test]
 pub(crate) fn a_service_with_no_ports_gets_no_clusterip() {
     let mut s = svc("worker", "/data");
     s.ports.clear();

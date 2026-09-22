@@ -45,7 +45,7 @@ fn bench_engine_var(key: &str) -> EnvVar {
 /// The bench's one pod. `idle_secs` is the region's `benchIdleSecs`, stamped in at create so a
 /// live setting change never reaches a running pod mid-session — the same `Mark::Live`-vs-`Boot`
 /// split as everywhere else in `k8s`: this value takes effect only on the pod's next create.
-pub fn bench_pod(b: &Bench, id: &str, pool: &str, runtime_class: Option<&str>, registry_host: &str, idle_secs: u64) -> Result<Pod, String> {
+pub fn bench_pod(b: &Bench, id: &str, pool: &str, runtime_class: Option<&str>, registry_host: &str, idle_secs: u64, kompress_url: &str) -> Result<Pod, String> {
     let owner = &b.spec.owner;
     let team = &b.spec.team;
     let folder = bench_folder(pool, team, owner)?;
@@ -57,38 +57,47 @@ pub fn bench_pod(b: &Bench, id: &str, pool: &str, runtime_class: Option<&str>, r
     };
     let var = |n: &str, v: String| EnvVar { name: n.into(), value: Some(v), ..Default::default() };
 
+    let mut env = vec![
+        var("KL_OWNER", owner.clone()),
+        var("KL_TEAM", team.clone()),
+        var("KL_BENCH", id.to_string()),
+        var("KL_MODEL", b.spec.model.clone()),
+        var("KL_REGISTRY_HOST", registry_host.to_string()),
+        var("KL_BENCH_IDLE_SECS", idle_secs.to_string()),
+    ];
+    // Empty means no Kompress service in this region; the engine client falls back to the
+    // rule-based compressors when `KL_KOMPRESS_URL` is unset entirely.
+    if !kompress_url.is_empty() {
+        env.push(var("KL_KOMPRESS_URL", kompress_url.to_string()));
+    }
+    env.extend([
+        EnvVar {
+            name: "NODE_NAME".into(),
+            value_from: Some(EnvVarSource {
+                field_ref: Some(ObjectFieldSelector { field_path: "spec.nodeName".into(), ..Default::default() }),
+                ..Default::default()
+            }),
+            ..Default::default()
+        },
+        var("HOME", HOME_DIR.to_string()),
+        var("LANG", "C.UTF-8".to_string()),
+        // The sys-1 engine's credentials, from the bench-only `bench-engine` Secret
+        // (never `user-key`, which every workspace pod mounts whole). `optional: true`
+        // so a fleet without these entries still starts the pod —
+        // `harness/bench/src/runtime.ts::makeTurn` then reports "TYPESAFE_API_KEY is not
+        // set" itself rather than the pod hitting CreateContainerConfigError.
+        bench_engine_var("TYPESAFE_API_KEY"),
+        bench_engine_var("JEVHARN_API_KEY"),
+        bench_engine_var("JEVHARN_MODEL"),
+        bench_engine_var("JEVHARN_BASE_URL"),
+    ]);
+
     let mut pod_spec = PodSpec {
         containers: vec![Container {
             name: BENCH_CONTAINER.to_string(),
             image: Some(b.spec.image.clone()),
             command: Some(command),
-            env: Some(vec![
-                var("KL_OWNER", owner.clone()),
-                var("KL_TEAM", team.clone()),
-                var("KL_BENCH", id.to_string()),
-                var("KL_MODEL", b.spec.model.clone()),
-                var("KL_REGISTRY_HOST", registry_host.to_string()),
-                var("KL_BENCH_IDLE_SECS", idle_secs.to_string()),
-                EnvVar {
-                    name: "NODE_NAME".into(),
-                    value_from: Some(EnvVarSource {
-                        field_ref: Some(ObjectFieldSelector { field_path: "spec.nodeName".into(), ..Default::default() }),
-                        ..Default::default()
-                    }),
-                    ..Default::default()
-                },
-                var("HOME", HOME_DIR.to_string()),
-                var("LANG", "C.UTF-8".to_string()),
-                // The sys-1 engine's credentials, from the bench-only `bench-engine` Secret
-                // (never `user-key`, which every workspace pod mounts whole). `optional: true`
-                // so a fleet without these entries still starts the pod —
-                // `harness/bench/src/runtime.ts::makeTurn` then reports "TYPESAFE_API_KEY is not
-                // set" itself rather than the pod hitting CreateContainerConfigError.
-                bench_engine_var("TYPESAFE_API_KEY"),
-                bench_engine_var("JEVHARN_API_KEY"),
-                bench_engine_var("JEVHARN_MODEL"),
-                bench_engine_var("JEVHARN_BASE_URL"),
-            ]),
+            env: Some(env),
             volume_mounts: Some(vec![
                 VolumeMount { name: "home".to_string(), mount_path: HOME_DIR.to_string(), mount_propagation: Some("HostToContainer".to_string()), ..Default::default() },
                 VolumeMount { name: "bench-folder".to_string(), mount_path: BENCH_DIR.to_string(), ..Default::default() },

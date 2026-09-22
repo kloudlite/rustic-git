@@ -12,7 +12,7 @@
 
 import { createHash } from "node:crypto";
 
-export type Compressed = { text: string; hash?: string; strategy: string; before: number; after: number };
+export type Compressed = { text: string; hash?: string; strategy: string; before: number; after: number; plain?: boolean };
 
 const MIN_CHARS = 800;
 const MAX_ITEMS = 15;
@@ -220,17 +220,58 @@ export function compress(text: string, query = ""): Compressed {
   if (text.length < MIN_CHARS || REFUSAL.test(text)) return pass(text);
 
   let result: Compressed;
+  let plain = false;
   try {
-    result = tryJsonArray(text, query) ?? trySearch(text) ?? tryDiff(text) ?? tryLog(text) ?? tryText(text);
+    const rule = tryJsonArray(text, query) ?? trySearch(text) ?? tryDiff(text) ?? tryLog(text);
+    if (rule) {
+      result = rule;
+    } else {
+      result = tryText(text);
+      plain = true;
+    }
   } catch {
     return pass(text);
   }
 
-  if (result.after >= result.before * 0.8) return pass(text); // overhead would exceed savings
+  if (result.after >= result.before * 0.8) return { ...pass(text), plain }; // overhead would exceed savings
   if (result.strategy === "table") return result; // lossless — nothing to retrieve
 
   const hash = remember(text);
-  return { ...result, hash, text: result.text + marker(result.before, result.after, hash) };
+  return { ...result, hash, plain, text: result.text + marker(result.before, result.after, hash) };
+}
+
+// ---- model-backed compression (Kompress) ---------------------------------------------------
+
+// Only the plain-text fallback path is worth sending to the model: a rule-based result (table,
+// search, diff, log) already exploited the shape's own redundancy, and json/table paths must
+// stay lossless — the model only ever gets what tryText got, so a failure here can only cost
+// the rules result, never a decompressable structural one.
+export async function compressWithModel(text: string, query = ""): Promise<Compressed> {
+  const c = compress(text, query);
+  const url = process.env.KL_KOMPRESS_URL;
+  if (!url || !c.plain) return c;
+
+  try {
+    const res = await fetch(`${url}/compress`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ content: text, target_ratio: null }),
+      signal: AbortSignal.timeout(2000),
+    });
+    if (!res.ok) return c;
+    const body = (await res.json()) as { compressed: string; original_tokens: number; compressed_tokens: number; compression_ratio: number };
+    if (typeof body.compressed !== "string" || body.compressed_tokens >= body.original_tokens * 0.8) return c; // same size gate as the rules
+    const hash = remember(text);
+    return {
+      text: body.compressed + marker(body.original_tokens, body.compressed_tokens, hash),
+      hash,
+      strategy: "kompress",
+      before: body.original_tokens,
+      after: body.compressed_tokens,
+    };
+  } catch {
+    return c; // network error, timeout, bad json — the rules result already stands
+  }
 }
 
 // ---- CCR retrieve tool ------------------------------------------------------------------------
