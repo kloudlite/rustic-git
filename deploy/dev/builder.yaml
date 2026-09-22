@@ -22,18 +22,6 @@ spec:
     requests:
       storage: 256Gi
 ---
-apiVersion: v1
-kind: PersistentVolumeClaim
-metadata:
-  name: dagger-state
-  namespace: kloudlite
-spec:
-  accessModes: [ReadWriteOnce]
-  storageClassName: managed-csi-premium
-  resources:
-    requests:
-      storage: 64Gi
----
 apiVersion: apps/v1
 kind: Deployment
 metadata:
@@ -149,17 +137,14 @@ spec:
             requests: { cpu: "2", memory: 2Gi }
             limits: { cpu: "8", memory: 8Gi }
           volumeMounts:
-            - { name: dagger-state, mountPath: /var/lib/dagger }
+            # /var/lib/dagger is the documented state path; a subPath of the work disk, not a
+            # second PVC — same pod, same RWO disk, no extra premium volume to pay for.
+            - { name: work, mountPath: /var/lib/dagger, subPath: dagger }
       volumes:
         - name: buildkit-sock
           emptyDir: {}
         - name: work
           persistentVolumeClaim: { claimName: dev-work }
-        # A separate PVC, not a subdirectory of dev-work: /var/lib/dagger is the documented mount
-        # point (docs.dagger.io/configuration/custom-runner — without it the engine is "extremely
-        # slow"), and the engine wants it as its own filesystem root, not a bind under /work.
-        - name: dagger-state
-          persistentVolumeClaim: { claimName: dagger-state }
         - name: k3s-kubeconfig
           secret: { secretName: kloudlite-slo-k3s-kubeconfig }
         - name: ssh-fast
