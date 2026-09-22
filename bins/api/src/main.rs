@@ -25,7 +25,7 @@ use std::sync::Arc;
 /// rule `crates/api`'s `user_identity` enforces), and the owner's `authorized_keys` for the
 /// Secret every workspace's sshd reads. Kept here rather than in either crate so
 /// `kloudlite-workspaces` never needs a dependency on `kloudlite-pulls` just for these lookups.
-struct Dir(Arc<kloudlite_pulls::directory::Directory>);
+struct Dir(Arc<kloudlite_pulls::directory::Directory>, Arc<kloudlite_storage::store::Store>);
 
 impl Dir {
     /// Handle in, email out. Every identity this process is handed comes off the JWT as a HANDLE,
@@ -66,7 +66,7 @@ impl kloudlite_workspaces::api::Directory for Dir {
     }
 
     async fn authorized_keys_for_owner(&self, owner: &str) -> Option<String> {
-        kloudlite_api::authorized_keys_for(&self.0, owner)
+        kloudlite_api::authorized_keys_for(&self.0, &self.1, owner)
             .await
             .inspect_err(|e| tracing::warn!(reason = "ssh-keys", %owner, error = %e, "directory.read.failed"))
             .ok()
@@ -357,7 +357,7 @@ async fn run() -> Result<()> {
                 kloudlite_workspaces::packages::resolve::Resolver::from_env(store.os.clone()),
             ));
             if let Some(dir) = directory.clone() {
-                state = state.with_directory(Arc::new(Dir(dir)));
+                state = state.with_directory(Arc::new(Dir(dir, store.clone())));
             }
             // In-cluster config when the pod has a ServiceAccount, else the operator's kubeconfig.
             // `None` is a legitimate dev configuration (no cluster) — workspace and environment

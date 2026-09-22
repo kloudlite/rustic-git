@@ -126,7 +126,10 @@ pub(super) fn login_env(name: &str, owner: &str, registry_host: &str) -> Vec<Env
 /// ponytail: `chown -R` walks the whole volume on every start; fine for source trees. `$H` is the
 /// persistent home hostPath and the rc files are seeded only if absent, so a person's own edits survive
 /// a restart and a new workspace alike; `~/workspaces/<id>` is a mount point inside it that the
-/// kubelet makes, which is why nothing here mkdirs it.
+/// kubelet makes, which is why nothing here mkdirs it. The seed also sets
+/// `receive.denyCurrentBranch updateInstead`: a sys-1 sub-session's clone pod pushes straight
+/// onto this pod's checked-out branch over SSH (spec §4), which plain git refuses by default —
+/// safe here because main never holds uncommitted edits when a push lands.
 pub(super) fn prelude(name: &str) -> String {
     let workspace_dir = workspace_dir(name);
     let profile = crate::packages::PROFILE_LINK;
@@ -148,6 +151,7 @@ pub(super) fn prelude(name: &str) -> String {
          H=/home/{SSH_USER}\n\
          mkdir -p $H/.config/fish $H/.config/zsh $H/.config/git $H/.local-cache/tmp\n\
          grep -qF '# kloudlite: derived state' $H/.config/git/ignore 2>/dev/null || cat /etc/kloudlite/gitignore-global >> $H/.config/git/ignore\n\
+         git config --global receive.denyCurrentBranch updateInstead\n\
          [ -e $H/.config/zsh/.zshrc ] || printf 'export PATH={path}\\neval \"$(dircolors -b)\"\\nzstyle \":completion:*\" list-colors \"${{(s.:.)LS_COLORS}}\"\\nalias ls=\"ls --color=auto\" grep=\"grep --color=auto\"\\neval \"$(starship init zsh)\"\\n' > $H/.config/zsh/.zshrc\n\
          [ -e $H/.config/fish/config.fish ] || printf 'set -gx PATH {path}\\nset -gx LS_COLORS (dircolors -b | string match -r \"LS_COLORS=.([^\\047]*)\")[2]\\nalias ls=\"ls --color=auto\"\\nalias grep=\"grep --color=auto\"\\nstarship init fish | source\\n' > $H/.config/fish/config.fish\n\
          SEED\n\

@@ -304,20 +304,49 @@ pub fn authorized_keys_union(sets: &[&[Credential]]) -> String {
     lines.iter().map(|l| format!("{l}\n")).collect()
 }
 
+/// `authorized_keys_union`'s output plus the owner's own platform key, deduped the same way.
+///
+/// Pure so the sys-1 clone-push test can assert on it directly without a directory or a store:
+/// a sub-session's clone pod pushes over SSH using the SAME platform key every workspace mounts
+/// (spec: Facts), so main's `authorized_keys` has to admit it or the push never authenticates.
+fn render_authorized_keys(union: &str, platform_key: Option<&str>) -> String {
+    let mut lines: Vec<&str> = union.lines().collect();
+    if let Some(k) = platform_key.map(str::trim).filter(|k| !k.is_empty()) {
+        lines.push(k);
+    }
+    lines.sort_unstable();
+    lines.dedup();
+    lines.iter().map(|l| format!("{l}\n")).collect()
+}
+
 /// The `authorized_keys` file for an owner namespace: a person's own keys, or every member's
-/// keys for a team. Keys belong to people; a namespace only ever sees a projection of them.
-pub async fn authorized_keys_for(db: &kloudlite_pulls::directory::Directory, owner: &str) -> Result<String> {
+/// keys for a team, plus the owner's platform key — unregistered as a `Credential` (it lives in
+/// `Store::user_key`, indexed by fingerprint for auth, not by owner for listing) so it would
+/// otherwise never appear here even though the auth path already accepts it.
+pub async fn authorized_keys_for(
+    db: &kloudlite_pulls::directory::Directory,
+    store: &kloudlite_storage::store::Store,
+    owner: &str,
+) -> Result<String> {
+    // A stored private key with no readable public half is skipped, not a hard failure: a
+    // corrupt row must not blank out every real member key in this file.
+    let platform_key = match store.user_key(owner).await? {
+        Some(private) => public_of_private(&private).ok().map(|(public, _)| public),
+        None => None,
+    };
     if let Some(u) = db.user_by_handle(owner).await? {
         let keys = db.credentials_for(&u.email, CredentialKind::SshKey).await?;
-        return Ok(authorized_keys_union(&[&keys]));
+        return Ok(render_authorized_keys(&authorized_keys_union(&[&keys]), platform_key.as_deref()));
     }
-    let Some(team) = db.get(owner).await? else { return Ok(String::new()) };
+    let Some(team) = db.get(owner).await? else {
+        return Ok(render_authorized_keys("", platform_key.as_deref()));
+    };
     let mut sets = Vec::with_capacity(team.members.len());
     for m in &team.members {
         sets.push(db.credentials_for(&m.user, CredentialKind::SshKey).await?);
     }
     let refs: Vec<&[Credential]> = sets.iter().map(Vec::as_slice).collect();
-    Ok(authorized_keys_union(&refs))
+    Ok(render_authorized_keys(&authorized_keys_union(&refs), platform_key.as_deref()))
 }
 
 /// `(name, email)` for git to commit as inside the owner's workspaces. A handle that is not a
@@ -1009,6 +1038,25 @@ mod tests {
             "ssh-ed25519 AAAA alice@laptop\nssh-rsa BBBB alice@desktop\n"
         );
         assert_eq!(authorized_keys_union(&[&[cred("old", "  ")][..]]), "");
+    }
+
+    /// The clone pod pushes into main's sshd with the platform key every pod mounts (spec:
+    /// Facts) — `authorized_keys_for` has to admit it even though it lives in `Store::user_key`,
+    /// not as a `Credential`, so it would otherwise never reach this file.
+    #[test]
+    fn authorized_keys_include_the_owners_platform_key() {
+        let union = authorized_keys_union(&[&[cred("laptop", "ssh-ed25519 AAAA alice@laptop")][..]]);
+        let keys = render_authorized_keys(&union, Some("ssh-ed25519 AAAAplatform kloudlite"));
+        assert!(keys.contains("ssh-ed25519 AAAAplatform kloudlite\n"), "{keys}");
+        assert!(keys.contains("ssh-ed25519 AAAA alice@laptop\n"), "{keys}");
+    }
+
+    /// A missing or unreadable platform key changes nothing — `render_authorized_keys` is what
+    /// `authorized_keys_for` falls back to when the stored private key does not parse.
+    #[test]
+    fn authorized_keys_with_no_platform_key_is_unchanged() {
+        let union = authorized_keys_union(&[&[cred("laptop", "ssh-ed25519 AAAA alice@laptop")][..]]);
+        assert_eq!(render_authorized_keys(&union, None), union);
     }
 
     /// A team's file is the union of its members' keys — one line per distinct key, sorted, so
