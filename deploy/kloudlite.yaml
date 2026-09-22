@@ -577,6 +577,17 @@ spec:
                   optional: true
                   items:
                     - { key: uri, path: KLOUDLITE_MONGO_URI }
+              # Hand-created per fleet (bench-keys brief); optional because a missing one must
+              # not stop the api — the bench pod then reports "TYPESAFE_API_KEY is not set"
+              # itself instead of the api failing to come up.
+              - secret:
+                  name: kloudlite-bench-engine
+                  optional: true
+                  items:
+                    - { key: typesafe, path: TYPESAFE_API_KEY }
+                    - { key: jevharn, path: JEVHARN_API_KEY }
+                    - { key: model, path: JEVHARN_MODEL }
+                    - { key: base-url, path: JEVHARN_BASE_URL }
 ---
 # A drain may not evict both api pods at once: this tier is the whole browse API and every /v1
 # write, and without the budget a two-node drain is a reschedule-long outage of both.

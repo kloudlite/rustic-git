@@ -351,6 +351,19 @@ async fn run() -> Result<()> {
             // Optional everywhere: unset means a failed probe run is recorded and shown on the
             // console, and nobody is messaged (design's Notify row).
             state = state.with_slo_webhook(kloudlite_core::secret::read("KLOUDLITE_SLO_WEBHOOK"));
+            // The bench pod's engine credentials, carried into the owner's `user-key` Secret.
+            // Only the user role ever calls `write_user_key`, but reading here is harmless
+            // either way and keeps the lookup in one place.
+            let bench_engine: std::collections::BTreeMap<String, String> = [
+                "TYPESAFE_API_KEY",
+                "JEVHARN_API_KEY",
+                "JEVHARN_MODEL",
+                "JEVHARN_BASE_URL",
+            ]
+            .into_iter()
+            .filter_map(|name| kloudlite_core::secret::read(name).map(|v| (name.to_string(), v)))
+            .collect();
+            state = state.with_bench_engine(bench_engine);
             // The package index: Nixhub, the mirrored index in our own object store, and that
             // same object store as the day-long resolution cache.
             state = state.with_resolver(Arc::new(

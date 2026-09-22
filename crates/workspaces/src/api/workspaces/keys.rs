@@ -136,7 +136,7 @@ pub(crate) async fn write_user_key(s: &ApiState, c: &kube::Client, ns: &str, own
             return;
         }
     };
-    let secret = crate::k8s::user_key_secret(owner, ns, &private, &material, &authorized, &registry_token);
+    let secret = crate::k8s::user_key_secret(owner, ns, &private, &material, &authorized, &registry_token, &s.bench_engine);
     if let Err(e) = api
         .patch(
             crate::k8s::USER_KEY_SECRET,
