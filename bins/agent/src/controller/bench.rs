@@ -201,16 +201,23 @@ pub async fn reconcile_bench(b: Arc<crd::Bench>, ctx: Arc<Ctx>) -> Result<Action
     };
     let (engine, vol_id, wt_id, quota_gb) = (ctx.engine.clone(), vol.name_any(), name.clone(), vol.spec.quota_gb);
     let result = super::timed("checkout", &name, tokio::task::spawn_blocking(move || {
-        engine.checkout(&vol_id, None, &wt_id)?;
-        engine.set_quota_worktree(&vol_id, &wt_id, quota_gb)?;
-        Ok::<_, kloudlite_workspaces::engine::ops::EngErr>(())
+        let path = engine.pool.worktree(&vol_id, &wt_id);
+        let checkout = engine.checkout(&vol_id, None, &wt_id).and_then(|()| engine.set_quota_worktree(&vol_id, &wt_id, quota_gb).map(|_| ()));
+        (path, checkout)
     }))
     .await
     .map_err(|e| ReconcileErr(e.to_string()))?;
-    match result {
+    let (path, checkout) = result;
+    match checkout {
         Ok(()) => {}
         Err(e) if e.0 == kloudlite_workspaces::engine::snapshot::WORKTREE_EXISTS => {}
         Err(e) => return Err(ReconcileErr(e.0)),
+    }
+    // The bench image runs as uid 1000 with no root prelude to chown its own home (unlike the
+    // workspace pod), so the worktree the agent just created as root must be handed over here.
+    // Fresh or pre-existing (`WORKTREE_EXISTS`), both need it — an older pass may have left it root.
+    if unsafe { libc::geteuid() } == 0 {
+        std::os::unix::fs::chown(&path, Some(k8s::SSH_UID as u32), Some(k8s::SSH_UID as u32)).map_err(|e| ReconcileErr(e.to_string()))?;
     }
 
     let ns = crd::ws_namespace(&owner, &team);

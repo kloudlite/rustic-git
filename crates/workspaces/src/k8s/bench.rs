@@ -89,7 +89,7 @@ pub fn bench_pod(b: &Bench, id: &str, pool: &str, runtime_class: Option<&str>, r
             command: Some(command),
             env: Some(env),
             volume_mounts: Some(vec![
-                VolumeMount { name: "live".to_string(), mount_path: HOME_DIR.to_string(), mount_propagation: Some("HostToContainer".to_string()), ..Default::default() },
+                VolumeMount { name: "live".to_string(), mount_path: HOME_DIR.to_string(), ..Default::default() },
                 VolumeMount { name: "user-key".to_string(), mount_path: USER_KEY_PATH.to_string(), read_only: Some(true), ..Default::default() },
                 VolumeMount { name: "attach".into(), mount_path: "/etc/resolv.conf".into(), read_only: Some(true), ..Default::default() },
                 VolumeMount { name: "tmp".to_string(), mount_path: "/tmp".to_string(), ..Default::default() },
