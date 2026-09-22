@@ -2,8 +2,6 @@ import { choice, noul, type Answer, type Ask, type ChoiceAnswer, type NoulAnswer
 import type { Decision } from "./chooser.ts";
 import { ladder } from "./chooser.ts";
 import { ACT, type Tool } from "./tools.ts";
-import { statSync } from "node:fs";
-import { resolve } from "node:path";
 
 export type Route = { step: "run" | "confirm"; tool: Tool; destructive: boolean; soft?: boolean } | { step: "escalate" };
 
@@ -61,7 +59,8 @@ export function freeFromLiterals(tool: Tool, instruction: string, cwd?: string):
   if (free.length !== 1 || !literal) return {};
   // Seen live: "start the server with `node index.js` in sample-node-app" ran the literal in the project root and failed. A directory named
   // outside the backticks is where the command runs.
-  const isDir = (w: string) => { try { return !!cwd && !w.startsWith("/") && !w.includes("..") && statSync(resolve(cwd, w)).isDirectory(); } catch { return false; } };
+  // Directory detection needs the pod (fs is remote now); the model's own `cd` written literally in the instruction still works.
+  const isDir = (_w: string) => false;
   const dir = tool.name === "bash" && !/\bcd\s/.test(literal) ? instruction.replace(/`[^`]+`/g, " ").split(/\s+/).map((w) => w.replace(/^["'(]+|["').,:;]+$/g, "")).find((w) => w && w !== "." && isDir(w)) : undefined;
   return { [free[0].name]: dir ? `cd ${dir} && ${literal}` : literal };
 }

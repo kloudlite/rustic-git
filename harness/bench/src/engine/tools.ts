@@ -1,14 +1,9 @@
-import { execFile, spawn } from "node:child_process";
-import { promisify } from "node:util";
-import { existsSync } from "node:fs";
-import { readFile, writeFile, mkdir, appendFile, stat, readdir } from "node:fs/promises";
-import { resolve, sep, dirname, basename, matchesGlob, join, relative } from "node:path";
+import { dirname, basename, matchesGlob, join } from "node:path";
 import { child, chain, type Envelope } from "./task.ts";
 import { choice, noul, type Ask, type ChoiceAnswer, type NoulAnswer } from "./jev.ts";
 import { pickBlocks } from "./pick.ts";
 import { ladder } from "./chooser.ts";
-
-const exec = promisify(execFile);
+import { remote, tryRemote, text } from "./remote.ts";
 
 // The threshold chooser.ts uses for tool-choice confidence; defined here since chooser.ts imports tools.ts and re-exports it.
 export const ACT = 0.9;
@@ -40,105 +35,25 @@ export type Tool = { name: string; description: string; brief?: string; shows?: 
 
 export const RESPONSES = ["done", "failed", "blocked", "other"];
 
-// Async so a long command never blocks the main session. Failing commands are results, not exceptions.
+// Async so a long command never blocks the main session. Failing commands are results, not exceptions
+// (the pod's own rule, mirrored by tryRemote). Quoted into one `sh -c` line since the pod's exec tool takes a command string.
+const q = (s: string) => `'${s.replace(/'/g, "'\\''")}'`;
 async function sh(cwd: string, file: string, args: string[]): Promise<string> {
-  try {
-    const { stdout, stderr } = await exec(file, args, { cwd, maxBuffer: 16 * 1024 * 1024 });
-    return stdout + stderr;
-  } catch (e: any) {
-    return `${e.stdout ?? ""}${e.stderr ?? ""}` || String(e);
-  }
+  return text(await tryRemote(cwd, "exec", { cmd: [file, ...args].map(q).join(" ") }));
 }
 
 export let BG_WAIT_MS = 10000;
 export const setBgWaitMs = (ms: number) => { BG_WAIT_MS = ms; };
 
-// ponytail: process table lives in memory only, lost on crash/restart; a running child then becomes unreachable (still running, but untracked).
-type Proc = { command: string; child: ReturnType<typeof spawn>; running: boolean; code: number | null };
-const procs = new Map<string, Proc>();
-let procSeq = 0;
-
-// An id with what it runs ("p1 npm run dev"): a bare id gives Jev nothing to choose by.
-export const procIds = async () => [...procs.entries()].map(([id, p]) => `${id} pid ${p.child.pid} ${p.running ? "running" : "exited"} ${p.command.slice(0, 120)}`);
-// A proc param arrives as the whole candidate line ("p1 pid 19079 running npm start"), a bare id, or an OS pid the LLM read off lsof: all name the same process.
-// ponytail: only the spawned pid matches, not its children (lsof shows the node child of an npm parent); the error lists the tracked ids for that case.
-const findProc = (given = "") => { const w = given.trim().split(" ")[0]; return procs.has(w) ? w : [...procs.entries()].find(([, p]) => String(p.child.pid) === w)?.[0]; };
-const tracked = async () => (await procIds()).join("; ") || "none";
-// What is running right now, for the frames Jev and the LLM decide from: without it a "restart" cannot know there is a tracked server to stop.
-export const procSummary = () => [...procs.entries()].map(([id, p]) => `${id} ${p.running ? "running" : `exited(${p.code})`}: ${p.command.slice(0, 120)}`);
-
-// The tracked child is the `sh -c` wrapper. Seen live: "cd app && node index.js" left node listening after its sh was killed, so the
-// command gets its own process group (detached) and the whole group is signalled.
-function killProc(p: Proc) {
-  try { process.kill(-p.child.pid!, "SIGTERM"); } catch { p.child.kill(); }
-}
-
-export function killAllProcs() {
-  for (const p of procs.values()) if (p.running) killProc(p);
-}
-
-const SERVICE_WAIT_MS = 1000; // long enough for an instant crash (port in use, file not found) to report as failed
-
-// Jev decides whether the command is a service. `shown` is the text Jev judges (a script's body, not "npm run start").
-async function isService(shown: string, ctx?: RunCtx): Promise<boolean> {
-  if (!ctx?.ask) return false;
-  try {
-    const a = (await ctx.ask({ command: shown, instruction: ctx.envelope?.instruction, chain: ctx.envelope && chain(ctx.envelope) },
-      { service: noul("Does this command keep running until someone stops it (a server, watcher or dev process), rather than finishing by itself?") })).service as NoulAnswer;
-    ctx.trace?.(`${"  ".repeat(ctx.envelope?.depth ?? 0)}[picked] service: ${a.noul >= 0.5 ? "yes" : "no"} (${a.noul.toFixed(2)})`);
-    return a.noul >= 0.5;
-  } catch { return false; }
-}
-
-// The start of each project file a failed command's output names: the error often points at a file no step has read.
-// ponytail: first 2 named files, 12 lines each; a range around the reported line if heads prove too little.
-async function namedHeads(cwd: string, out: string): Promise<string> {
-  const named = (await files(cwd).catch(() => [] as string[])).filter((f) => out.includes(f)).sort((a, b) => out.lastIndexOf(b) - out.lastIndexOf(a)).slice(0, 2);
-  const heads = await Promise.all(named.map(async (f) => `${f} begins:\n${(await readFile(resolve(cwd, f), "utf8").catch(() => "")).split("\n").slice(0, 12).join("\n")}`));
-  return heads.length ? `\nFiles the output names:\n${heads.join("\n\n")}` : "";
-}
-
-// Spawns `command`. A service backgrounds after SERVICE_WAIT_MS; anything else waits up to BG_WAIT_MS as a fallback for a wrong guess.
-async function shBg(cwd: string, command: string, ctx?: RunCtx, shown = command): Promise<string> {
-  const wait = (await isService(shown, ctx)) ? Math.min(SERVICE_WAIT_MS, BG_WAIT_MS) : BG_WAIT_MS;
-  if (ctx?.signal?.aborted) return "interrupted"; // aborted while isService()/wait awaited above: never spawn
-  const logDir = resolve(cwd, ".jevharn", "procs");
-  const id = `p${++procSeq}`;
-  const c = spawn("sh", ["-c", command], { cwd, detached: true });
-  let out = "";
-  const proc: Proc = { command, child: c, running: true, code: null };
-  c.stdout?.on("data", (d) => { out += d; appendFile(resolve(logDir, `${id}.log`), d).catch(() => {}); });
-  c.stderr?.on("data", (d) => { out += d; appendFile(resolve(logDir, `${id}.log`), d).catch(() => {}); });
-  const exited = new Promise<void>((res) => c.on("close", (code) => { proc.running = false; proc.code = code; res(); }));
-  await mkdir(logDir, { recursive: true });
-  const timeout = new Promise<"timeout">((res) => setTimeout(() => res("timeout"), wait));
-  // ponytail: only this tool honours an interrupt (the step's own child process); a write or delete already under way finishes on its own.
-  // Resolve at once if already aborted (spawned between the pre-check above and here): addEventListener("abort") on an
-  // already-aborted signal never fires.
-  const aborted = new Promise<"aborted">((res) => {
-    if (ctx?.signal?.aborted) return res("aborted");
-    ctx?.signal?.addEventListener("abort", () => res("aborted"), { once: true });
-  });
-  const result = await Promise.race([exited.then(() => "exited" as const), timeout, aborted]);
-  if (result === "aborted") { killProc(proc); return "interrupted"; }
-  // A long output keeps its start and its end (the error is most often at the end); the whole of it is in the log file.
-  const cutOut = out.length <= 8000 ? out : `${out.slice(0, 3000)}\n… ${out.length - 8000} chars cut, the full output is in .jevharn/procs/${id}.log …\n${out.slice(-5000)}`;
-  if (result === "exited") return cutOut + (proc.code ? `\n[exit code ${proc.code}]${await namedHeads(cwd, out)}` : ""); // the code is what tells a failed command from a quiet one
-  procs.set(id, proc);
-  return `started in background as ${id} (pid ${c.pid}); the process is alive after ${wait / 1000}s, which does not show it serves anything. Its output so far:\n${out.slice(0, 8000)}`;
-}
-
-function inside(cwd: string, p: string): string {
-  const abs = resolve(cwd, p);
-  if (abs !== resolve(cwd) && !abs.startsWith(resolve(cwd) + sep)) throw new Error(`${p} is outside the project`);
-  return abs;
-}
+// Background processes are tracked by the pod now, not here: candidates and the planner's "what's running" line both
+// come from process_output with no id, which the pod answers with a listing (its own bash_output shape).
+export const procIds = async (cwd: string) => text(await tryRemote(cwd, "process_output", {})).split("\n").filter(Boolean);
 
 const PROMPT_FILES = 60; // project paths shown to the params writer, so it knows what it can read before it writes a value
 // ponytail: cached per cwd for CACHE_MS, so 2-3 candidate calls in one tool call share a single git ls-files/package.json read; can read up to 2s stale after a write.
 const CACHE_MS = 2000;
 const filesCache = new Map<string, { at: number; v: string[] }>();
-export const invalidateCache = (cwd: string) => { filesCache.delete(cwd); ignoredCache.delete(cwd); scriptCache.delete(cwd); digestCache.delete(cwd); };
+export const invalidateCache = (cwd: string) => { filesCache.delete(cwd); scriptCache.delete(cwd); digestCache.delete(cwd); };
 async function cached(cache: Map<string, { at: number; v: string[] }>, cwd: string, compute: () => Promise<string[]>): Promise<string[]> {
   const hit = cache.get(cwd);
   if (hit && Date.now() - hit.at < CACHE_MS) return hit.v;
@@ -146,33 +61,16 @@ async function cached(cache: Map<string, { at: number; v: string[] }>, cwd: stri
   cache.set(cwd, { at: Date.now(), v });
   return v;
 }
-// An ignored folder is still part of the project when it declares commands of its own (an app kept out of the repo): its files are
-// listed like any other's. An ignored folder without a manifest (installed packages, build output) is known by name only, and an
-// ignored plain file (a secrets file) is not listed at all. Seen live: an ignored app folder did not exist for any list, and
-// "start the server in <that folder>" started the root project instead.
-const IGNORED_FILES = 200;
-const ignoredCache = new Map<string, { at: number; v: string[] }>();
-const ignoredDirs = (cwd: string) => cached(ignoredCache, cwd, async () =>
-  (await sh(cwd, "git", ["ls-files", "--others", "--ignored", "--exclude-standard", "--directory"]).catch(() => "")).split("\n").filter((e) => e.endsWith("/")).map((e) => e.slice(0, -1)));
-const files = (cwd: string) => cached(filesCache, cwd, async () => {
-  const listed = (await sh(cwd, "git", ["ls-files", "--cached", "--others", "--exclude-standard"])).split("\n").filter(Boolean);
-  const ignored = await ignoredDirs(cwd), skip = new Set(ignored.map((d) => d.split("/").at(-1)));
-  for (const dir of ignored) {
-    if (!Object.keys(MANIFESTS).some((m) => existsSync(join(cwd, dir, m)))) continue;
-    // ponytail: nested entries are skipped by the name of any ignored folder, not by the ignore rules themselves, and the walk stops at IGNORED_FILES; run git check-ignore per entry if a name clash hides a real file.
-    const inside = (await readdir(join(cwd, dir), { recursive: true, withFileTypes: true }))
-      .filter((e) => e.isFile() && !relative(join(cwd, dir), e.parentPath).split(sep).some((part) => skip.has(part)))
-      .map((e) => join(dir, relative(join(cwd, dir), e.parentPath), e.name).split(sep).join("/"));
-    listed.push(...inside.slice(0, IGNORED_FILES));
-  }
-  return listed;
-});
+// File listing is the pod's own glob now (it already applies the project's ignore rules); the ignored-but-manifested-folder
+// special case this used to walk by hand is the pod's `paths::confine`/glob concern, not the bench's.
+const ignoredDirs = async (_cwd: string) => [] as string[];
+const files = (cwd: string) => cached(filesCache, cwd, async () =>
+  ((await remote(cwd, "glob", { pattern: "**/*" })) as { paths: string[] }).paths);
 // Candidates read "name: body" so Jev sees what each script does ("dev: node index.js").
 // A script is a named command a project file declares. Every such file in the project counts, not the root's alone: a script of an
 // app in a folder is led by that folder ("api/dev: node index.js") and runs in it. Seen live: with the root's scripts only, "run the
 // server" started the wrong project's start script.
 type Script = { key: string; label: string; command: string };
-const q = (t: string) => `'${t.replace(/'/g, "'\\''")}'`;
 // The package manager is the one whose lockfile sits beside the package.json; npm when there is none.
 const LOCKS: [string, string][] = [["pnpm-lock.yaml", "pnpm"], ["yarn.lock", "yarn"], ["bun.lock", "bun"], ["bun.lockb", "bun"]];
 // ponytail: TOML is read for `key = "text"` lines under a named table only, with no parser installed; a task written as an inline
@@ -201,10 +99,15 @@ async function scriptList(cwd: string): Promise<Script[]> {
   if (hit && Date.now() - hit.at < CACHE_MS) return hit.v;
   const all = await files(cwd).catch(() => [] as string[]);
   const found = [...new Set([...Object.keys(MANIFESTS), ...all.filter((f) => basename(f) in MANIFESTS)])].sort((x, y) => x.split("/").length - y.split("/").length);
-  const v = (await Promise.all(found.map(async (f) => {
+  // One batched read for every manifest file; a `files` entry the pod could not read (missing, unreadable) is skipped rather than thrown.
+  const read = (await remote(cwd, "read", { paths: found }).catch(() => ({ files: [] }))) as { files?: { path: string; content?: string; error?: string }[] };
+  const byPath = new Map((read.files ?? []).map((f) => [f.path, f]));
+  const v = found.flatMap((f) => {
+    const got = byPath.get(f);
+    if (!got || got.error || got.content === undefined) return [];
     const dir = dirname(f) === "." ? "" : `${dirname(f)}/`;
-    try { return MANIFESTS[basename(f)](await readFile(resolve(cwd, f), "utf8"), dir, all).map(([name, body, run]) => ({ key: dir + name, label: `${dir}${name}: ${body}`, command: dir ? `cd ${q(dir)} && ${run}` : run })); } catch { return []; }
-  }))).flat();
+    try { return MANIFESTS[basename(f)](got.content, dir, all).map(([name, body, run]) => ({ key: dir + name, label: `${dir}${name}: ${body}`, command: dir ? `cd ${q(dir)} && ${run}` : run })); } catch { return []; }
+  });
   scriptCache.set(cwd, { at: Date.now(), v });
   return v;
 }
@@ -213,24 +116,15 @@ const scripts = async (cwd: string) => (await scriptList(cwd)).map((x) => x.labe
 export const scriptOf = async (cwd: string, given: string) => { const all = await scriptList(cwd); return all.find((x) => x.label === given)
   ?? all.filter((x) => given === x.key || given.startsWith(`${x.key}: `)).sort((x, y) => y.key.length - x.key.length)[0]; };
 export const ALL = "all files";
-// -E so alternation (a|b) works; git grep exits 1 with no output when nothing matches.
-async function search(cwd: string, pattern: string): Promise<string> {
-  // Exit status decides "no matches" (git grep exits 1, no stdout), not the failure message text: a real fatal (bad flag, not a repo) must reach the LLM as-is.
-  const run = async (mode: string) => {
-    try { return { stdout: (await exec("git", ["grep", "-n", mode, "--untracked", "-e", pattern], { cwd, maxBuffer: 16 * 1024 * 1024 })).stdout, code: 0 }; }
-    catch (e: any) { return { stdout: e.stdout ?? "", code: e.code ?? 1, stderr: e.stderr ?? "" }; }
-  };
-  let r = await run("-E");
-  // A pattern that is not a valid regex (unbalanced parens in "get('/'") is searched as plain text instead of costing the LLM a retry.
-  if (r.code !== 0 && !r.stdout && /fatal:/.test((r as { stderr?: string }).stderr ?? "")) r = await run("-F");
-  if (r.code === 1 && !r.stdout) return "no matches";
-  if (r.code !== 0) return `${r.stdout}${(r as { stderr?: string }).stderr ?? ""}` || "no matches";
-  return r.stdout;
+// The pod's grep does the search now; "no matches" is a result, never an exception (mirrors the old git-grep exit-1 handling).
+async function search(cwd: string, pattern: string, glob?: string): Promise<string> {
+  const r = (await remote(cwd, "grep", { pattern, glob, mode: "content" }).catch((e) => `error: ${(e as Error).message}`)) as
+    { matches?: { path: string; line: number; text: string }[] } | string;
+  if (typeof r === "string") return r;
+  return r.matches?.length ? r.matches.map((m) => `${m.path}:${m.line}:${m.text}`).join("\n") : "no matches";
 }
-// Sections closed so far, for the recall tool's candidates ("S2 move todo routes to todos.js").
-const sectionLabels = async (cwd: string): Promise<string[]> => {
-  try { return (JSON.parse(await readFile(resolve(cwd, ".jevharn", "sections.json"), "utf8")) as { id: string; label: string }[]).map((s) => `${s.id} ${s.label}`); } catch { return []; }
-};
+// Task 6 gives recall its own bench tool, answered from the session log; the engine's own section files are gone with local fs.
+const sectionLabels = async (_cwd: string): Promise<string[]> => [];
 
 const RIVAL = 0.2; // a candidate at or above this share of Jev's vote is a rival worth showing the user
 const READ_MAX = 16000; // chars; a file up to this size is returned whole, a larger one as an outline to read by line range
@@ -256,22 +150,20 @@ async function digestedPaths(cwd: string, paths: string[]): Promise<string[]> {
   const hit = digestCache.get(cwd);
   const cache = hit && Date.now() - hit.at < CACHE_MS ? hit.v : new Map<string, string>();
   if (!hit || Date.now() - hit.at >= CACHE_MS) digestCache.set(cwd, { at: Date.now(), v: cache });
-  return Promise.all(paths.map(async (p) => {
-    if (cache.has(p)) return `${p}: ${cache.get(p)}`;
-    let d = "";
-    try {
-      const st = await stat(inside(cwd, p));
-      if (st.size <= DIGEST_MAX_BYTES) d = fileDigest(await readFile(inside(cwd, p), "utf8"));
-    } catch { /* unreadable or binary: digest stays empty, path still listed */ }
-    cache.set(p, d);
-    return d ? `${p}: ${d}` : p;
-  }));
+  const missing = paths.filter((p) => !cache.has(p));
+  if (missing.length) {
+    // Batched read; no per-path size check (the pod owns confine/size) — approximate the old byte cap with total_lines*80, ponytail: a real char count needs the pod to report bytes.
+    const read = (await remote(cwd, "read", { paths: missing }).catch(() => ({ files: [] }))) as { files?: { path: string; content?: string; total_lines?: number }[] };
+    for (const f of read.files ?? []) cache.set(f.path, f.content !== undefined && (f.total_lines ?? 0) * 80 <= DIGEST_MAX_BYTES ? fileDigest(f.content) : "");
+    for (const p of missing) if (!cache.has(p)) cache.set(p, "");
+  }
+  return paths.map((p) => { const d = cache.get(p) ?? ""; return d ? `${p}: ${d}` : p; });
 }
 
 // A file is never narrowed by relevance: what comes back is exact, and the reader asks for more by line range.
 // ponytail: the outline is the digest regex per line, JS/TS-biased; a file it finds nothing in shows its head instead.
-function fileView(path: string, text: string, range?: string, max = READ_MAX): string {
-  const rows = text.split("\n"), num = (from: number, to: number) => rows.slice(from - 1, to).map((l, i) => `${from + i}| ${l}`).join("\n");
+function fileView(path: string, body: string, range?: string, max = READ_MAX): string {
+  const rows = body.split("\n"), num = (from: number, to: number) => rows.slice(from - 1, to).map((l, i) => `${from + i}| ${l}`).join("\n");
   const m = /(\d+)\D+(\d+)/.exec(range ?? "");
   if (m) return `${path} lines ${m[1]}-${Math.min(+m[2], rows.length)} of ${rows.length}\n${num(+m[1], +m[2])}`;
   if (text.length <= max) return `${path} (whole file, ${rows.length} lines)\n${num(1, rows.length)}`;
@@ -335,12 +227,15 @@ export const TOOLS: Tool[] = [
     outcomes: ["succeeded", "failed", "started"],
     messages: { succeeded: "Succeeded:\n{tail}", failed: "Failed:\n{tail}", started: "Started in background:\n{tail}" },
     safe: (a) => !a.shell && !!a.command && a.command !== "other",
-    run: async (cwd, a, ctx) => {
-      if (a.shell) return shBg(cwd, a.shell, ctx);
-      // A given script name is checked against package.json: only a real script may skip the confirm.
-      const script = await scriptOf(cwd, a.command);
-      if (!script) throw new Error(`no package.json script "${a.command.split(":")[0]}"`);
-      return shBg(cwd, script.command, ctx, script.label);
+    run: async (cwd, a) => {
+      let command = a.shell;
+      if (!command && a.command !== "other") {
+        // A given script name is checked against package.json: only a real script may skip the confirm; anything else is run as-is (a direct test call, or a name that just is a shell command).
+        const script = await scriptOf(cwd, a.command);
+        command = script ? script.command : a.command;
+      }
+      if (!command) throw new Error(`no package.json script "${a.command.split(":")[0]}"`);
+      return text(await tryRemote(cwd, "exec", { cmd: command, timeout_ms: BG_WAIT_MS }));
     } },
   // One tool for looking at code: a named file, or "all files" for a concept search. grep does exact text/regex search.
   { name: "read", shows: "numbered lines (N: text) of the file; a very large file as an outline of its definitions, to be read again by line range", description: "Read, find, get or show code or text: a whole file, a route, function, section or answer inside a file, or which files hold a concept the instruction names when the file is not known. For an exact text or regex, grep does that.", brief: "Read a file, or find which files hold a concept",
@@ -371,13 +266,15 @@ export const TOOLS: Tool[] = [
           .slice(0, CONCEPT_FILES);
         // ponytail: a picked binary file is read as text; add a skip by extension when Jev ever picks one.
         const outs = await Promise.all(paths.map(async (p) => {
-          const raw = await readFile(inside(cwd, p), "utf8").catch(() => "");
-          if (!raw) return "";
-          return fileView(p, raw, undefined, SEARCH_BODY);
+          const r = await tryRemote(cwd, "read", { path: p });
+          if (typeof r === "string") return "";
+          return fileView(p, (r as { content: string }).content, undefined, SEARCH_BODY);
         }));
         return outs.filter(Boolean).join("\n\n");
       }
-      return fileView(a.path, await readFile(inside(cwd, a.path), "utf8"), a.lines);
+      const r = await tryRemote(cwd, "read", { path: a.path });
+      if (typeof r === "string") return r;
+      return fileView(a.path, (r as { content: string }).content, a.lines);
     } },
   // Exact text or regex, across the project or narrowed to one file. read's "all files" branch instead finds files by what the instruction means, a concept, not a pattern.
   { name: "grep", shows: "the matching lines as path:line:text; nothing means no matches", description: "Find which files and lines mention an exact name, string, route or setting", brief: "Find files/lines matching an exact text or regex",
@@ -388,11 +285,7 @@ export const TOOLS: Tool[] = [
     ],
     outcomes: ["found", "not_found"],
     messages: { found: "Found:\n{tail}", not_found: "No matches." },
-    run: async (cwd, a) => {
-      const out = await search(cwd, a.pattern);
-      if (out === "no matches" || !a.path || a.path === ALL) return out;
-      return out.split("\n").filter((l) => l.startsWith(`${a.path}:`)).join("\n") || "no matches";
-    } },
+    run: async (cwd, a) => search(cwd, a.pattern, !a.path || a.path === ALL ? undefined : a.path) },
   // A patch for a file that already exists (an exact old_string that must occur once), the whole contents for a new file or a full replacement.
   { name: "edit", shows: "what changed, as a short -/+ rendering of the old and new text; the file is changed on disk", description: "Change part of an existing file: add, remove, rename, modify or fix code or text in it (a route, a function, a line, a config value, a bug). Not for a new file or a full replacement: write does that. Not for deleting, renaming or moving a whole file: bash does that", brief: "Change part of an existing file",
     params: [{ ...pathParam, question: "Which existing file does this step change?" },
@@ -401,18 +294,16 @@ export const TOOLS: Tool[] = [
     outcomes: ["edited", "refused"],
     messages: { edited: "Edited the file.", refused: "Could not edit the file: {detail}" },
     run: async (cwd, a, ctx) => {
-      const p = inside(cwd, a.path);
-      const old = await readFile(p, "utf8").catch(() => undefined);
-      if (old === undefined) throw new Error(`${a.path} does not exist: use write to create it`);
       const oldString = a.old_string ?? "", newString = a.new_string ?? "";
       if (!oldString) throw new Error("old_string must not be empty: use write to create or replace a file");
       if (oldString === newString) throw new Error("old_string and new_string are the same: nothing to change");
-      const n = old.split(oldString).length - 1;
-      if (n === 0) throw new Error(`old_string is not in ${a.path}: read ${a.path} and copy the text exactly`);
-      if (n > 1) throw new Error(`old_string occurs ${n} times in ${a.path}: add surrounding lines so it occurs once`);
-      const next = old.replace(oldString, newString);
-      await sound(a.path, next, ctx);
-      await writeFile(p, next);
+      // sound() checks the new whole-file text; the pod's own edit does the exactly-once match and reports the uniqueness error.
+      const before = await tryRemote(cwd, "read", { path: a.path });
+      if (typeof before === "string") throw new Error(`${a.path} does not exist: use write to create it`);
+      const preview = ((before as { content: string }).content).replace(oldString, newString);
+      await sound(a.path, preview, ctx);
+      const r = await tryRemote(cwd, "edit", { files: [{ path: a.path, edits: [{ old: oldString, new: newString }] }] });
+      if (typeof r === "string") throw new Error(r.replace(/^error: /, ""));
       invalidateCache(cwd);
       return `edited ${a.path}\n${cut(oldString).split("\n").map((l) => `-${l}`).join("\n")}\n${cut(newString).split("\n").map((l) => `+${l}`).join("\n")}`;
     } },
@@ -423,8 +314,8 @@ export const TOOLS: Tool[] = [
     outcomes: ["written", "refused"],
     messages: { written: "Wrote the file.", refused: "Could not write the file: {detail}" },
     run: async (cwd, a, ctx) => {
-      const p = inside(cwd, a.path);
-      const old = await readFile(p, "utf8").catch(() => undefined);
+      const before = await tryRemote(cwd, "read", { path: a.path });
+      const old = typeof before === "string" ? undefined : (before as { content: string }).content;
       // Overwriting an existing file is the one risky case: a fragment sent as the whole file wipes the rest.
       // Seen live: a 159-char "export function remove…" replaced all of lib/store.js, and every later edit failed.
       if (old !== undefined) {
@@ -439,8 +330,8 @@ export const TOOLS: Tool[] = [
         if (!(answer.type === "noul" && answer.noul >= DECIDE)) throw new Error("content is not the complete file: use edit to change part of it, or send the complete file");
       }
       await sound(a.path, a.content, ctx);
-      await mkdir(dirname(p), { recursive: true });
-      await writeFile(p, a.content);
+      const r = await tryRemote(cwd, "write", { path: a.path, content: a.content });
+      if (typeof r === "string") throw new Error(r.replace(/^error: /, ""));
       invalidateCache(cwd);
       // The written text is not shown back. Probed live: with it in the output the step judge went from "next" 0.69 to unsure (0.11 to 0.14) on
       // a good write, and every good write would have gone to the user. Junk is stopped before the write instead: plainValue.
@@ -459,38 +350,19 @@ export const TOOLS: Tool[] = [
     params: [{ name: "section", description: "closed section id and label", kind: "closed", candidates: sectionLabels }],
     outcomes: ["shown", "not_found"],
     messages: { shown: "{tail}", not_found: "No such section." },
-    run: async (cwd, a) => {
-      const id = a.section.split(" ")[0];
-      const sections = JSON.parse(await readFile(resolve(cwd, ".jevharn", "sections.json"), "utf8").catch(() => "[]")) as { id: string; first: number; last: number }[];
-      const s = sections.find((x) => x.id === id);
-      if (!s) throw new Error("no such section");
-      const lines = (await readFile(resolve(cwd, ".jevharn", "messages.jsonl"), "utf8").catch(() => "")).trim().split("\n").filter(Boolean).map((l) => JSON.parse(l));
-      return lines.filter((m: { id: number; section: string }) => m.section === id && m.id >= s.first && m.id <= s.last).map((m: { role: string; text: string }) => `[${m.role}] ${m.text}`).join("\n\n") || "no such section";
-    } },
+    // Task 6 gives recall its own bench tool, answered from the session log.
+    run: async () => "error: recall is answered from the session log" },
   // With no id (or an id nothing tracks), this lists every tracked process instead: the one place to check what a bash step backgrounded.
   { name: "bash_output", shows: "the latest output lines of that background process, or, with no id given, one line per tracked process: id, pid, state, command", description: "Show the log output a background process (a started server or watcher) has printed so far, or, with no id, list every tracked background process", brief: "Show a backgrounded command's output, or list them all",
     params: [{ name: "proc", description: "background process id", kind: "closed", candidates: procIds, requiredUnless: () => false }],
     outcomes: ["shown", "listed", "none", "not_found"],
     messages: { shown: "{tail}", listed: "Processes:\n{tail}", none: "No background processes.", not_found: "No such process." },
-    run: async (cwd, a) => {
-      a.proc = findProc(a.proc) ?? "";
-      if (!a.proc) return [...procs.entries()].map(([id, p]) => `${id} pid ${p.child.pid} ${p.running ? "running" : `exited with code ${p.code}`} ${p.command}`).join("\n");
-      const log = await readFile(resolve(cwd, ".jevharn", "procs", `${a.proc}.log`), "utf8").catch(() => "");
-      return log.slice(-8000);
-    } },
+    run: async (cwd, a) => text(await tryRemote(cwd, "process_output", { id: a.proc || undefined, since: 0 })) },
   { name: "kill_shell", shows: "which background process was stopped; it no longer runs", description: "Stop a background process (a started server or watcher)", brief: "Stop a background process",
     params: [{ name: "proc", description: "background process id", kind: "closed", candidates: procIds, question: "Which background process does this step stop?" }],
     outcomes: ["stopped", "not_found"],
     messages: { stopped: "{tail}.", not_found: "No such process." },
-    run: async (_cwd, a) => {
-      a.proc = findProc(a.proc) ?? a.proc;
-      const p = procs.get(a.proc);
-      // The error names what can be stopped here, and what cannot. Seen live: the LLM passed an lsof pid four plans in a row, each answered "no such process".
-      if (!p) throw new Error(`"${a.proc}" is not a background process started here (started here: ${await tracked()}); a process started elsewhere is stopped with a bash kill`);
-      killProc(p);
-      // A bare id reads as nothing to the step judge ("p1": did it stop?), so the output says what happened.
-      return `stopped background process ${a.proc} (${p.command.slice(0, 120)})`;
-    } },
+    run: async (cwd, a) => text(await tryRemote(cwd, "process_kill", { id: a.proc })) },
 ];
 
 const ind = (ctx?: RunCtx) => "  ".repeat(ctx?.envelope?.depth ?? 0);
@@ -499,8 +371,9 @@ const ind = (ctx?: RunCtx) => "  ".repeat(ctx?.envelope?.depth ?? 0);
 // The file a tool is about to change, for the params writer.
 async function fileFor(cwd: string, args: Record<string, string>): Promise<string> {
   if (!args.path) return "";
-  const text = await readFile(inside(cwd, args.path), "utf8").catch(() => "");
-  return text && text.length <= FILE_IN_PROMPT ? `Current contents of ${args.path}:\n${text}\n\n` : "";
+  const r = await tryRemote(cwd, "read", { path: args.path });
+  const body = typeof r === "string" ? "" : (r as { content: string }).content;
+  return body && body.length <= FILE_IN_PROMPT ? `Current contents of ${args.path}:\n${body}\n\n` : "";
 }
 
 // An LLM's value for a named field is not always the bare string asked for. Seen live: the whole params object, as a JSON string, inside the

@@ -1,9 +1,10 @@
-import { existsSync, readFileSync, writeFileSync, mkdirSync } from "node:fs";
+import { existsSync } from "node:fs";
 import { join } from "node:path";
 import { Type } from "@sinclair/typebox";
 import { choice, noul, type Ask, type Answer, type ChoiceAnswer, type NoulAnswer } from "./jev.ts";
 import { chooserQuestions, decide, ladder } from "./chooser.ts";
 import { TOOLS, procIds, TALK, RESPONSES, runTool, plainValue, ACT, DECIDE, type User, type Tool } from "./tools.ts";
+import { tryRemote } from "./remote.ts";
 import { child, root, MAX_DEPTH, JEV_FRAME_CAP, type Envelope } from "./task.ts";
 import { pickBlocks, formatBlocks } from "./pick.ts";
 import { freeFromLiterals } from "./router.ts";
@@ -330,12 +331,15 @@ Tools the steps can use: ${TOOLS.filter((t) => t.name !== "tell_user").map((t) =
 // Seen live: "start the server" and "stop the server", back to back, each began by listing the files and reading package.json; every such lookup turn is one more planner call.
 // ponytail: a plain capped list, oldest lines dropped first, never checked against the project; the planner is told a note may be stale. A note that a failure disproves is not yet removed.
 const NOTES = ".jevharn/project.md", MAX_NOTES = 30;
-export const readNotes = (cwd: string) => { try { return readFileSync(join(cwd, NOTES), "utf8").split("\n").filter(Boolean); } catch { return []; } };
-export function addNotes(cwd: string, notes: string[]) {
+export const readNotes = async (cwd: string) => {
+  const r = await tryRemote(cwd, "read", { path: NOTES });
+  return typeof r === "string" ? [] : (r as { content: string }).content.split("\n").filter(Boolean);
+};
+export async function addNotes(cwd: string, notes: string[]) {
   const fresh = notes.map((n) => n.replace(/\s+/g, " ").trim().slice(0, 200)).filter(Boolean);
   if (fresh.length === 0) return;
-  const all = [...new Set([...readNotes(cwd), ...fresh])].slice(-MAX_NOTES);
-  try { mkdirSync(join(cwd, ".jevharn"), { recursive: true }); writeFileSync(join(cwd, NOTES), all.join("\n") + "\n"); } catch { /* notes are a saving, never a failure */ }
+  const all = [...new Set([...(await readNotes(cwd)), ...fresh])].slice(-MAX_NOTES);
+  await tryRemote(cwd, "write", { path: NOTES, content: `${all.join("\n")}\n` }); // notes are a saving, never a failure: tryRemote turns a failed write into a string result, not a throw
 }
 
 export function makePlanner(llm: Llm, cwd: string, look?: () => ReturnType<typeof defineTool>): Planner {
@@ -345,7 +349,7 @@ export function makePlanner(llm: Llm, cwd: string, look?: () => ReturnType<typeo
       name: "submit_plan", label: "submit_plan", description: "Hand over the plan. Call this once.",
       parameters: Type.Object({ steps: Type.Optional(Type.Array(Type.Object({ id: Type.Optional(Type.String()), needs: Type.Optional(Type.Array(Type.String())), instruction: Type.String(), detail: Type.Optional(Type.String()), expect: Type.Optional(Type.String()), stopOn: Type.Optional(Type.Record(Type.String(), Type.String())), command: Type.Optional(Type.String()) }))), subplans: Type.Optional(Type.Array(Type.Object({ id: Type.String(), needs: Type.Optional(Type.Array(Type.String())), goal: Type.String(), done_when: Type.Optional(Type.Array(Type.Object({ fact: Type.String(), files: Type.Optional(Type.Array(Type.String())) }))), steps: Type.Optional(Type.Array(Type.Object({ id: Type.Optional(Type.String()), needs: Type.Optional(Type.Array(Type.String())), instruction: Type.String(), detail: Type.Optional(Type.String()), expect: Type.Optional(Type.String()), stopOn: Type.Optional(Type.Record(Type.String(), Type.String())), command: Type.Optional(Type.String()) }))) }))), done_when: Type.Optional(Type.Array(Type.Object({ fact: Type.String(), files: Type.Optional(Type.Array(Type.String())) }))), complete: Type.Optional(Type.Boolean()), answer: Type.Optional(Type.String()), notes: Type.Optional(Type.Array(Type.String())) }),
       execute: async (_id, input) => { const i = input as { steps?: LooseSteps; subplans?: (Omit<LooseSubplan, "doneWhen"> & { done_when?: DoneWhen[] })[]; done_when?: DoneWhen[]; complete?: boolean; answer?: string; notes?: string[] };
-        addNotes(cwd, i.notes ?? []);
+        await addNotes(cwd, i.notes ?? []);
         const plain = (steps?: LooseSteps) => steps?.map((st) => ({ ...st, instruction: plainValue(st.instruction, "instruction") ?? "" }));
         plan = { steps: plain(i.steps), subplans: i.subplans?.map(({ done_when, ...sp }) => ({ ...sp, goal: plainValue(sp.goal, "goal") ?? "", doneWhen: (done_when ?? []).slice(0, MAX_CRITERIA), steps: plain(sp.steps) })), doneWhen: (i.done_when ?? []).slice(0, MAX_CRITERIA), complete: i.complete, answer: plainValue(i.answer, "answer") }; return { content: [{ type: "text", text: "ok" }], details: {}, terminate: true }; },
     });
@@ -354,9 +358,9 @@ export function makePlanner(llm: Llm, cwd: string, look?: () => ReturnType<typeo
     // ponytail: three well-known spots; add more as stacks turn up.
     const own = [".venv/bin", "venv/bin", "node_modules/.bin"].filter((d) => existsSync(join(cwd, d)));
     // The planner starts each task with nothing carried over, so what runs in the background is told to it. Seen live: "stop server" spent three lookups and an lsof to find a process this session had started as p1.
-    const bg = await procIds();
+    const bg = await procIds(cwd);
     const running = bg.length > 0 ? `\n\nBackground processes started here (bash_output reads one, kill_shell stops one): ${bg.join("; ")}` : "";
-    const known = readNotes(cwd);
+    const known = await readNotes(cwd);
     const notes = known.length > 0 ? `\n\nKnown about this project from earlier tasks (may be stale; look up only what is not here):\n${known.join("\n")}` : "";
     await session.prompt((own.length > 0 ? `${task}\n\nThe project's own tools are in: ${own.join(", ")} (run them by that path, for example ${own[0]}/<tool>)` : task) + running + notes);
     // A long task history makes the model answer in text instead of calling the tool: one nudge in the same session before giving up.
