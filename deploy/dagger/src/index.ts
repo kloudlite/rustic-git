@@ -253,6 +253,11 @@ export class Kloudlite {
       .withFile("package.json", source.file("harness/package.json"))
       .withFile("package-lock.json", source.file("harness/package-lock.json"))
       .withExec(["npm", "ci", "--omit=dev"])
+      // The bench's own deps (ai, @ai-sdk/*, @sinclair/typebox) live in bench/package.json, not the
+      // harness root — the fleet's first 228b7610 bench died at import with ERR_MODULE_NOT_FOUND.
+      .withFile("bench/package.json", source.file("harness/bench/package.json"))
+      .withFile("bench/package-lock.json", source.file("harness/bench/package-lock.json"))
+      .withExec(["sh", "-c", "cd bench && npm ci --omit=dev"])
     return dag
       .container()
       .from("node:24-bookworm-slim")
@@ -264,6 +269,7 @@ export class Kloudlite {
       .withFile("/opt/harness/package-lock.json", source.file("harness/package-lock.json"))
       .withDirectory("/opt/harness/node_modules", deps.directory("/opt/harness/node_modules"))
       .withFile("/opt/harness/bench/package.json", source.file("harness/bench/package.json"))
+      .withDirectory("/opt/harness/bench/node_modules", deps.directory("/opt/harness/bench/node_modules"))
       .withDirectory("/opt/harness/bench/src", source.directory("harness/bench/src"))
       .withDirectory("/opt/harness/pi", source.directory("harness/pi"))
       .withExec(["sh", "-c",
