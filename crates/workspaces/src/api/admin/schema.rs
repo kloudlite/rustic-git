@@ -176,6 +176,7 @@ const CLUSTER_ENV_VARS: &[(&str, &str)] = &[
     ("defaultImage", "WS_DEFAULT_IMAGE"),
     ("gitInitImage", "WS_GIT_INIT_IMAGE"),
     ("runtimeClass", "WS_RUNTIME_CLASS"),
+    ("kompressUrl", "WS_KOMPRESS_URL"),
 ];
 
 fn cluster_default(name: &str) -> serde_json::Value {
@@ -197,6 +198,7 @@ fn cluster_default(name: &str) -> serde_json::Value {
         "defaultImage" => serde_json::Value::String(String::new()),
         "gitInitImage" => defaults::git_init_image().into(),
         "runtimeClass" => serde_json::Value::String(String::new()),
+        "kompressUrl" => serde_json::Value::String(String::new()),
         _ => serde_json::Value::Null,
     }
 }

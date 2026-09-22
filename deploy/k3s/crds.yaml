@@ -2384,6 +2384,11 @@
                         "nullable": true,
                         "type": "string"
                       },
+                      "kompressUrl": {
+                        "description": "URL of the region's Kompress service the bench engine POSTs plain text to; empty = off.\nStamped into a bench pod at create.",
+                        "nullable": true,
+                        "type": "string"
+                      },
                       "nixTimeoutSecs": {
                         "description": "Nix build timeout. 60..=7200 seconds.",
                         "format": "uint64",

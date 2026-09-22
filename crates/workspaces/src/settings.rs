@@ -27,6 +27,7 @@ pub struct AgentSettings {
     pub default_image: String,
     pub git_init_image: String,
     pub runtime_class: String,
+    pub kompress_url: String,
 }
 
 impl Default for AgentSettings {
@@ -59,6 +60,7 @@ impl AgentSettings {
             default_image: std::env::var("WS_DEFAULT_IMAGE").unwrap_or_default(),
             git_init_image: std::env::var("WS_GIT_INIT_IMAGE").unwrap_or_else(|_| crd::defaults::git_init_image()),
             runtime_class: std::env::var("WS_RUNTIME_CLASS").unwrap_or_default(),
+            kompress_url: std::env::var("WS_KOMPRESS_URL").unwrap_or_else(|_| crd::defaults::kompress_url()),
         }
     }
 
@@ -90,6 +92,7 @@ impl AgentSettings {
         over!(default_image);
         over!(git_init_image);
         over!(runtime_class);
+        over!(kompress_url);
         self
     }
 }
