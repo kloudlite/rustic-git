@@ -33,6 +33,14 @@ test("a turn.start without an end is open; an interrupted one is not", () => {
   assert.equal(unread(readRows(f)).length, 1);
 });
 
+test("an error end leaves the rows unread", () => {
+  const f = tmp();
+  append(f, u("a"));
+  append(f, { kind: "turn.start", ts: 2, turn: 1 });
+  append(f, { kind: "turn.end", ts: 3, turn: 1, error: "llm down" });
+  assert.deepEqual(unread(readRows(f)).map((r) => r.text), ["a"]);
+});
+
 test("a missing file reads as no rows", () => {
   assert.deepEqual(readRows(tmp()), []);
   assert.equal(nextTurn([]), 1);

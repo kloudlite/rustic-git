@@ -16,7 +16,9 @@ export const append = (file: string, row: Row) => appendLine(file, row);
 
 export function unread(rows: Row[]) {
   let from = 0;
-  rows.forEach((r, i) => { if (r.kind === "turn.end") from = i + 1; });
+  // A failed turn's `turn.end` is not a boundary: the user rows that fed it were never actually
+  // answered, so they must stay unread for the next attempt to pick up.
+  rows.forEach((r, i) => { if (r.kind === "turn.end" && r.error === undefined) from = i + 1; });
   return rows.slice(from).filter((r): r is Extract<Row, { kind: "user" }> => r.kind === "user");
 }
 
