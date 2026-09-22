@@ -181,16 +181,16 @@ pub(crate) async fn create_bench(
             guard_alloc(&s, &caller.name, false, &bench_cost(&b.spec.resources)).await?;
         }
         let name = b.metadata.name.clone().unwrap_or_default();
-        let patch = json!({"spec": {"desiredState": DesiredState::Running, "wakeAt": now()}});
+        // The image is re-stamped on every start, not only at create: a bench outlives a repin,
+        // and one frozen at creation kept crashing on a build the fleet had already replaced
+        // (hourly bench.start, 2026-09-22).
+        let patch = json!({"spec": {"desiredState": DesiredState::Running, "wakeAt": now(), "image": bench_image()}});
         let b = api.patch(&name, &PatchParams::default(), &Patch::Merge(&patch)).await.map_err(kube_err)?;
         return Ok(Json(bench_doc(&b, &region)).into_response());
     }
     guard_alloc(&s, &caller.name, false, &bench_cost(&crd::PodResources::default())).await?;
     let id = crd::bench_id(&caller.name, &team);
-    let image = std::env::var("KLOUDLITE_BENCH_IMAGE")
-        .ok()
-        .filter(|i| !i.is_empty())
-        .unwrap_or_else(|| crate::model::DEFAULT_BENCH_IMAGE.to_string());
+    let image = bench_image();
     let mut b = crd::Bench::new(
         &id,
         crd::BenchSpec {
@@ -342,4 +342,11 @@ pub(crate) async fn detach_bench(
         .await
         .map_err(kube_err)?;
     Ok(StatusCode::ACCEPTED.into_response())
+}
+
+fn bench_image() -> String {
+    std::env::var("KLOUDLITE_BENCH_IMAGE")
+        .ok()
+        .filter(|i| !i.is_empty())
+        .unwrap_or_else(|| crate::model::DEFAULT_BENCH_IMAGE.to_string())
 }
