@@ -17,12 +17,11 @@ mod ws;
 /// parallel threads: every test that sets one holds this first, or they interleave and read each
 /// other's directory. ONE lock for the whole binary — `config` and `bench` each had their own,
 /// which excluded nothing between them and only passed under nextest's process-per-test.
-/// Poisoning is irrelevant — a panicking test leaves stale env, not a corrupt lock — so the guard
-/// is taken back from a poisoned mutex rather than unwrapped. A std mutex held across an await is
-/// fine here: `#[tokio::test]` is a current-thread runtime.
+/// A tokio mutex, so the async bench tests hold it across their awaits without clippy's
+/// `await_holding_lock`; the sync config tests take it with `blocking_lock`. It never poisons.
 #[cfg(test)]
 mod test_env {
-    pub static ENV: std::sync::Mutex<()> = std::sync::Mutex::new(());
+    pub static ENV: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
 }
 
 use clap::{Parser, Subcommand};

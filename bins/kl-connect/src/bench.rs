@@ -130,7 +130,7 @@ mod tests {
     #[tokio::test]
     async fn each_local_connection_gets_its_own_tunnel_and_token() {
         let _ = rustls::crypto::ring::default_provider().install_default();
-        let _env = ENV.lock().unwrap_or_else(|e| e.into_inner());
+        let _env = ENV.lock().await;
         let counter = Arc::new(AtomicUsize::new(0));
         let app = Router::new()
             .route("/v1/bench/session", post(session_handler_ok))
@@ -163,7 +163,7 @@ mod tests {
     #[tokio::test]
     async fn a_sleeping_bench_is_waited_for_and_the_early_bytes_arrive() {
         let _ = rustls::crypto::ring::default_provider().install_default();
-        let _env = ENV.lock().unwrap_or_else(|e| e.into_inner());
+        let _env = ENV.lock().await;
         let counter = Arc::new(AtomicUsize::new(0));
         let upgrades = Arc::new(AtomicUsize::new(0));
 

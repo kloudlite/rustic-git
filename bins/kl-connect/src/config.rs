@@ -138,7 +138,7 @@ mod tests {
     /// known_hosts would have shouted.
     #[test]
     fn a_changed_host_key_is_refused_not_adopted() {
-        let _env = ENV.lock().unwrap_or_else(|e| e.into_inner());
+        let _env = ENV.blocking_lock();
         let d = tempfile::tempdir().unwrap();
         std::env::set_var("KL_CONFIG_DIR", d.path());
         super::pin_host_key("ws-1", "ssh-ed25519 AAAAfirst").unwrap();
@@ -167,7 +167,7 @@ mod tests {
     #[test]
     #[cfg(unix)]
     fn config_is_written_private() {
-        let _env = ENV.lock().unwrap_or_else(|e| e.into_inner());
+        let _env = ENV.blocking_lock();
         use std::os::unix::fs::PermissionsExt;
         let d = tempfile::tempdir().unwrap();
         let dir = d.path().join("kl-connect");
@@ -216,7 +216,7 @@ mod tests {
     #[test]
     #[cfg(unix)]
     fn the_config_dir_is_dot_config_kl_connect_everywhere() {
-        let _env = ENV.lock().unwrap_or_else(|e| e.into_inner());
+        let _env = ENV.blocking_lock();
         std::env::remove_var("KL_CONFIG_DIR");
         std::env::set_var("XDG_CONFIG_HOME", "/xdg");
         assert_eq!(super::dir(), std::path::Path::new("/xdg/kl-connect"));
