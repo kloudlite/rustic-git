@@ -56,7 +56,7 @@ export class Scheduler {
       if (slots <= 0) break;
       if (row.state === "closed" || row.archived) continue;
       const s = this.actor(row);
-      if (s.running || !s.hasUnread()) continue;
+      if (s.running || !s.isPending()) continue;
       slots--;
       void s.turn().finally(() => this.kick());
     }

@@ -2,7 +2,7 @@
 // time; everything it knows between turns is re-read from the rows, so a restart loses nothing but
 // the turn that was in flight, which boot marks `interrupted` and never resumes.
 import { TOOLS, type Tool, type User } from "./engine/index.ts";
-import { append, readRows, unread, nextTurn, openTurn, type Row } from "./rows.ts";
+import { append, readRows, unread, nextTurn, openTurn, pending, type Row } from "./rows.ts";
 import type { SessionRow } from "./sessions.ts";
 
 export type TurnCtx = { prompt: string; cwd: string; tools: Tool[]; user: User; readOnly: boolean; log: (step: string) => void; signal: AbortSignal; history: Row[] };
@@ -42,6 +42,7 @@ export class Session {
 
   rows() { return readRows(this.file); }
   hasUnread() { return unread(this.rows()).length > 0; }
+  isPending() { return pending(this.rows()); }
   receive(from: "person" | number, text: string, childTurn?: number) { append(this.file, { kind: "user", ts: Date.now(), from, text, ...(childTurn === undefined ? {} : { childTurn }) }); }
 
   tools(): Tool[] {

@@ -72,3 +72,20 @@ test("a closed session never runs", async () => {
   await tick();
   assert.deepEqual(ran, []);
 });
+
+test("a failed turn is not re-run until a new row arrives", async () => {
+  let calls = 0;
+  const { list, sched } = setup(async () => { calls++; throw new Error("boom"); });
+  const s = list.create(undefined, { tier: "main", state: "open", workspace: "w" });
+  append(list.logFile(s), { kind: "user", ts: 1, from: "person", text: "go" });
+  sched.boot();
+  await tick();
+  assert.equal(calls, 1);
+  sched.kick();
+  await tick();
+  assert.equal(calls, 1); // no new row: not re-run by the end-of-turn re-kick
+  sched.get(s.seq)!.receive("person", "again");
+  sched.kick();
+  await tick();
+  assert.equal(calls, 2);
+});

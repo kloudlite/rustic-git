@@ -3,7 +3,7 @@ import assert from "node:assert/strict";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import { append, readRows, unread, openTurn, nextTurn, lastEnd, type Row } from "../src/rows.ts";
+import { append, readRows, unread, openTurn, nextTurn, lastEnd, pending, type Row } from "../src/rows.ts";
 
 const tmp = () => path.join(fs.mkdtempSync(path.join(os.tmpdir(), "rows-")), "1.jsonl");
 const u = (text: string, ts = 1): Row => ({ kind: "user", ts, from: "person", text });
@@ -39,6 +39,17 @@ test("an error end leaves the rows unread", () => {
   append(f, { kind: "turn.start", ts: 2, turn: 1 });
   append(f, { kind: "turn.end", ts: 3, turn: 1, error: "llm down" });
   assert.deepEqual(unread(readRows(f)).map((r) => r.text), ["a"]);
+});
+
+test("pending is false after an error end until a new user row", () => {
+  const f = tmp();
+  append(f, u("a"));
+  append(f, { kind: "turn.start", ts: 2, turn: 1 });
+  append(f, { kind: "turn.end", ts: 3, turn: 1, error: "llm down" });
+  assert.equal(pending(readRows(f)), false);
+  assert.equal(unread(readRows(f)).length, 1);
+  append(f, u("b", 4));
+  assert.equal(pending(readRows(f)), true);
 });
 
 test("a missing file reads as no rows", () => {

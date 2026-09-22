@@ -22,6 +22,10 @@ export function unread(rows: Row[]) {
   return rows.slice(from).filter((r): r is Extract<Row, { kind: "user" }> => r.kind === "user");
 }
 
+// a user row after the LAST end, error or not — what makes a session runnable; unread() is what the
+// next turn reads, and after an error that is more
+export const pending = (rows: Row[]) => { let i = rows.length - 1; for (; i >= 0; i--) if (rows[i].kind === "turn.end") break; return rows.slice(i + 1).some((r) => r.kind === "user"); };
+
 export function openTurn(rows: Row[]): number | undefined {
   let open: number | undefined;
   for (const r of rows) {
