@@ -6,11 +6,10 @@ import { Idle } from "./idle.ts";
 /**
  * harness-bench's surface. Where it listens is main's choice: the pod IP
  * behind the platform's gateway-only NetworkPolicy, or loopback on a laptop.
- * Each session's RPC is pi's own JSONL framing, one message per frame; ids are
- * the client's and are rewritten only for the trip through pi (RpcChild mints
- * its own), so two devices can both send id "1".
+ * Each session's RPC is one JSON message per WebSocket frame; ids are the
+ * client's own and are echoed back unchanged, so two devices can both send id "1".
  */
-const status = (e: Error) => (/no session/.test(e.message) ? 404 : /read-only|not writable|in flight|only open session|belongs to/.test(e.message) ? 409 : 400);
+const status = (e: Error) => (/no session/.test(e.message) ? 404 : /read-only|not writable|in flight|only open session|belongs to|is closed/.test(e.message) ? 409 : 400);
 
 const TOO_LARGE = "request body too large";
 const MAX_BODY = 64 * 1024 * 1024;
@@ -65,6 +64,9 @@ export function serve(bench: Bench, port: number, host = "127.0.0.1", idle = new
         if (p.length === 3 && m === "GET" && p[2] === "messages") return send(res, 200, await bench.messages(p[1], n("after"), n("limit")));
         if (p.length === 3 && m === "POST" && p[2] === "btw") return send(res, 200, await bench.btw(p[1], String((await body(req)).question ?? "")));
         if (p.length === 3 && m === "GET" && p[2] === "btw") return send(res, 200, bench.listBtw(p[1]));
+        if (p.length === 3 && m === "GET" && p[2] === "children") return send(res, 200, await bench.children(p[1]));
+        if (p.length === 3 && m === "POST" && p[2] === "send") return send(res, 200, await bench.send(p[1], String((await body(req)).text ?? "")));
+        if (p.length === 3 && m === "POST" && p[2] === "abort") { await bench.abort(p[1]); return send(res, 204); }
       }
       if (m === "GET" && u.pathname === "/exchanges") {
         const s = u.searchParams.get("session"), w = u.searchParams.get("workspace");
@@ -73,11 +75,11 @@ export function serve(bench: Bench, port: number, host = "127.0.0.1", idle = new
       }
       if (p[0] === "workspaces") {
         // A thread never opened has no history yet, which is an empty one, not a missing route.
-        const thread = (id: string) => (bench.sessions.get(id) ? bench.messages(id, n("after"), n("limit")) : Promise.resolve({ messages: [], total: 0 }));
+        const eph = (id: string) => (bench.sessions.get(id) ? bench.messages(id, n("after"), n("limit")) : Promise.resolve({ messages: [], total: 0 }));
         if (p.length === 3 && p[2] === "session" && m === "POST") return send(res, 200, await bench.openWorkspace(p[1]));
-        if (p.length === 3 && p[2] === "messages" && m === "GET") return send(res, 200, await thread(`w-${p[1]}`));
+        if (p.length === 3 && p[2] === "messages" && m === "GET") return send(res, 200, await bench.workspaceMessages(p[1], n("after"), n("limit")));
         if (p.length === 5 && p[2] === "eph" && p[4] === "session" && m === "POST") return send(res, 200, await bench.openEphemeral(p[1], p[3]));
-        if (p.length === 5 && p[2] === "eph" && p[4] === "messages" && m === "GET") return send(res, 200, await thread(`e-${p[3]}`));
+        if (p.length === 5 && p[2] === "eph" && p[4] === "messages" && m === "GET") return send(res, 200, await eph(`e-${p[3]}`));
       }
       if (m === "GET" && u.pathname === "/tasks") return send(res, 200, bench.tasks.all());
       if (m === "GET" && u.pathname === "/procs") return send(res, 200, bench.procs.all());

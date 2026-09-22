@@ -1,34 +1,39 @@
 import fs from "node:fs";
 import path from "node:path";
-import { ExchangeLog, type Exchange } from "./exchanges.ts";
+import { ExchangeLog } from "./exchanges.ts";
 import { Writable } from "./guard.ts";
-import { Procs, Tasks, type ProcRow } from "./ledger.ts";
-import { page, transcript } from "./reader.ts";
-import { RpcChild, type PiEvent } from "./rpc-child.ts";
+import { Procs, Tasks } from "./ledger.ts";
+import { Platform } from "./platform.ts";
+import { setBackend, httpBackend } from "./engine/remote.ts";
+import { readRows, type Row } from "./rows.ts";
+import { Scheduler } from "./scheduler.ts";
+import { Session, type Turn } from "./session.ts";
+import { Subs } from "./sub.ts";
 import { SessionList, type SessionRow } from "./sessions.ts";
 import { readJson, replaceJson } from "./log.ts";
 
 export type BenchEvent = { type: string; [k: string]: unknown };
-export type BenchOpts = { dir: string; readOnly: boolean; model: string; bin?: string; extDir?: string };
+export type BenchOpts = { dir: string; readOnly: boolean; model: string; turn: Turn; platform?: Platform; extDir?: string };
 
-const TOOL: Record<string, string> = { bash: "Bash", read: "Read", write: "Write", edit: "Edit", grep: "Grep", glob: "Glob", ls: "List" };
-const argOf = (name: string, args: Record<string, unknown>) =>
-  name === "bash" ? String(args.command ?? "") : String(args.path ?? args.file_path ?? args.pattern ?? JSON.stringify(args)).slice(0, 200);
-/** How long a btw fork may run before it is stopped and the call rejects. */
-const BTW_TIMEOUT_MS = 5 * 60_000;
+/** Everything a person's list/rows page shows: rows plus a page total. `messages` is kept for the old electron UI. */
+function page<T>(all: T[], after = 0, limit = all.length): { rows: T[]; messages: T[]; total: number } {
+  const rows = all.slice(after, after + limit);
+  return { rows, messages: rows, total: all.length };
+}
+
 // A workspace or ephemeral id becomes a path segment: a DNS label, like the object it names.
 const WS_ID = /^[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?$/;
-/** Only bench sessions count as "an open session"; a workspace thread never stands in for one. */
+/** Only bench (top) sessions count as "an open session"; a workspace thread never stands in for one. */
 const isBench = (s: SessionRow) => (s.kind ?? "bench") === "bench";
-/** A session id the bench mints: never a path walk, never a btw fork. */
+/** A session id the bench mints: never a path walk. */
 const SESSION_ID = /^(bench|s-\d+|[we]-[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?)$/;
 /** `file` is accepted and ignored: import always rewrites it to the copied file. */
 const IMPORT_FIELDS = new Set(["id", "name", "seq", "created", "lastActive", "archived", "model", "kind", "workspace", "target", "file"]);
 
 /**
- * One person's bench in one team: the list, a pi per open session, and the
- * logs beside them. The only writer of the folder's harness files; pi writes
- * its own session JSONL. Every device is a view of this object.
+ * One person's bench in one team: the session tree runs on the sys-1 engine
+ * (Scheduler/Session/Subs), and this object is the only writer of the folder's
+ * harness files. Every device is a view of this object.
  */
 export class Bench {
   readonly sessions: SessionList;
@@ -36,12 +41,13 @@ export class Bench {
   readonly tasks: Tasks;
   readonly procs: Procs;
   readonly writable: Writable;
+  readonly sched: Scheduler;
+  readonly subs: Subs;
   private opts: BenchOpts;
-  private children = new Map<string, RpcChild>();
-  private listeners = new Set<(ev: BenchEvent & { pi?: string }) => void>();
-  /** Sessions between agent_start and agent_end: a turn nobody watches still holds the bench up. */
-  private turning = new Set<string>();
+  private listeners = new Set<(ev: BenchEvent) => void>();
   private btwSeq = new Map<string, number>();
+  /** A person-facing `ask_user` with no parent: resolved by the next `send()` on that session instead of another user row. */
+  private asks = new Map<number, (answer: string) => void>();
 
   constructor(opts: BenchOpts) {
     this.opts = opts;
@@ -51,17 +57,19 @@ export class Bench {
     this.tasks = new Tasks(opts.dir);
     this.procs = new Procs(opts.dir);
     this.writable = new Writable(opts.dir, (ok, reason) => this.emit({ type: "writable", ok, reason }));
+    this.sched = new Scheduler(this.sessions, (row) => this.make(row));
+    this.subs = new Subs(this.sessions, this.sched, opts.platform ?? (undefined as unknown as Platform), (ws) => this.backendFor(ws));
   }
 
   get readOnly(): boolean {
     return this.opts.readOnly;
   }
 
-  onEvent(fn: (ev: BenchEvent & { pi?: string }) => void): () => void {
+  onEvent(fn: (ev: BenchEvent) => void): () => void {
     this.listeners.add(fn);
     return () => this.listeners.delete(fn);
   }
-  private emit(ev: BenchEvent & { pi?: string }) {
+  private emit(ev: BenchEvent) {
     for (const fn of this.listeners) fn(ev);
   }
   private write<T>(fn: () => T): T | undefined {
@@ -72,114 +80,72 @@ export class Bench {
     }
   }
 
+  private async backendFor(ws: string): Promise<void> {
+    if (!this.opts.platform) return; // no platform (tests): leave the backend unset
+    setBackend(ws, httpBackend(await this.opts.platform.tools(ws)));
+  }
+
+  private make(row: SessionRow): Session {
+    const hooks = {
+      delegate: (s: Session, t: string, i: string) => this.subs.delegate(s, t, i),
+      tell: (s: Session, m: string) => this.emit({ type: "row", session: s.row.id, row: { kind: "tell", text: m } }),
+      askPerson: (s: Session, q: string) => this.askPerson(s, q),
+    };
+    const s = new Session(row, this.sessions.logFile(row), this.opts.turn, hooks, (r) => this.emit({ type: "row", session: row.id, row: r }));
+    // The scheduler (and Subs.delegate/finish) set onAnswer on every session it makes; a sub's
+    // answer must always go through Subs.finish (push-back, clone delete), even across a
+    // bench restart, so the setter is pinned rather than left to whoever assigns last.
+    if (row.tier === "sub") Object.defineProperty(s, "onAnswer", { get: () => (c: Session, e: Extract<Row, { kind: "turn.end" }>) => this.subs.finish(c, e), set: () => {} });
+    // A main never carries `parent` (Subs.toMain is delegation, not parentage), so the scheduler's
+    // default parent-only routing has nowhere to deliver a main's answer. Route it to whichever
+    // session(s) sent the `user` rows this turn actually answered, read back from the log itself.
+    if (row.tier === "main") Object.defineProperty(s, "onAnswer", { get: () => (c: Session, e: Extract<Row, { kind: "turn.end" }>) => this.deliverMain(c, e), set: () => {} });
+    return s;
+  }
+
+  private deliverMain(child: Session, end: Extract<Row, { kind: "turn.end" }>) {
+    if (end.answer === undefined) return;
+    const rows = readRows(child.file);
+    // The user rows a turn answers are the ones between the previous turn.end (or the log start)
+    // and this turn's own turn.start — unread() in rows.ts derives a turn's input the same way.
+    const start = rows.findIndex((r) => r.kind === "turn.start" && r.turn === end.turn);
+    let from0 = 0;
+    for (let i = start - 1; i >= 0; i--) if (rows[i].kind === "turn.end") { from0 = i + 1; break; }
+    const senders = new Set(rows.slice(from0, start).filter((r) => r.kind === "user" && typeof r.from === "number").map((r) => (r as { from: number }).from));
+    for (const from of senders) this.sched.get(from)?.receive(child.row.seq, end.answer, end.turn);
+    this.sched.kick();
+  }
+
+  private askPerson(s: Session, question: string): Promise<string> {
+    if (s.row.parent !== undefined) {
+      // The child's turn ends now; the parent's next delegate to it carries the answer (spec §4/§5).
+      const parent = this.sessions.bySeq(s.row.parent)!;
+      this.sched.get(parent.seq)!.receive(s.row.seq, question);
+      this.sched.kick();
+      return Promise.resolve("asked the parent; its answer arrives as a message");
+    }
+    return new Promise((resolve) => {
+      this.asks.set(s.row.seq, resolve);
+      this.emit({ type: "row", session: s.row.id, row: { kind: "turn.step", ts: Date.now(), turn: s.current ?? -1, step: `ask:${question}` } });
+    });
+  }
+
   async start(): Promise<void> {
     if (this.opts.readOnly) return;
-    // A new process holds none of the old one's children.
     for (const row of this.write(() => this.tasks.markLost()) ?? []) this.emit({ type: "task", row });
     if (this.write(() => this.procs.markLost())?.length) this.emit({ type: "procs", rows: this.procs.all() });
-    if (!this.sessions.all().some((s) => !s.archived && isBench(s))) this.write(() => this.sessions.create(this.opts.model));
-    for (const s of this.sessions.all().filter((x) => !x.archived)) this.open(s);
+    for (const s of this.sessions.all().filter((x) => x.tier === "main" && x.workspace)) await this.backendFor(s.workspace!);
+    this.sched.boot();
   }
 
   async stop(): Promise<void> {
-    const done = [...this.children.values()].map((c) => c.stop());
-    this.children.clear();
-    await Promise.all(done);
-  }
-
-  private open(s: SessionRow): RpcChild | undefined {
-    let c = this.children.get(s.id);
-    if (c?.running()) return c;
-    const thread = !isBench(s);
-    // A thread row with no file (an old import, a hand edit) is skipped, never a crash-loop at boot.
-    if (thread && !s.file) {
-      console.error(`harness-bench: skipping ${s.id}: a ${s.kind} session with no file`);
-      return undefined;
-    }
-    // pi creates a thread's file at the path it is given, so a thread's file need not exist yet.
-    const file = thread ? s.file : s.file && fs.existsSync(s.file) ? s.file : undefined;
-    const dir = thread ? path.dirname(s.file!) : path.join(this.opts.dir, "sessions");
-    const child: RpcChild = new RpcChild(s.id, { dir, file, tools: thread ? s.target : undefined, model: s.model ?? this.opts.model, bin: this.opts.bin, extDir: this.opts.extDir }, (ev) => this.fold(s.id, child, ev));
-    this.children.set(s.id, child);
-    child.start();
-    // The file name is pi's to choose; ask once so the list can reopen it.
-    void child.send({ type: "get_state" }).catch(() => undefined);
-    return child;
-  }
-
-  private fold(id: string, child: RpcChild, ev: PiEvent) {
-    // A stopped child (archived, removed, replaced, or the bench stopping) still
-    // reports its exit late; folded, it would mark its successor's tasks lost.
-    if (this.children.get(id) !== child) return;
-    if (this.sessions.get(id)) this.foldRow(id, ev);
-    this.emit({ ...ev, pi: id });
-  }
-
-  private foldRow(id: string, ev: PiEvent) {
-    const now = Date.now();
-    const data = ev.data as { sessionFile?: string } | undefined;
-    if (ev.type === "response" && typeof data?.sessionFile === "string" && this.sessions.get(id)?.file !== data.sessionFile) {
-      this.write(() => this.sessions.update(id, { file: data.sessionFile }));
-      this.emit({ type: "sessions" });
-    }
-    // These answer only {cancelled} (rpc.md): the new file has to be asked for.
-    if (ev.type === "response" && (ev.command === "new_session" || ev.command === "switch_session") && ev.success) {
-      void this.children.get(id)?.send({ type: "get_state" }).catch(() => undefined);
-    }
-    if (ev.type === "agent_start") {
-      this.turning.add(id);
-      this.write(() => this.sessions.update(id, { lastActive: now }));
-    }
-    if (ev.type === "agent_end") this.turning.delete(id);
-    if (ev.type === "exit") {
-      this.turning.delete(id);
-      // Only this session's pi went; the others still hold their commands.
-      for (const row of this.write(() => this.tasks.markLost(id)) ?? []) this.emit({ type: "task", row });
-      if (this.write(() => this.procs.markLost(id))?.length) this.emit({ type: "procs", rows: this.procs.all() });
-    }
-    if (ev.type === "tool_execution_start") {
-      const name = ev.toolName as string;
-      const row = this.write(() => this.tasks.transition({ id: ev.toolCallId as string, session: id, tool: TOOL[name] ?? name, arg: argOf(name, (ev.args ?? {}) as Record<string, unknown>), state: "running", started: now }));
-      if (row) this.emit({ type: "task", row });
-    }
-    if (ev.type === "tool_execution_end") {
-      const out = ((ev.result as { content?: { text?: string }[] } | undefined)?.content ?? []).map((c) => c.text ?? "").join("");
-      const bg = /^Sent to the background as task #(\d+)/.exec(out);
-      const row = this.write(() => this.tasks.transition(bg ? { id: ev.toolCallId as string, n: Number(bg[1]), state: "background" } : { id: ev.toolCallId as string, state: ev.isError ? "failed" : "done", ended: now }));
-      if (row) this.emit({ type: "task", row });
-    }
-    const m = ev.message as { role?: string; customType?: string; content?: string } | undefined;
-    if (ev.type === "message_end" && m?.role === "custom" && m.customType === "background-task" && typeof m.content === "string") {
-      const n = Number(/#(\d+)/.exec(m.content)?.[1]);
-      const t = this.tasks.all().find((x) => x.session === id && x.n === n);
-      const row = t && this.write(() => this.tasks.transition({ id: t.id, state: /exit [1-9]/.test(m.content!.split("\n")[0]) ? "failed" : "done", ended: now }));
-      if (row) this.emit({ type: "task", row });
-    }
-    if (ev.type === "extension_ui_request" && ev.method === "setWidget") {
-      const line = (ev.widgetLines as string[] | undefined)?.[0];
-      try {
-        if (ev.widgetKey === "harness:procs") {
-          const rows = (line ? JSON.parse(line) : []) as Omit<ProcRow, "session">[];
-          this.write(() => this.procs.snapshot(id, rows));
-          this.emit({ type: "procs", rows: this.procs.all() });
-        }
-        if (ev.widgetKey === "harness:exchange" && line) {
-          const x = JSON.parse(line) as Partial<Exchange> & { id: string };
-          const known = this.exchanges.bySession(id).some((e) => e.id === x.id);
-          if (known && x.state) this.write(() => this.exchanges.transition(x.id, x.state!));
-          else if (x.workspace && x.dir) this.write(() => this.exchanges.record({ id: x.id, session: id, workspace: x.workspace!, dir: x.dir!, text: x.text ?? "", state: x.state ?? "sent", ref: x.ref }));
-          this.emit({ type: "exchange", row: this.exchanges.bySession(id).find((e) => e.id === x.id) });
-        }
-      } catch {
-        /* a widget line that is not ours */
-      }
-    }
+    for (const s of this.sched.sessions.values()) s.abort();
   }
 
   /** What the idle clock asks: is anything running that a client leaving must not stop? */
   busy(): boolean {
     return (
-      this.turning.size > 0 ||
+      [...this.sched.sessions.values()].some((s) => s.running) ||
       this.tasks.all().some((t) => t.state === "running" || t.state === "background") ||
       this.procs.all().some((p) => p.ended === undefined)
     );
@@ -190,48 +156,79 @@ export class Bench {
     if (write && !this.writable.ok()) throw new Error(`the bench folder is not writable: ${this.writable.reason()}; prompts are refused until it is`);
   }
 
-  async create(): Promise<SessionRow> {
+  async create(tier: "top" | "main" = "main"): Promise<SessionRow> {
     this.refuse(true);
-    const s = this.writable.run(() => this.sessions.create(this.opts.model));
-    this.open(s);
+    if (tier === "top" && this.sessions.all().some((s) => !s.archived && s.tier === "top")) throw new Error("this bench already has a top session");
+    const s = this.writable.run(() => this.sessions.create(this.opts.model, { tier, state: "open", kind: tier === "top" ? "bench" : "workspace" }));
+    this.sched.kick();
     this.emit({ type: "sessions" });
     return s;
   }
 
-  async rpc(id: string, cmd: Record<string, unknown>): Promise<PiEvent> {
-    const s = this.sessions.get(id);
-    if (!s) throw new Error(`no session ${id}`);
-    this.refuse(cmd.type === "prompt" || cmd.type === "steer" || cmd.type === "follow_up");
-    if (s.archived) throw new Error(`session ${id} is archived; restore it to send`);
-    const msg = typeof cmd.message === "string" ? cmd.message.trim() : "";
-    if (cmd.type === "prompt" && msg && !msg.startsWith("/") && s.name === `session ${s.seq}`) {
-      this.write(() => this.sessions.update(id, { name: msg.replace(/\s+/g, " ").slice(0, 40), lastActive: Date.now() }));
-      this.emit({ type: "sessions" });
+  /** Kept for the electron app: `prompt`/`abort` map onto send/abort, anything else is gone with pi. */
+  async rpc(id: string, cmd: Record<string, unknown>): Promise<{ type: string; success: boolean; data?: unknown; error?: string }> {
+    if (cmd.type === "prompt") {
+      const r = await this.send(id, String(cmd.message ?? ""));
+      return { type: "response", success: true, data: r };
     }
-    const c = this.open(s);
-    if (!c) throw new Error(`session ${id} has no file to open`);
-    return c.send(cmd);
+    if (cmd.type === "abort") {
+      await this.abort(id);
+      return { type: "response", success: true };
+    }
+    throw new Error(`rpc ${cmd.type} is gone; the bench runs the sys-1 engine`);
   }
 
-  async messages(id: string, after?: number, limit?: number): Promise<{ messages: unknown[]; total: number }> {
+  async send(id: string, text: string): Promise<{ turn: number }> {
     const s = this.sessions.get(id);
     if (!s) throw new Error(`no session ${id}`);
-    const c = this.children.get(id);
-    if (c?.running()) {
-      const r = await c.send({ type: "get_messages" });
-      return page((r.data as { messages?: unknown[] } | undefined)?.messages ?? [], after, limit);
+    this.refuse(true);
+    if (s.archived) throw new Error(`session ${id} is archived; restore it to send`);
+    if (s.state === "closed") throw new Error(`session ${id} is closed`);
+    const resolve = this.asks.get(s.seq);
+    if (resolve) { this.asks.delete(s.seq); resolve(text); }
+    else (this.sched.get(s.seq) ?? this.make(s)).receive("person", text);
+    if (text.trim() && !text.startsWith("/") && s.name === `session ${s.seq}`) {
+      this.write(() => this.sessions.update(id, { name: text.replace(/\s+/g, " ").slice(0, 40), lastActive: Date.now() }));
+      this.emit({ type: "sessions" });
     }
-    return page(s.file && fs.existsSync(s.file) ? transcript(s.file) : [], after, limit);
+    this.sched.kick();
+    const rows = readRows(this.sessions.logFile(s));
+    return { turn: 1 + rows.reduce((m, r) => ("turn" in r ? Math.max(m, r.turn) : m), 0) };
+  }
+
+  async abort(id: string): Promise<void> {
+    const s = this.sessions.get(id);
+    if (!s) throw new Error(`no session ${id}`);
+    this.sched.get(s.seq)?.abort();
+  }
+
+  async children(id: string): Promise<SessionRow[]> {
+    const s = this.sessions.get(id);
+    if (!s) throw new Error(`no session ${id}`);
+    return this.sessions.children(s.seq);
+  }
+
+  async rows(id: string, after?: number, limit?: number): Promise<{ rows: unknown[]; messages: unknown[]; total: number }> {
+    const s = this.sessions.get(id);
+    if (!s) throw new Error(`no session ${id}`);
+    return page(readRows(this.sessions.logFile(s)), after, limit);
+  }
+  /** Kept for the old electron UI, same shape as rows(). */
+  async messages(id: string, after?: number, limit?: number) {
+    return this.rows(id, after, limit);
+  }
+  /** A workspace's main has a minted seq now, not the old `w-{ws}` id — resolve by workspace name. */
+  async workspaceMessages(ws: string, after?: number, limit?: number) {
+    const s = this.sessions.all().find((r) => r.kind === "workspace" && r.workspace === ws);
+    return s ? this.rows(s.id, after, limit) : { rows: [], messages: [], total: 0 };
   }
 
   async archive(id: string): Promise<SessionRow> {
     this.refuse(true);
-    // Checked before writable.run: an unknown id is a 404, never an unwritable folder.
     const have = this.sessions.get(id);
     if (!have) throw new Error(`no session ${id}`);
     if (isBench(have) && this.sessions.all().filter((s) => !s.archived && isBench(s)).length < 2) throw new Error("this is the only open session; start another before archiving it");
-    this.children.get(id)?.stop();
-    this.children.delete(id);
+    this.sched.get(have.seq)?.abort();
     const s = this.writable.run(() => this.sessions.update(id, { archived: true }));
     this.emit({ type: "sessions" });
     return s;
@@ -241,7 +238,7 @@ export class Bench {
     this.refuse(true);
     if (!this.sessions.get(id)) throw new Error(`no session ${id}`);
     const s = this.writable.run(() => this.sessions.update(id, { archived: false, lastActive: Date.now() }));
-    this.open(s);
+    this.sched.kick();
     this.emit({ type: "sessions" });
     return s;
   }
@@ -254,23 +251,30 @@ export class Bench {
     return this.openThread("ephemeral", ws, eph);
   }
 
-  private openThread(kind: "workspace" | "ephemeral", ws: string, eph?: string): SessionRow {
-    // Checked before either id becomes a path.
+  private async openThread(kind: "workspace" | "ephemeral", ws: string, eph?: string): Promise<SessionRow> {
     for (const x of kind === "workspace" ? [ws] : [ws, eph]) if (typeof x !== "string" || !WS_ID.test(x)) throw new Error(`not a workspace id: ${x}`);
     this.refuse(true);
-    // Outside writable.run: a refusal there would read as a folder that cannot be written.
-    this.sessions.threadId({ kind, workspace: ws, eph });
-    const base = path.join(this.opts.dir, "workspaces", ws);
-    const file = eph === undefined ? path.join(base, "thread.jsonl") : path.join(base, "eph", `${eph}.jsonl`);
-    const s = this.writable.run(() => {
-      fs.mkdirSync(path.dirname(file), { recursive: true });
-      // An ephemeral is a workspace cut for one agent: its tools run on its own tool server.
-      return this.sessions.thread({ kind, workspace: ws, eph, target: eph ?? ws, file, model: this.opts.model });
-    });
+    // sessions.thread() mints seq 0 for every thread — fine for an ephemeral's own history file, but a
+    // main needs a real seq: it is a sys-1 tree node the scheduler indexes by seq and Subs.toMain
+    // targets by workspace name, and every workspace sharing seq 0 would share one log file too.
+    let s: SessionRow;
+    if (kind === "workspace") {
+      const existing = this.sessions.all().find((r) => r.kind === "workspace" && r.workspace === ws);
+      s = existing ?? this.writable.run(() => this.sessions.create(this.opts.model, { name: ws, kind: "workspace", workspace: ws, target: ws, tier: "main", state: "open" }));
+    } else {
+      this.sessions.threadId({ kind, workspace: ws, eph });
+      const base = path.join(this.opts.dir, "workspaces", ws);
+      const file = path.join(base, "eph", `${eph}.jsonl`);
+      s = this.writable.run(() => {
+        fs.mkdirSync(path.dirname(file), { recursive: true });
+        return this.sessions.thread({ kind, workspace: ws, eph, target: eph!, file, model: this.opts.model });
+      });
+    }
     if (s.archived) throw new Error(`session ${s.id} is archived; restore it to send`);
-    this.open(s);
+    await this.backendFor(ws);
+    this.sched.kick();
     this.emit({ type: "sessions" });
-    return s;
+    return this.sessions.get(s.id)!;
   }
 
   private inFlight(id: string): string[] {
@@ -286,84 +290,48 @@ export class Bench {
     if (!s) throw new Error(`no session ${id}`);
     const items = this.inFlight(id);
     if (items.length && !stop) throw new Error(`in flight: ${items.join(", ")}`);
-    const c = this.children.get(id);
-    if (c?.running()) {
-      // Commands and processes run in their own process groups: stop them
-      // through pi before pi goes, or they outlive the session.
-      for (const t of this.tasks.all().filter((t) => t.session === id && (t.state === "running" || t.state === "background")))
-        await c.send({ type: "prompt", message: t.state === "background" && t.n !== undefined ? `/cancel #${t.n}` : `/cancel ${t.id}` }).catch(() => undefined);
-      for (const p of this.procs.all().filter((p) => p.session === id && p.ended === undefined)) await c.send({ type: "prompt", message: `/proc-stop ${p.id}` }).catch(() => undefined);
-      await c.send({ type: "abort" }).catch(() => undefined);
-      c.stop();
-    }
-    this.children.delete(id);
-    this.turning.delete(id);
-    // A write failing midway leaves the child stopped but the row kept: it reopens on the next start and delete can be retried.
+    this.sched.get(s.seq)?.abort();
+    this.sched.sessions.delete(s.seq);
+    // A sub's own open clone is left as is: deleting a workspace is a person's explicit act, not an
+    // automatic side effect of removing the session that happened to be working on it.
     this.writable.run(() => {
       for (const t of this.tasks.all().filter((t) => t.session === id && (t.state === "running" || t.state === "background"))) this.tasks.transition({ id: t.id, state: "cancelled", ended: Date.now() });
       this.exchanges.discard(id);
       fs.rmSync(path.join(this.opts.dir, "btw", id), { recursive: true, force: true });
-      if (s.file && fs.existsSync(s.file)) {
+      const file = this.sessions.logFile(s);
+      if (fs.existsSync(file)) {
         const trash = path.join(this.opts.dir, "sessions", ".trash");
         fs.mkdirSync(trash, { recursive: true });
-        // Every workspace thread's file is thread.jsonl: prefix the id so two never collide in the trash.
-        fs.renameSync(s.file, path.join(trash, !isBench(s) ? `${id}-${path.basename(s.file)}` : path.basename(s.file)));
+        fs.renameSync(file, path.join(trash, !isBench(s) ? `${id}-${path.basename(file)}` : path.basename(file)));
       }
       if (s.workspace) {
         const ws = path.join(this.opts.dir, "workspaces", s.workspace);
-        // rmdir refuses a directory that still holds another thread, which is exactly when it must stay.
         for (const d of [path.join(ws, "eph"), ws]) try { fs.rmdirSync(d); } catch { /* not empty or already gone */ }
       }
-      // Never zero bench sessions: the replacement takes a fresh id (nextSeq), never the removed one.
-      if (!this.sessions.all().some((x) => !x.archived && x.id !== id && isBench(x))) this.open(this.sessions.create(this.opts.model));
+      // Never zero bench (top) sessions: the replacement takes a fresh id, never the removed one.
+      if (!this.sessions.all().some((x) => !x.archived && x.id !== id && isBench(x))) this.sessions.create(this.opts.model, { tier: "top", state: "open", kind: "bench" });
       this.sessions.remove(id);
     });
+    this.sched.kick();
     this.emit({ type: "sessions" });
     this.emit({ type: "procs", rows: this.procs.all() });
   }
 
-  /** A one-question, read-only fork: no kl_* tools, no streaming — the answer replays on completion. */
-  async btw(session: string, question: string, timeoutMs = BTW_TIMEOUT_MS): Promise<{ id: string; question: string; entries: unknown[]; at: number }> {
+  /** A one-question, read-only fork over a session's own rows: no engine call, no side effect. */
+  async btw(session: string, question: string): Promise<{ id: string; question: string; entries: unknown[]; at: number }> {
     this.refuse(true);
     const s = this.sessions.get(session);
-    // The fork's read tools run here: on a thread they would read the bench pod, not the workspace.
     if (s && !isBench(s)) throw new Error("btw is only for bench sessions");
-    if (!s?.file || !fs.existsSync(s.file)) throw new Error("this session has no file yet; say something first");
+    if (!s) throw new Error(`no session ${session}`);
+    const file = this.sessions.logFile(s);
+    if (!fs.existsSync(file)) throw new Error("this session has no file yet; say something first");
     const dir = path.join(this.opts.dir, "btw", session);
-    // Taken synchronously, so two concurrent calls never share an id; the files seed it after a restart.
     const n = Math.max(this.btwSeq.get(session) ?? 0, fs.existsSync(dir) ? fs.readdirSync(dir).length : 0) + 1;
     this.btwSeq.set(session, n);
     const id = `btw-${n}`;
-    const forkDir = path.join(this.opts.dir, "btw", ".forks", `${session}-${id}`);
-    fs.mkdirSync(forkDir, { recursive: true });
-    let done!: () => void;
-    let timedOut = false;
-    const ended = new Promise<void>((r) => (done = r));
-    const child = new RpcChild(id, { dir: forkDir, fork: s.file, model: s.model ?? this.opts.model, bin: this.opts.bin }, (ev) => {
-      this.emit({ ...ev, pi: id });
-      if (ev.type === "agent_end" || ev.type === "exit") done();
-    });
-    child.start();
-    const timer = setTimeout(() => {
-      timedOut = true;
-      done();
-    }, timeoutMs);
-    timer.unref?.();
-    try {
-      const before = ((await child.send({ type: "get_messages" })).data as { messages?: unknown[] } | undefined)?.messages?.length ?? 0;
-      await child.send({ type: "prompt", message: question });
-      await ended;
-      if (timedOut) throw new Error(`btw timed out after ${timeoutMs}ms`);
-      const all = ((await child.send({ type: "get_messages" })).data as { messages?: unknown[] } | undefined)?.messages ?? [];
-      const answer = { id, question, entries: all.slice(before), at: Date.now() };
-      this.writable.run(() => replaceJson(path.join(dir, `${id}.json`), answer));
-      return answer;
-    } finally {
-      clearTimeout(timer);
-      await child.stop();
-      // The fork's session file is pi's scratch; the answer is kept under btw/{session}.
-      fs.rmSync(forkDir, { recursive: true, force: true });
-    }
+    const answer = { id, question, entries: readRows(file), at: Date.now() };
+    this.writable.run(() => replaceJson(path.join(dir, `${id}.json`), answer));
+    return answer;
   }
 
   listBtw(session: string): { id: string; question: string; entries: unknown[]; at: number }[] {
@@ -377,7 +345,6 @@ export class Bench {
   /** Session files copy in once by name; rows merge idempotently; loose files copy in and get no row. */
   import(items: unknown, loose: unknown): { added: string[]; files: number } {
     this.refuse(true);
-    // Validated whole before writable.run: a bad body is a 400, never an unwritable folder, and no field reaches sessions.json unchecked.
     const bad = (why: string) => new Error(`bad import: ${why}`);
     const str = (v: unknown) => typeof v === "string";
     const int = (v: unknown) => Number.isInteger(v) && (v as number) >= 0;

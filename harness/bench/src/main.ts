@@ -64,8 +64,9 @@ if (!readOnly) {
   }
 }
 
-const [{ Bench }, { Idle }, { serve }] = await Promise.all([import("./bench.ts"), import("./idle.ts"), import("./server.ts")]);
-const bench = new Bench({ dir, readOnly, model: a.model });
+const [{ Bench }, { Idle }, { serve }, { makeTurn }, { Platform }] = await Promise.all([import("./bench.ts"), import("./idle.ts"), import("./server.ts"), import("./runtime.ts"), import("./platform.ts")]);
+const platform = (() => { try { return Platform.fromEnv(); } catch { return undefined; } })();
+const bench = new Bench({ dir, readOnly, model: a.model, turn: makeTurn(), platform });
 await bench.start();
 if (!readOnly) {
   fs.writeFileSync(path.join(dir, ".health"), ""); // the probe appends; start each process from empty

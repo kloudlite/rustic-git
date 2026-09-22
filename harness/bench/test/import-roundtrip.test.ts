@@ -5,11 +5,10 @@ import os from "node:os";
 import path from "node:path";
 import { Bench } from "../src/bench.ts";
 import { serve } from "../src/server.ts";
-import { FAKE } from "./fake-pi.ts";
 import { batchImport, toItem, type ImportItem, type LooseFile } from "../../src/import-payload.ts";
 
 async function up() {
-  const bench = new Bench({ dir: fs.mkdtempSync(path.join(os.tmpdir(), "bench-imp-")), readOnly: false, model: "fake/m", bin: FAKE });
+  const bench = new Bench({ dir: fs.mkdtempSync(path.join(os.tmpdir(), "bench-imp-")), readOnly: false, model: "fake/m" });
   try {
     await bench.start();
     const srv = await serve(bench, 0);
@@ -28,7 +27,7 @@ const post = async (base: string, body: unknown) => {
 test("a laptop's remembered session and its loose sibling land on the bench, and importing again changes nothing", async () => {
   const t = await up();
   try {
-    // Bench.start() already seeds s-1, so the imported row uses an id the bench does not have yet.
+    // The imported row uses an id the bench does not have yet.
     const items: ImportItem[] = [toItem({ id: "s-101", name: "old session", seq: 101, lastActive: 111 }, "s-101.jsonl", '{"role":"user","content":"hi"}\n')];
     const loose: LooseFile[] = [{ name: "s-9.jsonl", content: '{"role":"user","content":"orphan"}\n' }];
     const batches = batchImport(items, loose);

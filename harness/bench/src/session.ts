@@ -34,17 +34,21 @@ export class Session {
   readonly file: string;
   private turnFn: Turn;
   private hooks: Hooks;
-  constructor(row: SessionRow, file: string, turnFn: Turn, hooks: Hooks) {
+  private onRow?: (row: Row) => void;
+  constructor(row: SessionRow, file: string, turnFn: Turn, hooks: Hooks, onRow?: (row: Row) => void) {
     this.row = row;
     this.file = file;
     this.turnFn = turnFn;
     this.hooks = hooks;
+    this.onRow = onRow;
   }
+
+  private append(row: Row) { append(this.file, row); this.onRow?.(row); }
 
   rows() { return readRows(this.file); }
   hasUnread() { return unread(this.rows()).length > 0; }
   isPending() { return pending(this.rows()); }
-  receive(from: "person" | number, text: string, childTurn?: number) { append(this.file, { kind: "user", ts: Date.now(), from, text, ...(childTurn === undefined ? {} : { childTurn }) }); }
+  receive(from: "person" | number, text: string, childTurn?: number) { this.append({ kind: "user", ts: Date.now(), from, text, ...(childTurn === undefined ? {} : { childTurn }) }); }
 
   tools(): Tool[] {
     const tier = this.row.tier ?? "main";
@@ -72,12 +76,12 @@ export class Session {
     this.ctl = new AbortController();
     const turn = nextTurn(rows);
     this.current = turn;
-    append(this.file, { kind: "turn.start", ts: Date.now(), turn });
+    this.append({ kind: "turn.start", ts: Date.now(), turn });
     const prompt = pending.map((r) => (r.from === "person" ? r.text : `[from session ${r.from}]\n${r.text}`)).join("\n\n");
     const user: User = { tell: (m) => this.hooks.tell(this, m), ask: (q) => this.hooks.askPerson(this, q) };
     let end: Extract<Row, { kind: "turn.end" }>;
     try {
-      const answer = await this.turnFn({ prompt, cwd: this.row.workspace ?? `bench-${this.row.seq}`, tools: this.tools(), user, readOnly: this.row.tier !== "sub", log: (step) => append(this.file, { kind: "turn.step", ts: Date.now(), turn, step }), signal: this.ctl.signal, history: rows });
+      const answer = await this.turnFn({ prompt, cwd: this.row.workspace ?? `bench-${this.row.seq}`, tools: this.tools(), user, readOnly: this.row.tier !== "sub", log: (step) => this.append({ kind: "turn.step", ts: Date.now(), turn, step }), signal: this.ctl.signal, history: rows });
       if (this.ctl.signal.aborted) return;
       end = { kind: "turn.end", ts: Date.now(), turn, answer };
     } catch (e) {
@@ -86,13 +90,13 @@ export class Session {
     } finally {
       this.running = false;
     }
-    append(this.file, end);
+    this.append(end);
     if (end.answer !== undefined && this.onAnswer) await this.onAnswer(this, end);
   }
 
   abort() {
     const turn = openTurn(this.rows());
-    if (turn !== undefined) append(this.file, { kind: "interrupted", ts: Date.now(), turn });
+    if (turn !== undefined) this.append({ kind: "interrupted", ts: Date.now(), turn });
     this.ctl?.abort();
     this.running = false;
   }
