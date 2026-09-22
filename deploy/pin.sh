@@ -43,7 +43,7 @@ digest_of() {
 }
 
 declare -A DIGEST
-for img in kloudlite kloudlite-agent kloudlite-gateway kloudlite-builder-gate kloudlite-workspace kloudlite-bench kloudlite-slo; do
+for img in kloudlite kloudlite-agent kloudlite-gateway kloudlite-builder-gate kloudlite-workspace kloudlite-bench kloudlite-slo kloudlite-kompress; do
   DIGEST[$img]=$(digest_of "$img" "$SHA") || { echo "ghcr.io/kloudlite/$img:$SHA does not exist — tests red, still building, or a typo" >&2; exit 1; }
 done
 if [ -n "$WEB" ]; then
@@ -71,6 +71,7 @@ pin 'kloudlite-workspace' "$SHA" "${DIGEST[kloudlite-workspace]}" k3s/agent-daem
 # Deployment).
 pin 'kloudlite-bench' "$SHA" "${DIGEST[kloudlite-bench]}" kloudlite.yaml
 pin 'kloudlite-slo' "$SHA" "${DIGEST[kloudlite-slo]}" kloudlite.yaml
+pin 'kloudlite-kompress' "$SHA" "${DIGEST[kloudlite-kompress]}" k3s/kompress.yaml
 [ -z "$WEB" ] || pin 'kloudlite-web' "$WEB" "${DIGEST[kloudlite-web]}" kloudlite-web.yaml
 
 grep -rn --include='*.yaml' -E 'image: ghcr\.io/kloudlite/' . | sed 's/^\.\///'

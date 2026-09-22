@@ -281,6 +281,42 @@ export class Kloudlite {
       .withEntrypoint([])
   }
 
+  // deploy/kompress/Dockerfile: the model (chopratejas/kompress-v2-base, int8 ONNX) is baked in
+  // at build time — the owner's call, no runtime download for something this small. pip's cache
+  // is a named volume; the offline-load RUN is what proves the runtime image needs no network.
+  private imageKompress(source: Directory): Container {
+    const builder = dag
+      .container()
+      .from("python:3.13-slim")
+      .withMountedCache("/root/.cache/pip", dag.cacheVolume("kloudlite-pip"))
+      .withExec(["pip", "install", "--no-cache-dir", "headroom-ai[proxy]==0.38.0", "huggingface-hub>=1.5.0,<2.0"])
+      .withEnvVariable("HF_HOME", "/opt/hf")
+      .withExec(["python", "-c",
+        "from headroom.transforms.kompress_compressor import KompressCompressor as K; K().preload(allow_download=True)"])
+      .withEnvVariable("HF_HUB_OFFLINE", "1")
+      .withEnvVariable("TRANSFORMERS_OFFLINE", "1")
+      .withExec(["python", "-c",
+        "from headroom.transforms.kompress_compressor import KompressCompressor as K; " +
+        "k = K(); k.preload(allow_download=False); assert k.is_ready()"])
+      .withExec(["sh", "-c", "find /opt/hf -iname '*fp32*onnx*' -delete"])
+    return dag
+      .container()
+      .from("python:3.13-slim")
+      .withDirectory("/usr/local/lib/python3.13/site-packages", builder.directory("/usr/local/lib/python3.13/site-packages"))
+      .withDirectory("/usr/local/bin", builder.directory("/usr/local/bin"))
+      .withDirectory("/opt/hf", builder.directory("/opt/hf"))
+      .withEnvVariable("HF_HOME", "/opt/hf")
+      .withEnvVariable("HF_HUB_OFFLINE", "1")
+      .withEnvVariable("TRANSFORMERS_OFFLINE", "1")
+      .withEnvVariable("PYTHONUNBUFFERED", "1")
+      .withEnvVariable("HEADROOM_KOMPRESS_ONNX_INTRA_THREADS", "2")
+      .withWorkdir("/opt/kompress")
+      .withFile("server.py", source.file("deploy/kompress/server.py"))
+      .withUser("1001:1001")
+      .withExposedPort(8787)
+      .withEntrypoint(["uvicorn", "server:app", "--host", "0.0.0.0", "--port", "8787"])
+  }
+
   // web/Dockerfile `deps`+`build` stages: bun installs (owns the lockfile), node runs `next
   // build` (bun SIGILLs under GitHub's runners for this step) (web/Dockerfile lines 6-19).
   private webBuild(webCtx: Directory): Container {
@@ -341,6 +377,7 @@ export class Kloudlite {
       [() => this.imageSlo(built), "kloudlite-slo"],
       [() => this.imageWorkspace(source, built), "kloudlite-workspace"],
       [() => this.imageBench(source, built), "kloudlite-bench"],
+      [() => this.imageKompress(source), "kloudlite-kompress"],
     ]
 
     for (const [make, image] of IMAGE_BUILDERS) {
