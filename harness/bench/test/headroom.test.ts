@@ -1,6 +1,96 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { compress, retrieve } from "../src/engine/headroom.ts";
+import { compress, retrieve, compressWithModel } from "../src/engine/headroom.ts";
+
+// A paragraph with no structure the rule detectors recognize (no json, no grep shape, no diff
+// markers, no log timestamps) so it always falls through to tryText -> plain: true, the one path
+// compressWithModel is allowed to hand to the model.
+const PLAIN_TEXT = "The quick brown fox jumps over the lazy dog. ".repeat(40);
+
+function withFetch<T>(impl: typeof fetch, run: () => Promise<T>): Promise<T> {
+  const orig = globalThis.fetch;
+  globalThis.fetch = impl as typeof fetch;
+  return run().finally(() => { globalThis.fetch = orig; });
+}
+
+test("compressWithModel: env unset behaves identically to compress", async () => {
+  delete process.env.KL_KOMPRESS_URL;
+  const rules = compress(PLAIN_TEXT, "");
+  const c = await compressWithModel(PLAIN_TEXT, "");
+  assert.equal(c.strategy, rules.strategy);
+  assert.equal(c.text, rules.text);
+});
+
+test("compressWithModel: 2xx shorter response is used, marked kompress, retrievable", async () => {
+  process.env.KL_KOMPRESS_URL = "http://kompress.test";
+  try {
+    const c = await withFetch(
+      async () => new Response(JSON.stringify({ compressed: "short", original_tokens: 400, compressed_tokens: 10, compression_ratio: 40 }), { status: 200 }),
+      () => compressWithModel(PLAIN_TEXT, ""),
+    );
+    assert.equal(c.strategy, "kompress");
+    assert.match(c.text, /Retrieve original: hash=/);
+    assert.equal(retrieve(c.hash!), PLAIN_TEXT);
+  } finally {
+    delete process.env.KL_KOMPRESS_URL;
+  }
+});
+
+test("compressWithModel: a 500 falls back to the rules result", async () => {
+  process.env.KL_KOMPRESS_URL = "http://kompress.test";
+  try {
+    const rules = compress(PLAIN_TEXT, "");
+    const c = await withFetch(
+      async () => new Response("boom", { status: 500 }),
+      () => compressWithModel(PLAIN_TEXT, ""),
+    );
+    assert.equal(c.strategy, rules.strategy);
+    assert.equal(c.text, rules.text);
+  } finally {
+    delete process.env.KL_KOMPRESS_URL;
+  }
+});
+
+test("compressWithModel: a rejected fetch (e.g. abort) falls back to the rules result", async () => {
+  process.env.KL_KOMPRESS_URL = "http://kompress.test";
+  try {
+    const rules = compress(PLAIN_TEXT, "");
+    const c = await withFetch(
+      async () => { throw new DOMException("aborted", "AbortError"); },
+      () => compressWithModel(PLAIN_TEXT, ""),
+    );
+    assert.equal(c.strategy, rules.strategy);
+    assert.equal(c.text, rules.text);
+  } finally {
+    delete process.env.KL_KOMPRESS_URL;
+  }
+});
+
+test("compressWithModel: a json-array input never calls fetch", async () => {
+  process.env.KL_KOMPRESS_URL = "http://kompress.test";
+  try {
+    const items = Array.from({ length: 60 }, (_, i) => ({ a: i, b: `row-with-some-padding-${i}` }));
+    const original = JSON.stringify(items);
+    let called = false;
+    const c = await withFetch(
+      async () => { called = true; return new Response("{}", { status: 200 }); },
+      () => compressWithModel(original, ""),
+    );
+    assert.equal(called, false);
+    assert.equal(c.strategy, "table");
+  } finally {
+    delete process.env.KL_KOMPRESS_URL;
+  }
+});
+
+test("compress: plain is set only for the text fallback path, not the other detectors", () => {
+  const items = Array.from({ length: 60 }, (_, i) => ({ a: i, b: `row-with-some-padding-${i}` }));
+  const table = compress(JSON.stringify(items), "");
+  assert.equal(table.plain, undefined);
+
+  const text = compress(PLAIN_TEXT, "");
+  assert.equal(text.plain, true);
+});
 
 test("json-array: smart_sample keeps error, outlier, head, tail", () => {
   // Not every item has the same key set (the error/outlier rows carry an extra field), which is what
