@@ -161,6 +161,11 @@ rules:
   - apiGroups: ["kloudlite.io"]
     resources: ["workspaces", "environments"]
     verbs: ["get", "list", "watch", "patch", "delete"]
+  # A bench is one more per-owner object the Owners detail lists; without this the whole owner
+  # page 403s (hourly admin.screens, 2026-09-22).
+  - apiGroups: ["kloudlite.io"]
+    resources: ["benches"]
+    verbs: ["get", "list", "watch"]
   # Read-only, and not optional: Owners, Clusters and Overview all compute their numbers from
   # these on the request path (usage is never a cached counter), so without this rule those three
   # areas answer 403 rather than degrading.
