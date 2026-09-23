@@ -598,6 +598,13 @@ async fn sessions(c: &mut Ctx) {
     // cold node. Waiting here keeps each ceiling measuring the DIAL, which is what they are the
     // target for, rather than the profile build, which is `ws.packages.*`'s to measure.
     own_workspace(c).await;
+    // BEFORE the token below: with it the bench can see the run's one workspace, and "Install jq."
+    // then becomes a proposal on it that nobody answers — the hourly 2026-09-23 23:01 IST run
+    // timed out at 60 s here, where 22:19 without a token passed in 4.5 s. The step is about a
+    // request that names no workspace, so the bench must not be able to pick one for it.
+    if c.walks("bench.pkg_needs_workspace") {
+        pkg_needs_workspace(c).await;
+    }
     // The bench resolves a workspace-scoped shell or tool with its pod token (`harness/pi/
     // kloudlite.ts` answers "sign in on the Kloudlite desktop app" without one), and only a live
     // CLI login mints that token: the hourly 2026-09-23 22:19 IST run failed all three ids on it.
@@ -628,9 +635,6 @@ async fn sessions(c: &mut Ctx) {
     }
     if c.walks("bench.no_hands") {
         no_hands(c).await;
-    }
-    if c.walks("bench.pkg_needs_workspace") {
-        pkg_needs_workspace(c).await;
     }
     if c.walks("bench.tools.own_hands") {
         own_hands(c).await;
@@ -956,9 +960,12 @@ async fn agent_tree_run(c: &mut Ctx) {
                 //    Read from the doc rather than from the bench, so a bench that invented a
                 //    local record and never called `/v1` fails here.
                 let doc = get(c, &doc_url, &jwt).await.context("could not read the workspace")?;
-                let row = tree_row(&doc, &tree).ok_or_else(|| {
-                    anyhow!("no tree named {tree} in the workspace doc: {}", super::clip(&doc.to_string()))
-                })?;
+                let Some(row) = tree_row(&doc, &tree) else {
+                    // The model's side of it: two hourlies failed here with no bench log to say
+                    // whether it never dispatched, was refused, or named another tree.
+                    let (_, said) = through(port, &format!("/sessions/{sid}/messages")).await.unwrap_or_default();
+                    bail!("no tree named {tree} in the workspace doc; the session ended: {}", transcript_tail(&said));
+                };
                 if row["ready"] != Value::Bool(true) {
                     bail!("the tree is not ready: {row}");
                 }
@@ -1729,6 +1736,21 @@ fn judge_reply(body: &str) -> Result<Reply> {
         bail!("the assistant reply is empty");
     }
     Ok(Reply::Answered)
+}
+
+/// The transcript's last four messages as `role(tool): text`, each cut to 120 chars: enough to
+/// say why a turn did not do what it was asked, short enough for a step's detail.
+fn transcript_tail(body: &str) -> String {
+    let doc: Value = serde_json::from_str(body).unwrap_or_default();
+    let msgs = doc["messages"].as_array().cloned().unwrap_or_default();
+    let line = |m: &Value| {
+        let parts: Vec<String> = m["content"].as_array().into_iter().flatten()
+            .filter_map(|c| c["text"].as_str().map(str::to_string).or_else(|| c["name"].as_str().map(|n| format!("call {n}"))))
+            .collect();
+        let tool = m["toolName"].as_str().map(|t| format!("({t})")).unwrap_or_default();
+        format!("{}{tool}: {}", m["role"].as_str().unwrap_or("?"), parts.join(" ").chars().take(120).collect::<String>())
+    };
+    msgs.iter().skip(msgs.len().saturating_sub(4)).map(line).collect::<Vec<_>>().join(" | ")
 }
 
 fn same_events(a: &[String], b: &[String]) -> Result<()> {
