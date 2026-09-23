@@ -22,6 +22,7 @@ use crate::controller::Ctx;
 use kloudlite_workspaces::crd;
 use kube::api::{Api, Patch, PatchParams};
 use std::path::Path;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 
 /// Separate from `crd::AGENT_FIELD_MANAGER` on purpose — see the module doc.
@@ -62,15 +63,42 @@ fn qgroup_of(path: &Path) -> Option<(u64, u64)> {
         .ok()?;
     let row = out.status.success().then(|| parse_qgroup(&String::from_utf8_lossy(&out.stdout))).flatten();
     if row.is_none() {
-        // Said once per unreadable subvolume per pass, with btrfs's own words: an operator who
-        // sees every volume stamping as unknown needs to be told `btrfs quota rescan` rather than
-        // left to find it. The rescan is deliberately NOT run from here — it walks the whole
-        // filesystem and is an operator's decision, not a reconcile's.
+        // Said once per unreadable subvolume per pass, with btrfs's own words.
         let why = String::from_utf8_lossy(&out.stderr);
         let why = why.lines().find(|l| !l.trim().is_empty()).unwrap_or("no measurement in the output");
         tracing::warn!(path = %path.display(), reason = %why.trim(), "usage.unreadable");
+        if why.contains("rescan recommended") {
+            rescan(path);
+        }
     }
     row
+}
+
+/// Unix seconds of the last rescan this agent started; 0 = never. One pool per agent, so this is
+/// per pool.
+static RESCAN_AT: AtomicU64 = AtomicU64::new(0);
+
+/// A rescan walks the whole filesystem; one per this window is plenty for a counter nobody enforces.
+const RESCAN_FLOOR_SECS: u64 = 600;
+
+/// Starts a background `btrfs quota rescan` (no `-w`: the kernel runs it and refuses a second
+/// while one is in flight). Leaving it to an operator meant nobody ran it: session-0 logged
+/// `usage.unreadable` 165 times in five hours and `vol.usage.stamped` failed the hourly
+/// (2026-09-23). Every subvolume delete can invalidate the accounting again, so this is not a
+/// one-off repair but the agent's own upkeep.
+fn rescan(path: &Path) {
+    let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_secs());
+    let last = RESCAN_AT.load(Ordering::Relaxed);
+    if now.saturating_sub(last) < RESCAN_FLOOR_SECS
+        || RESCAN_AT.compare_exchange(last, now, Ordering::Relaxed, Ordering::Relaxed).is_err()
+    {
+        return;
+    }
+    match std::process::Command::new("btrfs").args(["quota", "rescan"]).arg(path).output() {
+        Ok(o) if o.status.success() => tracing::info!(path = %path.display(), "usage.rescan.started"),
+        Ok(o) => tracing::warn!(path = %path.display(), error = %String::from_utf8_lossy(&o.stderr).trim(), "usage.rescan.refused"),
+        Err(e) => tracing::warn!(path = %path.display(), error = %e, "usage.rescan.refused"),
+    }
 }
 
 /// What the volume occupies: the largest `referenced` among its subvolumes (live worktrees and
