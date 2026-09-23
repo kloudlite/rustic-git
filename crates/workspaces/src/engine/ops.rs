@@ -100,6 +100,11 @@ impl Engine {
         // and recreate — that would be data loss dressed up as convergence.
         if !self.pool.live(id).exists() {
             run(&["btrfs", "subvolume", "create", path_str(&self.pool.live(id))?])?;
+            // `migrate_volume` renames this into the worktree slot, so `checkout` finds it existing
+            // and never reaches its own chown: hourly 2026-09-23 13:46 IST, a bench's harness hit
+            // EACCES making `/home/kl/.bench` in a 0:0 worktree. Clones and seeds keep their
+            // source's owner; this is the one place an empty root-owned subvolume is born.
+            Self::chown_tenant(&self.pool.live(id))?;
         }
         Ok(())
     }

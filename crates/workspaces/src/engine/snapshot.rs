@@ -109,7 +109,7 @@ impl Engine {
     /// be the prelude's own cost moved rather than removed. A non-root process cannot give a file
     /// away, so a dev or test run that is not root leaves it alone — the same rule the keys
     /// writer already follows.
-    fn chown_tenant(dst: &std::path::Path) -> Result<(), EngErr> {
+    pub(crate) fn chown_tenant(dst: &std::path::Path) -> Result<(), EngErr> {
         if unsafe { libc::geteuid() } != 0 {
             return Ok(());
         }
