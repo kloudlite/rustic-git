@@ -165,8 +165,8 @@ pub(crate) async fn write_user_key(s: &ApiState, c: &kube::Client, ns: &str, own
     // covers the owner's workspaces there, because `user-key` is per owner namespace and nothing
     // finer would survive a beat that rewrites one Secret for every workspace in it.
     let workspace_token = match space_of(c, ns, owner).await {
-        Some(space) => match s.jwt.mint_workspace_tool(owner, &space) {
-            Ok(t) => t.0,
+        Some(space) => match keep_or_mint(&s.jwt, workspace_token(c, ns).await.as_deref(), owner, &space) {
+            Ok(t) => t,
             Err(e) => {
                 tracing::warn!(%owner, error = %e, "workspace-token.mint.failed");
                 return;
@@ -279,9 +279,41 @@ fn install_refusal(read: Option<Option<&k8s_openapi::api::core::v1::Namespace>>,
     if young { Refusal::Young } else { Refusal::Fault }
 }
 
+/// The workspace-token to project: the one the Secret already holds while it verifies for this
+/// owner and space with more than half its day left, else a fresh one. Re-minting on every rewrite
+/// had `/v1/workspaces/{id}/tools` hand out a token the pod's mounted file only sees after the
+/// kubelet's Secret sync (up to a minute), and the tool server admits only that file: a bench
+/// placement rewrote the Secret and the hourly 2026-09-23 23:01 IST run's tool round trip got 401
+/// twice. Keeping it revokes nothing less: a rewrite never invalidated the old token anyway.
+///
+/// ponytail: the two still disagree for one kubelet sync after each twelve-hourly rotation; have
+/// the tool server admit the previous token too if a caller ever hits that window.
+fn keep_or_mint(jwt: &kloudlite_core::jwt::Jwt, current: Option<&str>, owner: &str, space: &str) -> kloudlite_core::Result<String> {
+    let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_secs());
+    let fresh = |c: &kloudlite_core::jwt::WorkspaceToolClaims| {
+        c.sub == owner && c.space == space && c.exp > now + kloudlite_core::jwt::WORKSPACE_TOOL_TTL_SECS / 2
+    };
+    if let Some(tok) = current.filter(|t| jwt.verify_workspace_tool(t).is_ok_and(|c| fresh(&c))) {
+        return Ok(tok.to_string());
+    }
+    Ok(jwt.mint_workspace_tool(owner, space)?.0)
+}
+
 #[cfg(test)]
 mod tests {
-    use super::{Refusal, install_refusal, retry_backoff};
+    use super::{Refusal, install_refusal, keep_or_mint, retry_backoff};
+
+    #[test]
+    fn a_fresh_token_for_the_same_owner_and_space_is_kept() {
+        let jwt = kloudlite_core::jwt::Jwt::new("test-secret-at-least-32-bytes-long!!").unwrap();
+        let (tok, _) = jwt.mint_workspace_tool("alice", "acme").unwrap();
+        assert_eq!(keep_or_mint(&jwt, Some(&tok), "alice", "acme").unwrap(), tok, "kept: the pod's file still matches");
+        assert_ne!(keep_or_mint(&jwt, Some(&tok), "alice", "other").unwrap(), tok, "another space mints");
+        assert_ne!(keep_or_mint(&jwt, Some(&tok), "bob", "acme").unwrap(), tok, "another owner mints");
+        let minted = keep_or_mint(&jwt, Some("garbage"), "alice", "acme").unwrap();
+        assert!(jwt.verify_workspace_tool(&minted).is_ok(), "an unreadable token is replaced");
+        assert!(keep_or_mint(&jwt, None, "alice", "acme").is_ok());
+    }
     use k8s_openapi::api::core::v1::Namespace;
 
     fn ns(age: i64, now: i64, terminating: bool) -> Namespace {
