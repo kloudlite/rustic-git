@@ -15,7 +15,9 @@ const IGNORE = [".git", "target", ".local", "**/node_modules", "web/.next", "har
 
 const RUST_IMAGE = "rust:1-bookworm"
 const DEBIAN_SLIM = "debian:bookworm-slim@sha256:abd67ffcfa541b485a3dff59865ab629aa048a6c613e639d36e7456b0b229241"
-const ALPINE_WORKSPACE = "alpine:3.20@sha256:d9e853e87e55526f6b2917df91a2115c36dd7c696a35be12163d44e6e2a4b6bc"
+const WORKSPACE_NODE = "node:22-bookworm-slim@sha256:83f487e0a63425e5b4d146fb5e5be574bcbe1b7b843d3ebafdd95eaf7767a7e5"
+const DOCKER_CLI = "docker:28-cli@sha256:625d9431a9f54c5a2bc90f24f0e1c3d55b1349fd857dd85035f98c2c9acbdd4d"
+const BUILDX_BIN = "docker/buildx-bin:0.20.1@sha256:ead27bfcde6308a757b4a5a4a931937363c1fa0091f7e2994b9114521853cf69"
 const BUN_IMAGE = "oven/bun:1.3.14@sha256:e10577f0db68676a7024391c6e5cb4b879ebd17188ab750cf10024a6d700e5c4"
 const NODE_IMAGE = "node:22-bookworm-slim@sha256:d649c27dae7ba0137b3cef5dd75baa422c08dc3d9e3fc0c23dfb172dc3cc6436"
 
@@ -95,16 +97,16 @@ export class Kloudlite {
       .withExec(["cargo", "build", "--profile", "dev-image", "--locked", "--bins"])
       .withExec([
         "cargo", "build", "--profile", "dev-image", "--locked",
-        "-p", "kl", "--target", "x86_64-unknown-linux-musl",
+        "-p", "kl", "-p", "kloudlite-intercept-proxy", "--target", "x86_64-unknown-linux-musl",
       ])
       // /work/target is a cache mount, and a cache mount is never part of the container's
       // snapshot — Container.file() on it fails with "cannot retrieve path from cache" (run 4).
       // The binaries have to be copied onto the container's own filesystem first.
-      .withExec(["sh", "-c", "mkdir -p /out/musl && cp /work/target/dev-image/kloudlite /work/target/dev-image/kloudlite-api /work/target/dev-image/kloudlite-worker /work/target/dev-image/kloudlite-agent /work/target/dev-image/kloudlite-gateway /work/target/dev-image/kloudlite-builder-gate /work/target/dev-image/kloudlite-slo /work/target/dev-image/kl-connect /out/ && cp /work/target/x86_64-unknown-linux-musl/dev-image/kl /out/musl/kl"])
+      .withExec(["sh", "-c", "mkdir -p /out/musl && cp /work/target/dev-image/kloudlite /work/target/dev-image/kloudlite-api /work/target/dev-image/kloudlite-worker /work/target/dev-image/kloudlite-agent /work/target/dev-image/kloudlite-gateway /work/target/dev-image/kloudlite-builder-gate /work/target/dev-image/kloudlite-controller /work/target/dev-image/kloudlite-slo /work/target/dev-image/kl-connect /out/ && cp /work/target/x86_64-unknown-linux-musl/dev-image/kl /work/target/x86_64-unknown-linux-musl/dev-image/kloudlite-intercept-proxy /out/musl/"])
   }
 
   // Dockerfile `server` stage: three binaries, one unprivileged user, git/ssh/curl for the
-  // three processes it can run as (Dockerfile lines 20-51).
+  // three processes it can run as.
   private imageServer(built: Container): Container {
     return dag
       .container()
@@ -128,7 +130,7 @@ export class Kloudlite {
       .withDefaultArgs(["serve"])
   }
 
-  // Dockerfile `agent` stage: root, btrfs/mount tooling (lines 56-79).
+  // Dockerfile `agent` stage: root, btrfs/mount tooling.
   private imageAgent(built: Container): Container {
     return dag
       .container()
@@ -142,7 +144,7 @@ export class Kloudlite {
   }
 
   // Dockerfile `gateway` stage: setcap NET_BIND_SERVICE on the binary itself, then drop the
-  // capability-granting package before switching to the unprivileged user (lines 84-103).
+  // capability-granting package before switching to the unprivileged user.
   private imageGateway(built: Container): Container {
     return dag
       .container()
@@ -162,7 +164,7 @@ export class Kloudlite {
       .withEntrypoint(["kloudlite-gateway"])
   }
 
-  // Dockerfile `builder-gate` stage: same shape as gateway, no file capability (lines 107-118).
+  // Dockerfile `builder-gate` stage: same shape as gateway, no file capability.
   private imageBuilderGate(built: Container): Container {
     return dag
       .container()
@@ -179,9 +181,9 @@ export class Kloudlite {
       .withEntrypoint(["kloudlite-builder-gate"])
   }
 
-  // Dockerfile `slo` stage: toolbox image, crane/kubectl fetched and checksummed at build time
-  // (lines 180-217) — the checksum check is the RUN chain's own sha256sum -c, kept in one exec so
-  // a failed checksum fails the same layer it would in docker build.
+  // Dockerfile `slo` stage: toolbox image, crane/kubectl fetched and checksummed at build time —
+  // the checksum check is the RUN chain's own sha256sum -c, kept in one exec so a failed checksum
+  // fails the same layer it would in docker build.
   private imageSlo(built: Container): Container {
     return dag
       .container()
@@ -208,17 +210,55 @@ export class Kloudlite {
       .withEntrypoint(["kloudlite-slo"])
   }
 
-  // Dockerfile `workspace` stage: the default workspace image, alpine base, no USER kl (root
-  // entrypoint is k8s::prelude, which drops to kl itself before exec'ing sshd) (lines 138-176).
+  // Dockerfile `controller` stage: no capability, no hostPath, no secret — ca-certificates only,
+  // same unprivileged-user shape as server/gateway/builder-gate.
+  private imageController(built: Container): Container {
+    return dag
+      .container()
+      .from(DEBIAN_SLIM)
+      .withExec(["sh", "-c",
+        "apt-get update && apt-get install -y --no-install-recommends ca-certificates " +
+        "&& rm -rf /var/lib/apt/lists/*"])
+      .withFile("/usr/local/bin/kloudlite-controller", built.file("/out/kloudlite-controller"))
+      .withExec(["useradd", "--system", "--uid", "1001", "--user-group",
+        "--no-create-home", "--shell", "/usr/sbin/nologin", "kloudlite"])
+      .withUser("kloudlite")
+      .withExposedPort(8080)
+      .withEntrypoint(["kloudlite-controller"])
+  }
+
+  // Dockerfile `intercept-proxy` stage: FROM scratch — a static musl binary, no libc, no shell,
+  // no USER (a scratch image has no /etc/passwd to name an account in; the pod spec runs it as
+  // uid 1000 with a read-only root).
+  private imageInterceptProxy(built: Container): Container {
+    return dag
+      .container()
+      .withFile("/kloudlite-intercept-proxy", built.file("/out/musl/kloudlite-intercept-proxy"))
+      .withEntrypoint(["/kloudlite-intercept-proxy"])
+  }
+
+  // Dockerfile `workspace` stage: the default workspace image, debian:bookworm-slim (glibc, for
+  // npm's native-binding loaders), node/docker/buildx copied in from their own upstream images by
+  // digest, no USER kl (root entrypoint is k8s::prelude, which drops to kl itself before exec'ing
+  // sshd).
   private imageWorkspace(source: Directory, built: Container): Container {
     return dag
       .container()
-      .from(ALPINE_WORKSPACE)
+      .from(DEBIAN_SLIM)
+      .withDirectory("/usr/local", dag.container().from(WORKSPACE_NODE).directory("/usr/local"))
+      .withFile("/usr/bin/docker", dag.container().from(DOCKER_CLI).file("/usr/local/bin/docker"))
+      .withFile(
+        "/usr/libexec/docker/cli-plugins/docker-buildx",
+        dag.container().from(BUILDX_BIN).file("/buildx"),
+      )
       .withExec(["sh", "-c", [
-        "apk add --no-cache libstdc++ libgcc docker-cli docker-cli-buildx nodejs npm",
+        "apt-get update",
+        "apt-get install -y --no-install-recommends ca-certificates libstdc++6 libgcc-s1",
+        "rm -rf /var/lib/apt/lists/*",
         "mkdir -p /var/empty",
-        "adduser -D -u 1000 -s /nix/profile/current/bin/zsh kl",
-        "sed -i 's/^kl:!:/kl:*:/' /etc/shadow",
+        "groupadd -g 1000 kl",
+        "useradd -u 1000 -g 1000 -m -d /home/kl -s /nix/profile/current/bin/zsh -p '*' kl",
+        "useradd -r -d /var/empty -s /usr/sbin/nologin -p '*' sshd",
         "printf '%s\\n' 'Kloudlite workspace — you are kl (no root, no sudo).' > /etc/motd",
       ].join(" && ")])
       .withFile(
@@ -234,11 +274,35 @@ export class Kloudlite {
       .withFile("/etc/profile.d/kl-build.sh", source.file("deploy/workspace-image/kl-build.sh"))
       .withFile("/etc/kloudlite/gitignore-global", source.file("deploy/workspace-image/gitignore-global"))
       .withExec(["sh", "-c",
-        "apk add --no-cache --virtual .gyp python3 make g++ " +
+        "apt-get update && apt-get install -y --no-install-recommends python3 make g++ " +
         "&& npm install -g @nanonets/graft@0.18.0 " +
         "&& npm cache clean --force " +
-        "&& apk del .gyp"])
+        "&& apt-get purge -y python3 make g++ && apt-get autoremove -y " +
+        "&& rm -rf /var/lib/apt/lists/*"])
       .withEnvVariable("DO_NOT_TRACK", "1")
+  }
+
+  // deploy/shell-image/Dockerfile: the shell image, a terminal and nothing else — same debian
+  // base, the same musl `kl` and gitignore-global the workspace image carries, plus rc files and
+  // the prelude that waits for the profile and execs ttyd.
+  private imageShell(source: Directory, built: Container): Container {
+    return dag
+      .container()
+      .from(DEBIAN_SLIM)
+      .withExec(["sh", "-c", [
+        "apt-get update",
+        "apt-get install -y --no-install-recommends ca-certificates",
+        "rm -rf /var/lib/apt/lists/*",
+        "groupadd -g 1000 kl",
+        "useradd -u 1000 -g 1000 -m -d /home/kl -s /bin/sh -p '*' kl",
+      ].join(" && ")])
+      .withFile("/usr/local/bin/kl", built.file("/out/musl/kl"), { permissions: 0o755 })
+      .withFile("/etc/kloudlite/gitignore-global", source.file("deploy/workspace-image/gitignore-global"))
+      .withFile("/etc/kl/.zshrc", source.file("deploy/shell-image/zshrc"))
+      .withFile("/etc/starship.toml", source.file("deploy/shell-image/starship.toml"))
+      .withFile("/usr/local/bin/prelude", source.file("deploy/shell-image/prelude.sh"), { permissions: 0o755 })
+      .withUser("1000:1000")
+      .withEntrypoint(["/usr/local/bin/prelude"])
   }
 
   // deploy/bench/Dockerfile: harness-bench from its TypeScript source under Node 24 type
@@ -272,6 +336,7 @@ export class Kloudlite {
       .withDirectory("/opt/harness/bench/node_modules", deps.directory("/opt/harness/bench/node_modules"))
       .withDirectory("/opt/harness/bench/src", source.directory("harness/bench/src"))
       .withDirectory("/opt/harness/pi", source.directory("harness/pi"))
+      .withDirectory("/opt/harness/skills", source.directory("harness/skills"))
       .withExec(["sh", "-c",
         "chmod 0755 /opt/harness/bench/src/main.ts " +
         "&& ln -s /opt/harness/bench/src/main.ts /usr/local/bin/harness-bench " +
@@ -373,10 +438,13 @@ export class Kloudlite {
       [() => this.imageServer(built), "kloudlite"],
       [() => this.imageAgent(built), "kloudlite-agent"],
       [() => this.imageGateway(built), "kloudlite-gateway"],
+      [() => this.imageController(built), "kloudlite-controller"],
       [() => this.imageBuilderGate(built), "kloudlite-builder-gate"],
       [() => this.imageSlo(built), "kloudlite-slo"],
       [() => this.imageWorkspace(source, built), "kloudlite-workspace"],
       [() => this.imageBench(source, built), "kloudlite-bench"],
+      [() => this.imageShell(source, built), "kloudlite-shell"],
+      [() => this.imageInterceptProxy(built), "kloudlite-intercept-proxy"],
       [() => this.imageKompress(source), "kloudlite-kompress"],
     ]
 
