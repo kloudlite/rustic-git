@@ -103,8 +103,12 @@ async fn audit_row(c: &mut Ctx, id: &str) {
         let jwt = c.admin_jwt();
         let deny = admin(c, &format!("/admin/requests/{id}/deny"));
         // `action` and `target` are exactly what `deny_request` records, so a row that comes back
-        // is this deny's own and not some other admin's.
-        let log = admin(c, &format!("/admin/audit?action=request.denied&target={id}"));
+        // is this deny's own and not some other admin's. `from` yesterday (UTC, the log's own
+        // day keys) so the row written a moment ago is in range across midnight: without it the
+        // list walks the default 90 days fetching every row to filter, and outran the ceiling
+        // (hourly 2026-09-23 16:58 IST).
+        let from = (chrono::Utc::now() - chrono::Duration::days(1)).format("%Y-%m-%d");
+        let log = admin(c, &format!("/admin/audit?action=request.denied&target={id}&from={from}"));
         // The dual write: every audit row is copied into `kloudlite.events` as `admin.<action>`,
         // where the console's own history charts read it. The object-store log stays the legal
         // record, so a ClickHouse that is not deployed is not a breach — that is `503 history
