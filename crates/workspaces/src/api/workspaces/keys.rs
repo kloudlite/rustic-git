@@ -180,6 +180,22 @@ pub(crate) async fn write_user_key(s: &ApiState, c: &kube::Client, ns: &str, own
         }
     };
     let secret = crate::k8s::user_key_secret(owner, ns, &private, &material, &authorized, &registry_token, &workspace_token);
+    // A separate Secret, never folded into user-key (that one is mounted whole into every
+    // workspace pod). Written only when there is something to write — no delete route exists
+    // on this api, so an empty map leaves whatever is already there alone.
+    if !s.bench_engine.is_empty() {
+        let engine_secret = crate::k8s::bench_engine_secret(owner, ns, &s.bench_engine);
+        if let Err(e) = api
+            .patch(
+                crate::k8s::BENCH_ENGINE_SECRET,
+                &kube::api::PatchParams::apply("kloudlite-api").force(),
+                &kube::api::Patch::Apply(&engine_secret),
+            )
+            .await
+        {
+            tracing::warn!(%owner, error = %e, "bench-engine.install.failed");
+        }
+    }
     for attempt in 1u32.. {
         let Err(e) = api
             .patch(
@@ -292,21 +308,5 @@ mod tests {
     fn the_retry_schedule_is_one_three_nine_and_then_the_beat() {
         let secs: Vec<_> = (1..=4).map(|a| retry_backoff(a).map(|d| d.as_secs())).collect();
         assert_eq!(secs, vec![Some(1), Some(3), Some(9), None]);
-    }
-    // A separate Secret, never folded into user-key (that one is mounted whole into every
-    // workspace pod). Written only when there is something to write — no delete route exists
-    // on this api, so an empty map leaves whatever is already there alone.
-    if !s.bench_engine.is_empty() {
-        let engine_secret = crate::k8s::bench_engine_secret(owner, ns, &s.bench_engine);
-        if let Err(e) = api
-            .patch(
-                crate::k8s::BENCH_ENGINE_SECRET,
-                &kube::api::PatchParams::apply("kloudlite-api").force(),
-                &kube::api::Patch::Apply(&engine_secret),
-            )
-            .await
-        {
-            tracing::warn!(%owner, error = %e, "bench-engine.install.failed");
-        }
     }
 }

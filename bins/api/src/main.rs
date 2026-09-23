@@ -692,7 +692,11 @@ mod tests {
         }
         d.create("acme", "Acme", "alice@x.io", "").await.unwrap().unwrap();
         d.add_member("acme", "bob@x.io", Role::Member).await.unwrap();
-        let dir = Dir(Arc::new(d));
+        let tmp = tempfile::tempdir().unwrap();
+        let store = kloudlite_storage::store::Store::open(Arc::new(object_store::memory::InMemory::new()), tmp.path().join("cache"), false)
+            .await
+            .unwrap();
+        let dir = Dir(Arc::new(d), Arc::new(store));
         assert_eq!(dir.membership("nope", "bob").await, Ok(Judged::TeamGone));
         assert_eq!(dir.membership("acme", "carol").await, Ok(Judged::NotMember));
         assert_eq!(dir.membership("acme", "bob").await, Ok(Judged::Member(MemberState::Active)));

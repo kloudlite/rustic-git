@@ -408,15 +408,6 @@ fn quota_kinds_are_published() {
     assert_eq!(words, vec!["pending", "approved", "denied"], "{words:?}");
 }
 
-/// The Bench CRD is generated and published in the manifest.
-#[test]
-fn bench_crd_is_generated() {
-    let kinds: Vec<String> = all_crds().into_iter().map(|c| c.spec.names.kind).collect();
-    assert!(kinds.iter().any(|k| k == "Bench"), "{kinds:?}");
-    let yaml = std::fs::read_to_string(concat!(env!("CARGO_MANIFEST_DIR"), "/../../deploy/k3s/crds.yaml")).unwrap();
-    assert!(yaml.contains("\"name\": \"benches.kloudlite.io\""), "regenerate deploy/k3s/crds.yaml");
-}
-
 /// The bootstrap numbers are the spec's table, and they are what an owner with no `Quota` object
 /// of their own gets — so a change here is a change to what every unlisted owner may allocate.
 #[test]

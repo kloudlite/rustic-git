@@ -1,8 +1,6 @@
 set -e
 H=/home/kl
-chown 1000:1000 $H $H/workspaces
-chown -h 1000:1000 $H/.cargo $H/.cargo/registry
-chown 1000:1000 $H/.local
+chown -Rh 1000:1000 $H
 mkdir -p /etc/fish/conf.d
 printf '%s\n' '[[ -o interactive ]] || return 0' '[ "$PWD" = "$HOME" ] && [ -d "$KL_WORKSPACE" ] && cd "$KL_WORKSPACE"' '[ -e "$HOME/.config/starship.toml" ] || export STARSHIP_CONFIG=/etc/starship.toml' 'mkdir -p "${XDG_CACHE_HOME:-$HOME/.cache}/zsh"' 'autoload -Uz compinit && compinit -d "${XDG_CACHE_HOME:-$HOME/.cache}/zsh/zcompdump"' 'zstyle ":completion:*" menu select' 'HISTSIZE=50000' 'SAVEHIST=50000' 'setopt appendhistory incappendhistory sharehistory histignorealldups histignorespace' '_kl_profile=$(readlink /nix/profile/current 2>/dev/null)' '_kl_rehash() { local p=$(readlink /nix/profile/current 2>/dev/null); [[ $p != $_kl_profile ]] && { _kl_profile=$p; rehash; }; }' 'precmd_functions+=(_kl_rehash)' '[ -r /etc/profile.d/kl-build.sh ] && sh /etc/profile.d/kl-build.sh' > /etc/zshrc
 printf '%s\n' 'status is-interactive; or exit' 'if test "$PWD" = "$HOME" -a -d "$KL_WORKSPACE"; cd "$KL_WORKSPACE"; end' 'test -e "$HOME/.config/starship.toml"; or set -gx STARSHIP_CONFIG /etc/starship.toml' 'test -r /etc/profile.d/kl-build.sh; and sh /etc/profile.d/kl-build.sh' > /etc/fish/conf.d/kl.fish
@@ -12,14 +10,14 @@ su kl -s /bin/sh <<'SEED'
 set -e
 export PATH=/nix/profile/current/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
 H=/home/kl
-mkdir -p $H/.config/fish $H/.config/zsh $H/.config/git $H/.local-cache/tmp
+mkdir -p $H/workspace $H/.cargo $H/.config/fish $H/.config/zsh $H/.config/git $H/.local/state
 grep -qF '# kloudlite: derived state' $H/.config/git/ignore 2>/dev/null || cat /etc/kloudlite/gitignore-global >> $H/.config/git/ignore
+git config --global receive.denyCurrentBranch updateInstead
 [ -e $H/.config/zsh/.zshrc ] || printf 'export PATH=/nix/profile/current/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin\neval "$(dircolors -b)"\nzstyle ":completion:*" list-colors "${(s.:.)LS_COLORS}"\nalias ls="ls --color=auto" grep="grep --color=auto"\neval "$(starship init zsh)"\n' > $H/.config/zsh/.zshrc
 [ -e $H/.config/fish/config.fish ] || printf 'set -gx PATH /nix/profile/current/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin\nset -gx LS_COLORS (dircolors -b | string match -r "LS_COLORS=.([^\047]*)")[2]\nalias ls="ls --color=auto"\nalias grep="grep --color=auto"\nstarship init fish | source\n' > $H/.config/fish/config.fish
 SEED
-chown -Rh 1000:1000 /home/kl/workspaces/api
 echo prelude.chown.done
-su kl -s /bin/sh -c 'mkdir -p /home/kl/workspaces/api/.cache/zsh /home/kl/workspaces/api/.cache/shell'
-su kl -s /bin/sh -c 'cd /home/kl/workspaces/api && KL_WORKSPACE=/home/kl/workspaces/api KLOUDLITE_OTLP_URL=http://kloudlite-otel-agent-otlp.kube-system.svc:4318 OTEL_SERVICE_NAME=kl-ide exec kl ide serve --bind 0.0.0.0:7788 >> /home/kl/.local/state/kl-ide.log 2>&1' &
+su kl -s /bin/sh -c 'mkdir -p /home/kl/.cache/zsh /home/kl/.cache/shell'
+su kl -s /bin/sh -c 'cd /home/kl/workspace && KL_WORKSPACE=/home/kl/workspace KLOUDLITE_OTLP_URL=http://kloudlite-otel-agent-otlp.kube-system.svc:4318 OTEL_SERVICE_NAME=kl-ide exec kl ide serve --bind 0.0.0.0:7788 >> /home/kl/.local/state/kl-ide.log 2>&1' &
 echo prelude.sshd.start
 exec /nix/profile/current/bin/sshd -D -e -f /etc/ssh/sshd_config

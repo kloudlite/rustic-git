@@ -334,7 +334,10 @@ async fn a_personal_pair_is_never_a_candidate() {
 
 #[tokio::test]
 async fn a_removed_pair_is_stamped_once_and_the_second_beat_writes_nothing() {
-    let routes = vec![benches(vec![bench("bob", "acme", "full", None)]), benches(vec![bench("bob", "acme", "paused", Some("2026-09-15T00:00:00Z"))])];
+    // Stamped NOW, never a fixed date: a literal went past the seven-day grace on the calendar and
+    // the second beat rightly wrote the due `delete-after` (2026-09-23).
+    let stamped = chrono::Utc::now().to_rfc3339();
+    let routes = vec![benches(vec![bench("bob", "acme", "full", None)]), benches(vec![bench("bob", "acme", "paused", Some(&stamped))])];
     let (s, rec, _) = setup(routes, &[("bob", "acme")]);
     let _ = reconcile(&s).await;
     let sent = rec.sent("PATCH", &path("bob", "acme"));

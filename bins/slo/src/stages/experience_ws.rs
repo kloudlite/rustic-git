@@ -292,7 +292,7 @@ pub async fn home_travels(c: &mut Ctx) {
                 drop_ws(c, &a).await;
                 return Err(anyhow!("writing the home files exited {code}: {}", err.trim()));
             }
-            let restored = push_then_restore(c, &a, &b).await;
+            let restored = push_then_restore(c, &a, &b, "home.travels").await;
             drop_ws(c, &a).await;
             let b = restored?;
             let (code, dot_out, err) = ws_exec(c, &b, &format!("cat {DOTFILE}"), EXEC).await?;
