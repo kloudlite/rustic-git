@@ -960,6 +960,24 @@ async fn agent_tree_run(c: &mut Ctx) {
             // happened, but never before the assertions below have read it.
             let outcome = async {
                 turn?;
+                // The bench names the agent, not the model: `ask` slugs the asked-for name to 24
+                // and adds a random tail (`harness/pi/kloudlite.ts`), so the tree is called what
+                // the tool result says. Hourly 2026-09-24 00:12 IST looked for the asked-for name
+                // and found nothing, next to a started `a-run-hourly-1790188933--q4iekk`.
+                let (_, said) = through(port, &format!("/sessions/{sid}/messages")).await?;
+                let Some(tree) = started_agent(&said) else {
+                    bail!("the session started no agent: {}", transcript_tail(&said));
+                };
+                // The turn ends at the dispatch ("Waiting for agent report"); the agent's work and
+                // report come after it, so wait for the file rather than read it once.
+                let home = kloudlite_workspaces::k8s::HOME_DIR;
+                let probe_file = format!("cat {home}/.agents/{tree}/workspace/{marker}.txt 2>&1");
+                poll_until(Duration::from_secs(180), || async {
+                    super::workspace::ws_exec(c, &ws_id, &probe_file, Duration::from_secs(20))
+                        .await
+                        .is_ok_and(|(_, out, _)| out.contains(&marker))
+                })
+                .await;
                 // 1. `/v1` lists the tree the dispatch cut, ready, with the name the model used.
                 //    Read from the doc rather than from the bench, so a bench that invented a
                 //    local record and never called `/v1` fails here.
@@ -978,7 +996,6 @@ async fn agent_tree_run(c: &mut Ctx) {
                 //    halves of §4.4 — the tree is real, and it is not main. A tree snapshots the
                 //    whole home, so its copy of the workspace is `~/.agents/{tree}/workspace`.
                 let f = format!("{marker}.txt");
-                let home = kloudlite_workspaces::k8s::HOME_DIR;
                 let (code, out, _) = super::workspace::ws_exec(
                     c,
                     &ws_id,
@@ -1744,6 +1761,16 @@ fn judge_reply(body: &str) -> Result<Reply> {
 
 /// The transcript's last four messages as `role(tool): text`, each cut to 120 chars: enough to
 /// say why a turn did not do what it was asked, short enough for a step's detail.
+/// The name `ask` gave the agent it started, from its `agent {name} started` tool result.
+fn started_agent(body: &str) -> Option<String> {
+    let doc: Value = serde_json::from_str(body).ok()?;
+    doc["messages"].as_array()?.iter().filter(|m| m["toolName"] == "ask").find_map(|m| {
+        m["content"].as_array()?.iter().find_map(|c| {
+            c["text"].as_str()?.strip_prefix("agent ")?.strip_suffix(" started").map(str::to_string)
+        })
+    })
+}
+
 fn transcript_tail(body: &str) -> String {
     let doc: Value = serde_json::from_str(body).unwrap_or_default();
     let msgs = doc["messages"].as_array().cloned().unwrap_or_default();
@@ -1839,6 +1866,20 @@ mod tests {
         }
         // The tail is kept, so two runs that share a prefix still differ.
         assert_ne!(tree_name("run-aaaa1111"), tree_name("run-aaaa2222"));
+    }
+
+    /// The tree is the name the tool reported, never the one the probe asked for.
+    #[test]
+    fn the_started_agent_is_read_from_the_ask_result() {
+        let body = serde_json::json!({"messages": [
+            {"role": "assistant", "content": [{"type": "toolCall", "name": "ask"}]},
+            {"role": "toolResult", "toolName": "tool_search", "content": [{"type": "text", "text": "agent x started"}]},
+            {"role": "toolResult", "toolName": "ask", "content": [{"type": "text", "text": "agent a-run-hourly-1--q4iekk started"}]},
+        ]})
+        .to_string();
+        assert_eq!(started_agent(&body).as_deref(), Some("a-run-hourly-1--q4iekk"));
+        assert_eq!(started_agent(r#"{"messages": []}"#), None);
+        assert_eq!(started_agent("not json"), None);
     }
 
     #[test]
