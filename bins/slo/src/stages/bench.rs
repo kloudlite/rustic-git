@@ -287,7 +287,7 @@ pub async fn fast(c: &mut Ctx) {
 
 /// Put the probe tenant's model key where its bench reads provider keys from.
 ///
-/// A bench keeps `auth.json` under `PI_CODING_AGENT_DIR` — `{workspace}/.bench/pi` since
+/// A bench keeps `auth.json` under `PI_CODING_AGENT_DIR` — `~/.bench/pi` since
 /// 2026-09-18 — inside its own volume, and NOTHING else writes that file: the desktop's Settings
 /// is the only other writer and no probe runs it. Before this, every bench probe that needed a
 /// model turn skipped on `NO_MODEL` forever, or passed on a key somebody had put there by hand
@@ -947,12 +947,14 @@ async fn agent_tree_run(c: &mut Ctx) {
                 }
                 // 2. And the node really cut it: the file the agent was told to write is under
                 //    `.agents/{tree}` and NOT in the workspace's own root. One assertion for both
-                //    halves of §4.4 — the tree is real, and it is not main.
+                //    halves of §4.4 — the tree is real, and it is not main. A tree snapshots the
+                //    whole home, so its copy of the workspace is `~/.agents/{tree}/workspace`.
                 let f = format!("{marker}.txt");
+                let home = kloudlite_workspaces::k8s::HOME_DIR;
                 let (code, out, _) = super::workspace::ws_exec(
                     c,
                     &ws_id,
-                    &format!("cd \"$KL_WORKSPACE\" && cat .agents/{tree}/{f} 2>&1; echo ---; ls {f} 2>&1"),
+                    &format!("cat {home}/.agents/{tree}/workspace/{f} 2>&1; echo ---; cd \"$KL_WORKSPACE\" && ls {f} 2>&1"),
                     Duration::from_secs(20),
                 )
                 .await?;
@@ -1527,7 +1529,7 @@ async fn tool_roundtrip(c: &mut Ctx) -> Option<String> {
             for _ in 0..2 {
                 one_turn(port, &sid, &tool_prompt(&marker), &nm).await?;
                 // Read by the workspace route, which is the thread file under the bench folder's
-                // own `workspaces/{ws}/` — `{KL_WORKSPACE}/.bench`, never a `/bench` mount.
+                // own `workspaces/{ws}/` — `~/.bench`, never a `/bench` mount.
                 let (status, body) = through(port, &format!("/workspaces/{ws}/messages")).await?;
                 if status != 200 {
                     bail!("GET /workspaces/{ws}/messages answered {status}");

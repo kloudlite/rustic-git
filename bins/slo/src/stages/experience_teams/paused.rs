@@ -45,14 +45,15 @@ const EXEC: Duration = Duration::from_secs(20);
 const CANARY: &str = "kloudlite-slo-pause-canary";
 
 /// The canary's path, computed INSIDE the bench container from the same two facts the container
-/// itself is built from: `KL_WORKSPACE` (the live worktree, mounted at the same path the workspace
-/// container sees) and `k8s::BENCH_SUBDIR`, which is what `harness-bench --dir` is given. It used
+/// itself is built from: `HOME` (the live worktree IS the home since 2026-09-22) and
+/// `k8s::BENCH_SUBDIR`, which is what `harness-bench --dir` is given as `{HOME}/.bench`. It read
+/// `KL_WORKSPACE`, which is `~/workspace` since that ruling, and ENOENT'd (hourly 2026-09-23). It used
 /// to be the literal `/bench`, the retired Bench pod's own mount — nothing mounts that now, and
 /// the write failed `ENOENT` on every run (hourly, 2026-09-17). One expression for the write and
 /// the read, so the two can never drift apart.
 fn canary_js(body: &str) -> String {
     format!(
-        r#"const w=process.env.KL_WORKSPACE;if(!w){{console.error("no KL_WORKSPACE in the bench container");process.exit(2)}}const p=require("path").join(w,{subdir:?},".slo-canary");{body}"#,
+        r#"const w=process.env.HOME;if(!w){{console.error("no HOME in the bench container");process.exit(2)}}const p=require("path").join(w,{subdir:?},".slo-canary");{body}"#,
         subdir = k8s::BENCH_SUBDIR,
     )
 }
@@ -292,7 +293,7 @@ mod canary_tests {
     #[test]
     fn the_canary_path_comes_from_the_containers_own_env() {
         let js = canary_js("read(p)");
-        assert!(js.contains("process.env.KL_WORKSPACE"), "{js}");
+        assert!(js.contains("process.env.HOME"), "{js}");
         assert!(js.contains(&format!("{:?}", k8s::BENCH_SUBDIR)), "{js}");
         assert!(js.ends_with("read(p)"), "{js}");
         assert!(!js.contains("\"/bench\""), "the retired Bench mount is back: {js}");
