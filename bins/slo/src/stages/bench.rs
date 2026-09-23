@@ -999,10 +999,12 @@ async fn agent_tree_run(c: &mut Ctx) {
                 let (code, out, _) = super::workspace::ws_exec(
                     c,
                     &ws_id,
-                    &format!("cat {home}/.agents/{tree}/workspace/{f} 2>&1; echo ---; cd \"$KL_WORKSPACE\" && ls {f} 2>&1"),
+                    &format!("cat {home}/.agents/{tree}/workspace/{f} 2>&1; echo ---; cd \"$KL_WORKSPACE\" && ls {f} 2>&1; true"),
                     Duration::from_secs(20),
                 )
                 .await?;
+                // `; true`: the `ls` that proves main has NO copy exits 2 on success (hourly
+                // 2026-09-24 00:39 IST), so only a shell that could not run at all fails here.
                 if code != 0 {
                     bail!("could not look inside the tree: exit {code}");
                 }
