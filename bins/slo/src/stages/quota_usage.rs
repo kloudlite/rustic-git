@@ -10,8 +10,11 @@
 //! tool server (`kl ide serve`), the way an agent working in the pod would write it, not through
 //! a kubectl exec of the probe's own.
 //!
-//! The file lands in `/home/kl`, which IS the workspace's btrfs volume (ruling 2026-09-22), so
-//! its qgroup is the one the stamp reads.
+//! The file lands in `~/workspace`, on the workspace's btrfs volume (ruling 2026-09-22), so its
+//! qgroup is the one the stamp reads. Not `/home/kl` itself: every tool `exec` runs under bwrap
+//! (`crates/ide/src/sandbox.rs`), which binds the tree and NOT the home, so a write to the home
+//! lands in the sandbox's in-memory root, exits 0 and never reaches btrfs — the hourly 2026-09-23
+//! 23:01 IST run's sync cut sent 11 KB after "200 MB written".
 //!
 //! Hourly, group 0, on the run's own workspace — the wait is two sync beats, which is more than
 //! the five-minute suite can spend.
@@ -106,7 +109,7 @@ async fn used_bytes(c: &Ctx, url: &str, jwt: &str, ws: &str) -> Result<Option<u6
 /// `exec`. `conv=fsync` because btrfs charges a qgroup for what is on disk, and the beat that
 /// reads it is seconds away — a write still in the page cache would be measured as nothing.
 async fn write_bytes(c: &Ctx, ws: &str) -> Result<()> {
-    let dir = kloudlite_workspaces::k8s::HOME_DIR;
+    let dir = kloudlite_workspaces::k8s::WORKSPACE_DIR;
     let cmd = format!("dd if=/dev/urandom of={dir}/slo-usage.bin bs=1M count={WRITTEN_MB} conv=fsync");
     // Through the shared helper, which reads the workspace's token from the file this container
     // mounts. Hand-rolling the curl here is what made this probe the one caller without a
@@ -135,12 +138,12 @@ mod tests {
     use super::*;
     use crate::testkit;
 
-    /// The file goes to the workspace's own subvolume, which IS the home since 2026-09-22.
+    /// The file goes to the tree, the one part of the subvolume the exec sandbox binds.
     #[test]
     fn the_bytes_are_written_to_the_subvolume_and_flushed() {
-        let dir = kloudlite_workspaces::k8s::HOME_DIR;
+        let dir = kloudlite_workspaces::k8s::WORKSPACE_DIR;
         let cmd = format!("dd if=/dev/urandom of={dir}/slo-usage.bin bs=1M count={WRITTEN_MB} conv=fsync");
-        assert!(cmd.contains("of=/home/kl/slo-usage.bin"), "{cmd}");
+        assert!(cmd.contains("of=/home/kl/workspace/slo-usage.bin"), "{cmd}");
         assert!(cmd.ends_with("conv=fsync"), "{cmd}");
     }
 
