@@ -598,6 +598,17 @@ async fn sessions(c: &mut Ctx) {
     // cold node. Waiting here keeps each ceiling measuring the DIAL, which is what they are the
     // target for, rather than the profile build, which is `ws.packages.*`'s to measure.
     own_workspace(c).await;
+    // The bench resolves a workspace-scoped shell or tool with its pod token (`harness/pi/
+    // kloudlite.ts` answers "sign in on the Kloudlite desktop app" without one), and only a live
+    // CLI login mints that token: the hourly 2026-09-23 22:19 IST run failed all three ids on it.
+    let login = if c.state.ux_workspace.is_some() && NEEDS_WORKSPACE.iter().any(|id| c.walks(id)) {
+        super::bench_tool::arm(c)
+            .await
+            .map_err(|why| tracing::warn!(error = %why, "slo.bench.tool_token.not_armed"))
+            .ok()
+    } else {
+        None
+    };
     if c.walks("bench.shell.roundtrip") || c.walks("shell.up") || c.walks("shell.fenced") || c.walks("shell.no_tools") {
         if let Err(e) = await_shell(c).await {
             tracing::warn!(error = %format!("{e:#}"), "slo.bench.shell.not_ready");
@@ -629,6 +640,11 @@ async fn sessions(c: &mut Ctx) {
     }
     if c.walks("agent.tree.run") {
         agent_tree_run(c).await;
+    }
+    if let Some(login) = login {
+        if let Err(e) = super::bench_tool::revoke_login(c, &login).await {
+            tracing::warn!(error = %format!("{e:#}"), "slo.bench.tool_token.login.revoke");
+        }
     }
     // What both sockets saw, filled by the round trip for `bench.two_clients` to judge.
     type Seen = Option<(Vec<String>, Vec<String>)>;
