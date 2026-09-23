@@ -275,7 +275,7 @@ export class Kloudlite {
       .withExec(["sh", "-c",
         "chmod 0755 /opt/harness/bench/src/main.ts " +
         "&& ln -s /opt/harness/bench/src/main.ts /usr/local/bin/harness-bench " +
-        "&& mkdir -p /bench /home/kl && chown 1000:1000 /bench /home/kl"])
+        "&& mkdir -p /home/kl && chown 1000:1000 /home/kl"])
       .withUser("1000:1000")
       .withWorkdir("/home/kl")
       .withEntrypoint([])
