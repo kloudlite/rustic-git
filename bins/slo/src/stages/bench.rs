@@ -597,6 +597,7 @@ async fn sessions(c: &mut Ctx) {
     // being fetched and `shell.up` and `bench.shell.roundtrip` timed out at 20 s and 45 s on a
     // cold node. Waiting here keeps each ceiling measuring the DIAL, which is what they are the
     // target for, rather than the profile build, which is `ws.packages.*`'s to measure.
+    own_workspace(c).await;
     if c.walks("bench.shell.roundtrip") || c.walks("shell.up") || c.walks("shell.fenced") || c.walks("shell.no_tools") {
         if let Err(e) = await_shell(c).await {
             tracing::warn!(error = %format!("{e:#}"), "slo.bench.shell.not_ready");
@@ -1159,8 +1160,9 @@ async fn shell_roundtrip(c: &mut Ctx) {
 /// `bench.no_hands`: a bench session cannot run a command, and says so rather than trying.
 ///
 /// The transcript is the assertion (spec §3.4): asked to `cat /etc/hostname` the session must call
-/// NO tool at all — there is no `bash`, no `read`, no filesystem tool registered in the sessions
-/// container in any mode, and `tool_search` finds none because none exists.
+/// no tool that acts — there is no `bash`, no `read`, no filesystem tool registered in the sessions
+/// container in any mode. The `ALWAYS_ON` tools only steer the session, so calling them (a
+/// `tool_search` for a shell, say) is allowed; any other tool result fails the id.
 async fn no_hands(c: &mut Ctx) {
     let no_model: Arc<Mutex<Option<String>>> = Default::default();
     let nm = no_model.clone();
@@ -1180,7 +1182,10 @@ async fn no_hands(c: &mut Ctx) {
             // is that nothing RAN: a tool call in the transcript is the boundary being crossed.
             let doc: Value = serde_json::from_str(&body)?;
             let msgs = doc["messages"].as_array().context("messages answer has no messages")?;
-            if let Some(call) = msgs.iter().find(|m| m["role"] == "toolResult" || m["toolCallId"].is_string()) {
+            // `ALWAYS_ON` steers the session and touches nothing, and a model looking for a way to
+            // run the command reaches for `tool_search` first (hourly 2026-09-23 19:53 IST): that
+            // is the session asking, not crossing. Any other tool, or one with no name, is.
+            if let Some(call) = msgs.iter().find(|m| crossed(m)) {
                 bail!("a bench session ran a tool: {}", super::clip(&call.to_string()));
             }
             Ok(())
@@ -1556,6 +1561,33 @@ async fn tool_roundtrip(c: &mut Ctx) -> Option<String> {
 
 /// The workspace the tool round trip runs in, or why it cannot: a workspace recorded but never
 /// ready already failed `ws.packages.add`, and must not fail a second id for the same fault.
+/// A message that says a tool outside `ALWAYS_ON` ran — `bench.no_hands`'s boundary.
+fn crossed(m: &Value) -> bool {
+    (m["role"] == "toolResult" || m["toolCallId"].is_string())
+        && !m["toolName"].as_str().is_some_and(|n| ALWAYS_ON.contains(&n))
+}
+
+/// The ids of this group that need a live workspace besides the bench.
+const NEEDS_WORKSPACE: [&str; 3] = ["shell.up", "shell.no_tools", "agent.tree.run"];
+
+/// A workspace of this pod's own for `NEEDS_WORKSPACE`, when `ws.packages.add` (group 0) did not
+/// make one here. Grouping split the two after `shell.up` was written against the shared one, and
+/// every grouped hourly run since failed it as "never created" (hourly 2026-09-23 19:53 IST).
+/// Plain, no packages: these ids judge the shell and the tool server, not the profile.
+async fn own_workspace(c: &mut Ctx) {
+    if c.state.ux_workspace.is_some() || !NEEDS_WORKSPACE.iter().any(|id| c.walks(id)) {
+        return;
+    }
+    let name = format!("{}-b", c.prefix());
+    match super::experience_ws::create(c, &name, serde_json::json!({})).await {
+        Ok(id) => {
+            c.state.ux_workspace = Some(id);
+            c.state.ux_ready = true;
+        }
+        Err(e) => tracing::warn!(error = %format!("{e:#}"), "slo.bench.workspace.not_created"),
+    }
+}
+
 fn tool_workspace(ws: Option<String>, ready: bool) -> std::result::Result<String, &'static str> {
     match (ws, ready) {
         (None, _) => Err("the stage's workspace was never created"),
@@ -2006,6 +2038,10 @@ mod tests {
         let why = tool_ran(&failed.to_string(), m).unwrap_err().to_string();
         // The failure carries what the tool said, so a fleet run names its cause.
         assert!(why.contains("isError=true") && why.contains("[exit 1]"), "{why}");
+        assert!(!crossed(&serde_json::json!({"role": "toolResult", "toolName": "tool_search"})));
+        assert!(crossed(&serde_json::json!({"role": "toolResult", "toolName": "kl_exec"})));
+        assert!(crossed(&serde_json::json!({"role": "toolResult"})));
+        assert!(!crossed(&serde_json::json!({"role": "assistant"})));
         assert!(tool_workspace(None, true).is_err());
         assert!(tool_workspace(Some("w".into()), false).unwrap_err().contains("ws.packages.add"));
         assert_eq!(tool_workspace(Some("w".into()), true).unwrap(), "w");

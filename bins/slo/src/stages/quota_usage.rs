@@ -10,8 +10,8 @@
 //! tool server (`kl ide serve`), the way an agent working in the pod would write it, not through
 //! a kubectl exec of the probe's own.
 //!
-//! The file lands in the workspace's subvolume (`k8s::workspace_dir`), never in `/home/kl`: the
-//! home is the region's shared NFS export, which has no qgroup and is charged to nobody.
+//! The file lands in `/home/kl`, which IS the workspace's btrfs volume (ruling 2026-09-22), so
+//! its qgroup is the one the stamp reads.
 //!
 //! Hourly, group 0, on the run's own workspace — the wait is two sync beats, which is more than
 //! the five-minute suite can spend.
