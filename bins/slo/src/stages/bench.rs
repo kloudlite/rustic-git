@@ -605,6 +605,12 @@ async fn sessions(c: &mut Ctx) {
     if c.walks("bench.pkg_needs_workspace") {
         pkg_needs_workspace(c).await;
     }
+    // Same reason: with the token, "Run: cat /etc/hostname" became an `ask` to the run's workspace
+    // whose proposal nobody answers (hourly 2026-09-23 23:42 IST, 60 s timeout). No hands means
+    // the bench's OWN; a workspace it may ask is the workspace's hands, not the bench's.
+    if c.walks("bench.no_hands") {
+        no_hands(c).await;
+    }
     // The bench resolves a workspace-scoped shell or tool with its pod token (`harness/pi/
     // kloudlite.ts` answers "sign in on the Kloudlite desktop app" without one), and only a live
     // CLI login mints that token: the hourly 2026-09-23 22:19 IST run failed all three ids on it.
@@ -632,9 +638,6 @@ async fn sessions(c: &mut Ctx) {
     }
     if c.walks("shell.no_tools") {
         shell_no_tools(c).await;
-    }
-    if c.walks("bench.no_hands") {
-        no_hands(c).await;
     }
     if c.walks("bench.tools.own_hands") {
         own_hands(c).await;
@@ -943,11 +946,12 @@ async fn agent_tree_run(c: &mut Ctx) {
             let sid = serde_json::from_str::<Value>(&row)?["id"].as_str().context("session row missing id")?.to_string();
             // Every proposal answered yes: the dispatch itself is one, and so is the close.
             let _answering = answering(port);
-            // `tool_search` first, like every other bench prompt: the `kl_*` and `ask` tools are
-            // DEFERRED, so naming one directly asks for a tool the session has not turned on.
+            // `ask` by name: it is `ALWAYS_ON`, and `tool_search` never finds it for "dispatch an
+            // agent" (every word must be in its summary), so the hourly 2026-09-23 23:42 IST run's
+            // model searched, was told there is no such tool, and stopped.
             let brief = format!(
-                "Call tool_search once with query \"dispatch an agent\", then call the tool it names \
-                 exactly once to start an agent named \"{tree}\" on workspace \"{ws_id}\", with the task: \
+                "Call the ask tool exactly once with to \"agent\", name \"{tree}\", workspace \"{ws_id}\" \
+                 and the task: \
                  write a file called {marker}.txt containing the word {marker} in your working directory, \
                  then reply done. Wait for that agent to report, then reply with exactly the word done."
             );
