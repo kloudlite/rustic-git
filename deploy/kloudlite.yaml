@@ -1997,6 +1997,8 @@ spec:
               env:
                 - name: KLOUDLITE_POD_UID
                   valueFrom: { fieldRef: { fieldPath: metadata.uid } }
+                - name: KLOUDLITE_POD_NAME
+                  valueFrom: { fieldRef: { fieldPath: metadata.name } }
                 - name: KLOUDLITE_SLO_JOB_NAME
                   valueFrom: { fieldRef: { fieldPath: "metadata.labels['job-name']" } }
                 # The probe holds no password: it MINTS its own user and admin tokens with the
@@ -2152,6 +2154,8 @@ spec:
               env:
                 - name: KLOUDLITE_POD_UID
                   valueFrom: { fieldRef: { fieldPath: metadata.uid } }
+                - name: KLOUDLITE_POD_NAME
+                  valueFrom: { fieldRef: { fieldPath: metadata.name } }
                 - name: KLOUDLITE_SLO_JOB_NAME
                   valueFrom: { fieldRef: { fieldPath: "metadata.labels['job-name']" } }
                 # The probe holds no password: it MINTS its own user and admin tokens with the
@@ -2296,6 +2300,8 @@ spec:
               env:
                 - name: KLOUDLITE_POD_UID
                   valueFrom: { fieldRef: { fieldPath: metadata.uid } }
+                - name: KLOUDLITE_POD_NAME
+                  valueFrom: { fieldRef: { fieldPath: metadata.name } }
                 - name: KLOUDLITE_SLO_JOB_NAME
                   valueFrom: { fieldRef: { fieldPath: "metadata.labels['job-name']" } }
                 # The run's WALL-CLOCK budget. The child stops starting stages once it is spent
@@ -2419,6 +2425,8 @@ spec:
               env:
                 - name: KLOUDLITE_POD_UID
                   valueFrom: { fieldRef: { fieldPath: metadata.uid } }
+                - name: KLOUDLITE_POD_NAME
+                  valueFrom: { fieldRef: { fieldPath: metadata.name } }
                 - name: KLOUDLITE_SLO_JOB_NAME
                   valueFrom: { fieldRef: { fieldPath: "metadata.labels['job-name']" } }
                 # The run's WALL-CLOCK budget. The child stops starting stages once it is spent

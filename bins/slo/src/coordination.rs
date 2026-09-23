@@ -136,8 +136,10 @@ pub async fn client() -> Result<kube::Client> {
 /// test running in parallel in this binary).
 pub struct Identity {
     pod_uid: String,
-    /// Kubelet sets a pod's hostname to its own name by default — `roll.sh` already leans on the
-    /// same `${HOSTNAME:-}` for its ownerReference, so this is not a new assumption.
+    /// From the downward API, never `$HOSTNAME`: an Indexed Job pod's hostname is `{job}-{index}`,
+    /// not its name, so an ownerReference built from it points at no pod and the garbage collector
+    /// deleted the lock within seconds (hourly 2026-09-23 16:58 IST: groups 1-3 waited 120 s on a
+    /// 404 and the bench group never ran).
     pod_name: Option<String>,
     job_name: String,
 }
@@ -146,7 +148,7 @@ impl Identity {
     pub fn from_env() -> Self {
         Self {
             pod_uid: std::env::var("KLOUDLITE_POD_UID").unwrap_or_else(|_| "manual".into()),
-            pod_name: std::env::var("HOSTNAME").ok().filter(|s| !s.is_empty()),
+            pod_name: std::env::var("KLOUDLITE_POD_NAME").ok().filter(|s| !s.is_empty()),
             job_name: std::env::var("KLOUDLITE_SLO_JOB_NAME").unwrap_or_default(),
         }
     }
