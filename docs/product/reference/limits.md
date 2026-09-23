@@ -16,8 +16,8 @@
 | Node considered dead | 180 s NotReady |
 | Key and membership propagation | Immediate on change; resynced every 300 s |
 | ssh user | `kl` |
-| Tree path | `/home/kl/workspaces/{name}` |
-| Home | `/home/kl`, shared per person per region |
+| Tree path | `/home/kl/workspace` |
+| Home | `/home/kl`, the workspace's own volume; a clone or restore carries the whole home, credentials included, and it is always your own workspace |
 | Registry | `cr.khost.dev/{owner}/{name}:{tag}` |
 | Git | `git@git.khost.dev:{owner}/{repo}` |
 | API | `https://dev.kloudlite.io/v1` |

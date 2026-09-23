@@ -1,9 +1,9 @@
-//! The `Workspace` reconciler: profile, host key, home, worktree, attachment and the one pod.
-//! Split out of `controller.rs` unchanged.
+//! The `Workspace` reconciler: profile, host key, worktree, attachment and the one pod. Split out
+//! of `controller.rs` unchanged.
 //!
-//! The module map: `profile` (nix packages), `conditions`, `replicas`, `home` (the NFS home and
-//! the legacy bench-folder migration), `seed` (the git seed container), `bench` (the second
-//! container's verdicts), `lifecycle` (stop, delete, migrate), `status` (the status write, labels,
+//! The module map: `profile` (nix packages), `conditions`, `replicas`, `seed` (the git seed
+//! container), `bench` (the second container's verdicts), `lifecycle` (stop, delete, migrate),
+//! `status` (the status write, labels,
 //! resolv.conf, host key). `apply_workspace` and the two reconcile entry points stay here.
 //!
 //! A BENCH is a Workspace with `spec.bench` set and nothing else special: same volume, same home,
@@ -38,16 +38,14 @@ mod conditions;
 
 mod replicas;
 
-mod home;
 mod seed;
 mod bench;
 mod trees;
 pub use trees::{tree_actions, TreeAction};
-use bench::{bench_verdict_action, migrate_bench, park_bench};
+use bench::{bench_verdict_action, park_bench};
 pub(crate) use profile::*;
 pub use conditions::*;
 pub(crate) use replicas::*;
-pub(crate) use home::*;
 pub(crate) use seed::*;
 
 
@@ -162,7 +160,7 @@ pub async fn apply_workspace(w: &crd::Workspace, ctx: &Arc<Ctx>) -> Result<Actio
     let vol = match super::timed(
         "resolve_volume",
         &wsname,
-        resolve_volume(w, &w.spec.owner, &w.spec.team, &w.spec.region, &w.spec.storage, &prev.node_name.clone(), &prev.conditions.clone(), gen, ctx),
+        resolve_volume(w, &w.spec.owner, &w.spec.team, &w.spec.region, &w.spec.storage, &prev.node_name.clone(), &prev.conditions.clone(), gen, crd::DEFAULT_REPLICAS, ctx),
     )
     .await?
     {
@@ -217,36 +215,6 @@ pub async fn apply_workspace(w: &crd::Workspace, ctx: &Arc<Ctx>) -> Result<Actio
         write_ws_status(w, st, ctx).await?;
         return Ok(Action::requeue(TICK));
     }
-    // The shared home replaces the home Volume (spec 2026-09-01): the agent makes the two mount
-    // sources exist before kubelet needs them. `{pool}/homes/{owner}` is NFS — mkdir is the whole
-    // materialize. The cache subvolume is local and disposable. Both idempotent, so every reconcile
-    // may call them. No WS_HOMES_EXPORT on this node: park, fail closed — a pod started anyway
-    // would hostPath an empty local dir and the person's dotfiles would silently not be theirs.
-    let Some(export) = ctx.homes_export.as_deref() else {
-        let st = crd::WorkspaceStatus {
-            phase: crd::Phase::Creating,
-            observed_generation: None,
-            volume_ref: Some(id),
-            conditions: ws_conditions(&prev, crd::condition("Ready", false, "HomeNotReady", "this node has no shared-home mount (WS_HOMES_EXPORT)", gen)),
-            ..prev
-        };
-        write_ws_status(w, st, ctx).await?;
-        return Ok(Action::requeue(TICK));
-    };
-    // `spawn_blocking`, exactly as the `ensure_homecache` call below: `mount_homes` runs
-    // `timeout -s KILL 5 ls`, `umount -f -l` and `timeout -s KILL 60 nsenter … mount`, all
-    // synchronous — up to ~65 s of a reactor thread that every other workspace on this node shares.
-    let (pool, export_owned, owner) = (ctx.pool.clone(), export.to_string(), w.spec.owner.clone());
-    super::timed("shared_home", &id, tokio::task::spawn_blocking(move || ensure_shared_home(&pool, &export_owned, &owner, k8s::SSH_UID as u32)))
-        .await
-        .map_err(|e| ReconcileErr(e.to_string()))?
-        .map_err(ReconcileErr)?;
-    let (engine, owner) = (ctx.engine.clone(), w.spec.owner.clone());
-    super::timed("homecache", &id, tokio::task::spawn_blocking(move || engine.ensure_homecache(&owner, k8s::SSH_UID as u32)))
-        .await
-        .map_err(|e| ReconcileErr(e.to_string()))?
-        .map_err(|e| ReconcileErr(e.0))?;
-
     // Who may ssh in arrives as `OwnerKeys`, rendered to this node by `controller::keys`. The pod
     // mounts that file as a `type: File` hostPath, so starting one before it exists is a pod the
     // kubelet refuses with an opaque mount error; park until the projection has reached this node.
@@ -341,14 +309,6 @@ pub async fn apply_workspace(w: &crd::Workspace, ctx: &Arc<Ctx>) -> Result<Actio
             let prev2 = prev.clone();
             write_ws_status(w, crd::WorkspaceStatus { head: Some(commit.to_string()), ..prev2 }, ctx).await?;
             prev.head = Some(commit.to_string());
-        }
-    }
-
-    // The legacy bench folder, moved into this worktree once and BEFORE any pod: a pod started
-    // first would make its own empty `.bench` in the volume and race the copy for the same files.
-    if crd::is_bench(w) {
-        if let Some(action) = migrate_bench(w, &id, gen, &mut prev, ctx).await? {
-            return Ok(action);
         }
     }
 
@@ -462,8 +422,9 @@ pub async fn apply_workspace(w: &crd::Workspace, ctx: &Arc<Ctx>) -> Result<Actio
             // `Some` exactly when `is_bench`: the image is the agent's configured one (a bench
             // follows it on every start, so it is not a spec field) and `benchIdleSecs` is stamped
             // in at create like every other `Mark::Live` value, so a setting change never reaches
-            // a session already running.
-            let bench = crd::is_bench(w).then(|| (ctx.bench_image.as_str(), ctx.settings.load().bench_idle_secs));
+            // a session already running. `kompressUrl` likewise.
+            let settings = ctx.settings.load();
+            let bench = crd::is_bench(w).then(|| (ctx.bench_image.as_str(), settings.bench_idle_secs, settings.kompress_url.as_str()));
             let pod = match k8s::workspace_pod(&w.spec, &id, &w.name_any(), &pod_ctx, init, bench) {
                 Ok(p) => p,
                 // Unreachable while `validate_ws_spec` runs at the top of this function; kept

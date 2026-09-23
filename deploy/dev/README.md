@@ -99,6 +99,20 @@ and label a node — closes the run's row, sweeps its objects (`pod/close-run.py
 decommission label a drill left behind. pm2 runs (`run-suite.sh`) are for code in the pod; a Job is
 the verdict on what is pinned.
 
+## Ship from the laptop with Dagger
+
+`deploy/dev/dagger-ship.sh` is `pod/ship.sh`'s laptop-driven twin: no push, no remote exec. A
+`dagger-engine` sidecar in the dev pod (`deploy/dev/builder.yaml`) does the work; the laptop's
+`dagger` CLI (v0.21.7) drives it over `kubectl exec`, and the laptop worktree — dirty or clean —
+is the source Dagger uploads. `pod/ship.sh` stays the fallback: it is what CI's tag shape assumes
+(a pushed, clean HEAD) and what a pod-only troubleshooting session still reaches for. Applying
+`builder.yaml` after adding the sidecar restarts the dev pod (`strategy: Recreate`).
+
+```sh
+deploy/dev/dagger-ship.sh              # check + checkWeb + publish
+deploy/dev/dagger-ship.sh --no-gate    # publish only
+```
+
 ## Web changes
 
 Bun and Node 22 live on the disk too (`/work/bun`, `/work/node`, on the pod's PATH; install once

@@ -287,6 +287,11 @@ pub struct ApiState {
     /// process global, so two states (two tests) never read each other's directory.
     pub(crate) member_verdicts: std::sync::Mutex<std::collections::HashMap<(String, String), (std::time::Instant, Judged)>>,
     pub(crate) cli_live: std::sync::Mutex<std::collections::HashMap<String, std::time::Instant>>,
+    /// The bench pod's engine credentials (`TYPESAFE_API_KEY`, `JEVHARN_API_KEY`,
+    /// `JEVHARN_MODEL`, `JEVHARN_BASE_URL`), read once at boot through
+    /// `kloudlite_core::secret::read` and carried into the owner's `user-key` Secret. Absent
+    /// name = not in the map, never an empty string: `user_key_secret` writes only what is here.
+    pub bench_engine: std::collections::BTreeMap<String, String>,
 }
 
 
@@ -308,6 +313,7 @@ impl ApiState {
             fleet: None,
             cli_live: std::sync::Mutex::new(std::collections::HashMap::new()),
             member_verdicts: std::sync::Mutex::new(std::collections::HashMap::new()),
+            bench_engine: std::collections::BTreeMap::new(),
         }
     }
 
@@ -320,6 +326,11 @@ impl ApiState {
 
     pub fn with_resolver(mut self, r: Arc<crate::packages::resolve::Resolver>) -> Self {
         self.resolver = Some(r);
+        self
+    }
+
+    pub fn with_bench_engine(mut self, engine: std::collections::BTreeMap<String, String>) -> Self {
+        self.bench_engine = engine;
         self
     }
 

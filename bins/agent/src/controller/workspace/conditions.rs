@@ -29,7 +29,7 @@ pub fn kept_conditions(prev: &[Condition], ready: Condition) -> Vec<Condition> {
     // `FolderMigrated` by the bench's one-time folder move — which runs ONCE and would otherwise be
     // erased by the very next write in the same pass. A wait arm dropping one makes its reader see
     // a value nobody computed.
-    let keep = [crd::PACKAGES_READY, crd::ATTACHED, "Replicated", "Decommissioning", crd::FOLDER_MIGRATED];
+    let keep = [crd::PACKAGES_READY, crd::ATTACHED, "Replicated", "Decommissioning"];
     let mut c: Vec<Condition> =
         prev.iter().filter(|c| keep.contains(&c.type_.as_str()) && c.type_ != ready.type_).cloned().collect();
     c.push(ready);

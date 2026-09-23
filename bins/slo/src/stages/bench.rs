@@ -54,6 +54,9 @@ const SHELL_CEILING: Duration = Duration::from_secs(20);
 /// `bench.shell.workspace`: target 20 s; the bench resolves the workspace's tool server first,
 /// and the id now walks a named session twice plus its listing and its kill.
 const SHELL_WS_CEILING: Duration = Duration::from_secs(45);
+/// `bench.delegate`: target 600 s — the whole top -> main -> sub chain, including a clone,
+/// a real turn and a push back.
+const DELEGATE_CEILING: Duration = Duration::from_secs(600);
 pub const STUB: &str = "bench image is the stub";
 pub const NO_DELETE_GRANT: &str = "no pod-delete grant for the probe";
 /// The ids that need a live `harness-bench`, in journey order. The two shell ids need no model,
@@ -442,6 +445,108 @@ pub async fn hourly(c: &mut Ctx) {
     // whose tenant never had a key would otherwise reach the model turns with none.
     seed_model_key(c).await;
     sessions(c).await;
+    delegate(c).await;
+}
+
+/// `bench.delegate`: top opens a main by workspace, sends it a `delegate to <ws>: ...`
+/// instruction, the main hands the work to a sub in a cloned workspace, and the sub's push lands
+/// back on main's branch. Judged on OUTPUT throughout (`ws_exec` into the main workspace's tool
+/// server, a real `GET /v1/workspaces/{clone}` 404, the child row's own `state`), never on a bare
+/// "the call didn't error".
+async fn delegate(c: &mut Ctx) {
+    let name = format!("{}-delegate", c.prefix());
+    c.step("bench.delegate", DELEGATE_CEILING, move |c| {
+        let name = name.clone();
+        async move {
+            let ws = super::experience_ws::create(c, &name, json!({"packages": []})).await?;
+            c.state.extra_workspaces.push(ws.clone());
+
+            let (_child, port) = forward(c).await?;
+
+            // Open a main session on the workspace — the real route is `/workspaces/{ws}/session`,
+            // not `/sessions/workspaces/{ws}` (the latter does not exist in harness-bench).
+            let (status, body) = through_with(port, reqwest::Method::POST, &format!("/workspaces/{ws}/session"), Some(json!({}))).await?;
+            if status != 200 {
+                bail!("POST /workspaces/{ws}/session answered {status}: {}", super::clip(&body));
+            }
+
+            // The top session always exists (a bench refuses ever having zero, and auto-recreates
+            // one on archive) — found by scanning the session list for tier == "top", never minted
+            // here.
+            let (status, list) = through(port, "/sessions").await?;
+            if status != 200 {
+                bail!("GET /sessions answered {status}: {}", super::clip(&list));
+            }
+            let rows: Vec<Value> = serde_json::from_str(&list).context("GET /sessions did not answer a JSON array")?;
+            let top = rows
+                .iter()
+                .find(|r| r.get("tier").and_then(Value::as_str) == Some("top"))
+                .and_then(|r| r.get("id").and_then(Value::as_str))
+                .ok_or_else(|| anyhow!("no tier=\"top\" session in {}", super::clip(&list)))?
+                .to_string();
+
+            let text = format!("delegate to {ws}: create hello.txt containing hi and commit it");
+            let (status, body) = through_with(port, reqwest::Method::POST, &format!("/sessions/{top}/send"), Some(json!({"text": text}))).await?;
+            if status != 200 {
+                bail!("POST /sessions/{top}/send answered {status}: {}", super::clip(&body));
+            }
+
+            // Find the main's own session (opened above by workspace) to poll its children.
+            let (status, list2) = through(port, "/sessions").await?;
+            if status != 200 {
+                bail!("GET /sessions answered {status}: {}", super::clip(&list2));
+            }
+            let rows2: Vec<Value> = serde_json::from_str(&list2).context("GET /sessions did not answer a JSON array")?;
+            let main_id = rows2
+                .iter()
+                .find(|r| r.get("workspace").and_then(Value::as_str) == Some(ws.as_str()))
+                .and_then(|r| r.get("id").and_then(Value::as_str))
+                .ok_or_else(|| anyhow!("no session for workspace {ws} in {}", super::clip(&list2)))?
+                .to_string();
+
+            // Poll children until one closes — the sub finished and pushed back.
+            let deadline = Instant::now() + DELEGATE_CEILING - Duration::from_secs(60);
+            let clone_ws = loop {
+                let (status, kids) = through(port, &format!("/sessions/{main_id}/children")).await?;
+                if status != 200 {
+                    bail!("GET /sessions/{main_id}/children answered {status}: {}", super::clip(&kids));
+                }
+                let kids: Vec<Value> = serde_json::from_str(&kids).context("children did not answer a JSON array")?;
+                if let Some(child) = kids.iter().find(|k| k.get("state").and_then(Value::as_str) == Some("closed")) {
+                    break child.get("workspace").and_then(Value::as_str).map(str::to_string);
+                }
+                if Instant::now() >= deadline {
+                    bail!("no child closed within {} s; children: {}", DELEGATE_CEILING.as_secs(), super::clip(&serde_json::to_string(&kids).unwrap_or_default()));
+                }
+                tokio::time::sleep(Duration::from_secs(3)).await;
+            };
+            let clone_ws = clone_ws.ok_or_else(|| anyhow!("the closed child named no workspace"))?;
+
+            // Assert on OUTPUT: the commit landed on main's branch, through the main workspace's
+            // own tool server (same `/tools/exec` shape as `ide.exec`), never a bare "no error".
+            let (code, out, err) = super::workspace::ws_exec(
+                c,
+                &ws,
+                "curl -sf -X POST http://127.0.0.1:7788/tools/exec -H 'content-type: application/json' -d '{\"cmd\":\"git log -1 --format=%s\"}'",
+                Duration::from_secs(30),
+            )
+            .await?;
+            if code != 0 || !out.contains("create hello.txt") {
+                bail!("main's tool server exec did not show the commit ({code}): {} {}", out.trim(), err.trim());
+            }
+
+            // The clone is gone: the workspace it lived in is a real 404, not merely absent from
+            // a list.
+            let (status, body) = raw(c, reqwest::Method::GET, &api(c, &format!("/v1/workspaces/{clone_ws}")), &c.probe_jwt, None, &[]).await?;
+            if status != reqwest::StatusCode::NOT_FOUND {
+                bail!("GET /v1/workspaces/{clone_ws} answered {status}, not 404: {}", super::clip(&body));
+            }
+
+            Ok(())
+        }
+        .boxed()
+    })
+    .await;
 }
 
 const TOOL: &str = "bench.workspace.tool_roundtrip";
@@ -449,6 +554,9 @@ const SHELL_WS: &str = "bench.shell.workspace";
 
 /// The session ids this pod walks: a grouped hourly run leaves `TOOL` to group 0.
 fn skip_sessions(c: &mut Ctx, why: &str) {
+    if c.walks("bench.delegate") {
+        c.skip("bench.delegate", why);
+    }
     for id in SESSION_IDS {
         if c.walks(id) {
             c.skip(id, why);
@@ -1138,10 +1246,10 @@ async fn shell_up(c: &mut Ctx) {
                 // made rather than passing on half the id.
                 bail!("the stage's workspace was never created, so only the bench shell was checked");
             };
-            // `ls` of the workspaces root: the sidecar has no such mount, so the shell must not
-            // find a workspace directory there. An empty answer and an error are both correct.
-            let (out, _) = pty_shell(port, &ws, &format!("ls {}; pwd; exit 0\n", kloudlite_workspaces::k8s::WORKSPACES_DIR)).await?;
-            if out.contains(&format!("{}/", kloudlite_workspaces::k8s::WORKSPACES_DIR)) {
+            // `ls` of the source directory: the sidecar has no such mount, so the shell must not
+            // find the workspace's code there. An empty answer and an error are both correct.
+            let (out, _) = pty_shell(port, &ws, &format!("ls {}; pwd; exit 0\n", kloudlite_workspaces::k8s::WORKSPACE_DIR)).await?;
+            if out.contains(&format!("{}/", kloudlite_workspaces::k8s::WORKSPACE_DIR)) {
                 bail!("the shell can see the workspaces root: {}", super::clip(&out));
             }
             if !out.contains(kloudlite_workspaces::k8s::HOME_DIR) {
@@ -1229,10 +1337,9 @@ async fn shell_workspace(c: &mut Ctx) {
         Ok(id) => id,
         Err(why) => return c.skip(SHELL_WS, &why),
     };
-    // The directory is named by the workspace's NAME, not its id (`workspace_dir(name)`), and the
-    // probe holds the id — so the judgement is "pwd printed a path under the workspaces root",
-    // which `/bin/sh` at `$HOME` would not (2026-09-16 21:19 hourly: the id-built path never matched).
-    let want = format!("{}/", kloudlite_workspaces::k8s::WORKSPACES_DIR);
+    // The shell sidecar opens in its own scratch home: it never mounts the worktree volume, which
+    // IS the workspace's home since 2026-09-22.
+    let want = kloudlite_workspaces::k8s::HOME_DIR.to_string();
     c.step(SHELL_WS, SHELL_WS_CEILING, move |c| {
             async move {
                 let (_child, port) = forward(c).await?;
@@ -1880,7 +1987,7 @@ mod tests {
     #[test]
     fn ceilings_are_at_least_their_targets() {
         use kloudlite_workspaces::slo::catalogue::find;
-        for (id, cap) in [("bench.shell.roundtrip", SHELL_CEILING), (SHELL_WS, SHELL_WS_CEILING), ("bench.workspace.tool_roundtrip", TOOL_CEILING), ("bench.session.roundtrip", ROUNDTRIP_CEILING), ("bench.start.p95", START_CEILING), ("bench.tunnel", TUNNEL_CEILING), ("bench.idle.wake", WAKE_CEILING)] {
+        for (id, cap) in [("bench.shell.roundtrip", SHELL_CEILING), (SHELL_WS, SHELL_WS_CEILING), ("bench.workspace.tool_roundtrip", TOOL_CEILING), ("bench.session.roundtrip", ROUNDTRIP_CEILING), ("bench.start.p95", START_CEILING), ("bench.tunnel", TUNNEL_CEILING), ("bench.idle.wake", WAKE_CEILING), ("bench.delegate", DELEGATE_CEILING)] {
             assert!(cap.as_millis() >= find(id).unwrap().target.max_ms.unwrap() as u128, "{id}");
         }
     }

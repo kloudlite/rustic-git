@@ -342,6 +342,7 @@ fn merge_cluster_spec(mut current: crd::ClusterSettingsSpec, patch: &crd::Cluste
     }
     over!(sync_secs);
     over!(bench_idle_secs);
+    over!(kompress_url);
     over!(trace_sample_ratio);
     over!(trace_probe_rate);
     over!(trace_probe_burst);

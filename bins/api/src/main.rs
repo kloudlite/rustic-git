@@ -27,7 +27,7 @@ mod backfill;
 /// rule `crates/api`'s `user_identity` enforces), and the owner's `authorized_keys` for the
 /// Secret every workspace's sshd reads. Kept here rather than in either crate so
 /// `kloudlite-workspaces` never needs a dependency on `kloudlite-pulls` just for these lookups.
-struct Dir(Arc<kloudlite_pulls::directory::Directory>);
+struct Dir(Arc<kloudlite_pulls::directory::Directory>, Arc<kloudlite_storage::store::Store>);
 
 impl Dir {
     /// Handle in, email out. Every identity this process is handed comes off the JWT as a HANDLE,
@@ -68,7 +68,7 @@ impl kloudlite_workspaces::api::Directory for Dir {
     }
 
     async fn authorized_keys_for_owner(&self, owner: &str) -> Option<String> {
-        kloudlite_api::authorized_keys_for(&self.0, owner)
+        kloudlite_api::authorized_keys_for(&self.0, &self.1, owner)
             .await
             .inspect_err(|e| tracing::warn!(reason = "ssh-keys", %owner, error = %e, "directory.read.failed"))
             .ok()
@@ -398,13 +398,26 @@ async fn run() -> Result<()> {
             // Optional everywhere: unset means a failed probe run is recorded and shown on the
             // console, and nobody is messaged (design's Notify row).
             state = state.with_slo_webhook(kloudlite_core::secret::read("KLOUDLITE_SLO_WEBHOOK"));
+            // The bench pod's engine credentials, carried into the owner's `user-key` Secret.
+            // Only the user role ever calls `write_user_key`, but reading here is harmless
+            // either way and keeps the lookup in one place.
+            let bench_engine: std::collections::BTreeMap<String, String> = [
+                "TYPESAFE_API_KEY",
+                "JEVHARN_API_KEY",
+                "JEVHARN_MODEL",
+                "JEVHARN_BASE_URL",
+            ]
+            .into_iter()
+            .filter_map(|name| kloudlite_core::secret::read(name).map(|v| (name.to_string(), v)))
+            .collect();
+            state = state.with_bench_engine(bench_engine);
             // The package index: Nixhub, the mirrored index in our own object store, and that
             // same object store as the day-long resolution cache.
             state = state.with_resolver(Arc::new(
                 kloudlite_workspaces::packages::resolve::Resolver::from_env(store.os.clone()),
             ));
             if let Some(dir) = directory.clone() {
-                state = state.with_directory(Arc::new(Dir(dir)));
+                state = state.with_directory(Arc::new(Dir(dir, store.clone())));
             }
             // In-cluster config when the pod has a ServiceAccount, else the operator's kubeconfig.
             // `None` is a legitimate dev configuration (no cluster) — workspace and environment

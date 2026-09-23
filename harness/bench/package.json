@@ -8,5 +8,13 @@
   },
   "bin": {
     "harness-bench": "src/main.ts"
+  },
+  "dependencies": {
+    "@ai-sdk/anthropic": "^4.0.58",
+    "@ai-sdk/deepseek": "^3.0.50",
+    "@ai-sdk/openai-compatible": "^3.0.53",
+    "@sinclair/typebox": "^0.34.52",
+    "ai": "^7.0.108",
+    "ws": "^8.21.3"
   }
 }

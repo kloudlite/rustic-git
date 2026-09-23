@@ -276,11 +276,8 @@ async fn create(c: &mut Ctx) -> bool {
 
 /// `ws.exec.ok`: a command inside the running pod, its OUTPUT, and the pod's home.
 ///
-/// A channel that opened proves nothing a person can use, and neither does an echo on its own: a
-/// pod started before its node's NFS mount was up hostPaths an empty local directory and silently
-/// strands the owner's dotfiles (`apply_workspace` parks a workspace in `HomeNotReady` to stop
-/// exactly that, and this is the id that would notice if it ever stopped). So the script prints a
-/// word AND the filesystem `/home/kl` is on, and the step judges both.
+/// A channel that opened proves nothing a person can use, and neither does an echo on its own: the
+/// script prints a word AND the filesystem `/home/kl` is on, and the step judges both.
 async fn exec_ok(c: &mut Ctx, id: &str) {
     if c.kube.is_none() {
         return c.skip("ws.exec.ok", "no kubeconfig");
@@ -292,7 +289,7 @@ async fn exec_ok(c: &mut Ctx, id: &str) {
             if code != 0 {
                 return Err(anyhow!("exec exited {code}: {}", err.trim()));
             }
-            home_is_shared(&out)
+            home_is_volume(&out)
         }
         .boxed()
     })
@@ -303,26 +300,21 @@ async fn exec_ok(c: &mut Ctx, id: &str) {
 ///
 /// `stat -f -c %T` names the filesystem type and is in both coreutils and busybox; the
 /// `/proc/mounts` line is the fallback and the more precise answer, since a bind of a local
-/// directory and the NFS export are different lines there whatever `stat` decides to call them.
+/// directory and the volume are different lines there whatever `stat` decides to call them.
 const EXEC_SCRIPT: &str = r#"echo slo
 stat -f -c %T /home/kl 2>/dev/null || true
 awk '$2 == "/home/kl" { print $3 }' /proc/mounts 2>/dev/null || true"#;
 
-/// The exec said `slo`, and `/home/kl` is a MOUNT rather than the container's own filesystem.
+/// The exec said `slo`, and `/home/kl` is the workspace's own btrfs volume.
 ///
 /// A pure function so the one judgement this id turns on is testable without a cluster.
 ///
-/// What is asserted is the failure mode, not one spelling of the success: a pod that came up
-/// before its node's NFS mount hostPaths an EMPTY LOCAL DIRECTORY, and that directory is part of
-/// the container's rootfs — an overlay, or no mount line at all. What a healthy pod shows depends
-/// on the sandbox: `runc` sees the export as `nfs`/`nfs4`, and gVisor (`runtimeClass`) passes it
-/// through its gofer, where the same mount reads as `v9fs`/`9p`. Requiring "nfs" failed every
-/// run on a gVisor node while the export was mounted perfectly well.
-///
-/// That the bytes are really the SHARED home — not merely some mount — is `home.persists`' job
-/// (hourly): a file written in one workspace read back from a fresh one, possibly on another node,
-/// which no single-pod check can stand in for.
-fn home_is_shared(out: &str) -> Result<()> {
+/// The home IS the worktree subvolume (ruling 2026-09-22), hostPathed whole at `/home/kl`. `runc`
+/// sees it as `btrfs`; gVisor (`runtimeClass`) passes it through its gofer, where the same mount
+/// reads as `v9fs`/`9p`. What this refuses is every other shape: the container's own overlay or
+/// tmpfs (the volume never mounted, so the person's files land in a layer that dies with the pod)
+/// and `nfs` (the retired shared home, back from a stale pod spec).
+fn home_is_volume(out: &str) -> Result<()> {
     let mut lines = out.lines().map(str::trim).filter(|l| !l.is_empty());
     if lines.next() != Some("slo") {
         return Err(anyhow!("the exec printed {:?}, not its command's output", out.trim()));
@@ -331,21 +323,14 @@ fn home_is_shared(out: &str) -> Result<()> {
     if rest.is_empty() {
         return Err(anyhow!("the pod could not say what /home/kl is"));
     }
-    // The rootfs filesystems: a home on one of these is the empty local directory the mount
-    // should have covered.
-    const LOCAL: [&str; 5] = ["overlay", "tmpfs", "rootfs", "ext4", "btrfs"];
-    if rest.iter().any(|l| LOCAL.contains(l)) {
-        return Err(anyhow!("/home/kl is {rest:?} — the container's own filesystem, not a mount"));
-    }
-    // A mount of its own, whatever the sandbox calls it.
-    const MOUNTED: [&str; 4] = ["nfs", "nfs4", "v9fs", "9p"];
-    if rest.iter().any(|l| MOUNTED.contains(l)) {
+    const VOLUME: [&str; 3] = ["btrfs", "v9fs", "9p"];
+    if rest.iter().all(|l| VOLUME.contains(l)) {
         return Ok(());
     }
-    Err(anyhow!("/home/kl is {rest:?}, which is not a mounted export"))
+    Err(anyhow!("/home/kl is {rest:?}, not the workspace's btrfs volume"))
 }
 
-/// `homes.rw.p95`:/// `homes.rw.p95`: write, `sync`, read back on the shared NFS home, timed INSIDE the pod.
+/// `homes.rw.p95`: write, `sync`, read back on the home volume, timed INSIDE the pod.
 ///
 /// The ms the pod prints is the sample, not the step's own elapsed time: the step's clock includes
 /// the exec handshake with the API server, which is tens of milliseconds against a 200 ms target —
@@ -385,7 +370,7 @@ async fn home_round_trip(c: &mut Ctx, id: &str) {
 
 /// Write, `sync`, read back, and time it INSIDE the pod.
 ///
-/// `set -e` and the final `[ … ]` are both load-bearing: an NFS export that answered a write and
+/// `set -e` and the final `[ … ]` are both load-bearing: a home that answered a write and
 /// then handed back somebody else's bytes would exit 0 with a duration to report, and this SLO
 /// would stay green through the one failure that loses a person's work. So the read-back is
 /// compared to what was written, and the comparison decides the exit code.
@@ -1149,24 +1134,23 @@ mod tests {
         assert_eq!(env.get("KL_SSH_SESSION").map(String::as_str), Some(r#"{"id":"ws-abc"}"#));
     }
 
-    /// The one judgement `ws.exec.ok` turns on. A pod that came up before its node's NFS mount
-    /// hostPaths an empty local directory and loses the owner's dotfiles silently — an id that
-    /// only checked the echo would pass straight through it.
+    /// The one judgement `ws.exec.ok` turns on. A pod whose volume never mounted writes the
+    /// person's files into its own overlay and loses them on restart — an id that only checked
+    /// the echo would pass straight through it.
     #[test]
-    fn the_exec_check_wants_the_output_and_a_shared_home() {
-        assert!(home_is_shared("slo\nnfs\nnfs4\n").is_ok());
-        assert!(home_is_shared("slo\nnfs4\n").is_ok());
-        // gVisor passes the very same export through its gofer, where it reads as 9p. Requiring
-        // "nfs" failed every run on a sandboxed node while the mount was perfectly healthy.
-        assert!(home_is_shared("slo\nv9fs\n9p\n").is_ok());
-        // The failure this exists for: a local filesystem under /home/kl.
-        assert!(home_is_shared("slo\nbtrfs\n").is_err());
-        assert!(home_is_shared("slo\noverlay\n").is_err());
-        assert!(home_is_shared("slo\ntmpfs\n").is_err());
+    fn the_exec_check_wants_the_output_and_the_home_volume() {
+        assert!(home_is_volume("slo\nbtrfs\nbtrfs\n").is_ok());
+        // gVisor passes the very same subvolume through its gofer, where it reads as 9p.
+        assert!(home_is_volume("slo\nv9fs\n9p\n").is_ok());
+        // Not the volume: the rootfs, a tmpfs, or the retired NFS home.
+        assert!(home_is_volume("slo\noverlay\n").is_err());
+        assert!(home_is_volume("slo\ntmpfs\n").is_err());
+        assert!(home_is_volume("slo\nnfs\nnfs4\n").is_err());
+        assert!(home_is_volume("slo\nbtrfs\noverlay\n").is_err());
         // And the ordinary weak check: an exec that connected and said nothing useful.
-        assert!(home_is_shared("").is_err());
-        assert!(home_is_shared("slo\n").is_err());
-        assert!(home_is_shared("nfs\n").is_err());
+        assert!(home_is_volume("").is_err());
+        assert!(home_is_volume("slo\n").is_err());
+        assert!(home_is_volume("btrfs\n").is_err());
         // The script asks the two questions in that order.
         assert!(EXEC_SCRIPT.starts_with("echo slo"), "{EXEC_SCRIPT}");
         assert!(EXEC_SCRIPT.contains("/proc/mounts"), "{EXEC_SCRIPT}");

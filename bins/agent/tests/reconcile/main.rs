@@ -196,26 +196,13 @@ fn ctx(pool: &std::path::Path, routes: Vec<Route>) -> (Arc<Ctx>, Recorder) {
 /// The one constructor: every test's profile root is a directory under its own pool tempdir, so no
 /// test can reach the node's real `/nix` and none of them race each other over it.
 fn ctx_full(pool: &std::path::Path, routes: Vec<Route>, nix: Arc<FakeNix>) -> (Arc<Ctx>, Recorder) {
-    // A literal address, never a name: the agent resolves the export host at boot, and a name
-    // that happens to resolve on a laptop (`test`) is NXDOMAIN inside the cluster, where these
-    // tests also run — 160 of them failed there on "Name or service not known".
-    ctx_with_homes_export(pool, routes, nix, Some("127.0.0.1:/".into()))
-}
-
-/// The `WS_HOMES_EXPORT`-unset variant: a node with no shared-home mount, which every workspace
-/// reconcile must park on rather than start a pod against.
-fn ctx_without_homes_export(pool: &std::path::Path, routes: Vec<Route>) -> (Arc<Ctx>, Recorder) {
-    ctx_with_homes_export(pool, routes, Arc::new(FakeNix::default()), None)
-}
-
-fn ctx_with_homes_export(pool: &std::path::Path, routes: Vec<Route>, nix: Arc<FakeNix>, homes_export: Option<String>) -> (Arc<Ctx>, Recorder) {
-    ctx_on_node("node-a", pool, routes, nix, homes_export)
+    ctx_on_node("node-a", pool, routes, nix)
 }
 
 /// The same fixture as some OTHER node — what the hand-off half of a capacity decline needs: one
 /// node with no room, and a second one that takes the parent it left unplaced.
-fn ctx_on_node(node: &str, pool: &std::path::Path, routes: Vec<Route>, nix: Arc<FakeNix>, homes_export: Option<String>) -> (Arc<Ctx>, Recorder) {
-    let (ctx, rec) = ctx_on_node_unlisted(node, pool, routes, nix, homes_export);
+fn ctx_on_node(node: &str, pool: &std::path::Path, routes: Vec<Route>, nix: Arc<FakeNix>) -> (Arc<Ctx>, Recorder) {
+    let (ctx, rec) = ctx_on_node_unlisted(node, pool, routes, nix);
     // The space cache listed and empty: "no choice" for every test that is not about the unknown
     // window, which asks for `ctx_unlisted` instead.
     ctx.remember_spaces(vec![]);
@@ -224,10 +211,10 @@ fn ctx_on_node(node: &str, pool: &std::path::Path, routes: Vec<Route>, nix: Arc<
 
 /// `ctx` with the space cache NOT yet listed.
 fn ctx_unlisted(pool: &std::path::Path, routes: Vec<Route>) -> (Arc<Ctx>, Recorder) {
-    ctx_on_node_unlisted("node-a", pool, routes, Arc::new(FakeNix::default()), Some("127.0.0.1:/".into()))
+    ctx_on_node_unlisted("node-a", pool, routes, Arc::new(FakeNix::default()))
 }
 
-fn ctx_on_node_unlisted(node: &str, pool: &std::path::Path, mut routes: Vec<Route>, nix: Arc<FakeNix>, homes_export: Option<String>) -> (Arc<Ctx>, Recorder) {
+fn ctx_on_node_unlisted(node: &str, pool: &std::path::Path, mut routes: Vec<Route>, nix: Arc<FakeNix>) -> (Arc<Ctx>, Recorder) {
     // Every reconcile now unconditionally may ask "does this volume have snapshots yet"
     // (`claim::placement`/`has_snapshots`, the checkout/migrate step) — a call no test fixture
     // needed before the snapshot model became the only model (Task 8). Appended AFTER the caller's
@@ -311,7 +298,6 @@ fn ctx_on_node_unlisted(node: &str, pool: &std::path::Path, mut routes: Vec<Rout
             pool.to_string_lossy().into(),
             "r1".into(),
             true,
-            homes_export,
             "registry.kloudlite.io".into(),
             String::new(),
             nix,

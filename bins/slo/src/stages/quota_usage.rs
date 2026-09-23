@@ -56,13 +56,13 @@ pub async fn stamped(c: &mut Ctx, ws: &str) {
     // Read BEFORE the step so the region's own knob, not the compiled-in default, sets the wait —
     // and outside the timing, since it is a precondition rather than part of what is measured.
     let beat = sync_secs(c).await;
-    let (ws, name) = (ws.to_string(), c.prefix());
+    let ws = ws.to_string();
     c.step(ID, CEILING, move |c| {
         let jwt = c.probe_jwt.clone();
         let volumes = api(c, "/v1/volumes");
         async move {
             let before = used_bytes(c, &volumes, &jwt, &ws).await?;
-            write_bytes(c, &ws, &name).await?;
+            write_bytes(c, &ws).await?;
             let want = before.unwrap_or(0).max(WANT_BYTES);
             let deadline = std::time::Instant::now() + beat * BEATS;
             loop {
@@ -105,8 +105,8 @@ async fn used_bytes(c: &Ctx, url: &str, jwt: &str, ws: &str) -> Result<Option<u6
 /// 200 MB of incompressible bytes into the workspace's subvolume, through the tool server's own
 /// `exec`. `conv=fsync` because btrfs charges a qgroup for what is on disk, and the beat that
 /// reads it is seconds away — a write still in the page cache would be measured as nothing.
-async fn write_bytes(c: &Ctx, ws: &str, name: &str) -> Result<()> {
-    let dir = kloudlite_workspaces::k8s::workspace_dir(name);
+async fn write_bytes(c: &Ctx, ws: &str) -> Result<()> {
+    let dir = kloudlite_workspaces::k8s::HOME_DIR;
     let cmd = format!("dd if=/dev/urandom of={dir}/slo-usage.bin bs=1M count={WRITTEN_MB} conv=fsync");
     // Through the shared helper, which reads the workspace's token from the file this container
     // mounts. Hand-rolling the curl here is what made this probe the one caller without a
@@ -135,15 +135,12 @@ mod tests {
     use super::*;
     use crate::testkit;
 
-    /// The file goes to the workspace's own subvolume. `/home/kl` is the region's shared NFS
-    /// export: bytes written there are charged to nobody, so the step would wait out both beats
-    /// against a number that can never move.
+    /// The file goes to the workspace's own subvolume, which IS the home since 2026-09-22.
     #[test]
     fn the_bytes_are_written_to_the_subvolume_and_flushed() {
-        let dir = kloudlite_workspaces::k8s::workspace_dir("run-hourly-1");
+        let dir = kloudlite_workspaces::k8s::HOME_DIR;
         let cmd = format!("dd if=/dev/urandom of={dir}/slo-usage.bin bs=1M count={WRITTEN_MB} conv=fsync");
-        assert!(cmd.contains("/workspaces/run-hourly-1/"), "{cmd}");
-        assert!(!cmd.contains("of=/home/kl/slo"), "{cmd}");
+        assert!(cmd.contains("of=/home/kl/slo-usage.bin"), "{cmd}");
         assert!(cmd.ends_with("conv=fsync"), "{cmd}");
     }
 

@@ -325,10 +325,6 @@ fi
 NODE_IP=$(kubectl get node "$E2E_NODE" -o jsonpath='{.status.addresses[?(@.type=="InternalIP")].address}')
 [ -n "$NODE_IP" ] || fail "node $E2E_NODE has no InternalIP; the seeding init container has nothing to clone from"
 
-# Without this the agent never mounts {pool}/homes and every workspace parks on HomeNotReady
-# (lib.rs's run: unset means "no shared home on this node", fail closed) — the real Service the
-# cluster's own agents point at (deploy/k3s/agent-daemonset.yaml), reachable here because this
-# runs against the real k3s cluster, just with a loopback pool standing in for the node's btrfs.
 # WS_REPLICA_SECS: the pull/retire beat, 300 s by default. The orphan-byte sweep and the
 # unreferenced-volume collection (and its age floor) both ride it, so every reclaim assertion in
 # this script would time out at the default; 20 s here, and every such wait below is at least
@@ -339,7 +335,6 @@ WS_GIT_SSH_HOST="$NODE_IP" \
 WS_GIT_SSH_PORT="$SERVER_SSH_PORT" \
 WS_REGION="$REGION_ID" \
 WS_POOL="$MOUNT" \
-WS_HOMES_EXPORT="zerofs.kloudlite-system.svc:/" \
 WS_SYNC_SECS="5" \
 WS_REPLICA_SECS="20" \
 HOSTNAME="ws-e2e-agent" \
@@ -528,12 +523,14 @@ kubectl -n "$WS_NS" wait --for=condition=Ready "pod/$WS_ID" --timeout=120s \
 
 # No PV/PVC to check Bound any more — the property that matters is that the pod's hostPath mount
 # actually landed on the workspace's own live subvolume, not just that /home/kl exists in the
-# container. Write on the host side and read it back through the pod: that only succeeds if the
-# hostPath is the same btrfs subvolume `live_dir` names, not an empty dir the kubelet invented.
+# container. `live_dir` names the ROOT of that subvolume, which is the whole home (/home/kl in the
+# pod) since the 2026-09-22 home-is-the-workspace-volume change, not a per-name subdirectory under
+# it. Write on the host side and read it back through the pod: that only succeeds if the hostPath
+# is the same btrfs subvolume `live_dir` names, not an empty dir the kubelet invented.
 log "writing a file into the live subvolume"
 sudo bash -c "printf 'hello from ws_e2e' > '$(live_dir "$WS_ID")/hello.txt'"
 [ -f "$(live_dir "$WS_ID")/hello.txt" ] || fail "write into live did not land"
-kubectl -n "$WS_NS" exec "$WS_ID" -- grep -q 'hello from ws_e2e' /home/kl/workspaces/e2e-ws/hello.txt \
+kubectl -n "$WS_NS" exec "$WS_ID" -- grep -q 'hello from ws_e2e' /home/kl/hello.txt \
   || fail "workspace pod $WS_ID does not see the host's write into its live hostPath"
 
 # ---------------------------------------------------------------------------
@@ -827,8 +824,8 @@ OTHER_CODE=$(curl -sS -o /dev/null -w '%{http_code}' -X POST "$BASE/v1/workspace
 [ "$OTHER_CODE" = "404" ] || fail "a second user's session mint must 404, got $OTHER_CODE"
 
 log "checking the registered key landed in the pod's authorized_keys"
-kubectl -n "$WS_NS" exec "$WS_ID" -- ls /home/kl/.ssh/authorized_keys >/dev/null \
-  || fail "no /home/kl/.ssh/authorized_keys in the workspace pod"
+kubectl -n "$WS_NS" exec "$WS_ID" -- ls /etc/kloudlite/authorized_keys >/dev/null \
+  || fail "no /etc/kloudlite/authorized_keys in the workspace pod"
 
 # The negative half: a peer workspace pod is not `app=kloudlite-gateway` in `kloudlite-system`, so the
 # default-deny-plus-gateway-hole NetworkPolicy must refuse it on port 22 — `kl` above only proved
@@ -852,22 +849,21 @@ fi
 kubectl -n "$WS_NS" exec "$CLONE_ID" -- jq --version >/dev/null || fail "the clone did not build its profile from the copied spec"
 
 # ---------------------------------------------------------------------------
-# Persistent home: one region-shared NFS export (ZeroFS, deploy/k3s/zerofs.yaml), not a per-node
-# btrfs subvolume any more. There is no home Volume, no OwnerBinding-owned CR, no push/pull and no
-# per-owner node pin — every pod hostPaths the SAME export at /home/kl, so a write is visible from
-# any node the instant it lands, and an owner's workspaces can now be claimed by any node whose
-# VolumeReplica is Synced rather than only the one node that used to hold their btrfs home (see
-# deploy/k3s/README.md, "Shared home"). zsh reads `$ZDOTDIR/.zshrc`, not `~/.zshrc` — the prelude
-# seeds the former, so that is the file a person actually edits and the one whose survival matters.
+# Home: the workspace's own btrfs volume, mounted whole at /home/kl (2026-09-22
+# home-is-the-workspace-volume change). No shared NFS export, no per-owner node pin. A write into
+# $ZSHRC must land on the host inside the workspace's own live subvolume — that is what proves the
+# home IS the volume, not just a directory the kubelet invented in the pod. zsh reads
+# `$ZDOTDIR/.zshrc`, not `~/.zshrc` — the prelude seeds the former, so that is the file a person
+# actually edits and the one whose survival matters.
 # ---------------------------------------------------------------------------
 ZSHRC=/home/kl/.config/zsh/.zshrc
-log "writing $ZSHRC in one workspace and reading it from another pod, with no push in between"
+log "writing $ZSHRC in the workspace and reading the marker back from the host's own live subvolume"
 kubectl -n "$WS_NS" exec "$WS_ID" -- sh -c "echo 'export WS_E2E_HOME=1' >> $ZSHRC" \
   || fail "could not append to $ZSHRC in $WS_ID"
-kubectl -n "$WS_NS" exec "$CLONE_ID" -- grep -q 'WS_E2E_HOME=1' "$ZSHRC" \
-  || fail "a second workspace pod does not see the shared NFS home's .zshrc"
+sudo grep -q 'WS_E2E_HOME=1' "$(live_dir "$WS_ID")/.config/zsh/.zshrc" \
+  || fail "the workspace's write into \$ZSHRC did not land on its own live subvolume"
 
-log "stopping and restarting the workspace: the home lives on the export, not the pod"
+log "stopping and restarting the workspace: the home lives on the volume, not the pod"
 curl -fsS -X POST "$BASE/v1/workspaces/$WS_ID/stop" -H "Authorization: Bearer $USER_TOKEN" >/dev/null
 # A stop is now seconds, not minutes: the cut turns Ready and the pod goes in the same pass, and
 # the replica wait moved into placement. 60s, not 300s, is the assertion — a stop that takes
@@ -891,35 +887,6 @@ curl -fsS -X POST "$BASE/v1/workspaces/$WS_ID/start" -H "Authorization: Bearer $
 wait_ws_ready "$WS_ID"
 kubectl -n "$WS_NS" wait --for=condition=Ready "pod/$WS_ID" --timeout=120s || fail "pod $WS_ID did not come back"
 kubectl -n "$WS_NS" exec "$WS_ID" -- grep -q 'WS_E2E_HOME=1' "$ZSHRC" || fail "the home's .zshrc did not survive a stop/start"
-
-# The thing this whole change buys: an owner's home is no longer pinned to one node. Placement is
-# a controller-side claim race (bins/agent/src/claim.rs's bootstrap case: a fresh, UNPLACED
-# workspace is claimable by any node), not something kube-scheduler decides — a cordon/taint/label
-# on this node cannot steer it, and forcing the race by pausing this script's own agent process
-# was tried and rejected: that agent runs as root under sudo holding the loopback pool mount, and
-# a SIGKILL of this script (or a CI timeout) bypasses the trap, leaving a stopped root process
-# behind with nothing to resume it. So this makes no attempt to steer where the claim lands —
-# it just proves the property that matters holds WHEREVER it lands, which is true on both a
-# single-node and a multi-node cluster and cannot strand anything.
-log "checking a freshly claimed workspace sees the shared home over NFS, whichever node claims it"
-OTHER_JSON=$(curl -fsS -X POST "$BASE/v1/workspaces" -H "Authorization: Bearer $USER_TOKEN" \
-  -H 'Content-Type: application/json' -d '{"name":"e2e-ws-other-node","region":"'"$REGION_ID"'","quota_gb":5}')
-OTHER_NODE_WS_ID=$(echo "$OTHER_JSON" | field id)
-[ -n "$OTHER_NODE_WS_ID" ] || fail "no id in other-node workspace create response: $OTHER_JSON"
-CLAIMED_ON=""
-for i in $(seq 1 60); do
-  CLAIMED_ON=$(kubectl get workspace "$OTHER_NODE_WS_ID" -o jsonpath='{.status.nodeName}' 2>/dev/null)
-  [ -n "$CLAIMED_ON" ] && break
-  sleep 2
-done
-[ -n "$CLAIMED_ON" ] || fail "e2e-ws-other-node was never claimed by any node"
-log "e2e-ws-other-node claimed on $CLAIMED_ON (this script's own node is $E2E_NODE)"
-wait_ws_ready "$OTHER_NODE_WS_ID"
-kubectl -n "$WS_NS" exec "$OTHER_NODE_WS_ID" -- grep -q 'WS_E2E_HOME=1' "$ZSHRC" \
-  || fail "a freshly claimed workspace (node $CLAIMED_ON) cannot see the home written earlier on $E2E_NODE — the NFS export is not actually shared"
-curl -fsS -X DELETE "$BASE/v1/workspaces/$OTHER_NODE_WS_ID" -H "Authorization: Bearer $USER_TOKEN" >/dev/null
-wait_ws_gone "$OTHER_NODE_WS_ID"
-OTHER_NODE_WS_ID=""
 
 # ---------------------------------------------------------------------------
 # Restore: new workspace grafted onto an EXPLICIT past snapshot (the newest entry in the
@@ -1017,13 +984,17 @@ kubectl get volume "$SEED_ID" -o jsonpath='{.metadata.ownerReferences[0].kind}' 
 [ "$(kubectl get workspace "$SEED_ID" -o jsonpath='{.status.volumeRef}')" = "$SEED_ID" ] \
   || fail "status.volumeRef does not report the child"
 
+log "checking the source tree landed under ~/workspace"
+kubectl -n "$WS_NS" exec "$SEED_ID" -c workspace -- test -d /home/kl/workspace \
+  || fail "workspace pod $SEED_ID has no ~/workspace after a seeded create"
+
 log "checking the init container actually cloned the repository into the workspace"
-kubectl -n "$WS_NS" exec "$SEED_ID" -c workspace -- sh -c 'ls -a /home/kl/workspaces/e2e-seeded/.git >/dev/null' \
-  || fail "no .git in ~/workspaces/<name>: the git-seeding init container did not run or did not clone"
+kubectl -n "$WS_NS" exec "$SEED_ID" -c workspace -- sh -c 'ls -a /home/kl/workspace/.git >/dev/null' \
+  || fail "no .git in ~/workspace: the git-seeding init container did not run or did not clone"
 # The working tree, read from the host this time: a `.git` directory proves a clone was attempted,
 # the pushed file proves it was THIS repository's content that landed.
 # sudo: the init container clones as root, so the tree is not readable as this user.
-sudo grep -q "seeded by ws_e2e" "$(live_dir "$SEED_ID")/README.md" \
+sudo grep -q "seeded by ws_e2e" "$(live_dir "$SEED_ID")/workspace/README.md" \
   || fail "the seeded workspace does not carry the pushed repository's content"
 
 log "pushing the seeded workspace and reading its history back from SnapshotRequests"

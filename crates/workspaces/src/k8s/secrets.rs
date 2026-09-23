@@ -13,6 +13,11 @@ use super::*;
 pub const USER_KEY_SECRET: &str = "user-key";
 
 
+/// The Secret holding the bench pod's engine credentials, one per owner namespace. Separate
+/// from `USER_KEY_SECRET` — see `bench_engine_secret`'s doc comment for why.
+pub const BENCH_ENGINE_SECRET: &str = "bench-engine";
+
+
 /// Where that key is mounted. Deliberately not `~/.ssh`: workspace images bring their own user and
 /// home directory, and `GIT_SSH_COMMAND` points at an absolute path that works whatever they are.
 pub const USER_KEY_PATH: &str = "/etc/kloudlite/ssh";
@@ -59,6 +64,28 @@ pub fn user_key_secret(
             // through revocation code of its own. Read per call and never cached by `kl`.
             ("workspace-token".to_string(), workspace_token.to_string()),
         ])),
+        type_: Some("Opaque".to_string()),
+        ..Default::default()
+    }
+}
+
+
+/// The bench pod's engine credentials, one per owner namespace.
+///
+/// A SEPARATE Secret from `user-key`, not another key in it: `user-key` is mounted WHOLE (0444,
+/// no `items` filter — `k8s::workspace::user_key_volume`) into every workspace pod of that
+/// owner, so `TYPESAFE_API_KEY` living there would be readable from any person's workspace. This
+/// one is referenced only by the bench pod's env (`bench_engine_var`), by name+key, never mounted
+/// as a volume anywhere.
+pub fn bench_engine_secret(owner: &str, namespace: &str, engine: &BTreeMap<String, String>) -> Secret {
+    Secret {
+        metadata: ObjectMeta {
+            name: Some(BENCH_ENGINE_SECRET.to_string()),
+            namespace: Some(namespace.to_string()),
+            labels: Some(labels(owner, "workspace")),
+            ..Default::default()
+        },
+        string_data: Some(engine.clone()),
         type_: Some("Opaque".to_string()),
         ..Default::default()
     }

@@ -1,5 +1,5 @@
 //! The workspace Pod: the login environment, the hardened security context, every hostPath
-//! volume (home on NFS, caches local, the worktree, the projected keys), node placement, the git
+//! volume (the worktree volume IS the home, the projected keys), node placement, the git
 //! seed init container, and `workspace_pod` that composes them.
 
 use super::*;
@@ -29,7 +29,7 @@ pub(super) fn login_env(
         git_ssh_command(),
         // Which workspace this shell is in: the platform rc files cd into it and the prompt
         // names it. Per pod, which is why sshd's SetEnv is generated per workspace.
-        var("KL_WORKSPACE", workspace_dir(name)),
+        var("KL_WORKSPACE", WORKSPACE_DIR.to_string()),
         var("KL_WORKSPACE_NAME", name.to_string()),
         // The CR name, not the person's name for it: `kl` addresses `/v1/workspaces/{id}` with
         // this, and two workspaces of one person in different teams share a `KL_WORKSPACE_NAME`.
@@ -38,6 +38,7 @@ pub(super) fn login_env(
         // space. It is the `{team}` segment of `/v1/me/environments/{team}` and the `space` claim
         // the workspace-token is refused against.
         var("KL_TEAM", crate::crd::space_slug(owner, team)),
+        var("CARGO_TARGET_DIR", format!("{HOME_DIR}/.cache/cargo-target")),
         var("GIT_CONFIG_SYSTEM", format!("{USER_KEY_PATH}/gitconfig")),
         var("BUILDKIT_HOST", BUILDKIT_HOST.to_string()),
         var("KL_OWNER", owner.to_string()),
@@ -56,49 +57,26 @@ pub(super) fn login_env(
         var("LANG", "C.UTF-8".into()),
         var("MANPATH", format!("{}/share/man:", crate::packages::PROFILE_LINK)),
         var("XDG_DATA_DIRS", format!("{}/share:/usr/local/share:/usr/share", crate::packages::PROFILE_LINK)),
-        // Three homes, one rule each. The NFS home keeps small config. The WORKSPACE DIR keeps
-        // the project and EVERY cache — build output, package stores, toolchains, editor servers
-        // — under `{ws}/.cache/`, so a clone, a restore or a start on another node arrives warm:
-        // it is snapshotted and replicated with the tree, where a per-node cache was rebuilt from
-        // nothing on every move (the owner's call, 2026-09-11: "everything that can be cached
-        // goes in the workspace folder"). `homecache`, node-local, keeps only what must not
-        // travel: `TMPDIR` and shell state.
-        //
-        // Under `{ws}/.cache/`, never a tool's own `./target`: nothing the platform places may
-        // collide with a directory a repository versions, and the global git ignore
+        // The volume IS the home now (2026-09-22 ruling): every cache lives under `~/.cache`
+        // because the whole tree travels with the workspace on clone/restore/push, and a cold
+        // cache never blocks on network I/O since there is no NFS home left to touch. Under
+        // `~/.cache`, never a tool's own `./target`: nothing the platform places may collide with
+        // a directory a repository versions, and the global git ignore
         // (`/etc/kloudlite/gitignore-global`, appended to `~/.config/git/ignore` by `prelude`) is
         // one line per kind rather than one per tool.
-        var("CARGO_TARGET_DIR", format!("{}/.cache/cargo-target", workspace_dir(name))),
-        var("GOCACHE", format!("{}/.cache/go-build", workspace_dir(name))),
-        var("PLAYWRIGHT_BROWSERS_PATH", format!("{}/.cache/ms-playwright", workspace_dir(name))),
-        var("XDG_CACHE_HOME", format!("{}/.cache/xdg", workspace_dir(name))),
-        var("npm_config_cache", format!("{}/.cache/npm", workspace_dir(name))),
-        var("PNPM_STORE_DIR", format!("{}/.cache/pnpm", workspace_dir(name))),
-        var("BUN_INSTALL_CACHE_DIR", format!("{}/.cache/bun", workspace_dir(name))),
-        // NOT CARGO_HOME: it holds `credentials.toml` and `config.toml` — configs, which is the
-        // half of the home that must survive. Cargo has no separate knob for its registry cache,
-        // so that part is a MOUNT of `{ws}/.cache/cargo-registry` at `~/.cargo/registry` instead
-        // (see `workspace_pod`).
-        var("RUSTUP_HOME", format!("{}/.cache/rustup", workspace_dir(name))),
-        // GOMODCACHE only, never GOPATH: GOPATH also holds `src/` and `bin/`, which are the
-        // person's own files, and the module cache is the only large rebuildable part of it.
-        var("GOMODCACHE", format!("{}/.cache/gomod", workspace_dir(name))),
-        // `GRADLE_USER_HOME` holds `gradle.properties` credentials — config, the home's half,
-        // the same shape as `CARGO_HOME`; Gradle's project cache is `{ws}/.gradle` on its own.
-        var("GRADLE_USER_HOME", format!("{HOME_DIR}/.gradle")),
-        var("MAVEN_OPTS", format!("-Dmaven.repo.local={}/.cache/m2", workspace_dir(name))),
-        var("YARN_CACHE_FOLDER", format!("{}/.cache/yarn", workspace_dir(name))),
-        var("COMPOSER_CACHE_DIR", format!("{}/.cache/composer", workspace_dir(name))),
-        var("NUGET_PACKAGES", format!("{}/.cache/nuget", workspace_dir(name))),
-        var("TMPDIR", format!("{HOME_CACHE_DIR}/tmp")),
+        var("RUSTUP_HOME", format!("{HOME_DIR}/.cache/rustup")),
+        var("GOMODCACHE", format!("{HOME_DIR}/.cache/gomod")),
+        var("MAVEN_OPTS", format!("-Dmaven.repo.local={HOME_DIR}/.cache/m2")),
+        var("PLAYWRIGHT_BROWSERS_PATH", format!("{HOME_DIR}/.cache/ms-playwright")),
+        var("NUGET_PACKAGES", format!("{HOME_DIR}/.cache/nuget")),
         var("DO_NOT_TRACK", "1".into()),
-        var("UV_CACHE_DIR", format!("{}/.cache/uv", workspace_dir(name))),
-        var("PIP_CACHE_DIR", format!("{}/.cache/pip", workspace_dir(name))),
-        var("DENO_DIR", format!("{}/.cache/deno", workspace_dir(name))),
-        // History belongs to the WORK, not the node (owner, 2026-09-16): in the workspace tree it
+        var("UV_CACHE_DIR", format!("{HOME_DIR}/.cache/uv")),
+        var("PIP_CACHE_DIR", format!("{HOME_DIR}/.cache/pip")),
+        var("DENO_DIR", format!("{HOME_DIR}/.cache/deno")),
+        // History belongs to the WORK, not the node (owner, 2026-09-16): in the volume it
         // is snapshotted, replicated and cloned with it, so a start on another node or a restore
         // finds what was typed, where the per-node state dir left every move blank.
-        var("HISTFILE", format!("{}/.cache/zsh/history", workspace_dir(name))),
+        var("HISTFILE", format!("{HOME_DIR}/.cache/zsh/history")),
     ];
     // Unset rather than empty when the agent has no `WS_API_URL`, exactly as the bench pod does:
     // `kl` then fails closed with "not in a workspace" instead of dialling an empty host.
@@ -142,9 +120,6 @@ pub(super) fn git_ssh_url(host: &str, port: &str) -> String {
 /// What the default image runs before sshd, as root, on every container start. The image
 /// (Dockerfile `workspace` stage) already carries the accounts, the chroot dir and the greeting;
 /// this is only what depends on the mounts: seeding the rc files, owning the volume, exec.
-/// `~/workspaces` is this pod's own emptyDir, mounted over the shared home, so the workspace
-/// mount point inside it never lands in the home and no pod lists a sibling's; root only has to
-/// hand that emptyDir to `kl` (a mount point cannot be a symlink, so root may chown it).
 /// The platform's shell config lives in `/etc` (container filesystem, rewritten every start,
 /// never inside the person's home): an interactive login lands in the workspace, and starship
 /// shows the directory, not `user@pod` — inside the workspace that directory IS its name — unless
@@ -160,26 +135,26 @@ pub(super) fn git_ssh_url(host: &str, port: &str) -> String {
 /// start because the seeder clones it as root and a restore can bring back files owned by
 /// anyone. `exec` so sshd is pid 1 and gets the kubelet's TERM.
 ///
-/// Root chowns only mountpoints and the directories the kubelet made to hold them, never a path
-/// the person could have replaced: `$H`, `$H/workspaces`, and `~/.cargo` with `~/.cargo/registry`.
-/// The last two are the exception and exist because the kubelet creates the missing PARENT of a
-/// subPath mount as root:root 0755 — leaving `CARGO_HOME` on the shared home (which is the point:
-/// `credentials.toml` and `config.toml` must survive) but unwritable, and the mount point itself
-/// root-owned so cargo cannot fill the cache either. `.vscode-server`/`.cursor-server` need no
-/// such fix: they are leaf mount points with no root-owned parent, and the editors recreate them.
-/// A mountpoint cannot be a symlink, and `-h` covers the parent in case the kubelet followed a
-/// planted one rather than creating it. Everything else below `$H` — the mkdirs, the rc seeds — runs as `kl` via `su`,
-/// because the home is now persistent and the person owns every byte of it between starts:
-/// `mv ~/.config x; ln -s /etc ~/.config` would otherwise make the next start `chown` and write
-/// through `/etc` as root, and the container keeps CHOWN/DAC_OVERRIDE on a writable rootfs. The
-/// seed runs from a heredoc on `su`'s stdin rather than `su -c` (which would need the printf
-/// quoting nested a second time), with `set -e` of its own so a failed seed still stops the pod.
+/// Root chowns the whole volume (`chown -Rh`, non-recursive would leave a root-owned git-seed
+/// checkout or a restored file owned by anyone unwritable by `kl`) before handing off to `su`:
+/// `-R` without `-L`/`-H` never follows a symlink and `-h` re-owns the link itself, so a person's
+/// own symlink under `$H` is untouched and the walk never leaves the volume. Nothing else is
+/// mounted under `$H`.
+/// Everything below `$H` — the mkdirs, the rc seeds — runs as `kl` via `su`, because the volume IS
+/// the home now and the person owns every byte of it between starts: `mv ~/.config x; ln -s /etc
+/// ~/.config` would otherwise make the next start `chown` and write through `/etc` as root, and
+/// the container keeps CHOWN/DAC_OVERRIDE on a writable rootfs. `~/.cargo` needs no root-owned-
+/// parent fix any more: there is no subPath mount making the kubelet create it as root, so it is
+/// an ordinary directory the seed itself creates as `kl`. The seed runs from a heredoc on `su`'s
+/// stdin (`su -c` would need the printf quoting nested a second time), with `set -e` of
+/// its own so a failed seed still stops the pod.
 /// ponytail: `chown -R` walks the whole volume on every start; fine for source trees. `$H` is the
-/// persistent home hostPath and the rc files are seeded only if absent, so a person's own edits survive
-/// a restart and a new workspace alike; `~/workspaces/<id>` is a mount point inside it that the
-/// kubelet makes, which is why nothing here mkdirs it.
-pub(super) fn prelude(name: &str) -> String {
-    let workspace_dir = workspace_dir(name);
+/// volume's own mount point and the rc files are seeded only if absent, so a person's own edits
+/// survive a restart and a new workspace alike. The seed also sets
+/// `receive.denyCurrentBranch updateInstead`: a sys-1 sub-session's clone pod pushes straight
+/// onto this pod's checked-out branch over SSH (spec §4), which plain git refuses by default —
+/// safe here because main never holds uncommitted edits when a push lands.
+pub(super) fn prelude(_name: &str) -> String {
     let profile = crate::packages::PROFILE_LINK;
     let path = crate::packages::path_env(None);
     // The rc text itself is `shell_rc`'s, shared byte for byte with the bench image; only the
@@ -190,9 +165,7 @@ pub(super) fn prelude(name: &str) -> String {
     format!(
         "set -e\n\
          H=/home/{SSH_USER}\n\
-         chown {SSH_UID}:{SSH_UID} $H $H/workspaces\n\
-         chown -h {SSH_UID}:{SSH_UID} $H/.cargo $H/.cargo/registry\n\
-         chown {SSH_UID}:{SSH_UID} $H/.local\n\
+         chown -Rh {SSH_UID}:{SSH_UID} $H\n\
          mkdir -p /etc/fish/conf.d\n\
          {zshrc} > /etc/zshrc\n\
          printf '%s\\n' 'status is-interactive; or exit' 'if test \"$PWD\" = \"$HOME\" -a -d \"$KL_WORKSPACE\"; cd \"$KL_WORKSPACE\"; end' 'test -e \"$HOME/.config/starship.toml\"; or set -gx STARSHIP_CONFIG /etc/starship.toml' 'test -r /etc/profile.d/kl-build.sh; and sh /etc/profile.d/kl-build.sh' > /etc/fish/conf.d/kl.fish\n\
@@ -202,15 +175,15 @@ pub(super) fn prelude(name: &str) -> String {
          set -e\n\
          export PATH={path}\n\
          H=/home/{SSH_USER}\n\
-         mkdir -p $H/.config/fish $H/.config/zsh $H/.config/git $H/.local-cache/tmp\n\
+         mkdir -p $H/workspace $H/.cargo $H/.config/fish $H/.config/zsh $H/.config/git $H/.local/state\n\
          grep -qF '# kloudlite: derived state' $H/.config/git/ignore 2>/dev/null || cat /etc/kloudlite/gitignore-global >> $H/.config/git/ignore\n\
+         git config --global receive.denyCurrentBranch updateInstead\n\
          [ -e $H/.config/zsh/.zshrc ] || {seed} > $H/.config/zsh/.zshrc\n\
          [ -e $H/.config/fish/config.fish ] || printf 'set -gx PATH {path}\\nset -gx LS_COLORS (dircolors -b | string match -r \"LS_COLORS=.([^\\047]*)\")[2]\\nalias ls=\"ls --color=auto\"\\nalias grep=\"grep --color=auto\"\\nstarship init fish | source\\n' > $H/.config/fish/config.fish\n\
          SEED\n\
-         chown -Rh {SSH_UID}:{SSH_UID} {workspace_dir}\n\
          echo prelude.chown.done\n\
-         su {SSH_USER} -s /bin/sh -c 'mkdir -p {workspace_dir}/.cache/zsh {workspace_dir}/.cache/shell'\n\
-         su {SSH_USER} -s /bin/sh -c 'cd {workspace_dir} && KL_WORKSPACE={workspace_dir} KLOUDLITE_OTLP_URL={OTLP_URL} OTEL_SERVICE_NAME=kl-ide exec kl ide serve --bind 0.0.0.0:{IDE_PORT} >> {IDE_LOG} 2>&1' &\n\
+         su {SSH_USER} -s /bin/sh -c 'mkdir -p {HOME_DIR}/.cache/zsh {HOME_DIR}/.cache/shell'\n\
+         su {SSH_USER} -s /bin/sh -c 'cd {WORKSPACE_DIR} && KL_WORKSPACE={WORKSPACE_DIR} KLOUDLITE_OTLP_URL={OTLP_URL} OTEL_SERVICE_NAME=kl-ide exec kl ide serve --bind 0.0.0.0:{IDE_PORT} >> {IDE_LOG} 2>&1' &\n\
          echo prelude.sshd.start\n\
          exec {profile}/bin/sshd -D -e -f {SSHD_DIR}/sshd_config\n"
     )
@@ -303,9 +276,8 @@ pub(super) fn host_dir(name: &str, path: String) -> Volume {
 /// The SHELL sidecar (spec §2): a terminal for the person, beside the container that does the
 /// work, on every workspace and every bench pod.
 ///
-/// What it mounts is the whole boundary: the HOME, the node-local `homecache` subPaths the home
-/// needs, and the workspace's Nix profile read-only — and NOT `workspaces`, not the live
-/// subvolume, not the tool token, not `/opt/harness`. "We are not providing access to the code
+/// What it mounts is the whole boundary: a scratch home of its own and the workspace's Nix profile
+/// read-only — and NOT the live subvolume (which IS the workspace's home since 2026-09-22), not the tool token, not `/opt/harness`. "We are not providing access to the code
 /// directly via shell" (owner, 2026-09-17). Nothing here can exec into a sibling container either:
 /// the pod shares no process namespace.
 ///
@@ -321,32 +293,20 @@ pub fn shell_container(image: &str, ws_id: &str) -> Container {
             // The same locale the workspace container sets, for the same reason: zsh without it
             // has MULTIBYTE off and starship's prompt counts as three columns.
             var("LANG", "C.UTF-8".to_string()),
-            var("XDG_CACHE_HOME", format!("{HOME_CACHE_DIR}/xdg")),
-            var("TMPDIR", format!("{HOME_CACHE_DIR}/tmp")),
-            // Shell history is node-local state, like the workspace container's: it must not
-            // travel with a snapshot, and the shell has no tree to put it in anyway.
-            var("HISTFILE", format!("{HOME_STATE_DIR}/shell-history")),
+            // ponytail: history and caches die with the pod; the shell may not see the volume
+            // and there is no NFS home left, so a persistent history needs a volume of its own.
+            var("HISTFILE", format!("{HOME_DIR}/.zsh_history")),
             var("PATH", crate::packages::path_env(None)),
             var("NIX_PROFILE", crate::packages::PROFILE_LINK.into()),
             // `zsh -l` reads `$ZDOTDIR/.zshrc` and nothing else that this image can put bytes in:
-            // the home is the person's NFS mount (no platform rc on it, and a bench pod has no
+            // the home is a scratch emptyDir (no platform rc on it, and a bench pod has no
             // workspace container to seed one) and `/etc` is unwritable to uid 1000. Without this
             // the shell came up as a bare `ws%` with no starship, aliases or history (2026-09-18).
             var("ZDOTDIR", "/etc/kl".to_string()),
         ]),
         ports: Some(vec![ContainerPort { container_port: SHELL_PORT as i32, name: Some("ttyd".into()), ..Default::default() }]),
         volume_mounts: Some(vec![
-            // `HostToContainer` for the same reason the workspace container needs it: this binds a
-            // path inside the node's shared-home NFS mount, and a remount on the node must reach a
-            // running pod rather than leaving it pointing at a detached mount.
-            VolumeMount {
-                name: "home".to_string(),
-                mount_path: HOME_DIR.to_string(),
-                mount_propagation: Some("HostToContainer".to_string()),
-                ..Default::default()
-            },
-            VolumeMount { name: "homecache".to_string(), mount_path: HOME_CACHE_DIR.to_string(), sub_path: Some("cache".to_string()), ..Default::default() },
-            VolumeMount { name: "homecache".to_string(), mount_path: HOME_STATE_DIR.to_string(), sub_path: Some("state".to_string()), ..Default::default() },
+            VolumeMount { name: "shell-home".to_string(), mount_path: HOME_DIR.to_string(), ..Default::default() },
             // The store and this workspace's profile, read-only — the same two subPaths the
             // workspace container gets, and the reason `ttyd`, `zsh` and `starship` exist here.
             VolumeMount { name: "nix".to_string(), mount_path: "/nix/store".to_string(), sub_path: Some("store".to_string()), read_only: Some(true), ..Default::default() },
@@ -413,29 +373,6 @@ pub(super) fn hardened() -> SecurityContext {
         privileged: Some(false),
         ..Default::default()
     }
-}
-
-
-/// The owner's persistent home: one region-shared NFS export, `{pool}/homes/{owner}`, so every
-/// node the owner lands on sees the same dotfiles and history — no per-node btrfs subvolume, no
-/// materialize-on-first-landing.
-pub(super) fn home_volume(pool: &str, owner: &str) -> Volume {
-    host_dir("home", format!("{pool}/homes/{owner}"))
-}
-
-
-/// The owner's node-local cache: editor servers, package-manager caches and shell state that are
-/// large, ephemeral and would otherwise cross the network on every read — kept off the shared NFS
-/// home and pinned to one node's btrfs, ONE volume with subPaths per use (see the mounts below) so
-/// the janitor deletes a single subvolume to reclaim it all.
-pub(super) fn homecache_volume(pool: &str, owner: &str) -> Volume {
-    host_dir("homecache", format!("{pool}/homecache/{owner}"))
-}
-
-
-/// An emptyDir for `WORKSPACES_DIR`. Per pod on purpose — see the mount's comment.
-pub(super) fn workspaces_volume() -> Volume {
-    Volume { name: "workspaces".to_string(), empty_dir: Some(Default::default()), ..Default::default() }
 }
 
 
@@ -552,12 +489,12 @@ pub fn git_init_container(
             // a minute, and a crash-looping init container backs off past the window in which
             // the mount refreshes. A clone the server refused is wiped before the next attempt.
             format!(
-                "set -e; [ \"$(ls -A {SEED_DIR})\" ] && exit 0; \
+                "set -e; [ \"$(ls -A {WORKSPACE_DIR})\" ] && exit 0; \
                  for i in $(seq 1 24); do install -m 600 {USER_KEY_PATH}/id_ed25519 /tmp/seed_key; \
                  echo \"seed key $(ssh-keygen -lf /tmp/seed_key 2>/dev/null | cut -d\" \" -f2)\"; \
                  GIT_SSH_COMMAND=\"ssh -i /tmp/seed_key -o IdentitiesOnly=yes -o StrictHostKeyChecking=accept-new\" \
-                 git clone --depth 1 --no-single-branch --branch \"$BRANCH\" -- \"$URL\" {SEED_DIR} && exit 0; \
-                 rm -rf {SEED_DIR}/* {SEED_DIR}/.[!.]* 2>/dev/null || true; sleep 5; done; exit 1"
+                 git clone --depth 1 --no-single-branch --branch \"$BRANCH\" -- \"$URL\" {WORKSPACE_DIR} && exit 0; \
+                 rm -rf {WORKSPACE_DIR}/* {WORKSPACE_DIR}/.[!.]* 2>/dev/null || true; sleep 5; done; exit 1"
             ),
         ]),
         env: Some(vec![
@@ -565,7 +502,10 @@ pub fn git_init_container(
             EnvVar { name: "BRANCH".to_string(), value: Some(branch.clone()), ..Default::default() },
         ]),
         volume_mounts: Some(vec![
-            VolumeMount { name: "live".to_string(), mount_path: SEED_DIR.to_string(), ..Default::default() },
+            // The whole home now, not just the workspace subdir: nothing else may mount at or
+            // below `/home/kl` (2026-09-22 ruling), and the seed's empty-dir check above still
+            // only looks at `WORKSPACE_DIR` inside it.
+            VolumeMount { name: "live".to_string(), mount_path: HOME_DIR.to_string(), ..Default::default() },
             VolumeMount {
                 name: "user-key-seed".to_string(),
                 mount_path: USER_KEY_PATH.to_string(),
@@ -612,7 +552,7 @@ pub fn owner_slug<'a>(owner: &'a str, team: &'a str) -> &'a str {
 /// (`id` is the source volume; `ws_id` is this workspace's own
 /// worktree name) — see `Pool::worktree`.
 ///
-/// `bench` is `Some((configured bench image, idle seconds))` exactly when `crd::is_bench(ws)`:
+/// `bench` is `Some((configured bench image, idle seconds, kompress url))` exactly when `crd::is_bench(ws)`:
 /// the pod then grows a second container running `harness-bench` and is labelled `kind=bench`.
 /// The image is not a spec field on purpose — a bench follows the configured image on every
 /// start — and `idle_secs` is stamped in at create like every other `Mark::Live` value, so a
@@ -623,7 +563,7 @@ pub fn workspace_pod(
     ws_id: &str,
     ctx: &PodContext,
     init: Option<Container>,
-    bench: Option<(&str, u64)>,
+    bench: Option<(&str, u64, &str)>,
 ) -> Result<Pod, String> {
     // The last place before `spec.name` becomes a root `/bin/sh -c` word, an sshd `SetEnv` value
     // and this container's `mount_path`. `/v1` checked it; this covers a Workspace written by any
@@ -671,46 +611,19 @@ pub fn workspace_pod(
                 ..Default::default()
             }),
             volume_mounts: Some(vec![
-                // Listed before the workspace mount for the reader; the kubelet orders by path
-                // depth and `workspace_dir(name)` is under `HOME_DIR`, so the order is implied either way.
-                //
-                // `HostToContainer` is load-bearing, not hygiene: this binds a path INSIDE the
-                // node's shared-home NFS mount, and with the default (`None`) the bind is resolved
-                // once at pod start and never again. Replace that mount on the node — a ZeroFS
-                // restart, an agent remount, the stale-mount repair in `mount_homes` — and every
-                // already-running pod keeps pointing at the detached one, where every access fails
-                // "Network is unreachable" until someone recreates the pod. Observed exactly that
-                // way. Propagation lets a running pod follow the node's remount instead.
-                VolumeMount {
-                    name: "home".to_string(),
-                    mount_path: HOME_DIR.to_string(),
-                    mount_propagation: Some("HostToContainer".to_string()),
-                    ..Default::default()
-                },
-                // One `homecache` volume, five subPaths: the janitor reclaims all of it by
-                // deleting a single node-local subvolume, and each subPath is resolved once at
-                // container start so `login_env`'s redirected vars actually land here.
-                VolumeMount { name: "homecache".to_string(), mount_path: HOME_CACHE_DIR.to_string(), sub_path: Some("cache".to_string()), ..Default::default() },
-                // Cargo's registry cache, mounted rather than redirected: `CARGO_HOME` stays on
-                // the shared home so `credentials.toml` survives, and cargo offers no env var for
-                // the cache alone — so the cache subtree is what moves into the workspace.
-                // Every one of these is a subPath of the LIVE subvolume's `.cache/`: the kubelet
-                // makes the directory if it is absent, and it travels with the tree.
-                VolumeMount { name: "live".to_string(), mount_path: "/home/kl/.cargo/registry".to_string(), sub_path: Some(".cache/cargo-registry".to_string()), ..Default::default() },
-                VolumeMount { name: "live".to_string(), mount_path: "/home/kl/.vscode-server".to_string(), sub_path: Some(".cache/vscode-server".to_string()), ..Default::default() },
-                VolumeMount { name: "live".to_string(), mount_path: "/home/kl/.cursor-server".to_string(), sub_path: Some(".cache/cursor-server".to_string()), ..Default::default() },
-                VolumeMount { name: "live".to_string(), mount_path: "/home/kl/.zed_server".to_string(), sub_path: Some(".cache/zed-server".to_string()), ..Default::default() },
-                VolumeMount { name: "live".to_string(), mount_path: "/home/kl/.windsurf-server".to_string(), sub_path: Some(".cache/windsurf-server".to_string()), ..Default::default() },
-                VolumeMount { name: "live".to_string(), mount_path: "/home/kl/.jetbrains".to_string(), sub_path: Some(".cache/jetbrains".to_string()), ..Default::default() },
-                VolumeMount { name: "homecache".to_string(), mount_path: HOME_STATE_DIR.to_string(), sub_path: Some("state".to_string()), ..Default::default() },
-                // This pod's own `~/workspaces`, over the shared home: the workspace's mount point
-                // is made inside it, so it never appears in the home and no sibling pod lists it.
-                VolumeMount { name: "workspaces".to_string(), mount_path: WORKSPACES_DIR.to_string(), ..Default::default() },
+                // The whole home is the workspace's own worktree volume now (2026-09-22 ruling):
+                // one mount, no subPath, no propagation — there is no separate node-side home
+                // mount left to remount out from under a running pod.
                 VolumeMount {
                     name: "live".to_string(),
-                    mount_path: workspace_dir(&spec.name),
+                    mount_path: HOME_DIR.to_string(),
                     ..Default::default()
                 },
+                // Every cache (`login_env`) lives under `~/.cache` inside the volume itself now,
+                // so none of the old per-tool subPath mounts are needed; `TMPDIR` lost its
+                // node-local home too, so this emptyDir covers it and anything else that must not
+                // travel with the tree.
+                VolumeMount { name: "tmp".to_string(), mount_path: "/tmp".to_string(), ..Default::default() },
                 VolumeMount {
                     name: "user-key".to_string(),
                     mount_path: USER_KEY_PATH.to_string(),
@@ -753,8 +666,8 @@ pub fn workspace_pod(
         // where the sessions run (spec §2.2).
         let shell = shell_container(ctx.shell_image, ws_id);
         match bench {
-            Some((image, idle)) => {
-                vec![bench_container(ws_id, spec, image, idle, ctx.api_url, ctx.registry_host), shell]
+            Some((image, idle, kompress_url)) => {
+                vec![bench_container(ws_id, spec, image, idle, kompress_url, ctx.api_url, ctx.registry_host), shell]
             }
             None => vec![workspace_container(), shell],
         }
@@ -763,10 +676,9 @@ pub fn workspace_pod(
         // the key.
         volumes: Some({
             let mut v = vec![
-                home_volume(ctx.pool, &spec.owner),
-                homecache_volume(ctx.pool, &spec.owner),
-                workspaces_volume(),
                 live_worktree_volume(ctx.pool, id, ws_id),
+                Volume { name: "tmp".to_string(), empty_dir: Some(Default::default()), ..Default::default() },
+                Volume { name: "shell-home".to_string(), empty_dir: Some(Default::default()), ..Default::default() },
                 // The store, read-only, at its root because the profile lives under it too; the
                 // mounts pick the two subdirectories the pod may see.
                 host_dir("nix", NIX_ROOT.to_string()),
@@ -790,7 +702,6 @@ pub fn workspace_pod(
                         secret: Some(SecretVolumeSource { secret_name: Some(BENCH_TOOL_SECRET.to_string()), optional: Some(true), default_mode: Some(0o444), ..Default::default() }),
                         ..Default::default()
                     },
-                    Volume { name: "tmp".to_string(), empty_dir: Some(Default::default()), ..Default::default() },
                 ]);
             }
             v

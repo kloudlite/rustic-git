@@ -289,6 +289,37 @@ pub fn allow_bench_tools(ns: &str, owner: &str, owner_ref: &OwnerReference) -> N
 }
 
 
+/// The port `kloudlite-kompress` listens on (`deploy/k3s/kompress.yaml`) — one process, no
+/// egress need of its own, and this is the only hole a bench's egress gets to reach it.
+const KOMPRESS_PORT: i32 = 8787;
+
+
+/// A bench's one egress hole to the region's Kompress service, the exact shape of
+/// `builder_gate_egress`: `kloudlite-system`, a label, one port. Empty `kompressUrl` means no
+/// service is deployed, but the policy is unconditional — an unreachable ClusterIP costs nothing
+/// and this stays simple instead of threading the setting into `binding.rs`'s ensure call.
+// ponytail: AKS runs no network policy engine; the fence holds on the k3s regions where benches run
+pub fn allow_bench_kompress(ns: &str, owner: &str, owner_ref: &OwnerReference) -> NetworkPolicy {
+    policy(
+        "allow-bench-kompress",
+        ns,
+        owner,
+        owner_ref,
+        json!({
+            "podSelector": { "matchLabels": { KIND_LABEL: "bench" } },
+            "policyTypes": ["Egress"],
+            "egress": [{
+                "to": [{
+                    "namespaceSelector": { "matchLabels": { "kubernetes.io/metadata.name": GATEWAY_NAMESPACE } },
+                    "podSelector": { "matchLabels": { "app": "kloudlite-kompress" } },
+                }],
+                "ports": [{ "protocol": "TCP", "port": KOMPRESS_PORT }],
+            }],
+        }),
+    )
+}
+
+
 /// The port the gate and buildkitd both listen on — one hop from a workspace, through the gate,
 /// to the builder's own buildkit service. Task 7's contract for the gate pod's label; the gate is
 /// the only thing that may dial a builder's buildkit, so this is the only egress a workspace gets

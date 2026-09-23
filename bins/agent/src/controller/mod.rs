@@ -248,10 +248,6 @@ pub struct Ctx {
     /// startup. A second, hand-maintained copy of a label the scheduler already reads is a second
     /// thing that can be wrong — see `k8s::placement`.
     pub has_pool: bool,
-    /// `WS_HOMES_EXPORT`: `None` means this node has no shared-home NFS mount, and every
-    /// workspace reconcile parks on `HomeNotReady` rather than starting a pod that would hostPath
-    /// an empty local dir in the home's place.
-    pub homes_export: Option<String>,
     /// `WS_REGISTRY_HOST`, threaded into every pod's `k8s::PodContext` — see `Config::registry_host`.
     pub registry_host: String,
     /// `WS_API_URL`, the bench pod's `KL_API_URL` — see `Config::api_url`.
@@ -322,7 +318,7 @@ pub struct Ctx {
 
 impl Ctx {
     #[allow(clippy::too_many_arguments)]
-    pub fn new(client: kube::Client, engine: Arc<Engine>, node: String, pool: String, region: String, has_pool: bool, homes_export: Option<String>, registry_host: String, api_url: String, nix: Arc<dyn crate::nix::Nix>, profiles_dir: std::path::PathBuf, settings: LiveSettings<AgentSettings>) -> Ctx {
+    pub fn new(client: kube::Client, engine: Arc<Engine>, node: String, pool: String, region: String, has_pool: bool, registry_host: String, api_url: String, nix: Arc<dyn crate::nix::Nix>, profiles_dir: std::path::PathBuf, settings: LiveSettings<AgentSettings>) -> Ctx {
         // Boot-marked fields (`CLUSTER_SETTING_META`): read ONCE here from the settings already
         // merged at process start, not per reconcile — a change to one takes effect on this
         // agent's next restart, not its next tick (pod templates and runtimeClassName are
@@ -394,7 +390,6 @@ impl Ctx {
             running: Mutex::new(HashMap::new()),
             region,
             has_pool,
-            homes_export,
             registry_host,
             api_url,
             nix,

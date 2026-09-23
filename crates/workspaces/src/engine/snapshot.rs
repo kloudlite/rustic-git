@@ -107,8 +107,8 @@ impl Engine {
     ///
     /// Only the subvolume ROOT: what is inside a fresh one is nothing, and a `-R` walk here would
     /// be the prelude's own cost moved rather than removed. A non-root process cannot give a file
-    /// away, so a dev or test run that is not root leaves it alone — the same rule
-    /// `ensure_homecache` and the keys writer already follow.
+    /// away, so a dev or test run that is not root leaves it alone — the same rule the keys
+    /// writer already follows.
     fn chown_tenant(dst: &std::path::Path) -> Result<(), EngErr> {
         if unsafe { libc::geteuid() } != 0 {
             return Ok(());

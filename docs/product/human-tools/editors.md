@@ -5,10 +5,10 @@ Any editor with an ssh remote mode works with a workspace once `kl-connect ws ss
 ## VS Code
 
 ```bash
-code --remote ssh-remote+api /home/kl/workspaces/api
+code --remote ssh-remote+api /home/kl/workspace
 ```
 
-Or Remote-SSH → Connect to Host → `api`. The remote server installs into the workspace's local cache, not the shared home, so two workspaces on different nodes never race it.
+Or Remote-SSH → Connect to Host → `api`. The remote server installs into the workspace's own cache under its home volume.
 
 ## Cursor, Windsurf, and forks
 
@@ -16,7 +16,7 @@ Same as VS Code: Remote-SSH with host `api`.
 
 ## JetBrains
 
-Gateway → SSH → host `api`, user `kl`, project `/home/kl/workspaces/api`. The IDE backend goes to the workspace's local cache.
+Gateway → SSH → host `api`, user `kl`, project `/home/kl/workspace`. The IDE backend goes to the workspace's local cache.
 
 ## Terminal editors
 
@@ -24,7 +24,7 @@ Gateway → SSH → host `api`, user `kl`, project `/home/kl/workspaces/api`. Th
 ssh api
 ```
 
-Your dotfiles are in `/home/kl` and persist across every workspace in the region, so a configured shell, `vim`, or `nvim` follows you.
+Your dotfiles are in `/home/kl`, this workspace's own volume, so a configured shell, `vim`, or `nvim` persists across stop and start of this workspace.
 
 ## Port forwarding
 

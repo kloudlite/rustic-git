@@ -3,19 +3,18 @@
 //!
 //! A bench is a Workspace with `spec.bench` set (`crd::is_bench`), so it has a volume, a home, a
 //! `user-key` and sshd like any other; nothing here rebuilds those. `bench_container` adds only
-//! what `harness-bench` itself needs, and its data lives at `{workspace_dir}/.bench` INSIDE the
-//! btrfs subvolume, so it is snapshotted, replicated and pushed with the workspace instead of
-//! sitting in a folder of its own on the shared home.
+//! what `harness-bench` itself needs, and its data lives at `~/.bench` INSIDE the btrfs subvolume
+//! (the volume IS the home, 2026-09-22), so it is snapshotted, replicated and pushed with the
+//! workspace.
 //!
 //! The pod's `restartPolicy` is the workspace's `Always`, so the idle/locked channel is per
 //! CONTAINER now (`status.containerStatuses[name=bench]`), not a pod phase: idle keeps serving and
 //! reports through the readiness probe, a held lock exits 75 and the kubelet backs off.
 
 use super::*;
-use k8s_openapi::api::core::v1::{EnvVarSource, ExecAction, ObjectFieldSelector};
+use k8s_openapi::api::core::v1::{EnvVarSource, ExecAction, ObjectFieldSelector, SecretKeySelector};
 
 pub const BENCH_PORT: u16 = 7789;
-pub const BENCH_DIR: &str = "/bench";
 /// The container every session's pi runs in. Named `sessions` since 2026-09-17 (spec §2.2): a
 /// bench pod is `sessions` + `shell` and has no workspace container at all, so "the bench
 /// container" no longer means anything a person could point at.
@@ -23,10 +22,21 @@ pub const BENCH_CONTAINER: &str = "sessions";
 pub const BENCH_TOOL_PATH: &str = "/etc/kloudlite/bench-tool";
 
 
-/// Where a bench keeps its sessions, locks and per-workspace state, relative to the workspace
-/// directory. A dot name so it is out of the way, and `deploy/workspace-image/gitignore-global`
+/// Where a bench keeps its sessions, locks and per-workspace state, relative to the home. A dot name so it is out of the way, and `deploy/workspace-image/gitignore-global`
 /// ignores it globally — the person's repo lives in the same tree and must never see it.
 pub const BENCH_SUBDIR: &str = ".bench";
+
+
+fn bench_engine_var(key: &str) -> EnvVar {
+    EnvVar {
+        name: key.to_string(),
+        value_from: Some(EnvVarSource {
+            secret_key_ref: Some(SecretKeySelector { name: BENCH_ENGINE_SECRET.to_string(), key: key.to_string(), optional: Some(true) }),
+            ..Default::default()
+        }),
+        ..Default::default()
+    }
+}
 
 
 /// The `harness-bench` container of a bench workspace's pod.
@@ -39,8 +49,9 @@ pub const BENCH_SUBDIR: &str = ".bench";
 /// sizes the `workspace` container the person works in, and a bench that shrank because somebody
 /// sized their workspace small would OOM mid-turn. The same function `quota` charges, so what
 /// runs and what is billed cannot drift apart.
-pub fn bench_container(ws_id: &str, spec: &WorkspaceSpec, image: &str, idle_secs: u64, api_url: &str, registry_host: &str) -> Container {
-    let dir = workspace_dir(&spec.name);
+#[allow(clippy::too_many_arguments)]
+pub fn bench_container(ws_id: &str, spec: &WorkspaceSpec, image: &str, idle_secs: u64, kompress_url: &str, api_url: &str, registry_host: &str) -> Container {
+    let data = format!("{HOME_DIR}/{BENCH_SUBDIR}");
     let var = |n: &str, v: String| EnvVar { name: n.into(), value: Some(v), ..Default::default() };
     let model = spec.bench.as_ref().map(|b| b.model.clone()).unwrap_or_default();
     let mut env = vec![
@@ -53,7 +64,7 @@ pub fn bench_container(ws_id: &str, spec: &WorkspaceSpec, image: &str, idle_secs
         // Same two names the workspace container carries, so `kl` and the tool server agree with
         // the bench about which workspace this is and where it lives.
         var("KL_WORKSPACE_ID", ws_id.to_string()),
-        var("KL_WORKSPACE", dir.clone()),
+        var("KL_WORKSPACE", WORKSPACE_DIR.to_string()),
         var("KL_MODEL", model),
         var("KL_REGISTRY_HOST", registry_host.to_string()),
         var("KL_BENCH_IDLE_SECS", idle_secs.to_string()),
@@ -65,7 +76,7 @@ pub fn bench_container(ws_id: &str, spec: &WorkspaceSpec, image: &str, idle_secs
         // `.bench/` is exactly where bench state belongs (spec §3.2 item 5): the harness's own
         // store, inside the bench's volume, so the keys are snapshotted, replicated and moved with
         // the bench like its transcripts — and read by the harness, never by a tool.
-        var("PI_CODING_AGENT_DIR", format!("{dir}/{}/pi", crate::k8s::BENCH_SUBDIR)),
+        var("PI_CODING_AGENT_DIR", format!("{data}/pi")),
         // The PATH to the tool token, never the token: env shows up in `ps e`, crash dumps and
         // child processes, and a file the api refreshes in place stays current without a restart.
         var("KL_TOOL_TOKEN_FILE", format!("{BENCH_TOOL_PATH}/token")),
@@ -94,10 +105,23 @@ pub fn bench_container(ws_id: &str, spec: &WorkspaceSpec, image: &str, idle_secs
         },
         var("HOME", HOME_DIR.to_string()),
         var("LANG", "C.UTF-8".to_string()),
+        // The sys-1 engine's credentials, from the bench-only `bench-engine` Secret (never
+        // `user-key`, which every workspace pod mounts whole). `optional: true` so a fleet without
+        // the entries still starts the pod and `harness/bench/src/runtime.ts` reports the missing
+        // key itself rather than the pod hitting CreateContainerConfigError.
+        bench_engine_var("TYPESAFE_API_KEY"),
+        bench_engine_var("JEVHARN_API_KEY"),
+        bench_engine_var("JEVHARN_MODEL"),
+        bench_engine_var("JEVHARN_BASE_URL"),
     ];
     // Unset rather than empty when the agent has no `WS_API_URL`: the tools then fail closed.
     if !api_url.is_empty() {
         env.push(var("KL_API_URL", api_url.to_string()));
+    }
+    // Empty means no Kompress service in this region; the engine then falls back to its
+    // rule-based compressors.
+    if !kompress_url.is_empty() {
+        env.push(var("KL_KOMPRESS_URL", kompress_url.to_string()));
     }
 
     // sshd is the other container's; without it nothing here chroots, so the one capability the
@@ -113,21 +137,16 @@ pub fn bench_container(ws_id: &str, spec: &WorkspaceSpec, image: &str, idle_secs
         command: Some(vec![
             "harness-bench".to_string(),
             "--dir".to_string(),
-            format!("{dir}/{BENCH_SUBDIR}"),
+            data,
             "--idle-secs".to_string(),
             idle_secs.to_string(),
         ]),
         env: Some(env),
         volume_mounts: Some(vec![
-            // NO `home`: the sessions container is a state store, not hands (spec §3.2). The
-            // person's home is the SHELL sidecar's, and a session that could read the home would
-            // have exactly the filesystem this design removes. `$HOME` still points at it so a
-            // library that insists on one has somewhere to look; nothing is mounted there.
-            //
-            // The LIVE worktree is the bench's OWN volume, and the only path here: it is where
-            // `.bench/` (plans, tasks, transcripts, memory) lives, which the harness reads for
-            // itself and no tool can list.
-            VolumeMount { name: "live".to_string(), mount_path: dir, ..Default::default() },
+            // The bench's OWN volume, which is its home (2026-09-22): `.bench/` (plans, tasks,
+            // transcripts, memory) lives there, read by the harness itself and listed by no tool.
+            // The person's workspaces are other volumes and never mounted here.
+            VolumeMount { name: "live".to_string(), mount_path: HOME_DIR.to_string(), ..Default::default() },
             VolumeMount { name: "user-key".to_string(), mount_path: USER_KEY_PATH.to_string(), read_only: Some(true), ..Default::default() },
             VolumeMount { name: "bench-tool".to_string(), mount_path: BENCH_TOOL_PATH.to_string(), read_only: Some(true), ..Default::default() },
             VolumeMount { name: "tmp".to_string(), mount_path: "/tmp".to_string(), ..Default::default() },
@@ -199,18 +218,4 @@ pub fn allow_gateway_bench(namespace: &str, id: &str) -> NetworkPolicy {
             .expect("static NetworkPolicy spec"),
         ),
     }
-}
-
-
-/// `{pool}/homes/.benches/{team}/{owner}` — under the region-shared home export, never on a
-/// node's local btrfs: a bench has no volume, so there is nothing for a per-node hostPath to
-/// pin. `.benches` keeps this out of the flat `{pool}/homes/{owner}` namespace a workspace's own
-/// home occupies. Every segment goes through `model::validate_mount`, the same check a bind mount
-/// gets, because this becomes a `hostPath` the same way: `team`/`owner` come from the CRD, not
-/// from a client body /v1 has already checked, so nothing here may assume they are already safe.
-pub fn bench_folder(pool: &str, team: &str, owner: &str) -> Result<String, String> {
-    for segment in [team, owner] {
-        model::validate_mount(&model::Mount { folder: segment.to_string(), path: BENCH_DIR.to_string() })?;
-    }
-    Ok(format!("{pool}/homes/.benches/{team}/{owner}"))
 }

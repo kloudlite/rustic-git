@@ -80,7 +80,7 @@ pub(crate) fn a_trees_reported_path_is_inside_the_pods_own_mount() {
         // The worktree's OWN mount, not the cache subPaths that share the volume name.
         .find(|m| m.name == "live" && m.sub_path.is_none())
         .expect("the worktree is mounted");
-    let reported = crate::crd::tree_path(&spec.name, "fix-auth");
+    let reported = crate::crd::tree_path("fix-auth");
     assert_eq!(reported, format!("{}/.agents/fix-auth", live.mount_path), "{reported}");
     // And the CR id is NOT what it is built from: the two differ here, which is the bug.
     assert_ne!(spec.name, "ws-1", "the fixture must distinguish the id from the display name");
@@ -145,6 +145,16 @@ pub(crate) fn the_user_key_secret_carries_the_private_key_the_git_identity_and_t
     assert_eq!(data["registry-token"], "TOKEN");
     // The credential `kl` acts under from inside the pod, beside the one docker reads.
     assert_eq!(data["workspace-token"], "WSTOKEN");
+}
+
+#[test]
+pub(crate) fn the_bench_engine_secret_carries_whatever_is_set_and_nothing_else() {
+    let s = bench_engine_secret("alice", "ws-alice", &BTreeMap::from([("TYPESAFE_API_KEY".to_string(), "x".to_string())]));
+    let data = s.string_data.unwrap();
+    assert_eq!(data["TYPESAFE_API_KEY"], "x");
+
+    let empty = bench_engine_secret("alice", "ws-alice", &BTreeMap::new());
+    assert!(empty.string_data.unwrap().is_empty());
 }
 
 
@@ -362,40 +372,31 @@ pub(crate) fn a_workspace_pod_mounts_its_volume_at_workspace_and_only_there() {
     let claims = s.volumes.as_ref().unwrap().iter().filter(|v| v.name == "live" && v.host_path.is_some());
     assert_eq!(claims.count(), 1);
     let mounts = s.containers[0].volume_mounts.as_ref().unwrap();
-    // One mount of the WHOLE subvolume, at the workspace path; every other `live` mount is a
-    // `.cache/` subPath (the registry, the editor servers) and never the root again.
+    // One `live` mount, the whole subvolume, at the home — nothing else names `live`.
     let whole: Vec<_> = mounts.iter().filter(|m| m.name == "live" && m.sub_path.is_none()).collect();
     assert_eq!(whole.len(), 1, "the nginx web-root mount is gone with nginx");
-    assert!(mounts.iter().all(|m| m.name != "live" || m.sub_path.is_none() || m.sub_path.as_deref().unwrap().starts_with(".cache/")));
-    assert!(mounts.iter().any(|m| m.mount_path == "/home/kl/workspaces/dev" && m.read_only.is_none()));
+    assert!(mounts.iter().any(|m| m.name == "live" && m.mount_path == HOME_DIR));
 }
 
 
-/// The home is a PV mounted at `/home/kl` and the workspace subvolume a PV mounted INSIDE it;
-/// the kubelet orders mounts by path depth, so the paths carry the order. The ssh Secret
-/// mounts under `/home/kl/.ssh` land inside the home too — a Secret inside a PV is fine.
+/// The whole home is the workspace's own volume now (2026-09-22 ruling): one mount at
+/// `HOME_DIR`, no subPath, no propagation — there is no separate node-side home mount left to
+/// remount out from under a running pod. Nothing else may mount at or below `HOME_DIR`, except
+/// `AUTHORIZED_KEYS_PATH`, which moved outside it for exactly that reason.
 #[test]
-pub(crate) fn a_workspace_pod_mounts_the_home_and_the_workspace_inside_it() {
+pub(crate) fn workspace_pod_mounts_the_volume_as_the_home() {
     let p = workspace_pod(&ws_spec(), "ws-1", "ws-1", &ctx(), None, None).unwrap();
     let s = p.spec.unwrap();
-    let home = s.volumes.as_ref().unwrap().iter().find(|v| v.name == "home").expect("home volume");
-    assert_eq!(home.host_path.as_ref().unwrap().path, format!("{}/homes/{}", ctx().pool, ws_spec().owner));
+    assert!(s.volumes.as_ref().unwrap().iter().all(|v| v.name != "home" && v.name != "homecache" && v.name != "workspaces"));
     let mounts = s.containers[0].volume_mounts.as_ref().unwrap();
-    let home_mount = mounts.iter().find(|m| m.name == "home").expect("home mount");
-    assert_eq!(home_mount.mount_path, HOME_DIR);
-    assert!(home_mount.read_only.is_none(), "dotfiles are written by the person");
-    assert!(home_mount.sub_path.is_none());
-    // Without this a node-side remount strands every running pod on the detached mount
-    // ("Network is unreachable" on every path under $HOME) until the pod is recreated.
-    assert_eq!(home_mount.mount_propagation.as_deref(), Some("HostToContainer"));
-    let live = mounts.iter().find(|m| m.name == "live").unwrap();
-    assert!(live.mount_path.starts_with(&format!("{HOME_DIR}/")), "the workspace is INSIDE the home: {}", live.mount_path);
-    assert!(AUTHORIZED_KEYS_PATH.starts_with(HOME_DIR));
-    // A custom image gets the home too: it is the person's, not the image's.
-    let mut custom = ws_spec();
-    custom.image = "ghcr.io/someone/theirs:1".into();
-    let s = workspace_pod(&custom, "ws-1", "ws-1", &ctx(), None, None).unwrap().spec.unwrap();
-    assert!(s.volumes.as_ref().unwrap().iter().any(|v| v.name == "home"));
+    let under_home: Vec<_> = mounts.iter().filter(|m| m.mount_path == HOME_DIR || m.mount_path.starts_with(&format!("{HOME_DIR}/"))).collect();
+    assert_eq!(under_home.len(), 1, "exactly one mount at or under the home: {under_home:?}");
+    let m = under_home[0];
+    assert_eq!(m.name, "live");
+    assert_eq!(m.mount_path, HOME_DIR);
+    assert!(m.sub_path.is_none());
+    assert!(m.mount_propagation.is_none());
+    assert!(!AUTHORIZED_KEYS_PATH.starts_with(HOME_DIR), "the keys file moved out of the home");
 }
 
 
@@ -423,21 +424,22 @@ pub(crate) fn a_clones_pod_is_named_after_the_workspace_not_the_shared_volume() 
 }
 
 
+/// Every cache now lives under `HOME_DIR/.cache/` inside the volume itself, so a clone or a
+/// restore arrives warm — and never at a tool's own `./target`, which a repository may version.
 #[test]
-pub(crate) fn the_home_is_the_shared_nfs_path_and_caches_are_local() {
-    let pod = workspace_pod(&ws_spec(), "vol-1", "ws-1", &ctx(), None, None).unwrap();
-    let s = pod.spec.unwrap();
-    let vols = s.volumes.unwrap();
-    let path = |n: &str| vols.iter().find(|v| v.name == n).unwrap().host_path.as_ref().unwrap().path.clone();
-    assert_eq!(path("home"), format!("{}/homes/{}", ctx().pool, ws_spec().owner));
-    assert_eq!(path("homecache"), format!("{}/homecache/{}", ctx().pool, ws_spec().owner));
-    let mounts = s.containers[0].volume_mounts.clone().unwrap();
-    let sub = |mp: &str| mounts.iter().find(|m| m.mount_path == mp).map(|m| (m.name.clone(), m.sub_path.clone()));
-    assert_eq!(sub(HOME_CACHE_DIR), Some(("homecache".into(), Some("cache".into()))));
-    for (path, dir) in [("/home/kl/.cargo/registry", "cargo-registry"), ("/home/kl/.vscode-server", "vscode-server"), ("/home/kl/.cursor-server", "cursor-server"), ("/home/kl/.zed_server", "zed-server"), ("/home/kl/.windsurf-server", "windsurf-server"), ("/home/kl/.jetbrains", "jetbrains")] {
-        assert_eq!(sub(path), Some(("live".into(), Some(format!(".cache/{dir}")))), "{path} travels with the tree");
-    }
-    assert_eq!(sub(HOME_STATE_DIR), Some(("homecache".into(), Some("state".into()))));
+pub(crate) fn the_login_env_redirects_every_cache_into_the_volume() {
+    let env = login_env("w-abc123", "ws-1", "acme", "", "registry.kloudlite.io", "https://api.kloudlite.io", "git.khost.dev", "22");
+    let get = |n: &str| env.iter().find(|e| e.name == n).unwrap().value.clone().unwrap();
+    assert_eq!(get("KL_WORKSPACE"), WORKSPACE_DIR);
+    assert_eq!(get("CARGO_TARGET_DIR"), format!("{HOME_DIR}/.cache/cargo-target"));
+    assert_eq!(get("RUSTUP_HOME"), format!("{HOME_DIR}/.cache/rustup"));
+    assert_eq!(get("GOMODCACHE"), format!("{HOME_DIR}/.cache/gomod"));
+    assert_eq!(get("MAVEN_OPTS"), format!("-Dmaven.repo.local={HOME_DIR}/.cache/m2"));
+    assert_eq!(get("PLAYWRIGHT_BROWSERS_PATH"), format!("{HOME_DIR}/.cache/ms-playwright"));
+    assert_eq!(get("NUGET_PACKAGES"), format!("{HOME_DIR}/.cache/nuget"));
+    // History is in the volume too: it travels with a clone, a restore and a move.
+    assert_eq!(get("HISTFILE"), format!("{HOME_DIR}/.cache/zsh/history"));
+    assert_eq!(get("DO_NOT_TRACK"), "1");
 }
 
 
@@ -476,14 +478,12 @@ fn the_sshd_set_env_carries_the_git_host() {
     assert!(cfg.contains("\"GIT_CONFIG_VALUE_0=kl:\""), "{cfg}");
 }
 
+/// What `kl` addresses `/v1` with from inside the pod: the CR name (never the person's name for
+/// it), the SPACE (personal folds to the handle) and the api base.
 #[test]
-pub(crate) fn the_login_env_redirects_every_cache_and_keeps_histfile_with_the_tree() {
+pub(crate) fn the_login_env_tells_kl_where_it_is() {
     let env = login_env("w-abc123", "ws-1", "acme", "", "registry.kloudlite.io", "https://api.kloudlite.io", "git.khost.dev", "22");
     let get = |n: &str| env.iter().find(|e| e.name == n).unwrap().value.clone().unwrap();
-    // In the tree, not on the node: history travels with a clone, a restore and a move.
-    assert_eq!(get("HISTFILE"), "/home/kl/workspaces/ws-1/.cache/zsh/history");
-    // What `kl` addresses `/v1` with from inside the pod: the CR name (never the person's name
-    // for it), the SPACE (personal folds to the handle) and the api base.
     assert_eq!(get("KL_WORKSPACE_ID"), "w-abc123");
     assert_eq!(get("KL_WORKSPACE_NAME"), "ws-1");
     assert_eq!(get("KL_TEAM"), "acme");
@@ -492,27 +492,6 @@ pub(crate) fn the_login_env_redirects_every_cache_and_keeps_histfile_with_the_tr
     assert_eq!(team.iter().find(|e| e.name == "KL_TEAM").unwrap().value.as_deref(), Some("acme"));
     // Unset, not empty, without `WS_API_URL`: `kl` fails closed rather than dialling an empty host.
     assert!(!team.iter().any(|e| e.name == "KL_API_URL"), "an empty api url must leave the var unset");
-    // Every cache lives WITH the workspace, under `{ws}/.cache/`, so a clone or a restore arrives
-    // warm — and never at a tool's own `./target`, which a repository may version.
-    let ws = workspace_dir("ws-1");
-    for (var, sub) in [
-        ("XDG_CACHE_HOME", "xdg"), ("npm_config_cache", "npm"), ("PNPM_STORE_DIR", "pnpm"), ("BUN_INSTALL_CACHE_DIR", "bun"),
-        ("RUSTUP_HOME", "rustup"), ("GOMODCACHE", "gomod"), ("UV_CACHE_DIR", "uv"), ("PIP_CACHE_DIR", "pip"),
-        ("DENO_DIR", "deno"), ("YARN_CACHE_FOLDER", "yarn"), ("COMPOSER_CACHE_DIR", "composer"), ("NUGET_PACKAGES", "nuget"),
-    ] {
-        assert_eq!(get(var), format!("{ws}/.cache/{sub}"), "{var}");
-    }
-    assert_eq!(get("MAVEN_OPTS"), format!("-Dmaven.repo.local={ws}/.cache/m2"));
-    // Only what must not travel stays node-local.
-    assert_eq!(get("TMPDIR"), format!("{HOME_CACHE_DIR}/tmp"));
-    assert_eq!(get("CARGO_TARGET_DIR"), format!("{ws}/.cache/cargo-target"));
-    assert_eq!(get("GOCACHE"), format!("{ws}/.cache/go-build"));
-    assert_eq!(get("PLAYWRIGHT_BROWSERS_PATH"), format!("{ws}/.cache/ms-playwright"));
-    // Config, the home's half: cargo and gradle credentials, a person's GOPATH/src.
-    assert_eq!(get("GRADLE_USER_HOME"), format!("{HOME_DIR}/.gradle"));
-    for var in ["CARGO_HOME", "GOPATH"] {
-        assert!(env.iter().all(|e| e.name != var), "{var} must stay on the shared home");
-    }
     assert_eq!(get("DO_NOT_TRACK"), "1");
 }
 
@@ -526,7 +505,7 @@ pub(crate) fn the_prelude_starts_kl_ide_serve_as_kl_before_sshd() {
     assert!(serve < sshd, "the server must start before sshd takes over");
     let line = s.lines().find(|l| l.contains("kl ide serve")).unwrap();
     assert!(line.trim_start().starts_with("su kl "), "{line}");
-    assert!(line.contains("KL_WORKSPACE=/home/kl/workspaces/api"), "{line}");
+    assert!(line.contains("KL_WORKSPACE=/home/kl/workspace"), "{line}");
     assert!(line.trim_end().ends_with('&'), "backgrounded: {line}");
     // `su -c '…'` runs a fresh shell: a prelude variable inside the quotes is empty there, and the
     // log redirect then fails before `exec` — which is how build fb3673f1 shipped a server that
@@ -535,7 +514,7 @@ pub(crate) fn the_prelude_starts_kl_ide_serve_as_kl_before_sshd() {
     // The CONSTANT, not a literal: the `ide.sandbox.active` probe reads this same path, and a
     // literal here would let the two drift into a probe reading a file nothing writes.
     assert!(line.contains(&format!(">> {}", crate::k8s::IDE_LOG)), "{line}");
-    assert!(crate::k8s::IDE_LOG.starts_with(&format!("{}/", crate::k8s::HOME_STATE_DIR)), "the log must be on the state MOUNT, or it dies with the pod");
+    assert!(crate::k8s::IDE_LOG.starts_with(&format!("{}/", crate::k8s::HOME_DIR)), "the log must be in the home volume, or it dies with the pod");
     // The bench dials the tool server on the pod IP (the bench spec's What runs where); the ssh tunnel still reaches it on loopback.
     assert!(line.contains("exec kl ide serve --bind 0.0.0.0:7788 "), "{line}");
     // Traced to the node collector; on the serve line only, so a person's own shells never inherit `OTEL_SERVICE_NAME`.
@@ -620,37 +599,20 @@ pub(crate) fn the_default_image_runs_sshd_with_its_own_host_key_and_the_owners_k
     assert!(sshd_config("w-abc123", "dev", "acme", "", "registry.kloudlite.io", "https://api.kloudlite.io", "git.khost.dev", "22").contains("StrictModes no\n"));
     // The account sshd lets in: fixed uid, unlocked, owning the volume; and the key it reads.
     let prelude = &cmd[2];
-    // `-h`: the tree is the person's between starts, and a planted symlink must not hand root's
-    // chown a target outside it (the same hole the home seed closed by running as kl).
-    assert!(prelude.contains("chown -Rh 1000:1000 /home/kl/workspaces/dev"), "{prelude}");
-    assert!(!prelude.contains("chown -R 1000:1000"), "{prelude}");
-    // Never `-R` over the home: `.ssh` is a read-only mount, and under `set -e` one EROFS
-    // from chown is a pod that never starts.
-    assert!(!prelude.contains("-R 1000:1000 $H"), "{prelude}");
-    // Root's part ends where `su` begins. Below `$H` the person owns the tree between starts,
-    // so a root `chown`/`mkdir`/redirect there follows whatever symlink they planted. The
-    // closed list below — not a prefix, so a new path cannot be smuggled onto an existing
-    // line — is every path root may touch: mountpoints and the `.cargo` parent the kubelet
-    // makes root-owned for one. Adding to it is the moment to re-read `prelude`'s doc comment.
-    const ROOT_CHOWNS: [&str; 3] =
-        ["chown 1000:1000 $H $H/workspaces", "chown -h 1000:1000 $H/.cargo $H/.cargo/registry", "chown 1000:1000 $H/.local"];
+    // Root's part ends where `su` begins. The git-seed init container clones as root and a
+    // restore can bring back files owned by anyone, so root re-owns the whole volume before
+    // handing off, not just its own mountpoint.
     let su_at = prelude.lines().position(|l| l.starts_with("su kl -s /bin/sh <<'SEED'")).expect("seed runs as kl");
     let root: Vec<&str> = prelude.lines().take(su_at).collect();
-    // Both must actually be there: dropping the second leaves `~/.cargo` unwritable by kl.
-    for want in ROOT_CHOWNS {
-        assert!(root.contains(&want), "{root:?}");
-    }
+    assert!(root.contains(&"chown -Rh 1000:1000 $H"), "{root:?}");
     for l in &root {
-        // Root writes only to /etc (the container's own filesystem); nothing under $H.
-        assert!(!l.contains("$H/") || ROOT_CHOWNS.contains(l), "root must not write under $H: {l}");
+        // Root writes only to /etc (the container's own filesystem) and its own mountpoint.
+        assert!(!l.contains("$H/"), "root must not write under $H: {l}");
         assert!(!l.contains("> /home"), "root must not write under the home: {l}");
-        assert!(!l.starts_with("chown") || ROOT_CHOWNS.contains(l), "root chown below the mountpoints: {l}");
+        assert!(!l.starts_with("chown") || *l == "chown -Rh 1000:1000 $H", "root chown below $H: {l}");
     }
     let seed_end = prelude.lines().position(|l| l == "SEED").expect("heredoc terminator at column 0");
     assert!(prelude.lines().skip(su_at + 1).take(seed_end - su_at - 1).any(|l| l.starts_with("mkdir -p $H/")), "{prelude}");
-    // `~/workspaces` is the pod's own emptyDir: root chowns that mount point and nothing else.
-    assert!(prelude.contains("chown 1000:1000 $H $H/workspaces\n"), "{prelude}");
-    assert!(prelude.lines().nth(seed_end + 1).unwrap().starts_with("chown -Rh 1000:1000 /home/kl/workspaces/"), "{prelude}");
     // The prompt and the profile's PATH, for both shells; the greeting replaces the base image's.
     assert!(prelude.contains("starship init zsh"), "{prelude}");
     // Coloured `ls` in both shells: coreutils' ls is plain until LS_COLORS and --color say
@@ -687,22 +649,18 @@ pub(crate) fn the_default_image_runs_sshd_with_its_own_host_key_and_the_owners_k
     assert_eq!(cfg.matches("SetEnv ").count(), 1, "{cfg}");
     let line = cfg.lines().find(|l| l.starts_with("SetEnv ")).unwrap();
     assert!(line.contains("\"PATH=/nix/profile/current/bin:"), "{line}");
-    assert!(line.contains("\"KL_WORKSPACE=/home/kl/workspaces/dev\"") && line.contains("\"KL_WORKSPACE_NAME=dev\""), "{line}");
+    assert!(line.contains("\"KL_WORKSPACE=/home/kl/workspace\"") && line.contains("\"KL_WORKSPACE_NAME=dev\""), "{line}");
     // The platform rc files: interactive-only cd into the workspace, starship names it.
     assert!(prelude.contains("> /etc/zshrc") && prelude.contains("> /etc/fish/conf.d/kl.fish") && prelude.contains("> /etc/starship.toml"), "{prelude}");
     // In the platform file, not the seeded `.zshrc`: a home seeded before this line existed
     // never gets a second seed, and without `compinit` zsh falls back to its primitive
     // completer, which appends the match to the word instead of replacing it ("cacargo").
-    // The dump goes to the per-node cache dir, never the shared home.
+    // The dump goes under the workspace's own home volume, same as everything else here.
     assert!(prelude.contains("autoload -Uz compinit && compinit -d"), "{prelude}");
     // The build profile: files, not env, so it runs as a subprocess of both rc files rather
     // than needing to be sourced — see kl-build.sh's own doc for why.
     assert!(prelude.contains("[ -r /etc/profile.d/kl-build.sh ] && sh /etc/profile.d/kl-build.sh"), "{prelude}");
     assert!(prelude.contains("test -r /etc/profile.d/kl-build.sh; and sh /etc/profile.d/kl-build.sh"), "{prelude}");
-    // `~/.local` is created ROOT-owned by the kubelet as the parent of the `.local/state`
-    // mount point, so without this fish cannot create `.local/share` and refuses to save
-    // history ("Permission denied"); the same for anything else that keeps XDG data.
-    assert!(prelude.contains("chown 1000:1000 $H/.local\n"), "{prelude}");
     assert!(prelude.contains("[[ -o interactive ]] || return 0"), "{prelude}");
     // zsh finds its rc under `~/.config` only if the LOGIN is told so; the entrypoint's env
     // does not reach an ssh session.
@@ -749,7 +707,7 @@ pub(crate) fn a_workspaces_host_key_lives_and_dies_with_it() {
     // the container runs as root, and the login is `kl` — never root.
     let cfg = &d["sshd_config"];
     assert!(cfg.contains(&format!("HostKey {SSHD_DIR}/ssh_host_ed25519_key")), "{cfg}");
-    assert!(cfg.contains("AuthorizedKeysFile /home/kl/.ssh/authorized_keys"), "{cfg}");
+    assert!(cfg.contains(&format!("AuthorizedKeysFile {AUTHORIZED_KEYS_PATH}")), "{cfg}");
     assert!(cfg.contains("PermitRootLogin no\n"), "{cfg}");
     assert!(cfg.contains("AllowUsers kl\n"), "{cfg}");
     assert!(cfg.contains("PasswordAuthentication no"), "{cfg}");
@@ -858,12 +816,12 @@ pub(crate) fn workspace_pod_accepts_a_real_name() {
     .unwrap();
     let pod = workspace_pod(&spec, "vol-1", "ws-1", &ctx, None, None).expect("a real name builds");
     let mounts = pod.spec.unwrap().containers[0].volume_mounts.clone().unwrap();
-    assert!(mounts.iter().any(|m| m.mount_path == workspace_dir("my-ws")));
+    assert!(mounts.iter().any(|m| m.mount_path == HOME_DIR));
 }
 
 
-/// The shell sidecar's whole boundary, as mounts: the home, the node-local cache and state, and
-/// the profile — and NOT the workspace directory, the live subvolume, the keys or the token.
+/// The shell sidecar's whole boundary, as mounts: a scratch home and the profile — and NOT the
+/// live subvolume (which is the person's home and code), the keys or the token.
 /// "We are not providing access to the code directly via shell" (owner, 2026-09-17).
 #[test]
 fn every_pod_carries_a_shell_that_sees_only_the_home() {
@@ -871,7 +829,7 @@ fn every_pod_carries_a_shell_that_sees_only_the_home() {
     let spec = p.spec.unwrap();
     let shell = spec.containers.iter().find(|c| c.name == crate::k8s::SHELL_CONTAINER).expect("a shell container");
     let mounts: Vec<&str> = shell.volume_mounts.as_ref().unwrap().iter().map(|m| m.name.as_str()).collect();
-    assert_eq!(mounts, ["home", "homecache", "homecache", "nix", "nix"], "{mounts:?}");
+    assert_eq!(mounts, ["shell-home", "nix", "nix"], "{mounts:?}");
     for forbidden in ["workspaces", "live", "user-key", "bench-tool", "attach"] {
         assert!(!mounts.contains(&forbidden), "the shell must not mount {forbidden}: {mounts:?}");
     }

@@ -86,7 +86,7 @@ pub(crate) async fn reconcile_trees(
                     Err(e) => {
                         tracing::warn!(workspace = %id, tree = %name, error = %e, "tree.cut.failed");
                         rows.push(crd::TreeStatus {
-                            path: crd::tree_path(&w.spec.name, &name),
+                            path: crd::tree_path(&name),
                             name,
                             ready: false,
                             reason: Some(e.0),
@@ -113,7 +113,7 @@ pub(crate) async fn reconcile_trees(
     // either just succeeded or was already on disk and left alone.
     for t in &w.spec.trees {
         if !rows.iter().any(|r| r.name == t.name) {
-            rows.push(crd::TreeStatus { name: t.name.clone(), path: crd::tree_path(&w.spec.name, &t.name), ready: true, reason: None });
+            rows.push(crd::TreeStatus { name: t.name.clone(), path: crd::tree_path(&t.name), ready: true, reason: None });
         }
     }
     Ok(rows)

@@ -6,13 +6,13 @@ import os from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import WebSocket from "ws";
-import { FAKE } from "./fake-pi.ts";
 import { until } from "./wait.ts";
 
 // The bin itself, run as the pod runs it: through its shebang, not `node main.ts`.
 const BIN = path.join(path.dirname(fileURLToPath(import.meta.url)), "..", "src", "main.ts");
 const run = (args: string[], env: Record<string, string> = {}) => {
-  const c = spawn(BIN, args, { env: { ...process.env, HARNESS_PI_BIN: FAKE, KL_BENCH_IDLE_SECS: "", ...env } });
+  // The binary refuses to start without these; these tests never reach the engine, so dummy values suffice.
+  const c = spawn(BIN, args, { env: { ...process.env, KL_BENCH_IDLE_SECS: "", TYPESAFE_API_KEY: "test", JEVHARN_API_KEY: "test", ...env } });
   let out = "";
   c.stdout!.on("data", (d) => (out += d));
   c.stderr!.on("data", (d) => (out += d));
@@ -48,7 +48,7 @@ test("a second writer exits 75 naming the holder; a reader beside it is served a
   r = run(["--dir", dir, "--port", "0", "--read-only"], { TERMINATION_LOG: term });
   const port = portOf(await r.line(/\(read-only\)/));
   const rows = await (await fetch(`http://127.0.0.1:${port}/sessions`)).json();
-  assert.equal(rows[0].id, "s-1");
+  assert.deepEqual(rows, [], "a fresh bench boots with no session until one is created");
   // The first --ping pays a cold Node start; time the second, as a probe after the first would see it.
   assert.equal(await exited(run(["--ping", "--port", String(port)]).c), 0);
   const t0 = performance.now();

@@ -52,7 +52,7 @@ pub(crate) fn ws_ctx_with_ssh_unlisted(pool: &std::path::Path, ssh: Vec<Route>) 
     // so `Engine::checkout` converges on `WORKTREE_EXISTS` instead of shelling out to a real
     // `btrfs subvolume create` this test environment doesn't have.
     std::fs::create_dir_all(pool.join("vol/ws-1/live/ws-1")).unwrap();
-    let (ctx, rec) = ctx_on_node_unlisted("node-a", pool, routes, fake.clone(), Some("127.0.0.1:/".into()));
+    let (ctx, rec) = ctx_on_node_unlisted("node-a", pool, routes, fake.clone());
     // The pod mounts the owner's home, so the Running arm waits for it to be Ready here.
     ctx.remember_volume(serde_json::from_value(home_vol_json(2)).unwrap());
     (ctx, rec, fake)

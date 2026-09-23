@@ -27,7 +27,6 @@ pub(crate) fn ctx_with_node(pool: &std::path::Path, node: &str, mut routes: Vec<
             pool.to_string_lossy().into(),
             "r1".into(),
             true,
-            Some("127.0.0.1:/".into()),
             "registry.kloudlite.io".into(),
             String::new(),
             Arc::new(FakeNix::default()),

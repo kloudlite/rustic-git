@@ -129,7 +129,23 @@ spec:
           volumeMounts:
             - { name: work, mountPath: /work }
             - { name: buildkit-sock, mountPath: /run/buildkit }
+        # Dagger's own engine (it cannot share buildkitd: it runs its own patched BuildKit).
+        # The laptop's dagger CLI drives it over kubectl exec; state lives on the work disk
+        # next to buildkit's so a pod restart keeps the layer and cargo caches warm.
+        - name: dagger-engine
+          image: registry.dagger.io/engine:v0.21.7
+          securityContext: { privileged: true }
+          resources:
+            requests: { cpu: "2", memory: 2Gi }
+            limits: { cpu: "8", memory: 8Gi }
+          volumeMounts:
+            # /var/lib/dagger is the documented state path; a subPath of the work disk, not a
+            # second PVC — same pod, same RWO disk, no extra premium volume to pay for.
+            - { name: work, mountPath: /var/lib/dagger, subPath: dagger }
+            - { name: dagger-config, mountPath: /etc/dagger/engine.json, subPath: engine.json }
       volumes:
+        - name: dagger-config
+          configMap: { name: dagger-engine-config }
         - name: buildkit-sock
           emptyDir: {}
         - name: work
@@ -142,3 +158,25 @@ spec:
           secret: { secretName: kloudlite-slo-hourly, defaultMode: 0400, items: [{ key: ssh_key, path: id_ed25519 }] }
         - name: ssh-drill
           secret: { secretName: kloudlite-slo-drill, defaultMode: 0400, items: [{ key: ssh_key, path: id_ed25519 }] }
+---
+# The engine's garbage collector, in absolute bytes. Its defaults are fractions of the WHOLE disk
+# (keep 20% free, use at most 75%), and the work disk is shared: 380G of it is the pod's own cargo
+# target dirs, leaving ~23% free, so the first build tipped free space under 20% and every run's
+# prune then emptied the engine's cache — layers and cargo cache mounts alike — back to nothing
+# (runs 4 and 5 each re-downloaded and recompiled the whole workspace). Absolute limits size the
+# engine to what the disk actually has spare for it, independent of the neighbours.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: dagger-engine-config
+  namespace: kloudlite
+data:
+  engine.json: |
+    {
+      "gc": {
+        "reservedSpace": "40GB",
+        "maxUsedSpace": "80GB",
+        "minFreeSpace": "10GB",
+        "sweepSize": "25%"
+      }
+    }

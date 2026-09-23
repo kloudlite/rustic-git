@@ -40,7 +40,7 @@ pub struct SpaceEnvironmentSpec {
 pub struct SpaceEnvironmentStatus {}
 
 
-/// Stamped by the api's migration on a Workspace or Bench whose retired `attachedEnvironment` it has
+/// Stamped by the api's migration on a Workspace whose retired `attachedEnvironment` it has
 /// settled (a choice exists, or the attach can never become one). From then on the field is ignored
 /// even while it is still set — so a clear that failed, or one deferred until every agent reads
 /// choices, can never resurrect an attach the person has since cleared.
@@ -121,10 +121,5 @@ mod tests {
         }))
         .unwrap();
         assert_eq!(w.attached_environment.as_deref(), Some("env-1"));
-        let b: BenchSpec = serde_json::from_value(serde_json::json!({
-            "owner": "a", "team": "t", "image": "i", "desiredState": "running", "attachedEnvironment": "env-1"
-        }))
-        .unwrap();
-        assert_eq!(b.attached_environment.as_deref(), Some("env-1"));
     }
 }

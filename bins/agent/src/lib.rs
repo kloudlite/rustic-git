@@ -43,10 +43,6 @@ pub struct Config {
     /// This node's name, from the downward-API `NODE_NAME`. It is the shard key: the controller
     /// watches only objects whose `spec.nodeName` equals it.
     pub node: String,
-    /// `WS_HOMES_EXPORT`, e.g. `<account>.file.core.windows.net:/<account>/homes` — the region's shared-home NFS
-    /// export. Unset means no shared home on this node: workspace reconciles that need it park on
-    /// HomeNotReady (fail closed, same shape as WS_PEER_SECRET gating the peer listener).
-    pub homes_export: Option<String>,
     /// `WS_REGISTRY_HOST`: the platform registry's external host (no scheme), the same value
     /// `registry::auth::realm()`'s host half resolves to on the api tier — the agent has no route
     /// to that env, so it is configured here instead. Fed into every workspace pod as
@@ -65,222 +61,15 @@ impl Config {
             // Declared capacity is gone: the kubelet reports node allocatable, and a second
             // hand-maintained copy of it is a second thing that can be wrong.
             node: std::env::var("NODE_NAME").unwrap_or_default(),
-            homes_export: std::env::var("WS_HOMES_EXPORT").ok().filter(|v| !v.is_empty()),
             registry_host: std::env::var("WS_REGISTRY_HOST").unwrap_or_default(),
             api_url: std::env::var("WS_API_URL").unwrap_or_default(),
         }
     }
 }
 
-/// `{pool}/homes` — where the region's shared-home export is mounted, one mount per node.
-pub fn homes_root(pool: &str) -> std::path::PathBuf {
-    std::path::Path::new(pool).join("homes")
-}
-
-/// True when `target` already appears as a mount point's column-2 entry in `/proc/mounts`'s
-/// contents. Split out from `mount_homes` so the parse decision is testable without root or NFS.
-fn already_mounted(mounts: &str, target: &str) -> bool {
-    mounts.lines().any(|l| l.split_whitespace().nth(1) == Some(target))
-}
-
-/// Refuses a `{pool}/homes` that is not a mount point, given `/proc/mounts`'s contents.
-///
-/// Whether an existing mount at `target` still ANSWERS. A mount can be listed in `/proc/mounts`
-/// and be a corpse: the NFS transport lives in the network namespace of whoever called `mount(2)`,
-/// so when the agent pod that made it is deleted, the namespace dies and the mount survives as an
-/// entry that blocks forever on first touch (`hard`). A restarted agent would see it listed, skip
-/// remounting, and then hang before the controller ever starts — with the pod reporting 2/2
-/// Running the whole time. Presence is not liveness; this asks.
-///
-/// `-s KILL`, because `timeout`'s default SIGTERM is exactly the signal a process wedged on a
-/// `hard` NFS mount ignores: it sleeps uninterruptibly and only SIGKILL breaks an NFS wait. With
-/// the default, `timeout` would send TERM and then wait forever for a child that never dies —
-/// hanging on the very corpse this probe exists to detect.
-fn mount_answers(target: &str) -> bool {
-    // A READDIR, not `stat -f`: statfs is answered off the mount's superblock and kept succeeding
-    // on a mount whose every real operation returned EIO after the NFS server moved to another
-    // node (a server-side restart, new file handles). Listing the root walks a handle the server
-    // must actually recognise.
-    std::process::Command::new("timeout")
-        .args(["-s", "KILL", "5", "ls", target])
-        .stdout(std::process::Stdio::null())
-        .stderr(std::process::Stdio::null())
-        .status()
-        .map(|st| st.success())
-        .unwrap_or(false)
-}
-
-/// `host:/path` with `host` resolved to an address. The mount runs in the HOST's network
-/// namespace (see `mount_homes`), where cluster DNS does not exist — so the Service name has to be
-/// resolved HERE, in the pod, and handed on as an address. A ClusterIP is stable for the life of
-/// the Service; recreating the Service means restarting the agents, which is the same restart the
-/// mount already needs.
-fn resolve_export(export: &str) -> Result<String, String> {
-    use std::net::ToSocketAddrs;
-    // `rsplit_once`: the path always starts at the LAST colon, so an IPv6 host (`fd00::1:/`)
-    // keeps its own colons.
-    let (host, path) = export.rsplit_once(':').ok_or_else(|| format!("{export}: expected host:/path"))?;
-    let host = host.trim_matches(|c| c == '[' || c == ']');
-    let addr = (host, 2049)
-        .to_socket_addrs()
-        .map_err(|e| format!("resolving {host}: {e}"))?
-        .next()
-        .ok_or_else(|| format!("{host} resolved to no address"))?;
-    // A dual-stack resolver can answer AAAA first; mount.nfs needs a v6 address bracketed.
-    Ok(match addr.ip() {
-        std::net::IpAddr::V6(v6) => format!("[{v6}]:{path}"),
-        std::net::IpAddr::V4(v4) => format!("{v4}:{path}"),
-    })
-}
-
-/// Idempotent and re-entrant from the reconcile path, not only from boot: an export that moves
-/// nodes leaves every client's mount stale, and the fix (detach, remount) is the same one boot
-/// runs. Serialised so two reconciles cannot race an unmount against a mount.
-/// Whether this process may `mount(2)` at all: CAP_SYS_ADMIN in its effective set. The privileged
-/// DaemonSet has it; a non-root test run does not, and neither does a root shell in an ordinary
-/// pod — which is the case a plain uid check got wrong.
-pub(crate) fn may_mount() -> bool {
-    const CAP_SYS_ADMIN: u32 = 21;
-    let Ok(status) = std::fs::read_to_string("/proc/self/status") else { return false };
-    status
-        .lines()
-        .find_map(|l| l.strip_prefix("CapEff:"))
-        .and_then(|hex| u64::from_str_radix(hex.trim(), 16).ok())
-        .is_some_and(|caps| caps & (1u64 << CAP_SYS_ADMIN) != 0)
-}
-
-/// How long a failed or attempted repair suppresses the next one. `mount_homes` is re-entered from
-/// every workspace reconcile, and each attempt is a `umount -f -l` plus a `mount.nfs` against an
-/// export that is — by the time we are here — not answering. Without this window a region-wide NFS
-/// outage turned every reconcile in the process into a queue behind one multi-second mount, and
-/// the reconciler stopped doing anything else (2026-09-12).
-const HOME_REPAIR_BACKOFF: std::time::Duration = std::time::Duration::from_secs(30);
-
-/// How long a pass that finds a repair in flight waits for it before giving up. Bounded because a
-/// mount against a dead export is up to ~65 s, and the backoff window already fails fast after it.
-const HOME_REPAIR_WAIT: std::time::Duration = std::time::Duration::from_secs(10);
-
-/// The instant of the last repair attempt, held only while one runs — never across a health check.
-static REPAIR: std::sync::Mutex<Option<std::time::Instant>> = std::sync::Mutex::new(None);
-
-/// Mounted and answering. The stale-mount repair MUST come before `create_dir_all`: on a node
-/// carrying a wedged mount every syscall against this path is already answered by a dead NFS
-/// client, and `create_dir_all` fails EEXIST — which once hid the repair that would have fixed it.
-fn home_healthy(target: &str) -> bool {
-    std::fs::read_to_string("/proc/mounts").is_ok_and(|m| already_mounted(&m, target)) && mount_answers(target)
-}
-
-pub(crate) fn mount_homes(pool: &str, export: &str) -> Result<(), String> {
-    mount_homes_with(pool, export, &home_healthy)
-}
-
-fn mount_homes_with(pool: &str, export: &str, healthy: &dyn Fn(&str) -> bool) -> Result<(), String> {
-    let target = homes_root(pool);
-    let Some(target_str) = target.to_str() else {
-        return Err(format!("{} is not valid UTF-8", target.display()));
-    };
-    // Lock-free: the check is the common case on every reconcile, and holding the repair lock
-    // across it refused every overlapping pass (~325 refusals on 2026-09-13, no repair ever ran).
-    if healthy(target_str) {
-        return Ok(());
-    }
-    // A pass that finds a repair in flight waits for it, bounded, then re-checks what it left —
-    // std's Mutex has no timed lock, hence the poll.
-    let started = std::time::Instant::now();
-    let mut last = loop {
-        match REPAIR.try_lock() {
-            Ok(g) => break g,
-            Err(std::sync::TryLockError::Poisoned(e)) => break e.into_inner(),
-            Err(std::sync::TryLockError::WouldBlock) if started.elapsed() < HOME_REPAIR_WAIT => {
-                std::thread::sleep(std::time::Duration::from_millis(100));
-            }
-            Err(std::sync::TryLockError::WouldBlock) => {
-                return Err(format!("the shared home at {pool} is still being repaired by another pass after {}s", HOME_REPAIR_WAIT.as_secs()));
-            }
-        }
-    };
-    if started.elapsed().as_millis() >= 100 {
-        tracing::info!(export = %target_str, waited_ms = started.elapsed().as_millis() as u64, "home.repair.waited");
-        if healthy(target_str) {
-            return Ok(());
-        }
-    }
-    let mounts = std::fs::read_to_string("/proc/mounts").map_err(|e| e.to_string())?;
-    // Everything past here mounts or unmounts, and each of those is seconds against a server that
-    // is not answering. One attempt per window, whatever the shape — the caller is told why rather
-    // than being handed a success it did not get.
-    if let Some(at) = *last {
-        if at.elapsed() < HOME_REPAIR_BACKOFF {
-            return Err(format!("the shared home at {target_str} is not ready; the last mount attempt was {}s ago", at.elapsed().as_secs()));
-        }
-    }
-    *last = Some(std::time::Instant::now());
-    tracing::warn!(export = %target_str, listed = already_mounted(&mounts, target_str), "home.repair");
-    if already_mounted(&mounts, target_str) {
-        // Listed but dead — the previous agent pod's namespace took the transport with it. Lazy
-        // AND forced: lazy detaches the tree even though the workspace pods still hold it open,
-        // forced stops the kernel waiting on a server that will never answer this client again.
-        tracing::warn!(export = %target_str, "home.remounting");
-        // In this pod's own mount namespace: `Bidirectional` propagation carries the detach out
-        // to the node, and the host filesystem has no umount.nfs helper to reach anyway.
-        let st = std::process::Command::new("umount")
-            .args(["-f", "-l", target_str])
-            .status()
-            .map_err(|e| format!("running umount: {e}"))?;
-        if !st.success() {
-            // Never mount over an undetached corpse, and never let `create_dir_all` below turn
-            // this into the bare "File exists" that hid the real cause once already.
-            return Err(format!("unmounting the stale shared home at {target_str} failed: {st}"));
-        }
-    }
-    // Safe only now: either nothing was mounted here, or the corpse above has been detached, so
-    // the path is a plain directory the kernel can answer for.
-    std::fs::create_dir_all(&target).map_err(|e| format!("creating {}: {e}", target.display()))?;
-    // Azure Files Premium serves NFS 4.1 only (no rpcbind, no mountd, no NLM sideband), so the
-    // option set is the one Microsoft documents for it: `vers=4,minorversion=1,sec=sys`. hard: a
-    // flapping export must block, not corrupt (spec ruling). r/wsize 1 MiB: the default 128 KiB
-    // triples the round trips on the config reads that dominate this mount.
-    //
-    // `retry=0` plus the outer `timeout` are belt and braces: retry=0 stops mount.nfs re-trying a
-    // dead server for two minutes, and the timeout means even a wedge that survives that surfaces
-    // as a failed startup — which the DaemonSet restarts and an operator can see.
-    let opts = "vers=4,minorversion=1,sec=sys,tcp,hard,rsize=1048576,wsize=1048576,retry=0";
-    // `nsenter -t 1 -n` — pid 1's NETWORK namespace only, deliberately not `-m`. The transport is
-    // the part that has to outlive this pod: created in the node's netns it survives every agent
-    // restart, whereas one created in the pod's netns dies with the pod and leaves a mount that
-    // blocks forever on `hard`. The MOUNT namespace stays the container's on purpose — `-m` would
-    // switch to the host's filesystem, where `/sbin/mount.nfs` does not exist (it ships in this
-    // image, not on the node), and `Bidirectional` propagation publishes the mount to the node
-    // regardless. NOT `hostNetwork: true`, which would also fix the lifetime but take the agent
-    // out of reach of the `agent-peer` NetworkPolicy restricting the peer listener on 8444.
-    let addr_export = resolve_export(export)?;
-    // `-s KILL` for the same reason as `mount_answers`: a mount.nfs stuck inside the mount
-    // syscall ignores SIGTERM.
-    let st = std::process::Command::new("timeout")
-        .args(["-s", "KILL", "60"])
-        .args(["nsenter", "-t", "1", "-n", "--", "mount", "-t", "nfs", "-o", opts])
-        .arg(&addr_export)
-        .arg(&target)
-        .status()
-        .map_err(|e| e.to_string())?;
-    if st.success() {
-        Ok(())
-    } else {
-        Err(format!(
-            "mount {addr_export} (from {export}) at {} failed: {st} (124 = timed out; check the export answers on 2049)",
-            target.display()
-        ))
-    }
-}
-
 /// Boots the node controller: Engine, janitor, Kubernetes client, then reconcile forever.
 pub async fn run(cfg: Config) -> Result<(), String> {
     let engine = Arc::new(Engine::new(Pool::new(&cfg.pool)));
-    // Fail closed like the pin/CRD checks below: a shared home the agent claims to serve but
-    // cannot actually reach is worse than the DaemonSet restart loop this causes.
-    if let Some(export) = &cfg.homes_export {
-        mount_homes(&cfg.pool, export)?;
-    }
     let nix_client: Arc<dyn nix::Nix> = Arc::new(nix::RealNix { bin: "/nix/var/nix/profiles/default/bin".into() });
     if cfg.node.is_empty() {
         return Err("NODE_NAME is unset: the controller would watch every node's objects".into());
@@ -348,7 +137,7 @@ pub async fn run(cfg: Config) -> Result<(), String> {
     // before `Ctx::new` below, which moves `cfg.pool`/`cfg.node`.
     janitor::spawn_janitor(cfg.pool.clone(), nix_client.clone(), client.clone());
     stats::spawn_stats(cfg.pool.clone(), client.clone(), cfg.node.clone());
-    let ctx = Arc::new(controller::Ctx::new(client.clone(), engine, cfg.node, cfg.pool, cfg.region, has_pool, cfg.homes_export, cfg.registry_host, cfg.api_url, nix_client, nix::PROFILES_DIR.into(), settings.clone()));
+    let ctx = Arc::new(controller::Ctx::new(client.clone(), engine, cfg.node, cfg.pool, cfg.region, has_pool, cfg.registry_host, cfg.api_url, nix_client, nix::PROFILES_DIR.into(), settings.clone()));
     spawn_settings_reflector(client, settings);
     // Not a Controller: `OwnerKeys` is cluster-wide, every node converges every object, and there
     // is no per-node sharding to reconcile against.
@@ -487,61 +276,5 @@ mod tests {
             "metadata": {"name": "n1", "labels": {"kloudlite.io/pool": "true", "kloudlite.io/session": "true"}}});
         let (client, _) = kloudlite_workspaces::kube_test::mock_client(vec![kloudlite_workspaces::kube_test::get("/api/v1/nodes/n1", pool)]);
         assert!(super::node_has_pool(&client, "n1").await);
-    }
-
-    use super::{already_mounted, resolve_export};
-
-    /// Literal addresses only — `to_socket_addrs` on a literal never touches DNS, so this pins the
-    /// parsing (last-colon split, v6 brackets) without a resolver in the test.
-    #[test]
-    fn resolve_export_splits_at_the_last_colon_and_brackets_ipv6() {
-        assert_eq!(resolve_export("10.43.1.2:/").unwrap(), "10.43.1.2:/");
-        assert_eq!(resolve_export("10.43.1.2:/homes").unwrap(), "10.43.1.2:/homes");
-        assert_eq!(resolve_export("fd00::1:/").unwrap(), "[fd00::1]:/");
-        assert_eq!(resolve_export("[fd00::1]:/homes").unwrap(), "[fd00::1]:/homes");
-        assert!(resolve_export("no-colon").is_err());
-    }
-
-    #[test]
-    fn already_mounted_matches_the_target_column_exactly() {
-        let mounts = "zerofs:/ /wspool-prod/homes nfs rw 0 0\nother /wspool-prod/homes2 nfs rw 0 0\n";
-        assert!(already_mounted(mounts, "/wspool-prod/homes"));
-        assert!(!already_mounted(mounts, "/wspool-prod/home"));
-    }
-
-    /// A healthy mount is answered without the repair lock: a pass overlapping another pass (here,
-    /// the lock held outright) is not refused. Refusing it cost a 60 s requeue per clone (2026-09-13).
-    #[test]
-    fn a_healthy_home_is_not_refused_while_another_pass_holds_the_lock() {
-        let (held, release) = (std::sync::mpsc::channel(), std::sync::mpsc::channel::<()>());
-        let holder = std::thread::spawn(move || {
-            let _g = super::REPAIR.lock().unwrap_or_else(|e| e.into_inner());
-            held.0.send(()).unwrap();
-            release.1.recv().ok();
-        });
-        held.1.recv().unwrap();
-        let r = super::mount_homes_with("/nonexistent-pool", "unused", &|_| true);
-        release.0.send(()).unwrap();
-        holder.join().unwrap();
-        assert_eq!(r, Ok(()));
-    }
-
-    /// An unhealthy home with a repair in flight waits for that repair (bounded) and succeeds on
-    /// what it left, rather than erroring into the requeue.
-    #[test]
-    fn a_pass_behind_a_repair_waits_for_it_instead_of_failing() {
-        use std::sync::atomic::{AtomicBool, Ordering};
-        static FIXED: AtomicBool = AtomicBool::new(false);
-        let (held_tx, held_rx) = std::sync::mpsc::channel();
-        let holder = std::thread::spawn(move || {
-            let _g = super::REPAIR.lock().unwrap_or_else(|e| e.into_inner());
-            held_tx.send(()).unwrap();
-            std::thread::sleep(std::time::Duration::from_millis(300));
-            FIXED.store(true, Ordering::SeqCst);
-        });
-        held_rx.recv().unwrap();
-        let r = super::mount_homes_with("/nonexistent-pool", "unused", &|_| FIXED.load(Ordering::SeqCst));
-        holder.join().unwrap();
-        assert_eq!(r, Ok(()));
     }
 }

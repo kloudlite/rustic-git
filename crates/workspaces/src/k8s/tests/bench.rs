@@ -1,16 +1,7 @@
 //! Tests for what a bench workspace adds to an ordinary workspace pod: the `harness-bench`
-//! container, the tool-token Secret, the gateway-only hole to `BENCH_PORT`, and the legacy
-//! `{pool}/homes/.benches` folder the agent's migration still derives from `bench_folder`.
+//! container, the tool-token Secret and the gateway-only hole to `BENCH_PORT`.
 
 use super::*;
-use crate::k8s::bench_folder;
-
-#[test]
-fn a_folder_segment_that_escapes_is_refused_before_it_becomes_a_hostpath() {
-    assert!(bench_folder("/wspool", "..", "alice").is_err());
-    assert!(bench_folder("/wspool", "acme", "a/b").is_err());
-    assert!(bench_folder("/wspool", "acme", ".").is_err());
-}
 
 #[test]
 fn bench_tool_secret_carries_token_and_exp_only() {
@@ -42,7 +33,7 @@ fn bench_ws_spec() -> WorkspaceSpec {
 /// NOTHING in a bench pod chowns its worktree, so the worktree must arrive owned by the tenant.
 ///
 /// An ordinary workspace pod gets away with a root-owned one because its `workspace` container's
-/// prelude runs `chown -Rh 1000 {workspace_dir}` on every start. A bench pod has no workspace
+/// prelude runs `chown -Rh 1000 {HOME_DIR}` on every start. A bench pod has no workspace
 /// container — `sessions` + `shell` since spec §2.2 — so that prelude never runs, and the worktree
 /// `btrfs subvolume create` left owned by root stayed that way: `harness-bench` died on
 /// `EACCES: mkdir '/home/kl/workspaces/bench/.bench'` and every team bench crash-looped
@@ -54,7 +45,7 @@ fn bench_ws_spec() -> WorkspaceSpec {
 #[test]
 fn a_bench_pod_has_no_prelude_to_chown_its_worktree() {
     let spec = bench_ws_spec();
-    let p = workspace_pod(&spec, "ws-1", "bench-1", &ctx(), None, Some(("cr.example/bench:v9", 420))).unwrap();
+    let p = workspace_pod(&spec, "ws-1", "bench-1", &ctx(), None, Some(("cr.example/bench:v9", 420, ""))).unwrap();
     let pod = p.spec.unwrap();
     // The bench's own container runs the binary directly — no shell, so no seeding of any kind.
     let sessions = pod.containers.iter().find(|c| c.name == "sessions").expect("the sessions container");
@@ -64,8 +55,8 @@ fn a_bench_pod_has_no_prelude_to_chown_its_worktree() {
         let argv = c.command.clone().unwrap_or_default().join(" ") + " " + &c.args.clone().unwrap_or_default().join(" ");
         assert!(!argv.contains("chown"), "{} chowns something; the engine-side chown may be redundant", c.name);
     }
-    // The worktree it must be able to write is the `live` mount, at the workspace dir.
-    let dir = crate::k8s::workspace_dir(&spec.name);
+    // The worktree it must be able to write is the `live` mount, which IS the home.
+    let dir = crate::k8s::HOME_DIR;
     let live = sessions
         .volume_mounts
         .as_ref()
@@ -81,7 +72,7 @@ fn a_bench_pod_has_no_prelude_to_chown_its_worktree() {
 
 #[test]
 fn a_bench_pod_carries_both_containers_and_the_tool_secret_optional() {
-    let p = workspace_pod(&bench_ws_spec(), "ws-1", "bench-1", &ctx(), None, Some(("cr.example/bench:v9", 420))).unwrap();
+    let p = workspace_pod(&bench_ws_spec(), "ws-1", "bench-1", &ctx(), None, Some(("cr.example/bench:v9", 420, ""))).unwrap();
     assert_eq!(p.metadata.labels.as_ref().unwrap()[KIND_LABEL], "bench");
     let spec = p.spec.unwrap();
     let names: Vec<&str> = spec.containers.iter().map(|c| c.name.as_str()).collect();
@@ -101,24 +92,19 @@ fn a_bench_pod_carries_both_containers_and_the_tool_secret_optional() {
     assert_eq!(c.image.as_deref(), Some("cr.example/bench:v9"));
     assert_eq!(
         c.command.as_deref().unwrap(),
-        ["harness-bench", "--dir", "/home/kl/workspaces/bench/.bench", "--idle-secs", "420"],
+        ["harness-bench", "--dir", "/home/kl/.bench", "--idle-secs", "420"],
         "the session folder is inside the btrfs subvolume, so it is snapshotted with the workspace"
     );
     let m = |name: &str| c.volume_mounts.as_ref().unwrap().iter().find(|m| m.name == name).cloned().expect(name);
-    assert_eq!(m("live").mount_path, workspace_dir("bench"), "the bench's own volume, where `.bench/` lives");
-    // A state store, not hands (spec §3.2): the person's HOME is the shell sidecar's, and a
-    // session that could read it would have the filesystem this design removes.
-    assert!(
-        !c.volume_mounts.as_ref().unwrap().iter().any(|m| m.name == "home"),
-        "the sessions container must not mount the home"
-    );
+    assert_eq!(m("live").mount_path, crate::k8s::HOME_DIR, "the bench's own volume, where `.bench/` lives");
     assert_eq!(m("bench-tool").read_only, Some(true));
     assert_eq!(m("user-key").read_only, Some(true));
-    // The SHELL beside it is where the home lives, with the propagation the node's remounts need.
+    // The SHELL beside it gets a scratch home of its own, never the worktree: no code in a shell.
     let shell = &spec.containers[1];
     assert_eq!(shell.name, crate::k8s::SHELL_CONTAINER);
     let sm = |name: &str| shell.volume_mounts.as_ref().unwrap().iter().find(|m| m.name == name).cloned().expect(name);
-    assert_eq!(sm("home").mount_propagation.as_deref(), Some("HostToContainer"));
+    assert_eq!(sm("shell-home").mount_path, crate::k8s::HOME_DIR);
+    assert!(shell.volume_mounts.as_ref().unwrap().iter().all(|m| m.name != "live"), "the shell must not see the worktree");
     assert_eq!(shell.ports.as_ref().unwrap()[0].container_port, crate::k8s::SHELL_PORT as i32);
     // sshd is the other container's, so the one capability it needs stays dropped here.
     let caps = c.security_context.as_ref().unwrap().capabilities.clone().unwrap();
@@ -146,15 +132,13 @@ fn a_bench_pod_carries_both_containers_and_the_tool_secret_optional() {
     let get = |n: &str| c.env.as_ref().unwrap().iter().find(|e| e.name == n).and_then(|e| e.value.clone());
     assert_eq!(get("KL_TOOL_TOKEN_FILE").as_deref(), Some("/etc/kloudlite/bench-tool/token"));
     assert_eq!(get("KL_WORKSPACE_ID").as_deref(), Some("bench-1"));
-    assert_eq!(get("KL_WORKSPACE").as_deref(), Some(workspace_dir("bench").as_str()));
+    assert_eq!(get("KL_WORKSPACE").as_deref(), Some(crate::k8s::WORKSPACE_DIR));
     assert_eq!(get("KL_MODEL").as_deref(), Some("sonnet"));
     assert_eq!(get("KL_BENCH_IDLE_SECS").as_deref(), Some("420"));
-    // pi's state directory, inside the bench's own volume: its default is `$HOME/.pi/agent` and
-    // this container has no home, so without this every provider key on the fleet disappears with
-    // the mount (2026-09-18). Under `.bench/`, so the keys travel with the bench.
+    // pi's state directory, under `.bench/` in the bench's own volume, so the keys travel with it.
     assert_eq!(
         get("PI_CODING_AGENT_DIR").as_deref(),
-        Some(format!("{}/.bench/pi", workspace_dir("bench")).as_str())
+        Some("/home/kl/.bench/pi")
     );
     // The pod's own address, from the downward API: the bench dials the shell sidecar beside it at
     // `{KL_POD_IP}:7790`, and without it the splice would look for a terminal on loopback and find

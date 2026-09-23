@@ -73,12 +73,6 @@ spec:
         # template carrying this marker — an older agent reads that field alone.
         kloudlite.io/space-env: "1"
     spec:
-      # `nsenter -t 1` in mount_homes needs to SEE pid 1, so the agent shares the host's pid
-      # namespace. Deliberately NOT hostNetwork: the shared-home mount must live in the node's
-      # network namespace to outlive an agent restart, but the POD must stay in its own, or the
-      # `agent-peer` NetworkPolicy — the only thing restricting the peer listener on 8444 to other
-      # agents — stops applying to it. hostPID buys the first without giving up the second.
-      hostPID: true
       serviceAccountName: kloudlite-agent
       # Only nodes that carry a btrfs pool. The control plane has none and must not run this.
       nodeSelector:
@@ -133,7 +127,7 @@ spec:
           # No imagePullSecret: the package is public, like the repository. That is deliberate —
           # the image carries no secret, and a cluster-wide pull credential is one more thing to
           # scope, rotate and leak.
-          image: ghcr.io/kloudlite/kloudlite-agent:05f63c0214fd49cbdbf027250c20b44d61d9555e@sha256:1ef510de25024998a41a2cca6a013b94a3f6f3416bbedab129c84e1886e4db46
+          image: ghcr.io/kloudlite/kloudlite-agent:9d72ff77bf42e00a481f164a4caf3a76cc416124@sha256:d81a06e7e1251dbfcf32c6e7e50d1bdc8a10ab8b18cc85c252b04d08b3c1d736
           # Safe with an immutable SHA tag, and it means kubelet image GC evicting the layers costs
           # one re-pull rather than a broken DaemonSet — which is what the hand-shipped tarball did.
           imagePullPolicy: IfNotPresent
@@ -173,14 +167,6 @@ spec:
                   fieldPath: spec.nodeName
             - name: WS_POOL
               value: /wspool-prod
-            # The region's shared-home NFS export —
-            # `run()` mounts it at `{pool}/homes` once at agent startup, before the controller
-            # starts. Unset means this node serves no shared home (fail closed, see lib.rs).
-            # Azure Files Premium (NFS 4.1), account kloudlite-homes in rustic-git-k3s, reachable
-            # only from the `nodes` subnet through its service endpoint. Per region: the homes are
-            # region-local by design, so each region gets its own share.
-            - name: WS_HOMES_EXPORT
-              value: kloudlitegithomes.file.core.windows.net:/kloudlitegithomes/homes
             # The platform registry's external host, no scheme — the same value
             # `registry::auth::realm()`'s `KLOUDLITE_EXTERNAL_URL` resolves the host half of
             # (`deploy/kloudlite.yaml`'s `https://cr.khost.dev`). The agent has no route to that
@@ -241,7 +227,7 @@ spec:
             # pinned to the same SHA as this agent by pin.sh. Legacy specs that still say
             # `alpine:3.20` are mapped to it too (`model::is_default_image`).
             - name: WS_DEFAULT_IMAGE
-              value: ghcr.io/kloudlite/kloudlite-workspace:05f63c0214fd49cbdbf027250c20b44d61d9555e@sha256:8a3083de2a9d1dc66ca47c90b84836d909e8a93315d0f3ca12f18722ef5e05ae
+              value: ghcr.io/kloudlite/kloudlite-workspace:9d72ff77bf42e00a481f164a4caf3a76cc416124@sha256:5bb469c1d3731286297a4019ecaf2d359da0b65fc820953138af00cc87b971d1
             # The harness-bench container a bench workspace's pod carries beside the workspace
             # container (a bench IS a Workspace since 2026-09-16). Pinned by deploy/pin.sh.
             - name: KLOUDLITE_BENCH_IMAGE
@@ -344,11 +330,6 @@ spec:
             - name: secrets
               mountPath: /var/run/secrets/kloudlite
               readOnly: true
-            # One-time sweep of old bench `/kl-login` configs (janitor.rs). Optional: absent is the
-            # normal state and sweeps nothing; the operator creates it, waits a beat, deletes it.
-            - name: bench-login-sweep
-              mountPath: /etc/kloudlite/bench-login-sweep
-              readOnly: true
           livenessProbe:
             # The controller touches this file on every reconcile tick. A watch that silently
             # stopped delivering looks exactly like an idle cluster from outside — this is what
@@ -426,10 +407,6 @@ spec:
         - name: nix-conf
           configMap:
             name: kloudlite-nix
-        - name: bench-login-sweep
-          configMap:
-            name: bench-login-sweep
-            optional: true
         # Every secret this pod needs as FILES, not env (2026-09-12 review #70). A process's
         # environment is readable in `kubectl describe pod`, in a core dump, in /proc — and, the
         # reason it mattered here, it is inherited by every child, and this fleet spawns plenty

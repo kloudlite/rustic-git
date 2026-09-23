@@ -53,12 +53,12 @@ Write an ssh config once and every editor's remote mode works with the workspace
 ```bash [kl-connect]
 kl-connect ws ssh-config
 ssh api
-code --remote ssh-remote+api /home/kl/workspaces/api
+code --remote ssh-remote+api /home/kl/workspace
 ```
 
 ## 4. Run something
 
-Inside the workspace your tree is at `/home/kl/workspaces/api`, your home persists across restarts and across workspaces in the region, and the packages you asked for are on `PATH`.
+Inside the workspace your tree is at `/home/kl/workspace`, your home is the workspace's own volume (it persists across restarts of this workspace, not across workspaces), and the packages you asked for are on `PATH`.
 
 ```bash
 cd ~/src

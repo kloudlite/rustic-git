@@ -186,6 +186,11 @@ rules:
   - apiGroups: ["kloudlite.io"]
     resources: ["workspaces", "environments"]
     verbs: ["get", "list", "watch", "patch", "delete"]
+  # A bench is one more per-owner object the Owners detail lists; without this the whole owner
+  # page 403s (hourly admin.screens, 2026-09-22).
+  - apiGroups: ["kloudlite.io"]
+    resources: ["benches"]
+    verbs: ["get", "list", "watch"]
   # Read-only, and not optional: Owners, Clusters and Overview all compute their numbers from
   # these on the request path (usage is never a cached counter), so without this rule those three
   # areas answer 403 rather than degrading.
@@ -269,7 +274,9 @@ rules:
     # name is not known at authorization time), so the api may still create an arbitrarily named
     # Secret in a workspace namespace; it may not touch an existing `ws-ssh-*` one, which is the
     # finding this closes.
-    resourceNames: ["user-key"]
+    # bench-engine sits beside user-key: same per-namespace apply, named for the same reason —
+    # it holds the platform's engine credentials, which no workspace pod may ever mount.
+    resourceNames: ["user-key", "bench-engine"]
     # `patch` is what server-side apply needs; without it the key install fails with a 403 that
     # reads like a missing binding. No `delete`: the Secret carries an ownerReference and is
     # reclaimed with its namespace.

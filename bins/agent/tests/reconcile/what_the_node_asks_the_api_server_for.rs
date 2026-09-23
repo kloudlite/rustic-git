@@ -124,35 +124,23 @@ async fn a_converged_workspace_does_not_re_apply_its_children_on_the_next_pass()
     assert_eq!(converged.len(), 2, "never saw two converged passes: {:?}", rec.calls());
 }
 
-/// The shared home replaces the home Volume (spec 2026-09-01): a node with no `WS_HOMES_EXPORT`
-/// has nowhere to mount an owner's home, so it must park the workspace rather than start a pod
-/// that would hostPath an empty local dir in the home's place.
+/// A workspace's home is its own volume now (2026-09-22): there is no shared-home mount left to
+/// gate on, so a fresh workspace reaches the pod-write step directly.
 #[tokio::test]
-async fn a_node_without_a_homes_export_parks_the_workspace_instead_of_starting_a_pod() {
+async fn a_workspace_starts_without_a_homes_export() {
     let tmp = tempfile::tempdir().unwrap();
-    // resolve_volume and the namespace-ready check both run before the homes-export gate, so
-    // this fixture still needs a Ready Volume and a Ready binding to reach it — same shapes as
-    // `ws_ctx_with_ssh`'s, minus the SSH/pod routes the homes-export gate never lets it reach.
-    let vol = serde_json::json!({
-        "apiVersion": "kloudlite.io/v1alpha1", "kind": "Volume",
-        "metadata": {"name": "ws-1", "uid": "vol-uid-1"},
-        "spec": {"owner": "alice", "team": "", "nodeName": "node-a", "region": "r1", "quotaGb": 20},
-        "status": {"phase": "ready", "subvolumePresent": true}
-    });
-    let routes = vec![
-        kloudlite_workspaces::kube_test::get("/apis/kloudlite.io/v1alpha1/volumes/ws-1", vol),
-        ready_binding(),
-        ready_namespace(),
-        Route { method: "PATCH", path: WS_STATUS.into(), status: 200, body: ws_json(serde_json::json!({})) },
-    ];
-    let (ctx, rec) = ctx_without_homes_export(tmp.path(), routes);
+    let (ctx, rec, _fake) = ws_ctx_with_nix(tmp.path());
     let w = ready_workspace("ws-1", vec![]);
 
-    let action = kloudlite_agent::controller::apply_workspace(&w, &ctx).await.unwrap();
-    assert_eq!(action, kube::runtime::controller::Action::requeue(std::time::Duration::from_secs(15)));
+    let action = apply_until_settled(&w, &ctx).await;
     let st = rec.sent("PATCH", WS_STATUS);
-    assert_eq!(st.last().unwrap()["status"]["conditions"][0]["reason"], "HomeNotReady");
-    assert!(rec.calls().iter().all(|c| !c.contains("/pods")), "no pod while unmounted: {:?}", rec.calls());
+    assert!(
+        st.iter().all(|s| s["status"]["conditions"][0]["reason"] != "HomeNotReady"),
+        "{:?}",
+        st
+    );
+    assert!(rec.calls().iter().any(|c| c.contains("/pods")), "should reach the pod: {:?}", rec.calls());
+    let _ = action;
 }
 
 /// Who may ssh in is a cluster fact (`OwnerKeys`) the api writes and every node's agent renders.

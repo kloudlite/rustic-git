@@ -45,7 +45,7 @@ digest_of() {
 }
 
 declare -A DIGEST
-for img in kloudlite kloudlite-agent kloudlite-gateway kloudlite-controller kloudlite-builder-gate kloudlite-workspace kloudlite-bench kloudlite-shell kloudlite-intercept-proxy kloudlite-slo; do
+for img in kloudlite kloudlite-agent kloudlite-gateway kloudlite-controller kloudlite-builder-gate kloudlite-workspace kloudlite-bench kloudlite-shell kloudlite-intercept-proxy kloudlite-slo kloudlite-kompress; do
   # The shell image is OPTIONAL while it is landing: a SHA built before `image.yml` grew its stage
   # has no package, and a hard failure here would block every unrelated roll — the same reasoning
   # the controller's manifest carries below. It becomes mandatory by simply existing.
@@ -91,6 +91,7 @@ pin 'kloudlite-gateway' "$SHA" "${DIGEST[kloudlite-gateway]}" k3s/gateway.yaml
 # first pin succeeds.
 pin 'kloudlite-controller' "$SHA" "${DIGEST[kloudlite-controller]:-}" k3s/controller.yaml
 pin 'kloudlite-builder-gate' "$SHA" "${DIGEST[kloudlite-builder-gate]}" k3s/builder-gate.yaml
+pin 'kloudlite-kompress' "$SHA" "${DIGEST[kloudlite-kompress]}" k3s/kompress.yaml
 # The workspace image is not a workload of ours: the agent hands it to tenant pods
 # (WS_DEFAULT_IMAGE), so it lives in the DaemonSet's env, not an image: line.
 pin 'kloudlite-workspace' "$SHA" "${DIGEST[kloudlite-workspace]}" k3s/agent-daemonset.yaml
@@ -105,6 +106,7 @@ pin 'kloudlite-bench' "$SHA" "${DIGEST[kloudlite-bench]}" k3s/agent-daemonset.ya
 # (KLOUDLITE_SHELL_IMAGE), so it is the DaemonSet's env and never an `image:` line of ours.
 [ -z "${DIGEST[kloudlite-shell]:-}" ] || pin 'kloudlite-shell' "$SHA" "${DIGEST[kloudlite-shell]}" k3s/agent-daemonset.yaml
 pin 'kloudlite-slo' "$SHA" "${DIGEST[kloudlite-slo]}" kloudlite.yaml
+pin 'kloudlite-kompress' "$SHA" "${DIGEST[kloudlite-kompress]}" k3s/kompress.yaml
 [ -z "$WEB" ] || pin 'kloudlite-web' "$WEB" "${DIGEST[kloudlite-web]}" kloudlite-web.yaml
 
 grep -rn --include='*.yaml' -E 'image: ghcr\.io/kloudlite/' . | sed 's/^\.\///'

@@ -143,19 +143,16 @@ pub fn tree_name_ok(s: &str) -> bool {
 pub const TREES_DIR: &str = ".agents";
 
 
-/// Where a tree lives inside the POD, which is the path a caller can act on.
-///
-/// `ws` is the workspace's DISPLAY NAME (`spec.name`), not its CR id: the pod mounts its worktree
-/// at `workspace_dir(spec.name)`, and reporting the id produced a path that simply does not exist
-/// — `ls` on it answered "No such file or directory" for a tree that was cut and healthy (R-D21,
-/// 2026-09-18). Built from `workspace_dir` itself rather than from `WORKSPACES_DIR` and a join,
-/// so the two cannot drift again.
+/// Where a tree lives inside the POD, which is the path a caller can act on: the worktree volume
+/// IS the home (2026-09-22 ruling), so its `.agents` sits at `~/.agents` in every workspace. The
+/// path once carried the workspace's name and reporting the id instead produced a path that did
+/// not exist (R-D21, 2026-09-18); with one home per pod there is no name left to get wrong.
 ///
 /// Note this is NOT where the agent cuts the subvolume: that is under the pool
 /// (`Engine::tree_dir`, `{pool}/vol/{volume}/live/{ws-id}/.agents/{name}`). The node writes the
 /// path a person or a tool server would use, never its own.
-pub fn tree_path(ws_name: &str, name: &str) -> String {
-    format!("{}/{TREES_DIR}/{name}", crate::k8s::workspace_dir(ws_name))
+pub fn tree_path(name: &str) -> String {
+    format!("{}/{TREES_DIR}/{name}", crate::k8s::HOME_DIR)
 }
 
 
@@ -179,8 +176,7 @@ pub struct BenchOptions {
 }
 
 
-/// Whether the owner may use this workspace at all. Shared with the retired `Bench` through the
-/// `BenchAccess` alias, so a stored object's value means the same thing on both kinds.
+/// Whether the owner may use this workspace at all.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "camelCase")]
 pub enum Access {
@@ -259,11 +255,6 @@ pub const FOLDER_LOCKED: &str = "FolderLocked";
 /// this the workspace sat in `creating` for its whole ceiling and then reported only that it
 /// never came up (2026-09-18).
 pub const BENCH_CRASH_LOOPING: &str = "BenchCrashLooping";
-
-/// Condition type recording that the legacy `{homes}/.benches/{team}/{owner}` folder has been
-/// moved into this workspace's volume, so the migration runs once per bench and never again.
-pub const FOLDER_MIGRATED: &str = "FolderMigrated";
-
 
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "camelCase")]

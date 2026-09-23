@@ -1,5 +1,5 @@
 //! Stage 14's workspace-shaped verbs: packages, seeding, the platform key behind seeding, and the
-//! home that outlives the workspace that wrote it.
+//! home that travels with the workspace's own volume across a push and restore.
 //!
 //! A sibling file rather than lines inside `experience.rs` because four implementers fill that
 //! scaffold's skips at once: `experience.rs` keeps one call per id and nothing else moves.
@@ -21,7 +21,7 @@ use crate::tools;
 use crate::ctx::Ctx;
 
 /// Per-step ceilings, each at or above its catalogue target so a slow answer is a breach with a
-/// number rather than a step the probe cut off. `key.platform.regenerate` and `home.persists` are
+/// number rather than a step the probe cut off. `key.platform.regenerate` and `home.travels` are
 /// availability SLOs with no target latency; theirs is a whole seeded create plus an exec, which
 /// is the same 180 s the seeded step itself is given, plus room for the second create.
 const ADD_CEILING: Duration = Duration::from_secs(290);
@@ -88,7 +88,7 @@ const PIN_CEILING: Duration = Duration::from_secs(290);
 const PIN_READ_CEILING: Duration = Duration::from_secs(60);
 
 /// `ws.packages.add` and `ws.packages.remove`: the workspace they run against is created here and
-/// kept for `home.persists`, which writes through it.
+/// kept for `home.travels`, which writes through it.
 ///
 /// The create is NOT an SLO of its own (stage 5 already measures one) — it is inside the first
 /// step, so a create that never becomes ready fails `ws.packages.add` with the reason instead of
@@ -104,7 +104,7 @@ pub async fn packages(c: &mut Ctx) {
             async move {
                 let id = create(c, &name, json!({ "packages": ["bash"] })).await?;
                 // Recorded before the wait: the workspace exists whatever the profile does, and
-                // `home.persists` needs it either way.
+                // `home.travels` needs it either way.
                 c.state.ux_workspace = Some(id.clone());
                 set_packages(c, &id, &["bash", PKG]).await?;
                 which(c, &id, true, ADD_CEILING).await
@@ -264,52 +264,67 @@ const DIAG_STEP: Duration = Duration::from_secs(6);
 /// The init container `k8s::seed_container` names.
 const SEED_CONTAINER: &str = "git-seed";
 
-/// `home.persists`: a file written in one workspace's home is read from a FRESH workspace's.
+/// `home.travels`: a dotfile and a file under `~/workspace` written in workspace A are present in
+/// B, restored from A's push, and absent from C, a fresh workspace of the same owner.
 ///
-/// The last id in the stage, because it asserts something about what everything before it did: the
-/// home is region-shared NFS with no `Volume` behind it, so the only proof it persists is a second
-/// pod — possibly on a second node — reading what the first wrote.
-pub async fn home_persists(c: &mut Ctx) {
+/// The last id in the stage, because it asserts something about what everything before it did:
+/// since the 2026-09-22 ruling, `/home/kl` IS the workspace's own btrfs volume, no separate mount, no
+/// shared NFS home — so what proves the home travels WITH the workspace (not with the owner) is a
+/// restore that carries the dotfile, and a fresh, unrelated create that does NOT.
+pub async fn home_travels(c: &mut Ctx) {
     if c.kube.is_none() {
-        return c.skip("home.persists", "no kubeconfig");
+        return c.skip("home.travels", "no kubeconfig");
     }
-    let Some(src) = c.state.ux_workspace.clone() else {
-        return c.skip("home.persists", "no workspace to write the home from");
+    let Some(a) = c.state.ux_workspace.clone() else {
+        return c.skip("home.travels", "no workspace to write the home from");
     };
-    let name = format!("{}-home", c.prefix());
+    let b = format!("{}-home-b", c.prefix());
+    let c_name = format!("{}-home-c", c.prefix());
     let want = c.run_id.clone();
-    c.step("home.persists", HOME_CEILING, move |c| {
+    c.step("home.travels", HOME_CEILING, move |c| {
         async move {
-            // `sync` before the second pod ever exists: NFS caches, and a read-back that raced the
-            // write would fail for a reason that is not the SLO.
-            let write = format!("set -e\nprintf %s {want} > {HOME_FILE}\nsync {HOME_FILE}");
-            let (code, _, err) = ws_exec(c, &src, &write, EXEC).await?;
+            // `~/workspace` may not exist yet (A never seeded a repo): `mkdir -p` it first.
+            let write = format!(
+                "set -e\nmkdir -p ~/.config ~/workspace\nprintf %s {want} > {DOTFILE}\nprintf %s {want} > {TREE_FILE}\nsync {DOTFILE} {TREE_FILE}"
+            );
+            let (code, _, err) = ws_exec(c, &a, &write, EXEC).await?;
             if code != 0 {
-                return Err(anyhow!("writing the home file exited {code}: {}", err.trim()));
+                drop_ws(c, &a).await;
+                return Err(anyhow!("writing the home files exited {code}: {}", err.trim()));
             }
-            let fresh = create(c, &name, json!({ "packages": [] })).await?;
-            // Asked of the FRESH pod, before either goes: the redirect is per-pod, and the pod a
-            // person would be typing into is the one whose caches must be local.
-            let redirects = cache_is_local(c, &fresh).await;
-            let (code, out, err) = ws_exec(c, &fresh, &format!("cat {HOME_FILE}"), EXEC).await?;
-            // Both workspaces go whatever the read said: a failed step must not leave two pods
-            // holding the run's quota for the rest of the stage.
+            let restored = push_then_restore(c, &a, &b).await;
+            drop_ws(c, &a).await;
+            let b = restored?;
+            let (code, dot_out, err) = ws_exec(c, &b, &format!("cat {DOTFILE}"), EXEC).await?;
+            if code != 0 {
+                drop_ws(c, &b).await;
+                return Err(anyhow!("reading the dotfile in the restored copy exited {code}: {}", err.trim()));
+            }
+            let (code, tree_out, err) = ws_exec(c, &b, &format!("cat {TREE_FILE}"), EXEC).await?;
+            drop_ws(c, &b).await;
+            if code != 0 {
+                return Err(anyhow!("reading the tree file in the restored copy exited {code}: {}", err.trim()));
+            }
+            if dot_out.trim() != want {
+                return Err(anyhow!("the restored copy's dotfile read back {:?}", dot_out.trim()));
+            }
+            if tree_out.trim() != want {
+                return Err(anyhow!("the restored copy's tree file read back {:?}", tree_out.trim()));
+            }
+            let fresh = create(c, &c_name, json!({ "packages": [] })).await?;
+            let (code, out, _) = ws_exec(c, &fresh, &format!("test -e {DOTFILE}"), EXEC).await?;
             drop_ws(c, &fresh).await;
-            drop_ws(c, &src).await;
-            if code != 0 {
-                return Err(anyhow!("reading the home file exited {code}: {}", err.trim()));
+            if code == 0 {
+                return Err(anyhow!("a fresh workspace of the same owner already had the dotfile: {:?}", out.trim()));
             }
-            if out.trim() != want {
-                return Err(anyhow!("the fresh workspace read back {:?}", out.trim()));
-            }
-            redirects
+            Ok(())
         }
         .boxed()
     })
     .await;
 }
 
-/// `ws.cache.travels`: build output written under `{ws}/.cache` travels with a push and is there
+/// `ws.cache.travels`: build output written under `/home/kl/.cache` travels with a push and is there
 /// on a restore — the property the 2026-09-11 move of `CARGO_TARGET_DIR` into the tree exists for.
 /// Read on the RESTORED copy: the source proves nothing.
 pub async fn cache_in_tree(c: &mut Ctx) {
@@ -593,68 +608,10 @@ pub(crate) async fn push_then_restore(c: &mut Ctx, src: &str, name: &str, messag
     Ok(id)
 }
 
-/// The half that breaks under concurrency: the caches are LOCAL, not on the shared export.
-///
-/// Two pods on two nodes racing one cache directory over NFS is the failure the redirect exists
-/// for, and it is silent — every cache hit crosses the network and the corruption shows up as a
-/// build that fails for no reason. `login_env` points `XDG_CACHE_HOME` and the rest at
-/// `HOME_CACHE_DIR` and `~/.local/state` at `HOME_STATE_DIR`, both on the per-(owner, node)
-/// `homecache` subvolume, so this reads them back from inside the pod.
-async fn cache_is_local(c: &Ctx, ws: &str) -> Result<()> {
-    let cache = kloudlite_workspaces::k8s::HOME_CACHE_DIR;
-    let state = kloudlite_workspaces::k8s::HOME_STATE_DIR;
-    // `readlink -f` on the state dir would compare the path to ITSELF — `HOME_STATE_DIR` IS
-    // `/home/kl/.local/state` — so it is the MOUNT that is read instead: the homecache subvolume
-    // is bind-mounted there under its own subPath, and a state directory that is merely a
-    // directory on the shared export has no mount line of its own at all.
-    let script = format!(
-        "printf '%s\\n%s\\n' \"$XDG_CACHE_HOME\" \"$CARGO_TARGET_DIR\"\n\
-         awk '$2 == \"{state}\" {{ print \"mount\", $1, $3 }}' /proc/mounts\n\
-         awk '$2 == \"{cache}\" {{ print \"cachemount\", $1, $3 }}' /proc/mounts"
-    );
-    let (code, out, err) = ws_exec(c, ws, &script, EXEC).await?;
-    if code != 0 {
-        return Err(anyhow!("reading the cache environment exited {code}: {}", err.trim()));
-    }
-    state_is_local(&out, cache, state)
-}
-
-/// `XDG_CACHE_HOME` and `CARGO_TARGET_DIR` point into the WORKSPACE DIR (every cache travels
-/// with the tree since 2026-09-11), and the state directory is a MOUNT of its own.
-///
-/// A pure function so the judgement is testable without a pod. The state half used to compare
-/// `readlink -f /home/kl/.local/state` against `/home/kl/.local/state` — the same string either
-/// way, true whether or not the homecache subPath was mounted, which asserted nothing. What says
-/// it is local is that `/proc/mounts` carries a line FOR it: shell history and `~/.local/state`
-/// ride the per-(owner, node) `homecache` volume through a separate subPath, and a state directory
-/// that had fallen back to the shared NFS home would be a plain directory under it with no mount
-/// line of its own.
-fn state_is_local(out: &str, _cache: &str, state: &str) -> Result<()> {
-    let lines: Vec<&str> = out.lines().map(str::trim).filter(|l| !l.is_empty()).collect();
-    let ws = kloudlite_workspaces::k8s::WORKSPACES_DIR;
-    match lines.first() {
-        Some(v) if v.starts_with(ws) && v.ends_with("/.cache/xdg") => {}
-        other => return Err(anyhow!("XDG_CACHE_HOME is {other:?}, not `{ws}/<name>/.cache/xdg`")),
-    }
-    match lines.get(1) {
-        Some(v) if v.starts_with(ws) && v.ends_with("/.cache/cargo-target") => {}
-        other => return Err(anyhow!("CARGO_TARGET_DIR is {other:?}, not `{ws}/<name>/.cache/cargo-target`")),
-    }
-    let mount = lines.iter().find(|l| l.starts_with("mount "));
-    let Some(mount) = mount else {
-        return Err(anyhow!("{state} is not a mount of its own, so it is on the shared export"));
-    };
-    // And it is not the export wearing a different path: NFS under the state dir is exactly the
-    // fallback this assertion exists to catch.
-    if mount.contains("nfs") {
-        return Err(anyhow!("{state} is mounted from the shared export ({mount}), not the local cache"));
-    }
-    Ok(())
-}
-
-/// The file the two halves of `home.persists` agree on. Under the shared home, and dot-prefixed so
-/// a person who opens the same account's workspace does not find probe litter in their listing.
-const HOME_FILE: &str = "/home/kl/.slo-home";
+/// The two files `home.travels` writes in A and reads back in B: a dotfile under `~/.config` and
+/// a file under `~/workspace`, so the SLI covers both the config path and the tree the volume IS.
+const DOTFILE: &str = "~/.config/kl-probe";
+const TREE_FILE: &str = "~/workspace/probe.txt";
 
 /// Create a workspace and wait for `ready`. Answers its id.
 pub(crate) async fn create(c: &Ctx, name: &str, extra: Value) -> Result<String> {
@@ -752,10 +709,10 @@ async fn seed_failed_condition(c: &Ctx, id: &str) -> Result<()> {
 
 /// The subject of the checked-out clone's last commit, compared to the one this run pushed.
 ///
-/// The path is `k8s::workspace_dir(name)` — the seeder clones into the workspace's own subvolume,
-/// which is mounted at `~/workspaces/{name}`, NOT into a directory named after the repo.
-async fn clone_subject(c: &Ctx, id: &str, name: &str) -> Result<()> {
-    let dir = kloudlite_workspaces::k8s::workspace_dir(name);
+/// The path is `k8s::WORKSPACE_DIR` — the seeder clones into the workspace's own volume, the whole
+/// home now, NOT into a directory named after the repo.
+async fn clone_subject(c: &Ctx, id: &str, _name: &str) -> Result<()> {
+    let dir = kloudlite_workspaces::k8s::WORKSPACE_DIR;
     let script = format!("git -C {dir} rev-parse HEAD");
     let (code, out, err) = ws_exec(c, id, &script, EXEC).await?;
     if code != 0 {
@@ -1046,7 +1003,7 @@ mod tests {
         "ws.seeded",
         "ws.seed.failed",
         "key.platform.regenerate",
-        "home.persists",
+        "home.travels",
     ];
 
     async fn all(c: &mut Ctx) {
@@ -1055,7 +1012,7 @@ mod tests {
         seeded(c).await;
         seed_failed(c).await;
         platform_key(c).await;
-        home_persists(c).await;
+        home_travels(c).await;
     }
 
     fn once<'a>(c: &'a Ctx, id: &str) -> &'a kloudlite_workspaces::history::slo::StepReport {
@@ -1099,7 +1056,7 @@ mod tests {
             assert!(!s.ok && !s.skipped, "{s:?}");
             assert!(s.detail.contains("409"), "the refusal is in the detail: {s:?}");
         }
-        for id in ["ws.packages.remove", "ws.packages.pin.unknown", "ws.packages.pin.uncached", "ws.packages.update", "ws.packages.pin.lockshape", "home.persists"] {
+        for id in ["ws.packages.remove", "ws.packages.pin.unknown", "ws.packages.pin.uncached", "ws.packages.update", "ws.packages.pin.lockshape", "home.travels"] {
             let s = once(&c, id);
             assert!(s.skipped, "{s:?}");
         }
@@ -1154,41 +1111,14 @@ mod tests {
         assert!(msg.starts_with(&c.prefix()), "{body}");
     }
 
-    /// The state half of `home.persists`. It used to compare `readlink -f` of the state dir to
-    /// the state dir — the same string, true whether or not the homecache was mounted — so it
-    /// asserted nothing at all. What says the directory is LOCAL is a mount line of its own that
-    /// is not the NFS export.
-    #[test]
-    fn the_state_dir_has_to_be_a_local_mount() {
-        let cache = "/home/kl/.local-cache";
-        let state = "/home/kl/.local/state";
-        let xdg = "/home/kl/workspaces/ws-1/.cache/xdg";
-        let target = "/home/kl/workspaces/ws-1/.cache/cargo-target";
-        let ok = format!("{xdg}\n{target}\nmount /dev/sda1 btrfs\ncachemount /dev/sda1 btrfs\n");
-        assert!(state_is_local(&ok, cache, state).is_ok());
-        // The failure the state redirect exists for: state fell back onto the shared export.
-        let nfs = format!("{xdg}\n{target}\nmount 10.0.0.4:/homes nfs4\n");
-        assert!(state_is_local(&nfs, cache, state).is_err());
-        // No mount line at all: a plain directory on the home, which is the same failure quieter.
-        let bare = format!("{xdg}\n{target}\n");
-        assert!(state_is_local(&bare, cache, state).is_err());
-        // Both caches have to point into the WORKSPACE DIR — not the home, not the node-local
-        // cache they used to live in.
-        let wrong = format!("/home/kl/.cache\n{target}\nmount /dev/sda1 btrfs\n");
-        assert!(state_is_local(&wrong, cache, state).is_err());
-        let old = format!("{cache}/xdg\n{cache}/cargo-target\nmount /dev/sda1 btrfs\n");
-        assert!(state_is_local(&old, cache, state).is_err());
-    }
-
     /// `ws.seeded` reads the clone from the workspace's own subvolume — `~/workspaces/{name}` —
     /// and compares it to the subject stage 2 pushed. Both halves are literals somewhere else in
+    /// `ws.seeded` reads the clone from the workspace's own volume — the whole home now — and
+    /// compares it to the subject stage 2 pushed. Both halves are literals somewhere else in
     /// the tree, so this is what catches either one moving.
     #[test]
     fn the_seed_check_reads_the_workspace_directory_and_stage_twos_subject() {
-        assert_eq!(
-            kloudlite_workspaces::k8s::workspace_dir("run-fast-1-seed"),
-            "/home/kl/workspaces/run-fast-1-seed"
-        );
+        assert_eq!(kloudlite_workspaces::k8s::WORKSPACE_DIR, "/home/kl/workspace");
         assert_eq!(BASE_BRANCH, "main");
         // `git.push.ok` commits with `-m seed`; if that changes, this test is the reminder.
         let git = include_str!("git.rs");

@@ -29,13 +29,15 @@ The ProxyCommand fetches a fresh connect ticket per connection, so a long-runnin
 Start a process that outlives the session with a multiplexer or `nohup`; a workspace keeps running until it is stopped.
 
 ```bash
-ssh api 'cd ~/workspaces/api && nohup pnpm dev --port 3000 > ~/dev.log 2>&1 &'
+ssh api 'cd ~/workspace && nohup pnpm dev --port 3000 > ~/dev.log 2>&1 &'
 ssh api 'tail -n 50 ~/dev.log'
 ```
 
 ## Working directory
 
-The tree is at `/home/kl/workspaces/{name}`; the home at `/home/kl` is shared across the account's workspaces in the region. Write scratch to the tree, not the home, unless you want every workspace to see it.
+The tree is at `/home/kl/workspace`; `/home/kl` is this workspace's own volume, not shared with
+any other workspace. Write scratch anywhere under the home; there is no other workspace to leak
+into.
 
 ## Creating workspaces from an agent
 

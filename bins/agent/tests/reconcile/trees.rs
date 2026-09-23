@@ -16,7 +16,7 @@ fn status(rows: &[(&str, bool)]) -> Vec<crd::TreeStatus> {
     rows.iter()
         .map(|(n, ready)| crd::TreeStatus {
             name: (*n).into(),
-            path: crd::tree_path("ws-1", n),
+            path: crd::tree_path(n),
             ready: *ready,
             reason: None,
         })
@@ -97,7 +97,7 @@ fn a_status_whose_only_change_is_a_tree_is_written() {
 #[test]
 fn the_reported_rows_name_every_asked_for_tree_and_only_those() {
     let ready = status(&[("x", true)]);
-    assert_eq!(ready[0].path, crd::tree_path("ws-1", "x"), "the path is the one the tool server serves");
+    assert_eq!(ready[0].path, crd::tree_path("x"), "the path is the one the tool server serves");
     assert!(ready[0].ready);
     assert_eq!(ready[0].reason, None);
     assert!(status(&[]).is_empty(), "a dropped tree leaves no row behind");

@@ -537,8 +537,8 @@ async fn the_sync_beat_cuts_a_transient_only_when_the_worktree_generation_moved(
     );
 }
 
-/// The owner guard: `spec.owner` becomes `{pool}/homes/{owner}` and is chowned by a privileged
-/// process, so a traversing owner must settle Permanent before `ensure_shared_home` runs — not be
+/// The owner guard: `spec.owner` is joined onto pool paths that a privileged process chowns,
+/// so a traversing owner must settle Permanent before any pool path is touched — not be
 /// caught by accident because `heal_labels` patches the same string as a label first.
 #[tokio::test]
 async fn a_workspace_with_a_traversing_owner_settles_permanent_and_makes_no_directory() {
@@ -601,7 +601,7 @@ async fn a_workspace_with_a_traversing_attached_environment_settles_permanent() 
     );
 }
 
-/// The same guard on an Environment, whose `spec.owner` reaches `{pool}/homecache/{owner}`.
+/// The same guard on an Environment, whose `spec.owner` reaches every pool path built for it.
 #[tokio::test]
 async fn an_environment_with_a_traversing_owner_settles_permanent_and_keeps_its_placement() {
     const ENV_STATUS: &str = "/apis/kloudlite.io/v1alpha1/environments/env-1/status";
@@ -625,7 +625,10 @@ async fn an_environment_with_a_traversing_owner_settles_permanent_and_keeps_its_
     assert_eq!(st["nodeName"], "node-a");
     assert_eq!(st["volumeRef"], "vol-1");
     assert!(rec.calls().iter().all(|c| !c.starts_with("POST")), "nothing was created: {:?}", rec.calls());
-    assert!(!tmp.path().join("homecache").exists(), "nothing under the pool root was created");
+    let entries: Vec<_> = std::fs::read_dir(tmp.path())
+        .map(|d| d.filter_map(|e| e.ok().map(|e| e.file_name().to_string_lossy().into_owned())).collect())
+        .unwrap_or_default();
+    assert!(!entries.contains(&"etc".to_string()), "the escape target was not created beside the pool root: {entries:?}");
 }
 
 

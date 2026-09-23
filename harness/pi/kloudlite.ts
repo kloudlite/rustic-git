@@ -325,7 +325,7 @@ export function identity(hands: string, platform = true, memory = MEMORY, who: A
  * same file: it is the person's memory, and the bench folder travels with their machine.
  */
 function memoryIndex(): string {
-  const dir = process.env.KL_BENCH_DIR || (process.env.KL_WORKSPACE ? path.join(process.env.KL_WORKSPACE, ".bench") : "");
+  const dir = process.env.KL_BENCH_DIR || (process.env.HOME ? path.join(process.env.HOME, ".bench") : "");
   if (!dir) return "";
   try {
     return fs.readFileSync(path.join(dir, "memory", "MEMORY.md"), "utf8").trim();

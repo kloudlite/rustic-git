@@ -52,7 +52,6 @@ pub(crate) fn test_ctx(pool: &std::path::Path, node: &str, routes: Vec<Route>) -
             pool.to_string_lossy().into(),
             "r1".into(),
             false,
-            Some("test:/".into()),
             "registry.kloudlite.io".into(),
             String::new(),
             Arc::new(NoopNix),

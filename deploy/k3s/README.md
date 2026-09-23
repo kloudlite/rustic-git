@@ -170,9 +170,7 @@ One kind of node. `kloudlite.io/session` and `kloudlite.io/env` were the old per
 reads them since 2026-09-09 (see the release note below), and a fresh node needs only `pool`.
 
 ```sh
-# N. The new node's flannel /32, BEFORE its agent first mounts. `system-netpol.yaml` allow-lists
-#    NFS (2049) by node and flannel address; a missing entry is not an error anyone sees — the
-#    mount times out and every workspace on that node parks in `HomeNotReady`.
+# N. The new node's flannel /32, BEFORE its agent first mounts.
 ssh <node> ip -4 -o addr show flannel.1     # e.g. 10.42.6.0 — add `- ipBlock: {cidr: 10.42.6.0/32}`
 kubectl apply -f system-netpol.yaml
 ```
@@ -448,31 +446,13 @@ mv {pool}/vol/{id}/live-migrating {pool}/vol/{id}/live
 There is no bulk "undo everything" command, deliberately — the same one-volume-at-a-time shape as
 the forward migration.
 
-## Shared homes: Azure Files Premium (NFS 4.1)
+## Homes: the workspace volume (2026-09-22)
 
-Every owner's `/home/kl` in a region is `{pool}/homes/{owner}` on ONE managed NFS 4.1 share —
-Azure Files Premium, account `kloudlitegithomes` (Premium_ZRS, `rustic-git-k3s`), share `homes`,
-reachable only from the `nodes` subnet through its `Microsoft.Storage` service endpoint. Nothing
-of ours runs in the path: the agent mounts it at boot (`WS_HOMES_EXPORT` in
-`agent-daemonset.yaml`, `vers=4,minorversion=1,sec=sys`), and the provider's SLA is the
-availability story. ZeroFS (a single pod serving NFSv3 over a blob-backed LSM tree) was retired
-on 2026-09-04 after its segment GC started leaking; this replaced it.
-
-Per region: a new region gets its own account and share in its own VNet (homes are region-local
-by design), the same three commands:
-
-```sh
-az network vnet subnet update --ids <nodes subnet id> --service-endpoints Microsoft.Storage
-az storage account create -n <account> -g <rg> -l <location> --kind FileStorage --sku Premium_ZRS \
-  --https-only false --default-action Deny
-az storage account network-rule add -g <rg> -n <account> --subnet <nodes subnet id>
-az storage share-rm create -g <rg> --storage-account <account> -n homes \
-  --enabled-protocols NFS --root-squash NoRootSquash --quota 100
-```
-
-`--https-only false` is required (NFS is not TLS) and `--default-action Deny` plus the subnet rule
-is what keeps the share off the internet. The quota is provisioned capacity (billed) — 100 GiB is
-the minimum and holds years of dotfiles; raise it only when `df` on a node says so.
+There is no shared home any more. A workspace's btrfs volume IS `/home/kl` — one `live` hostPath
+mount with no subPath, source code under `~/workspace`. Existing workspaces are not migrated
+(the owner's ruling); a clone or restore carries the whole home, credentials included, and it is
+always your own workspace. `authorized_keys` is projected at `/etc/kloudlite/authorized_keys` and
+the user key at `/etc/kloudlite/ssh`; `/tmp` is a plain `emptyDir`.
 
 ## Gateway
 

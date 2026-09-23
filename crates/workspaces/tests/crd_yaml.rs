@@ -68,7 +68,6 @@ fn every_crd_has_a_status_subresource_and_the_right_node_selector() {
             // The single `default` object per cluster: every agent watches it by name, not by
             // node, so there is no per-node axis to select on.
             "ClusterSettings" => &[],
-            "Bench" => &[".status.nodeName"],
             other => panic!("unknown kind {other}"),
         };
         if want.is_empty() {

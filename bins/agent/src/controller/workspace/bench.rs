@@ -12,7 +12,7 @@
 //! replayed pass writes the identical `status.idleSince`.
 
 use super::super::{delete_ignoring_404, Ctx, ReconcileErr, TICK};
-use super::{migrate_bench_folder, write_ws_status, ws_conditions};
+use super::{write_ws_status, ws_conditions};
 use k8s_openapi::api::core::v1::{ContainerStateTerminated, ContainerStatus, Pod};
 use k8s_openapi::jiff::Timestamp;
 use kloudlite_workspaces::crd;
@@ -149,50 +149,6 @@ pub(crate) async fn park_bench(w: &crd::Workspace, prev: crd::WorkspaceStatus, g
     let st = crd::WorkspaceStatus { phase, observed_generation: Some(gen), pod_ref: None, conditions, ..prev };
     write_ws_status(w, st, ctx).await?;
     Ok(Action::await_change())
-}
-
-/// The one-time legacy folder move, on the pass that first finds the worktree without a `.bench`.
-/// `Some(action)` means this pass is over and NO pod may be created — a pod started against a
-/// half-copied folder is a bench that silently lost transcripts.
-pub(crate) async fn migrate_bench(
-    w: &crd::Workspace,
-    volume: &str,
-    gen: i64,
-    prev: &mut crd::WorkspaceStatus,
-    ctx: &Arc<Ctx>,
-) -> Result<Option<Action>, ReconcileErr> {
-    // No share on this node is not this function's refusal to make: `apply_workspace` already
-    // parked on `HomeNotReady` above, and the legacy folder lives on that share.
-    let Some(export) = ctx.homes_export.clone() else { return Ok(None) };
-    // The legacy folder was keyed by the team `/v1` minted the bench under, and a PERSONAL bench's
-    // team is the person's own handle there while `spec.team` on the Workspace is "" — so the
-    // handle goes back in, or every personal bench would look for `.benches//{owner}`.
-    let team = if w.spec.team.is_empty() { w.spec.owner.clone() } else { w.spec.team.clone() };
-    let (pool, owner) = (ctx.pool.clone(), w.spec.owner.clone());
-    let worktree = ctx.engine.pool.worktree(volume, &w.name_any());
-    let r = tokio::task::spawn_blocking(move || migrate_bench_folder(&pool, &export, &team, &owner, &worktree))
-        .await
-        .map_err(|e| ReconcileErr(e.to_string()))?;
-    match r {
-        Ok(None) => Ok(None),
-        Ok(Some((files, bytes))) => {
-            tracing::info!(workspace = %w.name_any(), files, bytes, "bench.folder.migrated");
-            prev.conditions = super::replaced(&prev.conditions, crd::condition(crd::FOLDER_MIGRATED, true, "Migrated", &format!("{files} files ({bytes} bytes) moved into this workspace"), gen));
-            Ok(None)
-        }
-        Err(why) => {
-            // Retried next pass rather than settled: an io error on a share is transient far more
-            // often than it is permanent, and there is no pod either way until it lands.
-            let st = crd::WorkspaceStatus {
-                phase: crd::Phase::Creating,
-                observed_generation: None,
-                conditions: ws_conditions(prev, crd::condition(crd::FOLDER_MIGRATED, false, "MigrationFailed", &why, gen)),
-                ..prev.clone()
-            };
-            write_ws_status(w, st, ctx).await?;
-            Ok(Some(Action::requeue(TICK)))
-        }
-    }
 }
 
 /// Turns `bench_verdict` into the pass's outcome. `None` = nothing to say; the ordinary readiness

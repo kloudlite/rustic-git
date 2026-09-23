@@ -51,6 +51,12 @@ pub mod defaults {
     pub fn trees_per_workspace() -> u32 {
         crate::crd::TREES_PER_WORKSPACE
     }
+
+    /// Empty = off — a region with no Kompress service deployed stamps no env var into any bench
+    /// pod, and the client (`harness/bench/src/engine/headroom.ts`) fails open the same way.
+    pub fn kompress_url() -> String {
+        String::new()
+    }
     pub fn git_init_image() -> String {
         // Matches the agent's own pre-settings fallback (`bins/agent/src/controller/mod.rs`) —
         // this is a required init container image, not an optional one, so the built-in default
@@ -165,6 +171,10 @@ pub struct ClusterSettingsSpec {
     /// `gc.would_delete`: the delete is irreversible, and regional because the objects are.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub member_removal_deletes: Option<bool>,
+    /// URL of the region's Kompress service the bench engine POSTs plain text to; empty = off.
+    /// Stamped into a bench pod at create.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub kompress_url: Option<String>,
 }
 
 
@@ -209,6 +219,7 @@ pub const CLUSTER_SETTING_META: &[(&str, kloudlite_core::settings::Mark, &[&str]
     ("traceProbeBurst", kloudlite_core::settings::Mark::Live, &[]),
     ("tracePromoteRate", kloudlite_core::settings::Mark::Live, &[]),
     ("tracePromoteBurst", kloudlite_core::settings::Mark::Live, &[]),
+    ("kompressUrl", kloudlite_core::settings::Mark::Live, &[]),
 ];
 
 #[cfg(test)]

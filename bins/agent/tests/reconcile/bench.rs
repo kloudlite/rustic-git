@@ -1,5 +1,5 @@
-//! A bench reconciled as a WORKSPACE: the second container, the idle clock, the held folder, the
-//! one-time legacy folder migration and the pause — against the mocked API server.
+//! A bench reconciled as a WORKSPACE: the second container, the idle clock, the held folder and the
+//! pause — against the mocked API server.
 //!
 //! There is no bench reconciler any more. `crd::is_bench` is the only predicate and
 //! `crd::wants_pod` the only pod decision, so everything here goes through `apply_workspace`.
@@ -56,12 +56,6 @@ fn delete_pod() -> Route {
 
 fn last_status(rec: &Recorder) -> serde_json::Value {
     rec.sent("PATCH", WS_STATUS).last().expect("a status write")["status"].clone()
-}
-
-/// Whether ANY status write of the pass carried this condition: the migration writes it once, on
-/// the pass that moved the folder, and a later pass has nothing to re-derive it from.
-fn wrote_cond(rec: &Recorder, t: &str, status: &str, reason: &str) -> bool {
-    rec.sent("PATCH", WS_STATUS).iter().any(|w| has_cond(&w["status"], t, status, reason))
 }
 
 fn has_cond(st: &serde_json::Value, t: &str, status: &str, reason: &str) -> bool {
@@ -194,31 +188,6 @@ async fn a_paused_bench_has_no_pod() {
     let st = last_status(&rec);
     assert_eq!(st["phase"], "stopped");
     assert!(has_cond(&st, "Ready", "False", "Paused"), "{st}");
-}
-
-/// The one-time move: the transcripts land inside the volume before any pod starts, and the legacy
-/// folder is renamed aside.
-#[tokio::test]
-async fn a_legacy_bench_folder_is_migrated_into_the_volume_before_the_pod() {
-    let tmp = tempfile::tempdir().unwrap();
-    // A personal bench's legacy folder is keyed by the HANDLE, not by the empty `spec.team`.
-    let legacy = tmp.path().join("homes/.benches/alice/alice/sessions");
-    std::fs::create_dir_all(&legacy).unwrap();
-    std::fs::write(legacy.join("a.jsonl"), "hello").unwrap();
-    let mut routes = ssh_routes();
-    // Twice: the start's capacity gate asks whether a pod exists before `create_if_absent` does.
-    routes.push(kloudlite_workspaces::kube_test::not_found(POD));
-    routes.push(kloudlite_workspaces::kube_test::not_found(POD));
-    routes.push(kloudlite_workspaces::kube_test::get(POD, bench_pod(true, true, None, AT)));
-    let (ctx, rec, _nix) = ws_ctx_with_ssh(tmp.path(), routes);
-
-    apply_until_settled(&bench_ws(serde_json::json!({}), creating()), &ctx).await;
-
-    let moved = tmp.path().join("vol/ws-1/live/ws-1/.bench/sessions/a.jsonl");
-    assert_eq!(std::fs::read_to_string(&moved).unwrap(), "hello");
-    assert!(!tmp.path().join("homes/.benches/alice/alice").exists(), "the legacy folder is renamed aside");
-    assert!(wrote_cond(&rec, "FolderMigrated", "True", "Migrated"), "{:?}", rec.sent("PATCH", WS_STATUS));
-    assert_eq!(rec.sent("POST", PODS).len(), 1, "the pod still starts in the same pass");
 }
 
 

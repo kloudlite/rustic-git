@@ -128,7 +128,7 @@ pub(crate) async fn cut_tree(
         if cas_trees(kube(&s)?, &w, want).await? {
             // `w.spec.name`, never `id`: the pod mounts at the display name, so the CR id names a path
             // that does not exist (R-D21).
-            let doc = TreeDoc { name: body.name.clone(), path: tree_path(&w.spec.name, &body.name) };
+            let doc = TreeDoc { name: body.name.clone(), path: tree_path(&body.name) };
             return Ok((StatusCode::ACCEPTED, Json(doc)).into_response());
         }
     }

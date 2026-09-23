@@ -14,7 +14,7 @@ test("create numbers after the highest seq and persists", () => {
   const s2 = a.create();
   assert.equal(s1.id, "s-1");
   assert.equal(s2.name, "session 2");
-  a.update("s-1", { archived: true, file: "/bench/sessions/x.jsonl" });
+  a.update("s-1", { archived: true, file: "/home/kl/bench/sessions/x.jsonl" });
   const b = new SessionList(d);
   assert.deepEqual(b.all().map((s) => [s.id, s.archived]), [["s-1", true], ["s-2", false]]);
 });
@@ -53,4 +53,17 @@ test("remove drops the row", () => {
   a.remove("s-1");
   assert.equal(a.all().length, 0);
   assert.throws(() => a.update("s-1", {}), /no session s-1/);
+});
+
+test("tree fields persist and children are found by parent seq", () => {
+  const d = fs.mkdtempSync(path.join(os.tmpdir(), "tree-"));
+  const l = new SessionList(d);
+  const top = l.create(undefined, { tier: "top", state: "open" });
+  const main = l.create(undefined, { tier: "main", state: "open", workspace: "ws1" });
+  const sub = l.create(undefined, { tier: "sub", state: "open", parent: main.seq, workspace: "ws1-c1" });
+  assert.deepEqual(l.children(main.seq).map((s) => s.seq), [sub.seq]);
+  assert.equal(l.bySeq(top.seq)?.tier, "top");
+  assert.equal(l.logFile(sub), path.join(d, "sessions", `${sub.seq}.jsonl`));
+  const again = new SessionList(d);
+  assert.equal(again.bySeq(sub.seq)?.parent, main.seq);
 });

@@ -189,38 +189,18 @@ pub const SSHD_DIR: &str = "/etc/ssh";
 /// Who you are inside a workspace. Not root: sshd refuses root outright (`PermitRootLogin no`),
 /// so a leaked key is a shell as an ordinary user, and everything a person writes lands owned
 /// by an ordinary user. There is no sudo — root is `kubectl exec`, and installing software is
-/// `spec.packages`. The uid is fixed so `~/workspaces/<name>` keeps its owner across pod restarts and
-/// image changes.
+/// `spec.packages`. The uid is fixed so the home keeps its owner across pod restarts and image
+/// changes.
 pub const SSH_USER: &str = "kl";
-/// Where workspace subvolumes are mounted: inside the home, one directory PER WORKSPACE named by
-/// the workspace's NAME — the thing the person typed, not the id. Not a fixed `~/workspace`: the
-/// home is shared across a person's workspaces, and tools that key their state on the working
-/// directory (Claude Code's `~/.claude/projects/<path>`, opencode's sessions) would otherwise
-/// see every workspace as the same project. `model::valid_ws_name` keeps the name a safe path
-/// component. ponytail: two same-named workspaces in different teams of one person share the
-/// directory name (and so that tool state) — names are unique per (owner, team), not per owner.
-pub const WORKSPACES_DIR: &str = "/home/kl/workspaces";
-
-
-pub fn workspace_dir(name: &str) -> String {
-    format!("{WORKSPACES_DIR}/{name}")
-}
-
-
-/// The seeder's own view of the same volume. It runs before the home exists, so it mounts the
-/// subvolume at a fixed path of its own rather than under `~`.
-pub(super) const SEED_DIR: &str = "/workspace";
-/// Where the owner's persistent home is mounted; every `workspace_dir(name)` is inside it.
-/// Everything under here except `workspaces/` is the same in every workspace the person opens
-/// on this node.
+/// Where the workspace's own btrfs volume is mounted, in full, as the home: no shared NFS home,
+/// no per-node cache volume, one subvolume that IS `/home/kl` (2026-09-22 ruling: "this will
+/// simplify our design"). Source lives at `WORKSPACE_DIR`, everything else the platform mints is
+/// a mount over the tree (keys, resolv.conf); everything the person or a tool writes travels with
+/// the volume on clone/restore/push.
 pub const HOME_DIR: &str = "/home/kl";
-/// Where the node-local cache volume lands inside the home: tool caches redirected here (via
-/// `login_env`) never touch the NFS-backed home, so a cold cache never blocks on network I/O and a
-/// warm one never crosses it either.
-pub const HOME_CACHE_DIR: &str = "/home/kl/.local-cache";
-/// Shell state (history) that must survive a pod restart but has no business on shared NFS —
-/// every terminal on every node would otherwise interleave writes to the same file.
-pub const HOME_STATE_DIR: &str = "/home/kl/.local/state";
+/// The source tree inside the volume — `kl` and the tool server root here, `repo`/`branch`
+/// seeding clones here.
+pub const WORKSPACE_DIR: &str = "/home/kl/workspace";
 
 /// Where the pod prelude sends the tool server's output. A FILE under the state mount, not the
 /// container's stdout — so `kubectl logs` on a workspace pod shows none of it, and anything
@@ -228,7 +208,11 @@ pub const HOME_STATE_DIR: &str = "/home/kl/.local/state";
 pub const IDE_LOG: &str = "/home/kl/.local/state/kl-ide.log";
 
 pub const SSH_UID: i64 = 1000;
-pub(super) const AUTHORIZED_KEYS_PATH: &str = "/home/kl/.ssh/authorized_keys";
+// Not under /home/kl: the whole home is the workspace volume now, and nothing else may mount
+// at or below it — this is the one thing the platform must project into every pod regardless
+// (2026-09-22 ruling). sshd reads `AuthorizedKeysFile` from wherever we tell it, so a sibling
+// directory works exactly as well as a path under the home used to.
+pub(super) const AUTHORIZED_KEYS_PATH: &str = "/etc/kloudlite/authorized_keys";
 
 
 pub(super) fn quantities(res: &PodResources) -> ResourceRequirements {

@@ -39,6 +39,7 @@ pub struct AgentSettings {
     pub trace_promote_burst: f64,
     pub stall_dumps: bool,
     pub member_removal_deletes: bool,
+    pub kompress_url: String,
 }
 
 impl Default for AgentSettings {
@@ -85,6 +86,7 @@ impl AgentSettings {
             // No env: the controller deletes on it and `/v1` delete-now reports it, and only a value
             // both processes read from the same place can agree. `ClusterSettings` is its one source.
             member_removal_deletes: false,
+            kompress_url: std::env::var("WS_KOMPRESS_URL").unwrap_or_else(|_| crd::defaults::kompress_url()),
         }
     }
 
@@ -125,6 +127,7 @@ impl AgentSettings {
         over!(trace_promote_burst);
         over!(stall_dumps);
         over!(member_removal_deletes);
+        over!(kompress_url);
         self
     }
 }

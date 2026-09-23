@@ -5,18 +5,17 @@
 //! Every rule lives in `my_bench`, so no handler can forget one: the team is the caller's handle
 //! when absent (decision 4); a non-member gets the same 404 as a stranger, a paused
 //! member a 403 naming the pause, and `spec.access` is written only by the keys beat; the region is read from the
-//! directory on every call and never stored on the Bench (decision 1). Waking is a `wakeAt`
+//! directory on every call and never stored on the bench (decision 1). Waking is a `wakeAt`
 //! patch — `/v1` is spec's only writer, and the agent compares it to `status.idleSince`
 //! (decision 6).
 //!
 //! There is NO delete verb here, deliberately: nobody deletes their own bench, and the only thing
 //! that deletes one is the cluster controller's GC after a member removal's grace (`api::membership`,
-//! `bins/controller/src/gc.rs`). What that delete takes belongs beside the create that stamps it:
-//! the Bench carries `BENCH_FOLDER_FINALIZER`, so the bench folder `.benches/{team}/{owner}` — the
-//! chat transcripts and sessions — is deleted with the Bench, for every delete reason
-//! (`bins/agent/src/controller/bench.rs`). The user-facing place that says so in plain words is the
-//! team removal confirm (`web/apps/web/src/lib/team-removal.ts`); a delete route added here would
-//! have to say the same thing.
+//! `bins/controller/src/gc.rs`). What that delete takes: the chat transcripts and sessions live in
+//! `.bench` inside the bench's own volume (`k8s::BENCH_SUBDIR`), so they go with the Workspace for
+//! every delete reason. The user-facing place that says so in plain words is the team removal
+//! confirm (`web/apps/web/src/lib/team-removal.ts`); a delete route added here would have to say
+//! the same thing.
 //!
 //! A bench IS a Workspace (`spec.bench: Some`, `crd::is_bench` the only predicate): the routes here
 //! are a FACADE over the ordinary workspace machinery, kept byte-compatible for the shipped desktop

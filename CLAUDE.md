@@ -160,7 +160,8 @@ the ValidatingAdmissionPolicy in `deploy/k3s/agent-admission.yaml` — not conve
 stops a controller editing desired state: the agent's ClusterRole (`deploy/k3s/agent-rbac.yaml`,
 whose header table IS the role) keeps `patch` on the main resources only for labels, finalizers
 and the one spec field a parent's reconciler copies into its own child (`Volume.spec.restoreTo`;
-the `Volume.spec.quotaGb` exception went with the btrfs home, since an NFS home has no Volume),
+the `Volume.spec.quotaGb` exception went with the per-node btrfs home; the home is now the
+workspace's own `Volume`, sized by the workspace's `quota_gb` like any other),
 and the policy refuses it any other spec change. Apply both files.
 
 **Allocation is bounded by a `Quota` per owner.** A cluster-scoped `Quota` CR named by the owner
@@ -492,34 +493,14 @@ owner computes the preferred node by rendezvous (`peer::preferred_node`) over `{
 nodes}`, keyed by the volume id, and hands the volume over (release CAS + un-place every parent,
 `Placed=False/Moving` — a routine move, never `Degraded`) when that is not itself.
 
-**Every person has one persistent home per region, not per node** — `/home/kl` in every workspace
-pod of theirs is `{pool}/homes/{owner}` on a region-shared NFS 4.1 export (Azure Files Premium, one share per region), mounted by
-every node at `{pool}/homes` (`mount_homes` in `bins/agent/src/lib.rs`, `WS_HOMES_EXPORT`). There
-is no home `Volume` CR, no owner→node pin, no push beat, no history and no quota — all deliberately
-dropped: an NFS directory has no qgroup to enforce one and no per-commit history to keep. Making
-the export directory exist (`ensure_shared_home` in `bins/agent/src/controller/workspace.rs`, plain
-`mkdir`+`chown`, safe on every reconcile) is the whole "materialize a home" story now. A pod
-started before its node's NFS mount is up would hostPath an empty local directory and silently
-strand the owner's dotfiles, so `apply_workspace` parks a workspace in `Creating`/`HomeNotReady`
-until `ctx.homes_export` is set rather than ever starting one.
-**The workspace carries its caches** (`login_env`, `workspace_pod`). Everything a tool would
-cache lives under `{ws}/.cache/`: build output (`CARGO_TARGET_DIR`, `GOCACHE`), every package
-store (`XDG_CACHE_HOME`, npm, pnpm, bun, yarn, pip, uv, deno, `GOMODCACHE`, Maven, Composer,
-NuGet), toolchains (`RUSTUP_HOME`), browsers, and — as `live` subPath MOUNTS, since these tools
-have no env knob — `~/.cargo/registry` and the editors' remote servers (`.vscode-server`,
-`.cursor-server`, `.zed_server`, `.windsurf-server`, `.jetbrains`). Snapshotted and replicated
-with the tree, so a clone, a restore or a start on another node arrives warm; until 2026-09-11
-these sat on a per-node cache and every move paid a full rebuild and re-download (the owner's
-rule: "everything that can be cached goes in the workspace folder", the platform standard). The
-NFS home keeps SMALL CONFIG only (`~/.config`, `CARGO_HOME`, `GRADLE_USER_HOME` — both hold
-credentials). The per-(owner, node) LOCAL subvolume `{pool}/homecache/{owner}`
-(`Engine::ensure_homecache`, mounted at `k8s::HOME_CACHE_DIR`) keeps only what must not travel:
-`TMPDIR`, shell history and `~/.local/state` (`k8s::HOME_STATE_DIR`, a separate subPath). What
-the platform places inside a workspace dir — `.cache/`, `graft/`, `.direnv/` — is ignored by git
+**The workspace volume IS the home** (2026-09-22 ruling) — `/home/kl` is the workspace's own
+btrfs volume, one `live` hostPath mount with no subPath and nothing else mounted under it; source
+code lives at `~/workspace`. Existing workspaces from before this change are not migrated. The
+mounts that stay: `authorized_keys` at `/etc/kloudlite/authorized_keys`, the user key at
+`/etc/kloudlite/ssh`, `/tmp` as a plain `emptyDir`, and the rendered `resolv.conf` for attach. What
+the platform places inside the home — `.cache/`, `graft/`, `.direnv/` — is ignored by git
 GLOBALLY: the image ships `/etc/kloudlite/gitignore-global` and `prelude` appends it once to
-`~/.config/git/ignore`; never a per-repository `.gitignore` line. `home.persists` and
-`ws.cache.travels` hold both halves on the fleet. Cross-region: each region has its own export
-and nothing syncs them.
+`~/.config/git/ignore`; never a per-repository `.gitignore` line.
 
 **Keys belong to the person, not a team or workspace.** `Credential.owner` is the email, ssh and
 signing alike, and `/v1/keys` refuses a body carrying `owner` (400) — tokens stay per owner the
@@ -530,7 +511,7 @@ is its only writer, via server-side apply (field manager `kloudlite-api`) on eve
 membership change and again on a resync beat every `KEYS_RESYNC_SECS` (300), so a missed watch
 event self-heals. The agent watches it and converges: writes `{pool}/keys/{owner}/authorized_keys`
 IN PLACE (0600, uid 1000) — pods mount it as a hostPath `type: File` at
-`/home/kl/.ssh/authorized_keys`, same rename-is-unsafe reasoning as the attach `resolv.conf` above
+`/etc/kloudlite/authorized_keys`, same rename-is-unsafe reasoning as the attach `resolv.conf` above
 — and stamps `status.observedGeneration` plus a `Synced` condition (`Applied`/`NoKeys`/`WriteFailed`).
 Fail-closed both ways: a deleted `OwnerKeys` becomes an empty file, not a stale one, and a
 default-image workspace parks `Ready=False/KeysNotReady` until the file exists (a custom-image

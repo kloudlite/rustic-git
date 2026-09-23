@@ -183,6 +183,7 @@ const CLUSTER_ENV_VARS: &[(&str, &str)] = &[
     ("gitInitImage", "WS_GIT_INIT_IMAGE"),
     ("runtimeClass", "WS_RUNTIME_CLASS"),
     ("stallDumps", "WS_STALL_DUMPS"),
+    ("kompressUrl", "WS_KOMPRESS_URL"),
 ];
 
 fn cluster_default(name: &str) -> serde_json::Value {
@@ -211,6 +212,7 @@ fn cluster_default(name: &str) -> serde_json::Value {
         "tracePromoteRate" => kloudlite_trace::PROMOTE_RATE.into(),
         "tracePromoteBurst" => kloudlite_trace::PROMOTE_BURST.into(),
         "stallDumps" | "memberRemovalDeletes" => false.into(),
+        "kompressUrl" => serde_json::Value::String(String::new()),
         _ => serde_json::Value::Null,
     }
 }
@@ -317,7 +319,7 @@ mod tests {
     fn no_secret_or_address_env_var_is_exposed() {
         const FORBIDDEN: &[&str] = &[
             "SECRET", "JWT", "S3_URL", "CACHE_DIR", "PEER_ADDR", "PEER_SVC", "KLOUDLITE_SELF",
-            "WS_POOL", "WS_REGION", "NODE_NAME", "HOMES_EXPORT", "AUTH_", "RESEND_", "AWS_", "AZURE_",
+            "WS_POOL", "WS_REGION", "NODE_NAME", "AUTH_", "RESEND_", "AWS_", "AZURE_",
         ];
         for (name, var) in CENTRAL_ENV_VARS.iter().chain(CLUSTER_ENV_VARS) {
             for bad in FORBIDDEN {
