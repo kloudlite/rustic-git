@@ -81,9 +81,10 @@ pub async fn trees(c: &mut Ctx) {
                 }
                 // And the fence in the other direction: `main` may not read a subagent's files.
                 // A 403 NAMING the path, never a bare denial and never a 404 that reads as "no
-                // such file" to a model that would then create one.
-                let (code, body) = ws_tool(c, &id, "read", &json!({ "path": ".agents/probe/x" })).await?;
-                if code != 403 || !body.contains(".agents/probe/x") {
+                // such file" to a model that would then create one. Trees sit in `~/.agents`, one
+                // level above main's root (`~/workspace`), so `..` is the way a model would reach.
+                let (code, body) = ws_tool(c, &id, "read", &json!({ "path": "../.agents/probe/x" })).await?;
+                if code != 403 || !body.contains("../.agents/probe/x") {
                     return Err(anyhow!("main read under .agents answered {code}: {}", body.trim()));
                 }
                 Ok(())
@@ -203,8 +204,9 @@ pub async fn trees(c: &mut Ctx) {
             // travelled — a fail), or it is not there at all (also a pass: nothing of the tree
             // survived). `ls ... || true` alone conflated the third with the second, because the
             // error text landed in stdout and read as content.
-            let script = "d=\"$KL_WORKSPACE\"/.agents/probe; if [ -d \"$d\" ]; then echo PRESENT; ls -A \"$d\"; else echo ABSENT; fi";
-            let (code, out, err) = ws_exec(c, &copy, script, EXEC).await?;
+            // Trees are cut at the top of the worktree, the home, not under `$KL_WORKSPACE`.
+            let script = format!("d={}/.agents/probe; if [ -d \"$d\" ]; then echo PRESENT; ls -A \"$d\"; else echo ABSENT; fi", kloudlite_workspaces::k8s::HOME_DIR);
+            let (code, out, err) = ws_exec(c, &copy, &script, EXEC).await?;
             if code != 0 {
                 return Err(anyhow!("could not look at the restored .agents/probe: exit {code}: {}", err.trim()));
             }
@@ -232,7 +234,7 @@ pub async fn trees(c: &mut Ctx) {
             poll_json(c, &doc, &c.probe_jwt, PASS, |v| !names(v).iter().any(|n| n == TREE))
                 .await
                 .context("the tree never left status.trees")?;
-            let (_, out, _) = ws_exec(c, &id, "ls -A \"$KL_WORKSPACE\"/.agents 2>&1 || true", EXEC).await?;
+            let (_, out, _) = ws_exec(c, &id, &format!("ls -A {}/.agents 2>&1 || true", kloudlite_workspaces::k8s::HOME_DIR), EXEC).await?;
             if out.contains(TREE) {
                 return Err(anyhow!("the subvolume is still on disk: {:?}", out.trim()));
             }

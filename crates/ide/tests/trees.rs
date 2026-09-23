@@ -22,9 +22,11 @@ fn workspace() -> (tempfile::TempDir, Arc<App>) {
     let home = tmp.path().canonicalize().unwrap();
     let root = home.join("workspaces/ws-1");
     std::fs::create_dir_all(root.join("src")).unwrap();
-    std::fs::create_dir_all(root.join(".agents/x/src")).unwrap();
+    // A tree snapshots the whole home, so its copy of the workspace sits at the same path below it.
+    let tree = home.join(".agents/x/workspaces/ws-1");
+    std::fs::create_dir_all(tree.join("src")).unwrap();
     std::fs::write(root.join("src/main.rs"), "fn main() {}\n").unwrap();
-    std::fs::write(root.join(".agents/x/src/main.rs"), "fn main() {}\n").unwrap();
+    std::fs::write(tree.join("src/main.rs"), "fn main() {}\n").unwrap();
     let cfg = Config { bind: "127.0.0.1:0".parse().unwrap(), root, home, graft_dir: None, token_path: None };
     (tmp, Arc::new(App::new(cfg)))
 }
@@ -132,7 +134,8 @@ fn the_sandbox_binds_the_tree_the_store_and_nothing_else() {
     assert_eq!(&argv[dashdash + 1..], &["sh".to_string(), "-c".into(), "true".into()]);
 
     // Nothing of the workspace root, the other trees or `kl` is named anywhere.
-    assert!(!argv.iter().any(|a| a.ends_with("/workspaces/ws-1")), "{argv:?}");
+    // (The tree's own copy ends the same way, one `.agents/x` deeper.)
+    assert!(!argv.iter().any(|a| a.ends_with("/workspaces/ws-1") && !a.contains("/.agents/")), "{argv:?}");
     // And nothing under a HOME is a bind SOURCE: the pod has no `~/.nix-profile`, and naming one
     // made bwrap refuse to start on every exec in the fleet (2026-09-18).
     assert!(!sources.iter().any(|s| s.starts_with("/home/kl/.")), "{argv:?}");
@@ -170,6 +173,7 @@ fn a_running_main_sandbox_cannot_read_or_write_an_agent_tree() {
     let main = main_tree(&app);
     let secret = main.root.join(".agents/x/secret");
     let created = main.root.join(".agents/x/created");
+    std::fs::create_dir_all(main.root.join(".agents/x")).unwrap();
     std::fs::write(&secret, "agent secret").unwrap();
     let bwrap = kloudlite_ide::sandbox::usable(&main).expect("functional bwrap required for this integration test");
     let script = format!("mkdir -p '{}/x' && test ! -r '{}' && printf hidden > '{}'", main.root.join(".agents").display(), secret.display(), created.display());

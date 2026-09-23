@@ -1,7 +1,8 @@
 //! The tree a call acts on, and the resolver that hands it over.
 //!
 //! One `kl ide serve` serves every tree of its workspace: the main working directory and each
-//! `{ws}/.agents/{name}` the node agent cut for a subagent. Every tool argument and every `/fs/*`
+//! `~/.agents/{name}` the node agent cut for a subagent (a snapshot of the whole home, so the tree's
+//! own copy of the workspace is `~/.agents/{name}/workspace`; `Trees::dir_of`). Every tool argument and every `/fs/*`
 //! query takes an optional `tree` (absent or `main` means the workspace itself), and the server
 //! confines the call to that tree's root before it runs.
 //!
@@ -16,7 +17,7 @@ use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, RwLock};
 
-/// The directory nested tree subvolumes live in, under the workspace root. The same name the node
+/// The directory nested tree subvolumes live in, under the top of the worktree (the home). The same name the node
 /// agent writes and the global gitignore carries.
 pub const TREES_DIR: &str = ".agents";
 
@@ -77,8 +78,15 @@ impl TreeCtx {
 /// exists, and dropped when the directory is gone — checked on every use, because the node agent
 /// deletes a tree under us the moment `/v1` says to.
 pub struct Trees {
-    /// The workspace directory: `main`'s root, and the parent of every other tree's.
+    /// The workspace directory: `main`'s root.
     root: PathBuf,
+    /// Where `.agents/` sits: the top of the btrfs worktree, which is the home since the home
+    /// became the workspace volume (ruling 2026-09-22). The agent snapshots the WHOLE worktree
+    /// into `{top}/.agents/{name}`, so a tree's copy of `root` is `root`'s path below `top`,
+    /// replayed under the tree. Merged without this, the server looked for
+    /// `~/workspace/.agents/{name}` while the agent cut `~/.agents/{name}` (hourly 2026-09-23
+    /// 16:58 IST, `ws.tree.cut`: "no such tree").
+    top: PathBuf,
     graft_dir: Option<PathBuf>,
     map: RwLock<HashMap<String, Arc<TreeCtx>>>,
     /// Creation order, which is what a port block is keyed by. Kept beside the map rather than
@@ -88,13 +96,29 @@ pub struct Trees {
 }
 
 impl Trees {
+    /// Trees under `{root}/.agents`: the worktree IS the workspace directory.
     pub fn new(root: PathBuf, graft_dir: Option<PathBuf>) -> Self {
-        Trees { root, graft_dir, map: RwLock::new(HashMap::new()), order: RwLock::new(Vec::new()) }
+        Self::under(root.clone(), root, graft_dir)
+    }
+
+    /// Trees under `{top}/.agents`, each holding its copy of `root` at the same relative path.
+    /// A `root` outside `top` falls back to `new`'s layout rather than inventing one.
+    pub fn under(top: PathBuf, root: PathBuf, graft_dir: Option<PathBuf>) -> Self {
+        let top = if root.starts_with(&top) { top } else { root.clone() };
+        Trees { root, top, graft_dir, map: RwLock::new(HashMap::new()), order: RwLock::new(Vec::new()) }
     }
 
     /// The directory a tree's files live in.
     pub fn dir_of(&self, name: &str) -> PathBuf {
-        if name == MAIN { self.root.clone() } else { self.root.join(TREES_DIR).join(name) }
+        if name == MAIN {
+            return self.root.clone();
+        }
+        let dir = self.top.join(TREES_DIR).join(name);
+        // `join("")` would append a trailing separator, and the path is compared and bound verbatim.
+        match self.root.strip_prefix(&self.top) {
+            Ok(rel) if !rel.as_os_str().is_empty() => dir.join(rel),
+            _ => dir,
+        }
     }
 
     /// Resolve a request's `tree` argument. `None` and `main` are the workspace; anything else

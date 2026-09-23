@@ -144,7 +144,9 @@ pub const TREES_DIR: &str = ".agents";
 
 
 /// Where a tree lives inside the POD, which is the path a caller can act on: the worktree volume
-/// IS the home (2026-09-22 ruling), so its `.agents` sits at `~/.agents` in every workspace. The
+/// IS the home (2026-09-22 ruling), so its `.agents` sits at `~/.agents` in every workspace, and a
+/// tree is a snapshot of that whole home: its copy of the source is `~/.agents/{name}/workspace`,
+/// which is what `kl ide serve` confines the tree to (`Trees::dir_of`). The
 /// path once carried the workspace's name and reporting the id instead produced a path that did
 /// not exist (R-D21, 2026-09-18); with one home per pod there is no name left to get wrong.
 ///
@@ -152,7 +154,8 @@ pub const TREES_DIR: &str = ".agents";
 /// (`Engine::tree_dir`, `{pool}/vol/{volume}/live/{ws-id}/.agents/{name}`). The node writes the
 /// path a person or a tool server would use, never its own.
 pub fn tree_path(name: &str) -> String {
-    format!("{}/{TREES_DIR}/{name}", crate::k8s::HOME_DIR)
+    let rel = crate::k8s::WORKSPACE_DIR.strip_prefix(crate::k8s::HOME_DIR).unwrap_or("");
+    format!("{}/{TREES_DIR}/{name}{rel}", crate::k8s::HOME_DIR)
 }
 
 

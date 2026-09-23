@@ -110,7 +110,7 @@ async fn a_tree_is_cut_from_a_running_workspace() {
     assert_eq!(body["name"], "fix-auth");
     // Under the home, which IS the worktree mount now (one home per pod), never a path named by
     // the CR id: the id named a path that does not exist (R-D21).
-    assert_eq!(body["path"], "/home/kl/.agents/fix-auth");
+    assert_eq!(body["path"], "/home/kl/.agents/fix-auth/workspace");
     let w = written(&s);
     assert_eq!(w.len(), 1, "one write");
     assert_eq!(w[0].as_array().unwrap().len(), 1);

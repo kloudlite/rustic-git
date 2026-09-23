@@ -22,7 +22,7 @@ impl App {
     pub fn new(cfg: Config) -> Self {
         let procs = Arc::new(Procs::default());
         let watches = Arc::new(Watches::default());
-        let trees = Arc::new(Trees::new(cfg.root.clone(), cfg.graft_dir.clone()));
+        let trees = Arc::new(Trees::under(cfg.home.clone(), cfg.root.clone(), cfg.graft_dir.clone()));
         let registry = Registry::new(vec![
             Box::new(Files { trees: trees.clone() }),
             Box::new(Exec { trees: trees.clone(), procs: procs.clone() }),
@@ -195,9 +195,12 @@ mod tests {
     #[tokio::test]
     async fn the_query_string_names_a_tree_for_every_tool() {
         let (tmp, app) = traced_app();
-        let root = tmp.path().canonicalize().unwrap().join("workspaces/api");
-        std::fs::create_dir_all(root.join(".agents/t/sub")).unwrap();
-        std::fs::write(root.join(".agents/t/in-tree.txt"), "tree\n").unwrap();
+        let home = tmp.path().canonicalize().unwrap();
+        let root = home.join("workspaces/api");
+        // The tree is a snapshot of the whole home, so its copy of main sits at the same path below it.
+        let tree = home.join(".agents/t/workspaces/api");
+        std::fs::create_dir_all(tree.join("sub")).unwrap();
+        std::fs::write(tree.join("in-tree.txt"), "tree\n").unwrap();
         std::fs::write(root.join("in-main.txt"), "main\n").unwrap();
 
         let q = |uri: &'static str, body: &'static str| {
@@ -222,12 +225,12 @@ mod tests {
         // exec: the cwd is the TREE's root, which is what reported main's pwd before.
         let (st, v) = q("/tools/exec?tree=t", r#"{"cmd":"pwd"}"#).await;
         assert_eq!(st, 200, "{v}");
-        assert!(v["stdout"].as_str().unwrap().trim().ends_with("/.agents/t"), "exec ran in main: {v}");
+        assert!(v["stdout"].as_str().unwrap().trim().ends_with("/.agents/t/workspaces/api"), "exec ran in main: {v}");
 
         // write: the file lands in the TREE and main is untouched — the isolation hole itself.
         let (st, v) = q("/tools/write?tree=t", r#"{"path":"written.txt","content":"x"}"#).await;
         assert_eq!(st, 200, "{v}");
-        assert!(root.join(".agents/t/written.txt").exists(), "the write did not land in the tree");
+        assert!(tree.join("written.txt").exists(), "the write did not land in the tree");
         assert!(!root.join("written.txt").exists(), "the write landed in MAIN: the isolation hole");
 
         // glob: walks the tree, and never main.
@@ -241,7 +244,7 @@ mod tests {
         // and a URL a person happened to type must not override it.
         let (st, v) = q("/tools/exec?tree=main", r#"{"cmd":"pwd","tree":"t"}"#).await;
         assert_eq!(st, 200, "{v}");
-        assert!(v["stdout"].as_str().unwrap().trim().ends_with("/.agents/t"), "the query overrode the body: {v}");
+        assert!(v["stdout"].as_str().unwrap().trim().ends_with("/.agents/t/workspaces/api"), "the query overrode the body: {v}");
 
         // An unknown tree in the query is named, never silently main.
         let (st, v) = q("/tools/read?tree=nope", r#"{"path":"in-main.txt"}"#).await;

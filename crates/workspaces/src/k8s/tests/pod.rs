@@ -81,7 +81,7 @@ pub(crate) fn a_trees_reported_path_is_inside_the_pods_own_mount() {
         .find(|m| m.name == "live" && m.sub_path.is_none())
         .expect("the worktree is mounted");
     let reported = crate::crd::tree_path("fix-auth");
-    assert_eq!(reported, format!("{}/.agents/fix-auth", live.mount_path), "{reported}");
+    assert_eq!(reported, format!("{}/.agents/fix-auth/workspace", live.mount_path), "{reported}");
     // And the CR id is NOT what it is built from: the two differ here, which is the bug.
     assert_ne!(spec.name, "ws-1", "the fixture must distinguish the id from the display name");
     assert!(!reported.contains("/ws-1/"), "the reported path names the CR id: {reported}");
