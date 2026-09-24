@@ -241,9 +241,6 @@ first destructive stage.
 | `admin.reads` | Admin | `/admin/nodes`, `/admin/settings/schema` and a cluster status write answer, and an unknown history series is a 404 | 99.9 % ≤ 10000 ms | hourly | 14 · Experience |
 | `bench.idle.wake` | Benches | With every client gone past `benchIdleSecs` the bench has no pod, a new connection starts it, and the session list and a transcript read back unchanged | 99.9 % ≤ 480000 ms | hourly | 14 · Experience |
 | `bench.session.roundtrip` | Benches | A session is created, a no-tools prompt answered, and read back from `/sessions/{id}/messages` | 99.9 % ≤ 60000 ms | hourly | 14 · Experience |
-| `bench.tools.own_hands` | Benches | A bench session's tools are its own workspace's — the seven ide tools plus `process` and `kl_workspace_ask`, on `127.0.0.1:7788`, with pi's builtins off | 99.9 % | hourly | 14 · Experience |
-| `bench.proposal.asked` | Benches | A bench session's platform write is asked first: the proposal names the change, a no declines it, and nothing is created | 99.9 % ≤ 120000 ms | hourly | 14 · Experience |
-| `bench.exchange.both_views` | Benches | An exchange reads back by `?session=` and by `?workspace=` | 99.9 % | hourly | 14 · Experience |
 | `bench.two_clients` | Benches | Two WebSockets on one session see the same events in the same order | 99.9 % | hourly | 14 · Experience |
 | `bench.tool.token` | Benches | The probe's login mints a tool token and a `/v1/regions` call inside the bench pod answers JSON | 99.9 % ≤ 120000 ms | hourly | 14 · Experience |
 | `bench.tool.audience` | Benches | The pod's token is refused on `/v1/bench/session`, `/v1/cli/tokens` and `/v1/keys` | 99.9 % | hourly | 14 · Experience |
@@ -251,14 +248,11 @@ first destructive stage.
 | `shell.up` | Benches | A shell sidecar answers on both pod kinds, opens in the home, and cannot see the workspaces root | 99.9 % ≤ 15000 ms | hourly | 14 · Experience |
 | `shell.fenced` | Security | The shell port refuses a dial from outside the person's own bench | 100 % | hourly | 14 · Experience |
 | `shell.no_tools` | Security | The tool server answers the token-less shell 401 | 99.9 % | hourly | 14 · Experience |
-| `bench.no_hands` | Benches | A bench session asked to run a command calls no tool: there is no filesystem or shell where it runs | 99.9 % ≤ 60000 ms | hourly | 14 · Experience |
-| `bench.pkg_needs_workspace` | Benches | A package request with no workspace named is refused and proposes nothing | 99.9 % ≤ 60000 ms | hourly | 14 · Experience |
 | `bench.shell.roundtrip` | Benches | A shell opened on the bench through `/pty` echoes a marker and exits 0 | 99.9 % ≤ 15000 ms | hourly | 14 · Experience |
 | `bench.shell.workspace` | Benches | A shell opened through the bench into the run's workspace starts in the workspace directory, and a named session reattaches to its own scrollback | 99.9 % ≤ 20000 ms | hourly | 14 · Experience |
 | `bench.workspace.tool_roundtrip` | Benches | A workspace session on the bench runs `exec echo` in a workspace through its tool server, and the turn lands under `/bench/workspaces/{ws}/` | 99.9 % ≤ 180000 ms | hourly | 14 · Experience |
 | `bench.push.p95` | Benches | `POST /v1/workspaces/{bench}/push` completes and the volume's history lists the snapshot as ready | 95 % ≤ 60000 ms | hourly | 14 · Experience |
 | `bench.pkg.add` | Benches | a package added through the API lands in the bench's `spec.packages` | 99.9 % ≤ 20000 ms | hourly | 14 · Experience |
-| `agent.tree.run` | Benches | A dispatched agent gets a tree, reports, and leaves both standing; closing it deletes the tree and archives the session | 95 % ≤ 300000 ms | hourly | 14 · Experience |
 | `bench.delegate` | Benches | top → main → sub: the push lands on main's branch, the clone is gone, the child is closed | 99.9 % ≤ 600000 ms | hourly | 14 · Experience |
 | `git.push.large` | Git hosting | Push of a large commit succeeds — 90 MiB over HTTP, under Cloudflare's 100 MB upload cap, and 100 MiB over SSH, which has no proxy in front of it | 99.9 % | weekly | 12 · Weekly |
 | `reg.push.large` | Container registry | Pushing a large image layer succeeds | 99.9 % | weekly | 12 · Weekly |

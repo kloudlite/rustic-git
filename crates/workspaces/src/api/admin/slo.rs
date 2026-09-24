@@ -415,11 +415,10 @@ mod tests {
         let ids: Vec<&str> =
             run_journey(Suite::Hourly, Some(3)).into_iter().flat_map(|s| s.ids).collect();
         assert!(!ids.is_empty());
-        // `bench.*`, the three `shell.*` ids (the bench pod's sidecar, walked by the same
-        // journey — spec §2.5, 2026-09-17), and `agent.tree.run`, which is a subagent dispatched
-        // FROM the bench and so is the bench pod's work under another name (spec §4.8).
+        // `bench.*` and the `shell.*` ids (the bench pod's sidecar, walked by the same journey —
+        // spec §2.5, 2026-09-17).
         assert!(
-            ids.iter().all(|id| id.starts_with("bench.") || id.starts_with("shell.") || *id == "agent.tree.run"),
+            ids.iter().all(|id| id.starts_with("bench.") || id.starts_with("shell.")),
             "{ids:?}"
         );
         assert!(!ids.contains(&"bench.workspace.tool_roundtrip"), "group 0 walks that one");

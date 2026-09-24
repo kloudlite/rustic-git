@@ -74,3 +74,14 @@ test("abort marks the open turn interrupted and clears running", async () => {
   assert.equal(s.running, false);
   release();
 });
+
+test("top and main tiers have no filesystem or shell tools", () => {
+  const forbidden = ["bash", "write", "edit"];
+  for (const tier of ["top", "main"] as const) {
+    const tools = TIER_TOOLS[tier];
+    assert.ok(Array.isArray(tools));
+    for (const name of forbidden) {
+      assert.ok(!tools.includes(name), `${tier} must not include ${name}`);
+    }
+  }
+});

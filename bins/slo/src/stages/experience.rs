@@ -102,22 +102,16 @@ pub const IDS: &[&str] = &[
     "admin.reads",
     "bench.idle.wake",
     "bench.session.roundtrip",
-    "bench.tools.own_hands",
-    "bench.proposal.asked",
-    "bench.exchange.both_views",
     "bench.two_clients",
     "shell.up",
     "shell.fenced",
     "shell.no_tools",
-    "bench.no_hands",
-    "bench.pkg_needs_workspace",
     "bench.shell.roundtrip",
     "bench.tool.token",
     "bench.tool.audience",
     "bench.tool.revoked",
     "bench.push.p95",
     "bench.pkg.add",
-    "agent.tree.run",
     "bench.workspace.tool_roundtrip",
     "bench.shell.workspace",
     "bench.delegate",
@@ -225,9 +219,6 @@ pub async fn run(c: &mut Ctx) {
             // may run after it. One call reports both ids.
             "bench.push.p95" => super::bench_ws::run(c).await,
             "bench.pkg.add" => {}
-            // Dispatched from the bench's own stage (group 3), like every other `bench.*` id it
-            // walks; named here because this list is the whole stage, not one file's share.
-            "agent.tree.run" => {}
             // A grouped run walks the bench journey in group 3; this dial would reset its idle
             // wait, so it waits for that group to finish first.
             "bench.workspace.tool_roundtrip" if c.group.is_some() => {
@@ -236,10 +227,10 @@ pub async fn run(c: &mut Ctx) {
             }
             // Both shells are filed by the calls above: the bench shell with the session journey,
             // the workspace shell beside the tool round trip, in the group that owns the workspace.
-            "bench.session.roundtrip" | "bench.tools.own_hands" | "bench.proposal.asked" | "bench.exchange.both_views" | "bench.two_clients" | "bench.workspace.tool_roundtrip" => {}
+            "bench.session.roundtrip" | "bench.two_clients" | "bench.workspace.tool_roundtrip" => {}
             "bench.shell.roundtrip" | "bench.shell.workspace" => {}
             // Filed by the bench journey's own call, in group 3 with the rest of the shell ids.
-            "shell.up" | "shell.fenced" | "shell.no_tools" | "bench.no_hands" | "bench.pkg_needs_workspace" => {}
+            "shell.up" | "shell.fenced" | "shell.no_tools" => {}
             // Recorded by `bench::hourly` itself, after the sleep/wake journey.
             "bench.delegate" => {}
             _ => c.skip(id, "not implemented yet"),

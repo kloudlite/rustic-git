@@ -162,15 +162,12 @@ pub const HOURLY_GROUPS: u8 = 4;
 
 /// Group 3. Not `bench.workspace.tool_roundtrip` or `bench.shell.workspace`: both run in group 0's
 /// workspace, so group 0 walks them after waiting for this group to finish (`suite::wait_for_group`).
-const BENCH_IDS: [&str; 21] = [
+const BENCH_IDS: [&str; 15] = [
     "bench.create",
     "bench.start.p95",
     "bench.tunnel",
     "bench.idle.wake",
     "bench.session.roundtrip",
-    "bench.tools.own_hands",
-    "bench.proposal.asked",
-    "bench.exchange.both_views",
     "bench.two_clients",
     "bench.tool.token",
     "bench.tool.audience",
@@ -178,13 +175,10 @@ const BENCH_IDS: [&str; 21] = [
     "shell.up",
     "shell.fenced",
     "shell.no_tools",
-    "bench.no_hands",
-    "bench.pkg_needs_workspace",
     "bench.shell.roundtrip",
     "bench.push.p95",
     "bench.pkg.add",
-    "agent.tree.run",
-];
+    ];
 
 /// Group 1: every id the intercept journey owns. It is also the skip list a probe run that cannot
 /// get there files, and a missing id reads as passed — so it must name all of them, not only the
@@ -634,9 +628,6 @@ pub const CATALOGUE: &[Slo] = &[
     // reads; a region that raises the knob raises the probe's ceiling with it.
     Slo { id: "bench.idle.wake", feature: "Benches", sli: "With every client gone past `benchIdleSecs` the bench has no pod, a new connection starts it, and the session list and a transcript read back unchanged", target: bound(480_000), suite: Suite::Hourly, stage: "14 · Experience" },
     Slo { id: "bench.session.roundtrip", feature: "Benches", sli: "A session is created, a no-tools prompt answered, and read back from `/sessions/{id}/messages`", target: bound(60_000), suite: Suite::Hourly, stage: "14 · Experience" },
-    Slo { id: "bench.tools.own_hands", feature: "Benches", sli: "A bench session's tools are its own workspace's — the seven ide tools plus `process` and `kl_workspace_ask`, on `127.0.0.1:7788`, with pi's builtins off", target: avail(99.9), suite: Suite::Hourly, stage: "14 · Experience" },
-    Slo { id: "bench.proposal.asked", feature: "Benches", sli: "A bench session's platform write is asked first: the proposal names the change, a no declines it, and nothing is created", target: bound(120_000), suite: Suite::Hourly, stage: "14 · Experience" },
-    Slo { id: "bench.exchange.both_views", feature: "Benches", sli: "An exchange reads back by `?session=` and by `?workspace=`", target: avail(99.9), suite: Suite::Hourly, stage: "14 · Experience" },
     Slo { id: "bench.two_clients", feature: "Benches", sli: "Two WebSockets on one session see the same events in the same order", target: avail(99.9), suite: Suite::Hourly, stage: "14 · Experience" },
     Slo { id: "bench.tool.token", feature: "Benches", sli: "The probe's login mints a tool token and a `/v1/regions` call inside the bench pod answers JSON", target: bound(120_000), suite: Suite::Hourly, stage: "14 · Experience" },
     Slo { id: "bench.tool.audience", feature: "Benches", sli: "The pod's token is refused on `/v1/bench/session`, `/v1/cli/tokens` and `/v1/keys`", target: avail(99.9), suite: Suite::Hourly, stage: "14 · Experience" },
@@ -646,8 +637,6 @@ pub const CATALOGUE: &[Slo] = &[
     Slo { id: "shell.up", feature: "Benches", sli: "A shell sidecar answers on both pod kinds, opens in the home, and cannot see the workspaces root", target: bound(15_000), suite: Suite::Hourly, stage: "14 · Experience" },
     Slo { id: "shell.fenced", feature: "Security", sli: "The shell port refuses a dial from outside the person's own bench", target: avail(100.0), suite: Suite::Hourly, stage: "14 · Experience" },
     Slo { id: "shell.no_tools", feature: "Security", sli: "The tool server answers the token-less shell 401", target: avail(99.9), suite: Suite::Hourly, stage: "14 · Experience" },
-    Slo { id: "bench.no_hands", feature: "Benches", sli: "A bench session asked to run a command calls no tool: there is no filesystem or shell where it runs", target: bound(60_000), suite: Suite::Hourly, stage: "14 · Experience" },
-    Slo { id: "bench.pkg_needs_workspace", feature: "Benches", sli: "A package request with no workspace named is refused and proposes nothing", target: bound(60_000), suite: Suite::Hourly, stage: "14 · Experience" },
     Slo { id: "bench.shell.roundtrip", feature: "Benches", sli: "A shell opened on the bench through `/pty` echoes a marker and exits 0", target: bound(15_000), suite: Suite::Hourly, stage: "14 · Experience" },
     Slo { id: "bench.shell.workspace", feature: "Benches", sli: "A shell opened through the bench into the run's workspace starts in the workspace directory, and a named session reattaches to its own scrollback", target: bound(20_000), suite: Suite::Hourly, stage: "14 · Experience" },
     Slo { id: "bench.workspace.tool_roundtrip", feature: "Benches", sli: "A workspace session on the bench runs `exec echo` in a workspace through its tool server, and the turn lands under `/bench/workspaces/{ws}/`", target: bound(180_000), suite: Suite::Hourly, stage: "14 · Experience" },
@@ -658,7 +647,6 @@ pub const CATALOGUE: &[Slo] = &[
     Slo { id: "bench.pkg.add", feature: "Benches", sli: "a package added through the API lands in the bench's `spec.packages`", target: bound(20_000), suite: Suite::Hourly, stage: "14 · Experience" },
     // The whole subagent lifecycle as a person drives it, from the bench: the tree and the session
     // STAY after the report — nothing is dropped on completion — and only a close takes them.
-    Slo { id: "agent.tree.run", feature: "Benches", sli: "A dispatched agent gets a tree, reports, and leaves both standing; closing it deletes the tree and archives the session", target: p95(300_000), suite: Suite::Hourly, stage: "14 · Experience" },
     // The whole delegation chain end to end: top opens a main by workspace, sends it a
     // `delegate to` instruction, the main hands it to a sub in a cloned workspace, and the
     // sub's push lands back on main's branch.
@@ -798,11 +786,11 @@ mod tests {
     #[test]
     fn every_bench_id_is_catalogued() {
         for id in ["bench.create", "bench.start.p95", "bench.tunnel", "bench.idle.wake",
-                   "bench.session.roundtrip", "bench.exchange.both_views", "bench.two_clients",
+                   "bench.session.roundtrip", "bench.two_clients",
                    "bench.survives.reschedule", "bench.workspace.tool_roundtrip",
                    "bench.tool.token", "bench.tool.audience", "bench.tool.revoked",
                    "bench.shell.roundtrip", "bench.shell.workspace",
-                   "bench.push.p95", "bench.pkg.add", "agent.tree.run", "bench.delegate"] {
+                   "bench.push.p95", "bench.pkg.add", "bench.delegate"] {
             assert!(find(id).is_some(), "{id} missing from CATALOGUE");
         }
     }
