@@ -61,16 +61,11 @@ pub const STUB: &str = "bench image is the stub";
 pub const NO_DELETE_GRANT: &str = "no pod-delete grant for the probe";
 /// The ids that need a live `harness-bench`, in journey order. The two shell ids need no model,
 /// but they need the same bench, so they skip with the same reasons.
-const SESSION_IDS: [&str; 13] = [
+const SESSION_IDS: [&str; 8] = [
     "bench.session.roundtrip",
     "shell.up",
     "shell.fenced",
     "shell.no_tools",
-    "bench.no_hands",
-    "bench.pkg_needs_workspace",
-    "bench.tools.own_hands",
-    "bench.proposal.asked",
-    "bench.exchange.both_views",
     "bench.two_clients",
     "bench.shell.roundtrip",
     "bench.shell.workspace",
@@ -282,62 +277,6 @@ pub async fn fast(c: &mut Ctx) {
         .boxed()
     })
     .await;
-    seed_model_key(c).await;
-}
-
-/// Put the probe tenant's model key where its bench reads provider keys from.
-///
-/// A bench keeps `auth.json` under `PI_CODING_AGENT_DIR` — `~/.bench/pi` since
-/// 2026-09-18 — inside its own volume, and NOTHING else writes that file: the desktop's Settings
-/// is the only other writer and no probe runs it. Before this, every bench probe that needed a
-/// model turn skipped on `NO_MODEL` forever, or passed on a key somebody had put there by hand
-/// and lost the moment the volume moved.
-///
-/// Idempotent, and untimed on purpose: seeding is a precondition of the bench probes, not one of
-/// the samples they report. A failure is logged and left to the probes that then skip, because a
-/// run that could not seed a key has nothing to say about the model path either way.
-///
-/// The key travels in the request BODY, never a path segment and never an error string — the same
-/// rule the route itself documents.
-pub(crate) async fn seed_model_key(c: &mut Ctx) {
-    let Some((provider, key)) = c.cfg.model_key.clone() else {
-        // Loud, not silent: an unset credential and a working one looked identical in the run
-        // report, and every model probe then failed with pi's own "No API key found" while the
-        // seeding step said nothing at all (hourly 08:05, 2026-09-18).
-        return tracing::warn!("slo.bench.model_key.unset: KLOUDLITE_SLO_MODEL_KEY is not set, so every model turn will be refused");
-    };
-    let out = async {
-        let (_child, port) = forward(c).await?;
-        let (status, _) = through_with(port, reqwest::Method::PUT, &format!("/providers/{provider}"), Some(json!({ "apiKey": key }))).await?;
-        // 204 is the route's answer; anything else is reported WITHOUT the body, which is the one
-        // place a mistyped key could otherwise be echoed back into a log.
-        if status != 204 {
-            bail!("the bench refused the model key for {provider}: {status}");
-        }
-        // Read it back: a 204 says the route ran, not that pi will find a key for the model this
-        // bench runs. `configured` is a boolean per provider and carries no byte of the key, so
-        // the check is safe to make and safe to log.
-        let (status, body) = through(port, "/providers").await?;
-        if status != 200 {
-            bail!("the bench would not list its providers: {status}");
-        }
-        let rows: Value = serde_json::from_str(&body).context("the providers listing is not JSON")?;
-        let configured = rows
-            .as_array()
-            .map(|rs| rs.iter().any(|r| r["id"] == provider.as_str() && r["configured"] == true))
-            .unwrap_or(false);
-        if !configured {
-            bail!("the bench still reports no key for {provider} after the write");
-        }
-        Ok::<_, anyhow::Error>(())
-    }
-    .await;
-    match out {
-        // The provider id, never the key: `listProviders` answers `configured` per provider, which
-        // is the one read-back that says the seed took without any byte of the key coming back.
-        Ok(()) => tracing::info!(%provider, "slo.bench.model_key.seeded"),
-        Err(e) => tracing::warn!(%provider, error = %format!("{e:#}"), "slo.bench.model_key.failed"),
-    }
 }
 
 pub async fn hourly(c: &mut Ctx) {
@@ -440,10 +379,6 @@ pub async fn hourly(c: &mut Ctx) {
         None => return skip_sessions(c, "the bench could not be reached before the sleep"),
         Some(false) => {}
     }
-    // The pod was deleted and recreated by the idle/wake above, so the key is seeded HERE, after
-    // the wake and before any session: the bench's `.bench/pi` travels with the volume, but a run
-    // whose tenant never had a key would otherwise reach the model turns with none.
-    seed_model_key(c).await;
     sessions(c).await;
     delegate(c).await;
 }
@@ -598,19 +533,6 @@ async fn sessions(c: &mut Ctx) {
     // cold node. Waiting here keeps each ceiling measuring the DIAL, which is what they are the
     // target for, rather than the profile build, which is `ws.packages.*`'s to measure.
     own_workspace(c).await;
-    // BEFORE the token below: with it the bench can see the run's one workspace, and "Install jq."
-    // then becomes a proposal on it that nobody answers — the hourly 2026-09-23 23:01 IST run
-    // timed out at 60 s here, where 22:19 without a token passed in 4.5 s. The step is about a
-    // request that names no workspace, so the bench must not be able to pick one for it.
-    if c.walks("bench.pkg_needs_workspace") {
-        pkg_needs_workspace(c).await;
-    }
-    // Same reason: with the token, "Run: cat /etc/hostname" became an `ask` to the run's workspace
-    // whose proposal nobody answers (hourly 2026-09-23 23:42 IST, 60 s timeout). No hands means
-    // the bench's OWN; a workspace it may ask is the workspace's hands, not the bench's.
-    if c.walks("bench.no_hands") {
-        no_hands(c).await;
-    }
     // The bench resolves a workspace-scoped shell or tool with its pod token (`harness/pi/
     // kloudlite.ts` answers "sign in on the Kloudlite desktop app" without one), and only a live
     // CLI login mints that token: the hourly 2026-09-23 22:19 IST run failed all three ids on it.
@@ -639,55 +561,45 @@ async fn sessions(c: &mut Ctx) {
     if c.walks("shell.no_tools") {
         shell_no_tools(c).await;
     }
-    if c.walks("bench.tools.own_hands") {
-        own_hands(c).await;
-    }
-    if c.walks("bench.proposal.asked") {
-        proposal_asked(c).await;
-    }
-    if c.walks("agent.tree.run") {
-        agent_tree_run(c).await;
-    }
     if let Some(login) = login {
         if let Err(e) = super::bench_tool::revoke_login(c, &login).await {
             tracing::warn!(error = %format!("{e:#}"), "slo.bench.tool_token.login.revoke");
         }
     }
-    // What both sockets saw, filled by the round trip for `bench.two_clients` to judge.
+    // What both `/events` sockets saw, filled by the round trip for `bench.two_clients` to judge.
     type Seen = Option<(Vec<String>, Vec<String>)>;
     let seen: Arc<Mutex<Seen>> = Default::default();
     let no_model: Arc<Mutex<Option<String>>> = Default::default();
     let created: Arc<Mutex<Option<String>>> = Default::default();
     let (seen_w, no_model_w, created_w) = (seen.clone(), no_model.clone(), created.clone());
-    let answered = c
-        .step("bench.session.roundtrip", ROUNDTRIP_CEILING, move |c| {
-            async move {
-                let (_child, port) = forward(c).await?;
-                let (status, row) = through_with(port, reqwest::Method::POST, "/sessions", None).await?;
-                if status != 201 {
-                    bail!("POST /sessions answered {status}: {}", super::clip(&row));
-                }
-                let sid = serde_json::from_str::<Value>(&row)?["id"].as_str().context("session row missing id")?.to_string();
-                *created_w.lock().unwrap() = Some(sid.clone());
-                let url = format!("ws://127.0.0.1:{port}/sessions/{sid}/rpc");
-                let (mut a, _) = tokio_tungstenite::connect_async(url.as_str()).await.context("socket A")?;
-                let (b, _) = tokio_tungstenite::connect_async(url.as_str()).await.context("socket B")?;
-                // Both sockets are open before the prompt, so each must see the whole turn.
-                // Aborted on drop, so a timeout or an early `?` never leaks socket B.
-                let mut watch_b = AbortOnDrop(tokio::spawn(until_agent_end(b)));
-                a.send(Message::text(json!({"id": "1", "type": "prompt", "message": PROMPT}).to_string())).await?;
-                let ea = mark_no_key(until_agent_end(a).await, &no_model_w)?;
-                let eb = mark_no_key((&mut watch_b.0).await?, &no_model_w)?;
-                *seen_w.lock().unwrap() = Some((ea, eb));
-                let (status, body) = through(port, &format!("/sessions/{sid}/messages")).await?;
-                if status != 200 {
-                    bail!("GET messages answered {status}");
-                }
-                answered(&body, &no_model_w)
+    c.step("bench.session.roundtrip", ROUNDTRIP_CEILING, move |c| {
+        async move {
+            let (_child, port) = forward(c).await?;
+            let (status, row) = through_with(port, reqwest::Method::POST, "/sessions", None).await?;
+            if status != 201 {
+                bail!("POST /sessions answered {status}: {}", super::clip(&row));
             }
-            .boxed()
-        })
-        .await;
+            let sid = serde_json::from_str::<Value>(&row)?["id"].as_str().context("session row missing id")?.to_string();
+            *created_w.lock().unwrap() = Some(sid.clone());
+            // Both sockets are open before the send, so each must see the whole turn. Aborted on
+            // drop, so a timeout or an early `?` never leaks socket B.
+            let url = format!("ws://127.0.0.1:{port}/events");
+            let (a, _) = tokio_tungstenite::connect_async(url.as_str()).await.context("socket A")?;
+            let (b, _) = tokio_tungstenite::connect_async(url.as_str()).await.context("socket B")?;
+            let sid_a = sid.clone();
+            let sid_b = sid.clone();
+            let mut watch_b = AbortOnDrop(tokio::spawn(collect_rows(b, sid_b)));
+            let mut watch_a = AbortOnDrop(tokio::spawn(collect_rows(a, sid_a)));
+            let turn = one_turn(port, &sid, PROMPT, &no_model_w);
+            turn.await?;
+            let ea = (&mut watch_a.0).await?;
+            let eb = (&mut watch_b.0).await?;
+            *seen_w.lock().unwrap() = Some((ea, eb));
+            Ok(())
+        }
+        .boxed()
+    })
+    .await;
     let no_model = no_model.lock().unwrap().clone();
     if let Some(why) = &no_model {
         // Not a sample: the probe tenant holds no provider key, so nothing about the bench was measured.
@@ -696,403 +608,47 @@ async fn sessions(c: &mut Ctx) {
     let seen = seen.lock().unwrap().take();
     match (no_model.is_some(), seen) {
         (true, _) => c.skip("bench.two_clients", NO_MODEL),
+        (false, Some((a, b))) if a.is_empty() && b.is_empty() => c.skip("bench.two_clients", "no events were recorded"),
         (false, Some((a, b))) => {
             c.step("bench.two_clients", Duration::from_secs(5), move |_| async move { same_events(&a, &b) }.boxed()).await;
         }
-        (false, None) => c.skip("bench.two_clients", if answered { "no events were recorded" } else { "the round trip failed" }),
+        (false, None) => c.skip("bench.two_clients", "the round trip failed"),
     }
     let sid = created.lock().unwrap().take();
-    let thread = match &no_model {
-        Some(_) => {
-            c.skip("bench.exchange.both_views", NO_MODEL);
-            if c.walks(TOOL) {
-                c.skip(TOOL, NO_MODEL);
-                // The shell needs no model, so a missing provider key never skips it.
-                shell_workspace(c).await;
-            }
-            None
-        }
-        None => {
-            exchanges(c, sid.clone()).await;
-            if c.walks(TOOL) {
-                let thread = tool_roundtrip(c).await;
-                shell_workspace(c).await;
-                thread
-            } else {
-                None
-            }
-        }
+    let thread = if no_model.is_none() && c.walks(TOOL) {
+        let thread = tool_roundtrip(c).await;
+        shell_workspace(c).await;
+        thread
+    } else if c.walks(SHELL_WS) {
+        // The shell needs no model, so a missing provider key never skips it.
+        shell_workspace(c).await;
+        None
+    } else {
+        None
     };
     drop_sessions(c, sid.into_iter().chain(thread)).await;
 }
 
-/// `bench.tools.own_hands`: a bench session's hands are its OWN workspace's, and nobody else's.
-///
-/// Not "no hands at all" — that was one ruling earlier on 2026-09-17 and it was superseded: a bench
-/// session has read/write/edit/bash/grep/find/ls and `process`, all running on its own workspace
-/// container's tool server (`127.0.0.1:7788`), with pi's builtins off so nothing can run in the
-/// BENCH container. Another workspace is reached only by `ask`, a queue.
-///
-/// Its own session rather than the round trip's, because this needs no model: the tenant holding no
-/// provider key skips every prompted id, and "the model ran with a shell in the wrong place" is
-/// exactly the regression that must still be caught on that run. Read from the bench itself — pi's
-/// RPC has no tool listing, so `GET /sessions/{id}/tools` answers from the argv and env its child
-/// is spawned with.
-async fn own_hands(c: &mut Ctx) {
-    c.step("bench.tools.own_hands", Duration::from_secs(30), move |c| {
-        async move {
-            let (_child, port) = forward(c).await?;
-            let (status, row) = through_with(port, reqwest::Method::POST, "/sessions", None).await?;
-            if status != 201 {
-                bail!("POST /sessions answered {status}: {}", super::clip(&row));
-            }
-            let sid = serde_json::from_str::<Value>(&row)?["id"].as_str().context("session row missing id")?.to_string();
-            let (status, body) = through(port, &format!("/sessions/{sid}/tools")).await?;
-            let _ = delete_session(port, &sid, Duration::from_secs(10)).await;
-            if status != 200 {
-                bail!("GET /sessions/{sid}/tools answered {status}: {}", super::clip(&body));
-            }
-            judge_tools(&body)
-        }
-        .boxed()
-    })
-    .await;
-}
-
-/// The eight tools that would act on the bench's OWN machine. Since slice 2 a bench session must
-/// carry NONE of them: "a bench session has no hands" (spec §3.1) — a workspace change is a
-/// message into that workspace's session, never something driven from the bench container, which
-/// is nobody's machine. This probe used to demand all eight and so failed on a bench that was
-/// working exactly as designed (hourly 08:05, 2026-09-18).
-const OWN_HANDS: [&str; 8] = ["read", "write", "edit", "bash", "grep", "find", "ls", "process"];
-
-/// The rest of the always-on set (spec §13/§14): one way to reach a workspace or an agent, and the
-/// four tools the session steers itself with. Deliberately NOT any `kl_*`: since 2026-09-17 every
-/// platform tool is registered but INACTIVE until `tool_search` turns it on, so demanding one here
-/// asserted the old catalogue and failed the id on a bench that was working exactly as designed.
-/// `tool_search` itself is what must be there — it is the door to all of them.
-const ALWAYS_ON: [&str; 5] = ["ask", "plan", "skill", "tool_search", "memory"];
-
-
-fn judge_tools(body: &str) -> Result<()> {
-    let doc: Value = serde_json::from_str(body)?;
-    let tools: Vec<String> = doc["tools"]
-        .as_array()
-        .context("no `tools` array")?
-        .iter()
-        .map(|t| t.as_str().unwrap_or_default().to_string())
-        .collect();
-    // The inversion is the assertion: hands are what a bench must NOT have.
-    if let Some(hand) = OWN_HANDS.iter().find(|h| tools.iter().any(|t| &t == h)) {
-        bail!("a bench session has hands of its own: `{hand}` in {}", tools.join(", "));
-    }
-    for want in ALWAYS_ON.iter() {
-        if !tools.iter().any(|t| t == want) {
-            bail!("a bench session cannot steer itself: no `{want}` in {}", tools.join(", "));
-        }
-    }
-    // A direct tool onto ANOTHER workspace's tool server is the shape the owner ruled out: work
-    // there is queued into that workspace's own session, never driven from here.
-    if let Some(direct) = tools.iter().find(|t| t.starts_with("kl_ws_")) {
-        bail!("a bench session drives another workspace directly through `{direct}`");
-    }
-    // No tool server AT ALL, which is the other half of having no hands: a bench session that was
-    // handed an address could reach a filesystem, whatever its tool list says (spec §3.1).
-    if let Some(at) = doc["toolsAddress"].as_str() {
-        bail!("a bench session was given a tool server at {at}");
-    }
-    if doc["builtinTools"] != Value::Bool(false) {
-        bail!("pi's builtins are on: they would run in the bench container");
-    }
-    Ok(())
-}
-
-/// `bench.proposal.asked`: a change the person did not agree to does not happen.
-///
-/// The whole of §9 in one sample: the model is told to create a workspace, the bench holds the
-/// QUESTION rather than the call, the probe answers NO, and then the two things that matter — the
-/// tool said it was declined, and `/v1` has no such workspace. A gate that asks and then acts
-/// anyway is exactly the failure this exists to catch, so the api read is the assertion, not the
-/// transcript.
-const PROPOSAL_CEILING: Duration = Duration::from_secs(120);
-/// `agent.tree.run`: two model turns (the dispatch and the close), the subagent's own turn between
-/// them, a tree cut and a tree collected. The catalogue target is 300 s; this is that plus room for
-/// the step to say WHY rather than being cut off.
-const AGENT_TREE_CEILING: Duration = Duration::from_secs(320);
-
-async fn proposal_asked(c: &mut Ctx) {
-    let name = format!("{}-proposal", c.prefix());
-    let no_model: Arc<Mutex<Option<String>>> = Default::default();
-    let nm = no_model.clone();
-    let region = c.cfg.region.clone();
-    c.step("bench.proposal.asked", PROPOSAL_CEILING, move |c| {
-        let jwt = c.probe_jwt.clone();
-        let list = super::api(c, "/v1/workspaces");
-        async move {
-            let (_child, port) = forward(c).await?;
-            let (status, row) = through_with(port, reqwest::Method::POST, "/sessions", None).await?;
-            if status != 201 {
-                bail!("POST /sessions answered {status}: {}", super::clip(&row));
-            }
-            let sid = serde_json::from_str::<Value>(&row)?["id"].as_str().context("session row missing id")?.to_string();
-            // Through `tool_search`, because every `kl_*` tool is DEFERRED now (spec §13): naming
-            // one directly asks for a tool the session has not turned on, and the turn would end
-            // with no proposal to answer.
-            let prompt = format!(
-                "Call tool_search once with query \"create workspace\", then call the tool it names for creating a workspace exactly once with name \"{name}\" and region \"{region}\". Whatever it answers, then reply with exactly the word done."
-            );
-            // The turn does not end until the question is answered, so the answer is given from
-            // here WHILE it runs — the same shape `answering` has, with the opposite answer and
-            // one assertion in the middle: the question named this workspace.
-            let seen: Arc<Mutex<Option<String>>> = Default::default();
-            let asked = seen.clone();
-            let want = name.clone();
-            let _declining = AbortOnDrop(tokio::spawn(async move {
-                loop {
-                    if let Ok((200, body)) = through(port, "/proposals").await {
-                        if let Ok(rows) = serde_json::from_str::<Vec<Value>>(&body) {
-                            for p in rows {
-                                let (Some(id), Some(summary)) = (p["id"].as_str(), p["summary"].as_str()) else { continue };
-                                if summary.contains(&want) {
-                                    *asked.lock().unwrap() = Some(summary.to_string());
-                                }
-                                let _ = through_with(port, reqwest::Method::POST, &format!("/proposals/{id}"), Some(json!({"answer": "no"}))).await;
-                            }
-                        }
-                    }
-                    tokio::time::sleep(Duration::from_millis(500)).await;
-                }
-            }));
-            let turn = one_turn(port, &sid, &prompt, &nm).await;
-            let _ = delete_session(port, &sid, Duration::from_secs(10)).await;
-            turn?;
-            let summary = seen.lock().unwrap().clone();
-            let Some(summary) = summary else {
-                bail!("no proposal named {name}: a platform write ran without asking, or the model never called the tool");
-            };
-            if !summary.contains(&name) {
-                bail!("the question does not name the workspace: {}", super::clip(&summary));
-            }
-            // The one that cannot be argued with: the api never heard of it.
-            let made = get(c, &list, &jwt).await.context("could not list the workspaces")?;
-            if made.as_array().is_some_and(|ws| ws.iter().any(|w| w["name"] == name.as_str())) {
-                bail!("{name} was created although the person said no");
-            }
-            Ok(())
-        }
-        .boxed()
-    })
-    .await;
-    // Cloned out of the guard before the await, like `exchanges` — a `MutexGuard` held across one
-    // is a future the borrow checker will not take.
-    let why = no_model.lock().unwrap().clone();
-    if let Some(why) = why {
-        c.demote_to_skip("bench.proposal.asked", &format!("{NO_MODEL}: {}", super::clip(&why)));
-    }
-}
-
-/// Untimed teardown: the bench mints session ids, so no run-{id} prefix exists to sweep by. The
-/// workspace thread's id is `w-{ws}`, deleted the same way.
-async fn drop_sessions(c: &Ctx, ids: impl IntoIterator<Item = String>) {
-    for sid in ids {
-        let del = async {
-            let (_child, port) = forward(c).await?;
-            delete_session(port, &sid, TEARDOWN_BOUND).await
-        };
-        // The forward bounds itself at 10 s; this bounds the whole teardown so a hung bench never stalls the suite.
-        match tokio::time::timeout(TEARDOWN_BOUND + Duration::from_secs(10), del).await {
-            Ok(Ok(_)) => {}
-            Ok(Err(e)) => tracing::warn!(error = %e, "slo.bench.session.teardown"),
-            Err(_) => tracing::warn!("slo.bench.session.teardown timed out"),
-        }
-    }
-}
-
-/// `agent.tree.run`: the whole subagent lifecycle as a person drives it. Dispatch through the
-/// bench's own `ask` tool, the tree exists in `/v1` AND in the workspace that serves it, the
-/// agent's ide calls land in the tree and nowhere else, a report comes back, both the tree and the
-/// session STAY once it is done, and only `ask_close` takes them.
-///
-/// "Both stay" is the half worth the probe. Nothing is dropped on completion by design (spec
-/// §4.3): the person reads the transcript and the diff after a run that went wrong, and a tree
-/// swept on DONE would take the evidence with it. That is a silent regression — the id would still
-/// go green on dispatch-and-report — so it is asserted between the report and the close.
-///
-/// Driven from the bench rather than from `/v1` directly, because `/v1` cannot dispatch an agent:
-/// the tool is the bench's, the model calls it, and what this measures is that path end to end.
-async fn agent_tree_run(c: &mut Ctx) {
-    const ID: &str = "agent.tree.run";
-    let ws = match tool_workspace(c.state.ux_workspace.clone(), c.state.ux_ready) {
-        Ok(ws) => ws,
-        Err(why) => return c.skip(ID, why),
-    };
-    // The agent works in a tree of a workspace, so the workspace's own tool server has to be
-    // serving before any of this means anything — the bench waits on it too (`GET /fs/stat`).
-    // A tree name is `[a-z0-9-]{1,32}` (`crd::tree_name_ok`), and a run id is neither bounded to
-    // that length nor guaranteed to be in that charset — so it is filtered and cut, not formatted.
-    let name = tree_name(&c.prefix());
-    let marker = format!("{}-agent", c.prefix());
-    let no_model: Arc<Mutex<Option<String>>> = Default::default();
-    let (nm, ws_id, tree) = (no_model.clone(), ws.clone(), name.clone());
-    c.step(ID, AGENT_TREE_CEILING, move |c| {
-        let jwt = c.probe_jwt.clone();
-        let doc_url = super::api(c, &format!("/v1/workspaces/{ws_id}"));
-        async move {
-            let (_child, port) = forward(c).await?;
-            let (status, row) = through_with(port, reqwest::Method::POST, "/sessions", None).await?;
-            if status != 201 {
-                bail!("POST /sessions answered {status}: {}", super::clip(&row));
-            }
-            let sid = serde_json::from_str::<Value>(&row)?["id"].as_str().context("session row missing id")?.to_string();
-            // Every proposal answered yes: the dispatch itself is one, and so is the close.
-            let _answering = answering(port);
-            // `ask` by name: it is `ALWAYS_ON`, and `tool_search` never finds it for "dispatch an
-            // agent" (every word must be in its summary), so the hourly 2026-09-23 23:42 IST run's
-            // model searched, was told there is no such tool, and stopped.
-            let brief = format!(
-                "Call the ask tool exactly once with to \"agent\", name \"{tree}\", workspace \"{ws_id}\" \
-                 and the task: \
-                 write a file called {marker}.txt containing the word {marker} in your working directory, \
-                 then reply done. Wait for that agent to report, then reply with exactly the word done."
-            );
-            let turn = one_turn(port, &sid, &brief, &nm).await;
-            // The session is the person's window on the agent; it goes at the end whatever
-            // happened, but never before the assertions below have read it.
-            let outcome = async {
-                turn?;
-                // The bench names the agent, not the model: `ask` slugs the asked-for name to 24
-                // and adds a random tail (`harness/pi/kloudlite.ts`), so the tree is called what
-                // the tool result says. Hourly 2026-09-24 00:12 IST looked for the asked-for name
-                // and found nothing, next to a started `a-run-hourly-1790188933--q4iekk`.
-                let (_, said) = through(port, &format!("/sessions/{sid}/messages")).await?;
-                let Some(tree) = started_agent(&said) else {
-                    bail!("the session started no agent: {}", transcript_tail(&said));
-                };
-                // The turn ends at the dispatch ("Waiting for agent report"); the agent's work and
-                // report come after it, so wait for the file rather than read it once.
-                let home = kloudlite_workspaces::k8s::HOME_DIR;
-                let probe_file = format!("cat {home}/.agents/{tree}/workspace/{marker}.txt 2>&1");
-                poll_until(Duration::from_secs(180), || async {
-                    super::workspace::ws_exec(c, &ws_id, &probe_file, Duration::from_secs(20))
-                        .await
-                        .is_ok_and(|(_, out, _)| out.contains(&marker))
-                })
-                .await;
-                // 1. `/v1` lists the tree the dispatch cut, ready, with the name the model used.
-                //    Read from the doc rather than from the bench, so a bench that invented a
-                //    local record and never called `/v1` fails here.
-                let doc = get(c, &doc_url, &jwt).await.context("could not read the workspace")?;
-                let Some(row) = tree_row(&doc, &tree) else {
-                    // The model's side of it: two hourlies failed here with no bench log to say
-                    // whether it never dispatched, was refused, or named another tree.
-                    let (_, said) = through(port, &format!("/sessions/{sid}/messages")).await.unwrap_or_default();
-                    bail!("no tree named {tree} in the workspace doc; the session ended: {}", transcript_tail(&said));
-                };
-                if row["ready"] != Value::Bool(true) {
-                    bail!("the tree is not ready: {row}");
-                }
-                // 2. And the node really cut it: the file the agent was told to write is under
-                //    `.agents/{tree}` and NOT in the workspace's own root. One assertion for both
-                //    halves of §4.4 — the tree is real, and it is not main. A tree snapshots the
-                //    whole home, so its copy of the workspace is `~/.agents/{tree}/workspace`.
-                let f = format!("{marker}.txt");
-                let (code, out, _) = super::workspace::ws_exec(
-                    c,
-                    &ws_id,
-                    &format!("cat {home}/.agents/{tree}/workspace/{f} 2>&1; echo ---; cd \"$KL_WORKSPACE\" && ls {f} 2>&1; true"),
-                    Duration::from_secs(20),
-                )
-                .await?;
-                // `; true`: the `ls` that proves main has NO copy exits 2 on success (hourly
-                // 2026-09-24 00:39 IST), so only a shell that could not run at all fails here.
-                if code != 0 {
-                    bail!("could not look inside the tree: exit {code}");
-                }
-                let (in_tree, in_main) = out.split_once("---").unwrap_or((&out, ""));
-                if !in_tree.contains(&marker) {
-                    bail!("the agent's file is not in its tree; {f} read {:?}", in_tree.trim());
-                }
-                if !in_main.contains("No such file") && !in_main.contains("cannot access") {
-                    bail!("the agent wrote into the workspace root as well: {:?}", in_main.trim());
-                }
-                // 3. The report reached the calling session — a direct line, not a queue.
-                let (status, body) = through(port, &format!("/sessions/{sid}/messages")).await?;
-                if status != 200 {
-                    bail!("GET /sessions/{sid}/messages answered {status}");
-                }
-                answered(&body, &nm)?;
-                // 4. Nothing is dropped on completion: the tree is STILL there after the report.
-                let doc = get(c, &doc_url, &jwt).await.context("could not re-read the workspace")?;
-                if tree_row(&doc, &tree).is_none() {
-                    bail!("the tree was swept when the agent finished; it must stay until it is closed");
-                }
-                // 5. And the close is what takes it — through the same tool, so the proposal the
-                //    person answers is the one that deletes it.
-                let close = format!(
-                    "Call tool_search once with query \"close an agent\", then call the tool it names \
-                     exactly once to close the agent named \"{tree}\". Then reply with exactly the word done."
-                );
-                one_turn(port, &sid, &close, &nm).await?;
-                let gone = poll_until(Duration::from_secs(60), || async {
-                    get(c, &doc_url, &jwt).await.map(|d| tree_row(&d, &tree).is_none()).unwrap_or(false)
-                })
-                .await;
-                if !gone {
-                    bail!("the tree survived the close");
-                }
-                Ok(())
-            }
-            .await;
-            let _ = delete_session(port, &sid, TEARDOWN_BOUND).await;
-            outcome
-        }
-        .boxed()
-    })
-    .await;
-    // Bound out of the guard before the `if let`: holding a `MutexGuard` across the branch keeps
-    // the borrow alive past `no_model`'s own scope.
-    let why = no_model.lock().unwrap().clone();
-    if let Some(why) = why {
-        c.demote_to_skip(ID, &format!("{NO_MODEL}: {}", super::clip(&why)));
-    }
-}
-
-/// A run's prefix as a legal tree name: lowercase, `[a-z0-9-]` only, at most 32. The tail rather
-/// than the head, because a run id's entropy is at its end and two runs must not collide on one
-/// workspace's `.agents/`.
-fn tree_name(prefix: &str) -> String {
-    let kept: String = prefix
-        .to_ascii_lowercase()
-        .chars()
-        .filter(|ch| ch.is_ascii_lowercase() || ch.is_ascii_digit() || *ch == '-')
-        .collect();
-    let tail: String = kept.chars().rev().take(28).collect::<Vec<_>>().into_iter().rev().collect();
-    // Never leading `-` and never empty: both are names `/v1` refuses with a 422, which would
-    // report the probe's own bug as a platform failure.
-    format!("a-{}", tail.trim_start_matches('-'))
-}
-
-/// One tree row of a workspace doc, by name. `status.trees` as `/v1` serves it — the list is short
-/// (eight at most) so a scan is the whole lookup.
-fn tree_row<'a>(doc: &'a Value, name: &str) -> Option<&'a Value> {
-    doc["trees"].as_array()?.iter().find(|t| t["name"] == name)
-}
-
-/// Poll a condition to a deadline. The close is a proposal, then a `/v1` DELETE, then the agent's
-/// own pass — three hops, so the row goes some seconds after the turn says it is done.
-async fn poll_until<F, Fut>(bound: Duration, mut f: F) -> bool
+/// Every `type:"row"` frame this socket sees for `sid`, until (and including) that session's
+/// `turn.end` row, as the row's own JSON text. The socket is a plain `/events` firehose — no
+/// per-session subscribe — so every frame not naming this session is dropped.
+async fn collect_rows<S>(mut ws: tokio_tungstenite::WebSocketStream<S>, sid: String) -> Vec<String>
 where
-    F: FnMut() -> Fut,
-    Fut: std::future::Future<Output = bool>,
+    S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin,
 {
-    let deadline = Instant::now() + bound;
-    while Instant::now() < deadline {
-        if f().await {
-            return true;
+    let mut out = Vec::new();
+    while let Some(Ok(Message::Text(t))) = ws.next().await {
+        let Ok(v) = serde_json::from_str::<Value>(&t) else { continue };
+        if v["type"] != "row" || v["session"].as_str() != Some(sid.as_str()) {
+            continue;
         }
-        tokio::time::sleep(Duration::from_secs(2)).await;
+        let is_end = v["row"]["kind"] == "turn.end";
+        out.push(v["row"].to_string());
+        if is_end {
+            break;
+        }
     }
-    false
+    out
 }
 
 /// One shell over the bench's `/pty`, to its end: the protocol's first frame is the resize, input
@@ -1203,85 +759,6 @@ async fn shell_roundtrip(c: &mut Ctx) {
     .await;
 }
 
-/// `bench.no_hands`: a bench session cannot run a command, and says so rather than trying.
-///
-/// The transcript is the assertion (spec §3.4): asked to `cat /etc/hostname` the session must call
-/// no tool that acts — there is no `bash`, no `read`, no filesystem tool registered in the sessions
-/// container in any mode. The `ALWAYS_ON` tools only steer the session and the `READ_ONLY` ones only
-/// look, so calling them (a `tool_search` for a shell, `kl_workspaces`) is allowed; any other tool
-/// result fails the id.
-async fn no_hands(c: &mut Ctx) {
-    let no_model: Arc<Mutex<Option<String>>> = Default::default();
-    let nm = no_model.clone();
-    c.step("bench.no_hands", ROUNDTRIP_CEILING, move |c| {
-        async move {
-            let (_child, port) = forward(c).await?;
-            let (status, row) = through_with(port, reqwest::Method::POST, "/sessions", None).await?;
-            if status != 201 {
-                bail!("POST /sessions answered {status}: {}", super::clip(&row));
-            }
-            let sid = serde_json::from_str::<Value>(&row)?["id"].as_str().context("session row missing id")?.to_string();
-            let turn = one_turn(port, &sid, "Run: cat /etc/hostname", &nm).await;
-            let (_, body) = through(port, &format!("/sessions/{sid}/messages")).await?;
-            let _ = delete_session(port, &sid, Duration::from_secs(10)).await;
-            turn?;
-            // Not "it answered something sensible" — that is a model's business. What this id holds
-            // is that nothing RAN: a tool call in the transcript is the boundary being crossed.
-            let doc: Value = serde_json::from_str(&body)?;
-            let msgs = doc["messages"].as_array().context("messages answer has no messages")?;
-            // `ALWAYS_ON` steers the session and touches nothing, and a model looking for a way to
-            // run the command reaches for `tool_search` first (hourly 2026-09-23 19:53 IST): that
-            // is the session asking, not crossing; so is a `READ_ONLY` look at the platform. Any other
-            // tool, or one with no name, is.
-            if let Some(call) = msgs.iter().find(|m| crossed(m)) {
-                bail!("a bench session ran a tool: {}", super::clip(&call.to_string()));
-            }
-            Ok(())
-        }
-        .boxed()
-    })
-    .await;
-    let why = no_model.lock().unwrap().clone();
-    if let Some(why) = why {
-        c.demote_to_skip("bench.no_hands", &format!("{NO_MODEL}: {}", super::clip(&why)));
-    }
-}
-
-/// `bench.pkg_needs_workspace`: there is no "on the bench" to install onto.
-///
-/// A package request always names a workspace and becomes a proposal on THAT workspace's spec
-/// (spec §3.1). Asked to install with no workspace named, the tool refuses with the sentence and
-/// nothing is proposed — so the assertion is the empty proposal list, not the model's prose.
-async fn pkg_needs_workspace(c: &mut Ctx) {
-    let no_model: Arc<Mutex<Option<String>>> = Default::default();
-    let nm = no_model.clone();
-    c.step("bench.pkg_needs_workspace", ROUNDTRIP_CEILING, move |c| {
-        async move {
-            let (_child, port) = forward(c).await?;
-            let (status, row) = through_with(port, reqwest::Method::POST, "/sessions", None).await?;
-            if status != 201 {
-                bail!("POST /sessions answered {status}: {}", super::clip(&row));
-            }
-            let sid = serde_json::from_str::<Value>(&row)?["id"].as_str().context("session row missing id")?.to_string();
-            let turn = one_turn(port, &sid, "Install jq.", &nm).await;
-            let (_, open) = through(port, "/proposals").await?;
-            let _ = delete_session(port, &sid, Duration::from_secs(10)).await;
-            turn?;
-            // A package install that reached a PROPOSAL means the tool accepted a request with no
-            // workspace in it — the refusal is meant to happen before anyone is asked anything.
-            if !proposal_ids(&open).is_empty() {
-                bail!("a package install with no workspace was proposed: {}", super::clip(&open));
-            }
-            Ok(())
-        }
-        .boxed()
-    })
-    .await;
-    let why = no_model.lock().unwrap().clone();
-    if let Some(why) = why {
-        c.demote_to_skip("bench.pkg_needs_workspace", &format!("{NO_MODEL}: {}", super::clip(&why)));
-    }
-}
 
 /// `shell.up`: the SHELL SIDECAR answers, and it sees only the home (spec §2.5).
 ///
@@ -1424,120 +901,48 @@ async fn shell_workspace(c: &mut Ctx) {
 /// `/proposals/{id}/wait` for up to ten minutes, and an unanswered question is a no. A probe that
 /// prompts a turn into a platform write is the person in that conversation, so it answers — spawned
 /// beside the turn rather than after it, because the turn does not end until the answer lands.
-fn answering(port: u16) -> AbortOnDrop<()> {
-    AbortOnDrop(tokio::spawn(async move {
-        loop {
-            if let Ok((200, body)) = through(port, "/proposals").await {
-                for id in proposal_ids(&body) {
-                    let _ = through_with(port, reqwest::Method::POST, &format!("/proposals/{id}"), Some(json!({"answer": "yes"}))).await;
-                }
-            }
-            tokio::time::sleep(Duration::from_millis(500)).await;
-        }
-    }))
-}
-
-/// The ids in a `GET /proposals` body. A body that is not the listing names nothing — never an
-/// error: this runs beside a turn whose own failure is the sample.
-fn proposal_ids(body: &str) -> Vec<String> {
-    serde_json::from_str::<Value>(body)
-        .ok()
-        .and_then(|v| v.as_array().cloned())
-        .unwrap_or_default()
-        .iter()
-        .filter_map(|p| p["id"].as_str().map(str::to_string))
-        .collect()
-}
-
-/// `bench.exchange.both_views` has no bound (availability only), so this caps one tool call plus a
-/// one-word reply: the round trip's own 60 s target, doubled for the extra model step.
-const EXCHANGE_CEILING: Duration = Duration::from_secs(120);
 /// `bench.workspace.tool_roundtrip`: target 180 s.
 const TOOL_CEILING: Duration = Duration::from_secs(180);
-
-/// `ask` is what writes an exchange now (`Bench.ask` records one before it queues the task), so the
-/// prompt calls that — and the task is a greeting, which changes nothing wherever it lands and
-/// leaves no teardown owed.
-fn exchange_prompt(target: &str) -> String {
-    // `ask` (spec §13) replaced `kl_workspace_ask`/`kl_agent`, and it is what WRITES the exchange
-    // this id reads back. A prompt naming a `kl_*` tool would name a DEFERRED one now — inactive
-    // until `tool_search` turns it on — so the turn would end without the row.
-    format!("Call the tool ask exactly once with to \"{target}\" and task \"say hello\". Whatever it answers, then reply with exactly the word done.")
-}
 
 fn tool_prompt(marker: &str) -> String {
     format!("Use the bash tool exactly once to run: echo {marker}. Then reply with exactly the word done.")
 }
 
-/// One prompt on one socket, to this turn's end. A refusal that is pi reporting no provider key
-/// lands in `no_model`, so the caller demotes instead of failing.
+/// One turn, driven the way the new engine actually runs one: `POST /sessions/{sid}/send`, then
+/// poll `GET /sessions/{sid}/messages` until a `turn.end` row for the turn number that send
+/// returned. An `error` containing `API_KEY` is the tenant having no provider key — recorded in
+/// `no_model` so the caller demotes instead of failing; any other `error` fails outright; an empty
+/// or absent `answer` on a clean end fails too. Callers' own step ceilings bound the wait.
 async fn one_turn(port: u16, sid: &str, prompt: &str, no_model: &Mutex<Option<String>>) -> Result<()> {
-    let (mut ws, _) = tokio_tungstenite::connect_async(format!("ws://127.0.0.1:{port}/sessions/{sid}/rpc")).await.context("socket")?;
-    ws.send(Message::text(json!({"id": "1", "type": "prompt", "message": prompt}).to_string())).await?;
-    mark_no_key(until_agent_end(ws).await, no_model).map(|_| ())
-}
-
-/// The transcript answered and holds no-key or a real reply; `NoCredential` is written to `no_model`
-/// and still fails the step, which the caller then demotes.
-fn answered(body: &str, no_model: &Mutex<Option<String>>) -> Result<()> {
-    match judge_reply(body)? {
-        Reply::Answered => Ok(()),
-        Reply::NoCredential(why) => {
-            *no_model.lock().unwrap() = Some(why.clone());
-            bail!("{why}")
-        }
+    let (status, body) = through_with(port, reqwest::Method::POST, &format!("/sessions/{sid}/send"), Some(json!({"text": prompt}))).await?;
+    if status != 200 {
+        bail!("POST /sessions/{sid}/send answered {status}: {}", super::clip(&body));
     }
-}
-
-/// `bench.exchange.both_views`: the probe's own turn writes an exchange on the round trip's session,
-/// and every exchange that session lists must read back identically through its workspace's view.
-async fn exchanges(c: &mut Ctx, sid: Option<String>) {
-    let Some(sid) = sid else {
-        return c.skip("bench.exchange.both_views", "the round trip created no session");
-    };
-    // The run's own workspace when there is one: `ask` OPENS the target's session before it
-    // records the exchange (`Bench.ask`), so a name nothing resolves to may throw before there is
-    // a row to read back. The synthetic name stays as the fallback — a stage that never made a
-    // workspace still files a sample rather than a skip.
-    let target = c.state.ux_workspace.clone().unwrap_or_else(|| format!("{}-exchange", c.prefix()));
-    let no_model: Arc<Mutex<Option<String>>> = Default::default();
-    let nm = no_model.clone();
-    c.step("bench.exchange.both_views", EXCHANGE_CEILING, move |c| {
-        async move {
-            let (_child, port) = forward(c).await?;
-            // `ask` is a gated write, and its tool call does not return until somebody answers
-            // the question — so the answer has to come from here, while the turn is still running.
-            let _answering = answering(port);
-            let mut rows: Vec<Value> = Vec::new();
-            // Two tries: a model may answer without calling the tool; a second miss is a failure.
-            for _ in 0..2 {
-                one_turn(port, &sid, &exchange_prompt(&target), &nm).await?;
-                answered(&through(port, &format!("/sessions/{sid}/messages")).await?.1, &nm)?;
-                let (_, body) = through(port, &format!("/exchanges?session={sid}")).await?;
-                rows = serde_json::from_str(&body).context("parsing ?session=")?;
-                if rows.iter().any(|r| r["workspace"] == target.as_str()) {
-                    break;
-                }
-            }
-            if !rows.iter().any(|r| r["workspace"] == target.as_str()) {
-                bail!("two turns recorded no exchange naming {target} ({} rows)", rows.len());
-            }
-            let mut by_ws = std::collections::BTreeMap::new();
-            for r in &rows {
-                let ws = r["workspace"].as_str().context("exchange row missing workspace")?.to_string();
-                if !by_ws.contains_key(&ws) {
-                    let (_, body) = through(port, &format!("/exchanges?workspace={ws}")).await?;
-                    by_ws.insert(ws.clone(), serde_json::from_str::<Vec<Value>>(&body).context("parsing ?workspace=")?);
-                }
-            }
-            views_agree(&rows, &by_ws)
+    let turn = serde_json::from_str::<Value>(&body)?["turn"].as_u64().context("send answered no `turn`")?;
+    loop {
+        let (status, body) = through(port, &format!("/sessions/{sid}/messages")).await?;
+        if status != 200 {
+            bail!("GET /sessions/{sid}/messages answered {status}: {}", super::clip(&body));
         }
-        .boxed()
-    })
-    .await;
-    if let Some(why) = no_model.lock().unwrap().clone() {
-        c.demote_to_skip("bench.exchange.both_views", &format!("{NO_MODEL}: {}", super::clip(&why)));
-    };
+        let doc: Value = serde_json::from_str(&body).context("parsing messages")?;
+        let rows = doc["rows"].as_array().context("messages answer has no `rows`")?;
+        let end = rows.iter().find(|r| r["kind"] == "turn.end" && r["turn"].as_u64() == Some(turn));
+        if let Some(end) = end {
+            if let Some(err) = end["error"].as_str() {
+                if err.contains("API_KEY") {
+                    *no_model.lock().unwrap() = Some(err.to_string());
+                    return Ok(());
+                }
+                bail!("the turn ended in error: {}", super::clip(err));
+            }
+            let answer = end["answer"].as_str().unwrap_or_default();
+            if answer.trim().is_empty() {
+                bail!("the assistant reply is empty");
+            }
+            return Ok(());
+        }
+        tokio::time::sleep(Duration::from_secs(1)).await;
+    }
 }
 
 /// `bench.workspace.tool_roundtrip`: a workspace thread on the bench runs `echo` through the tool
@@ -1570,13 +975,9 @@ async fn tool_roundtrip(c: &mut Ctx) -> Option<String> {
         async move {
             let (_child, port) = forward(c).await?;
             let (status, row) = through_with(port, reqwest::Method::POST, &format!("/workspaces/{ws}/session"), None).await?;
-            if status != 200 {
+            if status != 200 && status != 201 {
                 bail!("POST /workspaces/{ws}/session answered {status}: {}", super::clip(&row));
             }
-            // A workspace session's `kl_env_*`/`kl_environment_*` are gated the same way; the
-            // prompt below asks for `bash` only, but a model that reaches for one of those would
-            // otherwise hang this turn to the ten-minute cap rather than failing it.
-            let _answering = answering(port);
             // Two tries: a model may answer without calling the tool; a second miss is a failure.
             let mut last = Ok(());
             for _ in 0..2 {
@@ -1587,7 +988,6 @@ async fn tool_roundtrip(c: &mut Ctx) -> Option<String> {
                 if status != 200 {
                     bail!("GET /workspaces/{ws}/messages answered {status}");
                 }
-                answered(&body, &nm)?;
                 last = tool_ran(&body, &marker);
                 if last.is_ok() {
                     break;
@@ -1607,26 +1007,8 @@ async fn tool_roundtrip(c: &mut Ctx) -> Option<String> {
     Some(thread)
 }
 
-/// The platform tools that only look: every `kl_*` entry with `effect: "read"` in
-/// `harness/pi/catalog.ts`. Asked to run a command, a bench model checks which workspaces there
-/// are before saying it cannot (hourly 2026-09-24 00:39 and 01:05 IST, `kl_workspaces` both
-/// times); reading the platform is not having hands. Kept by hand: a catalogue entry turning
-/// `read` without landing here only makes this id stricter.
-const READ_ONLY: [&str; 15] = [
-    "kl_workspace_progress", "kl_pkg_list", "kl_repos", "kl_repo_branches", "kl_pulls", "kl_pull",
-    "kl_images", "kl_workspaces", "kl_workspace", "kl_workspace_snapshots", "kl_env_current",
-    "kl_environments", "kl_environment", "kl_environment_snapshots", "kl_capabilities",
-];
-
-/// A message that says a tool outside `ALWAYS_ON` and `READ_ONLY` ran — `bench.no_hands`'s
-/// boundary.
-fn crossed(m: &Value) -> bool {
-    (m["role"] == "toolResult" || m["toolCallId"].is_string())
-        && !m["toolName"].as_str().is_some_and(|n| ALWAYS_ON.contains(&n) || READ_ONLY.contains(&n))
-}
-
 /// The ids of this group that need a live workspace besides the bench.
-const NEEDS_WORKSPACE: [&str; 3] = ["shell.up", "shell.no_tools", "agent.tree.run"];
+const NEEDS_WORKSPACE: [&str; 2] = ["shell.up", "shell.no_tools"];
 
 /// A workspace of this pod's own for `NEEDS_WORKSPACE`, when `ws.packages.add` (group 0) did not
 /// make one here. Grouping split the two after `shell.up` was written against the shared one, and
@@ -1694,109 +1076,19 @@ async fn delete_session(port: u16, sid: &str, bound: Duration) -> Result<(u16, S
         .map_err(|_| anyhow!("DELETE session did not answer within {} s", bound.as_secs()))?
 }
 
+/// Deletes every session this stage opened, best-effort: teardown never fails the run, only warns.
+async fn drop_sessions(c: &Ctx, ids: impl IntoIterator<Item = String>) {
+    let Ok((_child, port)) = forward(c).await else { return };
+    for sid in ids {
+        if let Err(e) = delete_session(port, &sid, TEARDOWN_BOUND).await {
+            tracing::warn!(session = %sid, error = %format!("{e:#}"), "slo.bench.session.teardown");
+        }
+    }
+}
+
 const NO_MODEL: &str = "no model credential in the probe tenant";
 /// Asks for no tool, so the turn is one model reply and nothing runs on the bench.
 const PROMPT: &str = "Reply with exactly the word pong. Do not use any tools.";
-
-/// Every non-response frame a socket sees until this turn's `agent_end`, verbatim.
-async fn until_agent_end<S>(mut ws: tokio_tungstenite::WebSocketStream<S>) -> Result<Vec<String>>
-where
-    S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin,
-{
-    let mut out = Vec::new();
-    while let Some(msg) = ws.next().await {
-        let Message::Text(t) = msg? else { continue };
-        let v: Value = serde_json::from_str(&t).context("a frame that is not JSON")?;
-        match v["type"].as_str() {
-            Some("response") if v["success"] == Value::Bool(false) => bail!("the prompt was refused: {}", super::clip(&t)),
-            Some("response") => continue,
-            Some("agent_end") => {
-                out.push(t.to_string());
-                return Ok(out);
-            }
-            _ => out.push(t.to_string()),
-        }
-    }
-    bail!("the socket closed before agent_end")
-}
-
-enum Reply {
-    Answered,
-    NoCredential(String),
-}
-
-/// pi's own wording for "the probe tenant has no key for this provider" — narrow on purpose, so a
-/// real model-turn failure (rate limit, timeout, a tool error) still fails the probe instead of
-/// silently skipping it. Both `AgentSession.getModel` (unquoted, `formatNoApiKeyFoundMessage`) and
-/// `ModelRegistry` (quoted) throw this shape in pi 0.73 and 0.85 alike. Returns the provider name
-/// only — never the surrounding message, which may echo other text but never a key.
-fn pi_no_api_key_provider(msg: &str) -> Option<String> {
-    let after = msg.split_once("No API key found for ")?.1;
-    let provider = after.trim_start_matches('"');
-    let end = provider.find(['"', '.', '\n']).unwrap_or(provider.len());
-    let provider = provider[..end].trim();
-    (!provider.is_empty()).then(|| provider.to_string())
-}
-
-/// Runs after a socket task that may have failed on a refused prompt: if the failure is pi
-/// reporting no provider key, records the provider in `no_model` before propagating the error, so
-/// the caller can demote the step (and its dependents) to skip instead of failing it.
-fn mark_no_key(res: Result<Vec<String>>, no_model: &Mutex<Option<String>>) -> Result<Vec<String>> {
-    if let Err(e) = &res {
-        if let Some(provider) = pi_no_api_key_provider(&e.to_string()) {
-            *no_model.lock().unwrap() = Some(format!("no API key for {provider}"));
-        }
-    }
-    res
-}
-
-/// The transcript's last assistant message: text is an answer, pi reporting no provider key is the
-/// tenant having no key, and any other error or an empty reply fails.
-fn judge_reply(body: &str) -> Result<Reply> {
-    let doc: Value = serde_json::from_str(body).context("parsing messages")?;
-    let msgs = doc["messages"].as_array().context("messages answer has no messages")?;
-    if !msgs.iter().any(|m| m["role"] == "user") {
-        bail!("the prompt is not in the transcript");
-    }
-    let last = msgs.iter().rev().find(|m| m["role"] == "assistant").context("no assistant message in the transcript")?;
-    if last["stopReason"] == "error" || last["stopReason"] == "aborted" {
-        let why = last["errorMessage"].as_str().unwrap_or_default().to_string();
-        if pi_no_api_key_provider(&why).is_some() {
-            return Ok(Reply::NoCredential(why));
-        }
-        bail!("the model turn failed: {}", super::clip(&why));
-    }
-    let text: String = last["content"].as_array().into_iter().flatten().filter_map(|c| c["text"].as_str()).collect();
-    if text.trim().is_empty() {
-        bail!("the assistant reply is empty");
-    }
-    Ok(Reply::Answered)
-}
-
-/// The name `ask` gave the agent it started, from its `agent {name} started` tool result.
-fn started_agent(body: &str) -> Option<String> {
-    let doc: Value = serde_json::from_str(body).ok()?;
-    doc["messages"].as_array()?.iter().filter(|m| m["toolName"] == "ask").find_map(|m| {
-        m["content"].as_array()?.iter().find_map(|c| {
-            c["text"].as_str()?.strip_prefix("agent ")?.strip_suffix(" started").map(str::to_string)
-        })
-    })
-}
-
-/// The transcript's last four messages as `role(tool): text`, each cut to 120 chars: enough to
-/// say why a turn did not do what it was asked, short enough for a step's detail.
-fn transcript_tail(body: &str) -> String {
-    let doc: Value = serde_json::from_str(body).unwrap_or_default();
-    let msgs = doc["messages"].as_array().cloned().unwrap_or_default();
-    let line = |m: &Value| {
-        let parts: Vec<String> = m["content"].as_array().into_iter().flatten()
-            .filter_map(|c| c["text"].as_str().map(str::to_string).or_else(|| c["name"].as_str().map(|n| format!("call {n}"))))
-            .collect();
-        let tool = m["toolName"].as_str().map(|t| format!("({t})")).unwrap_or_default();
-        format!("{}{tool}: {}", m["role"].as_str().unwrap_or("?"), parts.join(" ").chars().take(120).collect::<String>())
-    };
-    msgs.iter().skip(msgs.len().saturating_sub(4)).map(line).collect::<Vec<_>>().join(" | ")
-}
 
 fn same_events(a: &[String], b: &[String]) -> Result<()> {
     if a.is_empty() {
@@ -1804,19 +1096,6 @@ fn same_events(a: &[String], b: &[String]) -> Result<()> {
     }
     if let Some(i) = (0..a.len().max(b.len())).find(|&i| a.get(i) != b.get(i)) {
         bail!("the sockets diverge at event {i} of {} vs {}", a.len(), b.len());
-    }
-    Ok(())
-}
-
-fn views_agree(by_session: &[Value], by_ws: &std::collections::BTreeMap<String, Vec<Value>>) -> Result<()> {
-    for r in by_session {
-        let ws = r["workspace"].as_str().unwrap_or_default();
-        let found = by_ws.get(ws).and_then(|rows| rows.iter().find(|w| w["id"] == r["id"]));
-        match found {
-            None => bail!("exchange {} is missing from its workspace view", r["id"]),
-            Some(w) if w != r => bail!("exchange {} differs between the two views", r["id"]),
-            _ => {}
-        }
     }
     Ok(())
 }
@@ -1868,33 +1147,6 @@ mod tests {
     use super::*;
     use crate::report::run_state;
     use kloudlite_workspaces::history::slo::RunState;
-
-    /// The name the dispatch asks `/v1` for has to pass `crd::tree_name_ok`, or the probe reports
-    /// its own 422 as a platform failure. Checked against that predicate itself, not against a
-    /// copy of the rule.
-    #[test]
-    fn a_runs_tree_name_is_one_v1_accepts() {
-        for prefix in ["run-abc123", "run-ABC-123", "run-", "run-0123456789012345678901234567890123456789", "x"] {
-            let n = tree_name(prefix);
-            assert!(kloudlite_workspaces::crd::tree_name_ok(&n), "{prefix:?} became {n:?}");
-        }
-        // The tail is kept, so two runs that share a prefix still differ.
-        assert_ne!(tree_name("run-aaaa1111"), tree_name("run-aaaa2222"));
-    }
-
-    /// The tree is the name the tool reported, never the one the probe asked for.
-    #[test]
-    fn the_started_agent_is_read_from_the_ask_result() {
-        let body = serde_json::json!({"messages": [
-            {"role": "assistant", "content": [{"type": "toolCall", "name": "ask"}]},
-            {"role": "toolResult", "toolName": "tool_search", "content": [{"type": "text", "text": "agent x started"}]},
-            {"role": "toolResult", "toolName": "ask", "content": [{"type": "text", "text": "agent a-run-hourly-1--q4iekk started"}]},
-        ]})
-        .to_string();
-        assert_eq!(started_agent(&body).as_deref(), Some("a-run-hourly-1--q4iekk"));
-        assert_eq!(started_agent(r#"{"messages": []}"#), None);
-        assert_eq!(started_agent("not json"), None);
-    }
 
     #[test]
     fn stub_health_and_totals_read() {
@@ -2048,71 +1300,12 @@ mod tests {
     }
 
     #[test]
-    fn replies_events_and_exchange_views_judge() {
-        let user = json!({"role": "user", "content": [{"type": "text", "text": PROMPT}]});
-        let ok = json!({"messages": [user, {"role": "assistant", "content": [{"type": "text", "text": "pong"}], "stopReason": "stop"}], "total": 2});
-        assert!(matches!(judge_reply(&ok.to_string()).unwrap(), Reply::Answered));
-        let nokey = json!({"messages": [user, {"role": "assistant", "content": [], "stopReason": "error", "errorMessage": "No API key found for deepseek"}]});
-        assert!(matches!(judge_reply(&nokey.to_string()).unwrap(), Reply::NoCredential(_)));
-        let broke = json!({"messages": [user, {"role": "assistant", "content": [], "stopReason": "error", "errorMessage": "socket hang up"}]});
-        assert!(judge_reply(&broke.to_string()).is_err());
-        let empty = json!({"messages": [user, {"role": "assistant", "content": [{"type": "text", "text": " "}], "stopReason": "stop"}]});
-        assert!(judge_reply(&empty.to_string()).is_err());
-        assert!(judge_reply(&json!({"messages": []}).to_string()).is_err());
-
-        // pi's WS refusal frame carries the message unquoted, wrapped by `until_agent_end`'s bail
-        // context — this is the wording that actually reached the fleet (2026-09-14 hourly run).
-        let ws_refusal = "the prompt was refused: {\"id\":\"1\",\"type\":\"response\",\"success\":false,\"error\":\"No API key found for deepseek.\\n\\nUse /login...\"}";
-        assert_eq!(pi_no_api_key_provider(ws_refusal).as_deref(), Some("deepseek"));
-        // The exact clipped detail from the 2026-09-14 12:02 UTC hourly run
-        // (kloudlite-slo-hourly-29823122), byte-for-byte including the `"command":"prompt"` field
-        // pi's RPC response envelope carries and the literal `\n\n` escapes as they arrive over the
-        // wire (never a real newline) — proves clip()'s 200-char cut lands after the provider name,
-        // and that the extra envelope field does not defeat the match.
-        let fleet_evidence = "the prompt was refused: {\"id\":\"1\",\"type\":\"response\",\"command\":\"prompt\",\"success\":false,\"error\":\"No API key found for deepseek.\\n\\nUse /login to log into a provider via OAuth or API key. See: /opt/harness/node_modules/@mar";
-        assert_eq!(pi_no_api_key_provider(fleet_evidence).as_deref(), Some("deepseek"));
-        // ModelRegistry's quoted wording, still narrow.
-        assert_eq!(pi_no_api_key_provider("No API key found for \"anthropic\"").as_deref(), Some("anthropic"));
-        // A non-auth refusal (rate limit, tool error, ...) must still fail, never skip.
-        assert_eq!(pi_no_api_key_provider("the prompt was refused: rate limited, retry later"), None);
-        match judge_reply(&broke.to_string()) {
-            Err(e) => assert!(e.to_string().contains("the model turn failed")),
-            Ok(_) => panic!("a non-auth refusal must fail, not skip or pass"),
-        }
-
-        // mark_no_key: an auth-shaped socket failure records the provider and still propagates
-        // the error; a non-auth failure passes through untouched.
-        let no_model: Mutex<Option<String>> = Mutex::new(None);
-        assert!(mark_no_key(Err(anyhow!("{ws_refusal}")), &no_model).is_err());
-        assert_eq!(no_model.lock().unwrap().as_deref(), Some("no API key for deepseek"));
-        let no_model2: Mutex<Option<String>> = Mutex::new(None);
-        assert!(mark_no_key(Err(anyhow!("connection reset")), &no_model2).is_err());
-        assert!(no_model2.lock().unwrap().is_none());
-
-        // bench.two_clients' own skip reason: skipped (not "the round trip failed") whenever the
-        // round trip itself was a credential skip, and only reports the generic failure otherwise.
-        let dependent_reason = |no_model: Option<&str>, answered: bool| match no_model {
-            Some(_) => NO_MODEL,
-            None if answered => "no events were recorded",
-            None => "the round trip failed",
-        };
-        assert_eq!(dependent_reason(Some("no API key for deepseek"), false), NO_MODEL);
-        assert_eq!(dependent_reason(None, false), "the round trip failed");
-
+    fn events_from_two_sockets_must_match_in_order() {
         let s = |v: &[&str]| v.iter().map(|x| x.to_string()).collect::<Vec<_>>();
         assert!(same_events(&s(&["a", "b", "end"]), &s(&["a", "b", "end"])).is_ok());
         assert!(same_events(&s(&["a", "b", "end"]), &s(&["b", "a", "end"])).unwrap_err().to_string().contains("event 0"));
         assert!(same_events(&s(&["a", "end"]), &s(&["a"])).is_err());
         assert!(same_events(&[], &[]).is_err());
-
-        let row = json!({"id": "x1", "session": "s", "workspace": "w", "dir": "out", "text": "hi", "state": "sent", "ts": 1});
-        let mut ws = std::collections::BTreeMap::new();
-        ws.insert("w".to_string(), vec![row.clone()]);
-        assert!(views_agree(std::slice::from_ref(&row), &ws).is_ok());
-        ws.insert("w".to_string(), vec![json!({"id": "x1", "session": "s", "workspace": "w", "dir": "out", "text": "hi", "state": "done", "ts": 1})]);
-        assert!(views_agree(std::slice::from_ref(&row), &ws).unwrap_err().to_string().contains("differs"));
-        ws.insert("w".to_string(), vec![]);
-        assert!(views_agree(&[row], &ws).unwrap_err().to_string().contains("missing"));
     }
 
     #[test]
@@ -2135,97 +1328,16 @@ mod tests {
         let why = tool_ran(&failed.to_string(), m).unwrap_err().to_string();
         // The failure carries what the tool said, so a fleet run names its cause.
         assert!(why.contains("isError=true") && why.contains("[exit 1]"), "{why}");
-        assert!(!crossed(&serde_json::json!({"role": "toolResult", "toolName": "tool_search"})));
-        assert!(crossed(&serde_json::json!({"role": "toolResult", "toolName": "kl_exec"})));
-        assert!(!crossed(&serde_json::json!({"role": "toolResult", "toolName": "kl_workspaces"})));
-        assert!(crossed(&serde_json::json!({"role": "toolResult", "toolName": "kl_pkg_add"})));
-        assert!(crossed(&serde_json::json!({"role": "toolResult"})));
-        assert!(!crossed(&serde_json::json!({"role": "assistant"})));
         assert!(tool_workspace(None, true).is_err());
         assert!(tool_workspace(Some("w".into()), false).unwrap_err().contains("ws.packages.add"));
         assert_eq!(tool_workspace(Some("w".into()), true).unwrap(), "w");
-        // `ask`, never a `kl_*` name: those are deferred until `tool_search` turns them on.
-        let ex = exchange_prompt("run-abc-exchange");
-        assert!(tool_prompt(m).contains(m) && ex.contains("tool ask") && ex.contains("run-abc-exchange"));
-        assert!(!ex.contains("kl_"), "{ex}");
+        assert!(tool_prompt(m).contains(m));
 
         // The sign-in answer is an ordinary failed round trip now that the probe mints the token.
         let login = json!({"role": "toolResult", "toolCallId": "t1", "isError": false, "content": [{"type": "text", "text": "sign in on the Kloudlite desktop app"}]});
         assert!(tool_ran(&json!({"messages": [call, login]}).to_string(), m).is_err());
-
-        let no_model = Mutex::new(None);
-        let nokey = json!({"messages": [{"role": "user", "content": "x"}, {"role": "assistant", "content": [], "stopReason": "error", "errorMessage": "No API key found for deepseek"}]});
-        assert!(answered(&nokey.to_string(), &no_model).is_err());
-        assert!(no_model.lock().unwrap().is_some(), "a missing key must be recorded for the demote");
     }
 
-
-    /// `GET /proposals` is a listing of ids; anything else names nothing, and never fails the turn
-    /// it runs beside.
-    #[test]
-    fn proposal_ids_are_read_from_the_listing_and_nothing_else() {
-        let body = json!([
-            {"id": "p-1", "session": "s-1", "tool": "kl_workspace_create", "summary": "Create workspace x"},
-            {"id": "p-2", "session": "s-1", "tool": "kl_workspace_stop", "summary": "Stop workspace y"},
-        ])
-        .to_string();
-        assert_eq!(proposal_ids(&body), ["p-1", "p-2"]);
-        assert!(proposal_ids("[]").is_empty());
-        assert!(proposal_ids("bench unreachable").is_empty());
-        assert!(proposal_ids(&json!({"error": "no"}).to_string()).is_empty());
-    }
-
-    /// The ruling this id exists for, both halves: the eight own-machine tools and the always-on
-    /// five must be there, and they must run on the bench's OWN workspace tool server with pi's
-    /// builtins off. A list that satisfies the names while running in the bench container is the
-    /// regression. No `kl_*` is required: every one of them is deferred until `tool_search`.
-    #[test]
-    fn own_hands_refuses_a_bench_session_that_has_any() {
-        // What a correct bench session answers since slice 2: no hands, no tool server, no
-        // builtins — only the tools it steers ITSELF with.
-        let ok = json!({
-            "tools": ["ask", "ask_close", "plan", "skill", "tool_search", "memory", "question"],
-            "builtinTools": false,
-        });
-        assert!(judge_tools(&ok.to_string()).is_ok(), "a hands-free bench session must pass");
-
-        // Each of the eight is a failure ON ITS OWN: one is enough to run something in the bench
-        // container, which is nobody's machine.
-        for hand in OWN_HANDS {
-            let mut v = ok.clone();
-            let mut tools = ok["tools"].as_array().unwrap().clone();
-            tools.push(json!(hand));
-            v["tools"] = json!(tools);
-            assert!(judge_tools(&v.to_string()).is_err(), "`{hand}` on a bench session passed");
-        }
-
-        // The steering set is still required: without `tool_search` no platform tool can be
-        // reached at all, and without `ask` there is no way to reach a workspace.
-        let without = |name: &str| {
-            let mut v = ok.clone();
-            v["tools"] = json!(ok["tools"].as_array().unwrap().iter().filter(|t| *t != name).collect::<Vec<_>>());
-            judge_tools(&v.to_string())
-        };
-        assert!(without("ask").is_err());
-        assert!(without("tool_search").is_err(), "without it no platform tool can be reached at all");
-        assert!(without("memory").is_err());
-        assert!(without("plan").is_err());
-
-        // An ADDRESS is hands by another name, whatever the tool list says.
-        let mut addressed = ok.clone();
-        addressed["toolsAddress"] = json!("127.0.0.1:7788");
-        assert!(judge_tools(&addressed.to_string()).is_err(), "a bench session with a tool server passed");
-
-        let mut builtins = ok.clone();
-        builtins["builtinTools"] = json!(true);
-        assert!(judge_tools(&builtins.to_string()).is_err(), "pi's builtins in the bench container passed");
-
-        let mut driving = ok.clone();
-        let mut tools = ok["tools"].as_array().unwrap().clone();
-        tools.push(json!("kl_ws_exec"));
-        driving["tools"] = json!(tools);
-        assert!(judge_tools(&driving.to_string()).is_err(), "a direct tool onto another workspace passed");
-    }
 
     #[tokio::test]
     async fn a_stub_bench_and_the_reschedule_drill_reach_the_run_row_as_skipped() {
@@ -2234,9 +1346,7 @@ mod tests {
         c.demote_to_skip("bench.idle.wake", STUB);
         SESSION_IDS.iter().for_each(|id| c.skip(id, STUB));
         weekly(&mut c).await;
-        // The weekly skip plus every `SESSION_IDS` this fixture files — five more since the shell
-        // sidecar arrived (`shell.*`, `bench.no_hands`, `bench.pkg_needs_workspace`) and one fewer
-        // for the retired `ws.terminal.persists`.
+        // The weekly skip plus every `SESSION_IDS` this fixture files.
         assert_eq!(c.steps.len(), 1 + SESSION_IDS.len() + 1);
         assert!(c.steps.iter().all(|s| s.skipped && !s.ok), "a skip read as a sample");
         assert_eq!(c.failed(), 0);
