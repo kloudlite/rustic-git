@@ -49,9 +49,8 @@ import {
   validateCapabilityArgs,
 } from "./arguments.ts";
 import type { ArgsCheck, ArgumentStates } from "./arguments.ts";
-import { NOT_A_WORKSPACE, SKILLS, dispatchWithPolicy, isOwnBench } from "../../../pi/kloudlite.ts";
-import type { ApprovalRequirement } from "../../../pi/kloudlite.ts";
-import { question } from "../../../pi/catalog.ts";
+import { NOT_A_WORKSPACE, SKILLS, dispatchWithPolicy, isOwnBench } from "./policy.ts";
+import { question } from "./catalog.ts";
 import type { Adapter, AdapterInput, AdapterResult } from "./adapters.ts";
 
 // ---------------------------------------------------------------------------

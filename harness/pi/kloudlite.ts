@@ -8,7 +8,11 @@ import type { JsonValue } from "../bench/src/operations/shape.ts";
 import { workspaceCreateSourceIssues } from "../bench/src/operations/arguments.ts";
 import type { ArgumentStates } from "../bench/src/operations/arguments.ts";
 import { createSharedAdapters, resolveUnique, resolveWorkspaceProgress, toolResult as adapterToolResult } from "../bench/src/operations/adapters.ts";
-import { TOOLS, gated, question } from "./catalog.ts";
+import { TOOLS, gated, question } from "../bench/src/operations/catalog.ts";
+export type { ToolResult, DispatchOutcome, ApprovalRequirement, PolicyPlan } from "../bench/src/operations/policy.ts";
+export { DECLINED, dispatchWithPolicy, toolResultOf, SKILLS, NOT_A_WORKSPACE, isOwnBench } from "../bench/src/operations/policy.ts";
+import type { ToolResult, DispatchOutcome, ApprovalRequirement, PolicyPlan } from "../bench/src/operations/policy.ts";
+import { DECLINED, dispatchWithPolicy, toolResultOf, SKILLS, NOT_A_WORKSPACE, isOwnBench } from "../bench/src/operations/policy.ts";
 
 /**
  * The bench's hands on the platform: `/v1` as tools. Authentication is the
@@ -56,83 +60,10 @@ export async function call(method: string, p: string, body?: unknown, signal?: A
   return { status: r.status, data };
 }
 
-/** What every tool answers with, here and in `workspace-tools.ts`. */
-export type ToolResult = { content: { type: "text"; text: string }[]; isError?: boolean };
-
 const text = (v: unknown): ToolResult => ({ content: [{ type: "text" as const, text: typeof v === "string" ? v : JSON.stringify(v, null, 2) }] });
 
-/**
- * How a dispatch ended. `refused` means policy stopped the call before the
- * handler ran, so no effect exists to reconcile and the executor must not read
- * it as success. A handler that ran and answered with an error is `failed`.
- */
-export type DispatchOutcome<T = ToolResult> =
-  | { outcome: "completed"; result: T }
-  | { outcome: "failed"; code: OperationErrorCode; result: T }
-  | { outcome: "refused"; code: OperationErrorCode; reason: string };
-
-export type ApprovalRequirement = "none" | "user" | "policy";
-
-export const DECLINED = "declined by the person";
-const NO_APPROVAL_CHANNEL = "that change needs approval and no approval channel is available; nothing ran";
 /** `kl_pkg_add`/`kl_pkg_rm` share this refusal: a bench session has no machine of its own. */
 const NAME_IT_REASON = "name the workspace: packages are installed in a workspace, and this session has no machine of its own";
-
-/**
- * One policy-bearing dispatch for every caller: the registered tools (a person
- * is asked asynchronously through `propose`) and the operation executor's
- * capabilities. Scope/path/argument refusals run first, then approval, then the
- * handler — in that order, so a call that cannot be authorized never reaches it,
- * and a mutating plan with no approval channel is refused rather than run.
- */
-export type PolicyPlan<T = ToolResult> = {
-  capability: string;
-  effect: "read" | "write" | "destroy";
-  approval: { required: ApprovalRequirement; obtain?: () => Promise<boolean> };
-  inspect?: () => { code: OperationErrorCode; reason: string } | undefined;
-  run: () => Promise<T>;
-  failed?: (result: T) => OperationErrorCode | undefined;
-  /** The answer a thrown handler error becomes; the registered tools keep `thrown`'s sentence. */
-  error?: (e: unknown) => ToolResult;
-};
-
-export async function dispatchWithPolicy<T = ToolResult>(plan: PolicyPlan<T>): Promise<DispatchOutcome<T>> {
-  const blocked = plan.inspect?.();
-  if (blocked) return { outcome: "refused", code: blocked.code, reason: blocked.reason };
-  if (plan.approval.required !== "none") {
-    const obtain = plan.approval.obtain;
-    if (!obtain) return { outcome: "refused", code: "permission_denied", reason: NO_APPROVAL_CHANNEL };
-    const granted = await obtain().catch((error) => {
-      if (plan.capability.includes(".")) throw error;
-      return false;
-    });
-    if (!granted) return { outcome: "refused", code: "permission_denied", reason: DECLINED };
-  }
-  try {
-    const result = await plan.run();
-    const code = plan.failed?.(result) ?? ((result as ToolResult)?.isError ? "execution_failure" : undefined);
-    return code ? { outcome: "failed", code, result } : { outcome: "completed", result };
-  } catch (e) {
-    if (!plan.error) throw e;
-    const answer = plan.error(e);
-    return { outcome: "failed", code: "execution_failure", result: { ...answer, isError: true } as T };
-  }
-}
-
-/**
- * The registered tool surface keeps the words the model already reads: a
- * decline is its own sentence, a scope/argument refusal is an error, and an
- * error the handler answered with is unchanged. The executor reads the
- * `DispatchOutcome` itself, where a denial is never "completed".
- */
-export function toolResultOf(outcome: DispatchOutcome<ToolResult>, declined: "error" | "plain" = "error"): ToolResult {
-  if (outcome.outcome === "completed") return outcome.result;
-  if (outcome.outcome === "failed") return { ...outcome.result, isError: true };
-  if (declined === "plain" && outcome.code === "permission_denied" && outcome.reason === DECLINED) {
-    return { content: [{ type: "text", text: outcome.reason }] };
-  }
-  return { content: [{ type: "text", text: outcome.reason }], isError: true };
-}
 
 /**
  * What a failed platform call SAYS to the model: one sentence about the person's intent, and
@@ -547,8 +478,6 @@ export const BENCH_ALWAYS_ON = ["ask", "ask_close", "plan", "skill", "tool_searc
 /** What Plan mode leaves on: everything that reads, plus the plan itself. */
 export const PLAN_TOOLS = ["read", "grep", "find", "ls", "plan", "skill", "tool_search", "memory", "architecture", "kl_capabilities", "kl_workspace_progress"];
 
-/** The six skills, read from beside the extension: product words, not tool lists. */
-export const SKILLS = ["workspaces", "environments", "snapshots", "repos", "images", "agents"];
 /** Where the skills live beside the extension. Named in the error, because a missing directory in
  *  an image is the usual reason a skill "does not exist" (owner, 2026-09-17). */
 // @ts-expect-error See caveman(): pi loads this source as ESM outside the desktop CommonJS build.
@@ -1163,13 +1092,6 @@ function environmentTools(reg: ReturnType<typeof makeReg>) {
  * A bench session no longer defaults ANY tool to its own machine (spec §3.1: it has none). A
  * workspace session still defaults to its own workspace, which is what `ownTools` is.
  */
-export const NOT_A_WORKSPACE = "that is you, not a workspace; name a workspace";
-export const isOwnBench = (id: string): boolean => {
-  const own = process.env.KL_WORKSPACE_ID;
-  // The bench's own workspace id, and the `bench-` objects the platform names a bench with
-  // (`crd::bench_id`) — a listing never offers one, so anything shaped like one is a mistake.
-  return !!id && (id === own || /^bench-[0-9a-f]{8,}$/.test(id));
-};
 /** Throws the person's own sentence when a bench session names itself. */
 export function refuseOwnBench(id: string): string {
   if (isOwnBench(id)) throw new Error(NOT_A_WORKSPACE);
