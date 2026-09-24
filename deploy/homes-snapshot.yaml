@@ -5,6 +5,8 @@
 # Keeps 14 days: NFS shares have no file soft-delete, and a snapshot is the only undo for a rename
 # or a finalizer that ran a delete. Restore = mount the snapshot on a node
 # (`mount -t nfs ... :/homes/.snapshot/<ts>` or the portal's "Restore") and copy back.
+# Suspended 2026-09-24: since the home-is-the-workspace-volume ruling (2026-09-22) nothing mounts
+# the share; its data and snapshots stay for a human to retire.
 apiVersion: batch/v1
 kind: CronJob
 metadata:
@@ -12,6 +14,7 @@ metadata:
   namespace: kloudlite
 spec:
   schedule: "0 21 * * *"            # 02:30 IST
+  suspend: true
   concurrencyPolicy: Forbid
   successfulJobsHistoryLimit: 3
   failedJobsHistoryLimit: 3
