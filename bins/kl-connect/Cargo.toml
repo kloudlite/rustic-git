@@ -22,7 +22,7 @@ base64 = { workspace = true }
 rustls = { workspace = true }
 tokio-tungstenite = { workspace = true, features = ["rustls-tls-webpki-roots"] }
 futures = { workspace = true }
-dirs = "6"
+dirs = "7"
 open = "5"
 
 [dev-dependencies]
