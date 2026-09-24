@@ -66,10 +66,10 @@ export function serve(
   host = "127.0.0.1",
   idle = new Idle(() => bench.busy()),
   maxBody = MAX_BODY,
-  // Tests pass a fake; the real one is loaded lazily so the bench's own routes never pull the tool-server SDK in.
-  opts: { resolveTools?: (ws: string) => Promise<string> } & OperationControlOptions = {},
+  // Tests pass a fake; production reads the bench's own Platform (main.ts's Platform.fromEnv()).
+  opts: { resolveTools?: (ws: string, fresh?: boolean) => Promise<{ address: string; token?: string }> } & OperationControlOptions = {},
 ): Promise<{ port: number; close(): Promise<void>; server: http.Server; sweepOnce(): void }> {
-  const resolveTools = opts.resolveTools ?? ((ws: string) => import("../../pi/workspace-tools.ts").then((m) => m.resolveFromApi(ws)));
+  const resolveAuth = opts.resolveTools ?? ((ws: string, fresh?: boolean) => bench.platform!.tools(ws, fresh));
   /**
    * Where a scope's tool server is AND the token every `/tools/*`, `/fs/*` and `/stream/*` call
    * must carry. The bench's own container (`bench`) is loopback in the same pod and takes none.
@@ -77,13 +77,7 @@ export function serve(
    */
   const toolsFor = async (scope: string): Promise<{ address: string; token?: string }> => {
     if (scope === "bench") return { address: LOCAL_TOOLS };
-    const mod = await import("../../pi/workspace-tools.ts");
-    if (opts.resolveTools) {
-      const address = await opts.resolveTools(scope);
-      const token = await mod.toolsAuth(scope).then((a) => a.token, () => undefined);
-      return { address, ...(token ? { token } : {}) };
-    }
-    return mod.toolsAuth(scope);
+    return resolveAuth(scope);
   };
   const bearer = (t?: string): Record<string, string> => (t ? { authorization: `Bearer ${t}` } : {});
   const body = async (req: http.IncomingMessage): Promise<Record<string, unknown>> => {
@@ -334,10 +328,10 @@ export function serve(
             spliceShell(w, ownPod(), first);
             return held.release();
           }
-          return resolveTools(scope!).then(
+          return resolveAuth(scope!).then(
             (a) => {
               // The tool server's address, with the port swapped: same pod, the shell beside it.
-              spliceShell(w, a, first);
+              spliceShell(w, a.address, first);
               held.release();
             },
             (e: Error) => {

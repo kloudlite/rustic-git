@@ -6,9 +6,30 @@ export const setBackend = (cwd: string, b: Backend | undefined) => { b ? backend
 
 export class ToolError extends Error { status: number; constructor(status: number, message: string) { super(message); this.status = status; } }
 
-export const httpBackend = (address: string): Backend => async (name, args) => {
-  const r = await fetch(`http://${address}/tools/${name}`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(args), signal: AbortSignal.timeout(600_000) });
-  const v = (await r.json().catch(() => ({ error: `bad json from ${name}` }))) as { error?: string };
+export type ToolsAuth = { address: string; token?: string };
+
+/**
+ * `resolve(fresh)` gets the address+token pair, cached by the caller; a 401 means the keys beat
+ * re-minted the token since the last resolve, so it is answered by resolving once more (`fresh`)
+ * and retrying, not by failing the call.
+ */
+export const httpBackend = (resolve: (fresh?: boolean) => Promise<ToolsAuth>): Backend => async (name, args) => {
+  const call = async (at: ToolsAuth) => {
+    const r = await fetch(`http://${at.address}/tools/${name}`, {
+      method: "POST",
+      headers: { "content-type": "application/json", ...(at.token ? { authorization: `Bearer ${at.token}` } : {}) },
+      body: JSON.stringify(args),
+      signal: AbortSignal.timeout(600_000),
+    });
+    const v = (await r.json().catch(() => ({ error: `bad json from ${name}` }))) as { error?: string };
+    return { r, v };
+  };
+  let at = await resolve();
+  let { r, v } = await call(at);
+  if (r.status === 401) {
+    at = await resolve(true);
+    ({ r, v } = await call(at));
+  }
   if (!r.ok) throw new ToolError(r.status, v.error ?? `${name}: ${r.status}`);
   return v;
 };

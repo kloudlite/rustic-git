@@ -22,7 +22,7 @@ async function up(address: string) {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), "bench-fs-"));
   const bench = new Bench({ dir, readOnly: false, model: "fake/m", turn: async () => "ok" });
   await bench.start();
-  const srv = await serve(bench, 0, "127.0.0.1", undefined, undefined, { resolveTools: async () => address });
+  const srv = await serve(bench, 0, "127.0.0.1", undefined, undefined, { resolveTools: async () => ({ address }) });
   return {
     base: `http://127.0.0.1:${srv.port}`,
     down: async () => (await srv.close(), await bench.stop(), fs.rmSync(dir, { recursive: true, force: true })),

@@ -71,7 +71,7 @@ export class Subs {
     const parent = this.list.bySeq(row.parent!)!;
     const clone = row.workspace!, mainWs = parent.workspace!;
     try {
-      const mainIp = (await this.platform.tools(mainWs)).replace(/:\d+$/, "");
+      const mainIp = (await this.platform.tools(mainWs)).address.replace(/:\d+$/, "");
       // /home/kl is the workspace's own volume; the tree is /home/kl/workspace, never the id or name
       const push = async () => text(await remote(clone, "exec", { cmd: `git push ssh://kl@${mainIp}/home/kl/workspace HEAD:${row.target}`, timeout_ms: 120_000 }));
       let out = await push();

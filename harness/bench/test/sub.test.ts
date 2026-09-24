@@ -47,7 +47,7 @@ const world = (childAnswer = "done: feature landed") => {
       ? c.tools.find((t) => t.name === "delegate")!.run(c.cwd, { target: "", instruction: "build it" }, {})
       : "ok, got the child's answer"
   , hooks));
-  const subs = new Subs(list, sched, platform, async (ws) => setBackend(ws, httpBackend(await platform.tools(ws))));
+  const subs = new Subs(list, sched, platform, async (ws) => setBackend(ws, httpBackend((fresh) => platform.tools(ws, fresh))));
   const main = list.create(undefined, { tier: "main", state: "open", workspace: "m" });
   return { list, sched, subs, main };
 };

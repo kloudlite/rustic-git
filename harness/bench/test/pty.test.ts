@@ -14,7 +14,7 @@ import { until } from "./wait.ts";
  * splices the two sockets and adds ttyd's opening frame; everything else crosses unchanged, and
  * there is no session, no reattach and no tmux behind it.
  */
-async function up(resolveTools?: (ws: string) => Promise<string>) {
+async function up(resolveTools?: (ws: string) => Promise<{ address: string; token?: string }>) {
   const bench = new Bench({ dir: fs.mkdtempSync(path.join(os.tmpdir(), "bench-pty-")), readOnly: false, model: "fake/m", turn: async () => "ok" });
   await bench.start();
   const srv = await serve(bench, 0, "127.0.0.1", undefined, undefined, { resolveTools });
@@ -65,7 +65,7 @@ test("the splice speaks ttyd: an auth frame, then input and output unchanged", a
   const shell = fakeTtyd();
   if (!(await shell.ready)) return void t0.skip(`127.0.0.1:${SHELL_PORT} is busy on this machine`);
   // The workspace's tool-server address; the splice swaps the port to the sidecar's.
-  const t = await up(async () => "127.0.0.1:7788");
+  const t = await up(async () => ({ address: "127.0.0.1:7788" }));
   const w = new WebSocket(`ws://127.0.0.1:${t.port}/pty?scope=ws-0123456789abcdef`);
   try {
     await opened(w);
@@ -89,7 +89,7 @@ test("the splice speaks ttyd: an auth frame, then input and output unchanged", a
 test("a shell that ends closes the socket, and nothing retries", async (t0) => {
   const shell = fakeTtyd();
   if (!(await shell.ready)) return void t0.skip(`127.0.0.1:${SHELL_PORT} is busy on this machine`);
-  const t = await up(async () => "127.0.0.1:7788");
+  const t = await up(async () => ({ address: "127.0.0.1:7788" }));
   const w = new WebSocket(`ws://127.0.0.1:${t.port}/pty?scope=ws-0123456789abcdef`);
   try {
     await opened(w);
@@ -108,7 +108,7 @@ test("a shell that ends closes the socket, and nothing retries", async (t0) => {
 });
 
 test("nothing listening in the pod is one error frame and a close", async () => {
-  const t = await up(async () => "127.0.0.1:7788");
+  const t = await up(async () => ({ address: "127.0.0.1:7788" }));
   const w = new WebSocket(`ws://127.0.0.1:${t.port}/pty?scope=ws-0123456789abcdef`);
   try {
     await opened(w);
@@ -156,7 +156,7 @@ test("a title and preferences arrive as text frames, output as binary, and the a
     up.send(`2${JSON.stringify({ disableLeaveAlert: true, fontFamily: "IBM Plex Mono", fontSize: 13 })}`);
     up.send(Buffer.from("0hello from the shell", "utf8"), { binary: true });
   });
-  const t = await up(async () => "127.0.0.1:7788");
+  const t = await up(async () => ({ address: "127.0.0.1:7788" }));
   const w = new WebSocket(`ws://127.0.0.1:${t.port}/pty?scope=ws-0123456789abcdef`);
   try {
     await opened(w);

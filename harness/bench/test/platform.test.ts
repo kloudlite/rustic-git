@@ -23,7 +23,7 @@ const api = `http://127.0.0.1:${(srv.address() as { port: number }).port}`;
 
 test("tools, clone and remove hit the right routes with the token", async () => {
   const p = new Platform(api, "tok", "team1");
-  assert.equal(await p.tools("ws1"), "10.0.0.5:7788");
+  assert.deepEqual(await p.tools("ws1"), { address: "10.0.0.5:7788" });
   assert.equal(await p.name("ws1"), "alpha");
   assert.equal(await p.clone("ws1", "sub-1"), "ws1-c1");
   await p.remove("ws1-c1");

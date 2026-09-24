@@ -15,10 +15,19 @@ export class PlatformError extends Error {
   }
 }
 
+const ADDR_RE = /^([A-Za-z0-9.-]+:\d{1,5}|\[[0-9a-fA-F:]+\]:\d{1,5})$/;
+function validAddress(addr: string, source: string): string {
+  if (!ADDR_RE.test(addr)) throw new Error(`${source} is not a host:port address: ${addr}`);
+  return addr;
+}
+
+export type ToolsAuth = { address: string; token?: string };
+
 export class Platform {
   private api: string;
   private token: string;
   private team?: string;
+  private toolsCache = new Map<string, ToolsAuth>();
 
   constructor(api: string, token: string, team?: string) {
     this.api = api;
@@ -51,7 +60,27 @@ export class Platform {
     }
   }
 
-  async tools(ws: string) { return ((await this.call("GET", `/v1/workspaces/${encodeURIComponent(ws)}/tools`)) as { address: string }).address; }
+  /**
+   * `{address, token}` for a workspace, cached. `fresh` re-asks `/v1` — a 401 at the tool server
+   * means the keys beat re-minted the token, answered by resolving once more, not by failing the call.
+   */
+  async tools(ws: string, fresh = false): Promise<ToolsAuth> {
+    if (!fresh) {
+      const had = this.toolsCache.get(ws);
+      if (had) return had;
+    }
+    // A laptop points every workspace session at one tool server, such as the local end of
+    // `kl-connect ws ide`; it carries its own token in the env when it needs one.
+    let at: ToolsAuth;
+    if (process.env.KL_TOOLS_ADDRESS) {
+      at = { address: validAddress(process.env.KL_TOOLS_ADDRESS, "KL_TOOLS_ADDRESS"), ...(process.env.KL_TOOLS_TOKEN ? { token: process.env.KL_TOOLS_TOKEN } : {}) };
+    } else {
+      const d = (await this.call("GET", `/v1/workspaces/${encodeURIComponent(ws)}/tools`)) as { address: string; token?: string };
+      at = { address: validAddress(d.address, "workspace address"), ...(typeof d.token === "string" && d.token ? { token: d.token } : {}) };
+    }
+    this.toolsCache.set(ws, at);
+    return at;
+  }
   async name(ws: string) { return ((await this.call("GET", `/v1/workspaces/${encodeURIComponent(ws)}`)) as { name: string }).name; }
   async clone(ws: string, name: string) { return ((await this.call("POST", `/v1/workspaces/${encodeURIComponent(ws)}/clone`, { name })) as { id: string }).id; }
   async remove(ws: string) { await this.call("DELETE", `/v1/workspaces/${encodeURIComponent(ws)}`); }

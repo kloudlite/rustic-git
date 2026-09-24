@@ -1,5 +1,6 @@
 import { test, after } from "node:test";
 import assert from "node:assert/strict";
+import http from "node:http";
 import { fakeTools } from "./fake-tools.ts";
 import { setBackend, httpBackend, remote } from "../src/engine/remote.ts";
 import { TOOLS, runTool } from "../src/engine/index.ts";
@@ -7,7 +8,7 @@ import { setBgWaitMs } from "../src/engine/tools.ts";
 
 const fake = await fakeTools((cmd) => ({ exit_code: cmd.includes("false") ? 1 : 0, stdout: `ran ${cmd}`, stderr: "" }));
 after(() => fake.close());
-setBackend("ws1", httpBackend(fake.address));
+setBackend("ws1", httpBackend(async () => ({ address: fake.address })));
 const tool = (n: string) => TOOLS.find((t) => t.name === n)!;
 
 test("remote posts to /tools/{name} and a 4xx is an error string, not a throw", async () => {
@@ -40,9 +41,35 @@ test("bash background sends detach and returns the process id", async () => {
   assert.match(out, /started in background as p1/);
 });
 
+test("a stale token 401s once, the resolver re-mints a fresh one, and the call succeeds", async () => {
+  const tokens = { stale: "tok-old", fresh: "tok-new" };
+  let current = tokens.stale;
+  const seen: (string | undefined)[] = [];
+  const srv = http.createServer((req, res) => {
+    seen.push(req.headers.authorization);
+    if (req.headers.authorization !== `Bearer ${tokens.fresh}`) { res.statusCode = 401; return res.end(JSON.stringify({ error: "stale token" })); }
+    let body = "";
+    req.on("data", (c) => (body += c));
+    req.on("end", () => res.end(JSON.stringify({ ok: true })));
+  });
+  await new Promise<void>((r) => srv.listen(0, "127.0.0.1", r));
+  try {
+    const address = `127.0.0.1:${(srv.address() as { port: number }).port}`;
+    setBackend("ws3", httpBackend(async (fresh) => {
+      if (fresh) current = tokens.fresh;
+      return { address, token: current === tokens.fresh ? tokens.fresh : tokens.stale };
+    }));
+    const out = await remote("ws3", "read", {});
+    assert.deepEqual(out, { ok: true });
+    assert.deepEqual(seen, [`Bearer ${tokens.stale}`, `Bearer ${tokens.fresh}`], "one retry with a re-resolved token, not a loop");
+  } finally {
+    srv.close();
+  }
+});
+
 test("a foreground timeout tells the model to rerun in the background", async () => {
   const slow = await fakeTools((cmd) => ({ exit_code: 0, stdout: `ran ${cmd}`, stderr: "", timed_out: true }));
-  setBackend("ws2", httpBackend(slow.address));
+  setBackend("ws2", httpBackend(async () => ({ address: slow.address })));
   setBgWaitMs(1);
   try {
     const out = await runTool("ws2", tool("bash"), { command: "sleep 100" });

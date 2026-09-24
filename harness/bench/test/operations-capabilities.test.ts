@@ -27,6 +27,7 @@ import * as workspaceToolsExtension from "../../pi/workspace-tools.ts";
 import { forbidden, mutates } from "../../pi/workspace-tools.ts";
 import { TOOLS, gated, question } from "../../pi/catalog.ts";
 import { createPlatformAdapters } from "../src/operations/adapters.ts";
+import type { Platform } from "../src/platform.ts";
 import { Bench } from "../src/bench.ts";
 import { capabilityRuntime } from "./operations-runtime-fixture.ts";
 
@@ -224,9 +225,12 @@ test("every enabled read is wired in the real Bench runtime and returns schema-v
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), "cap-bench-runtime-"));
   const bench = new Bench({
     dir, readOnly: false, model: "test",
-    platform: async (_method, route) => route.startsWith("/v1/workspaces/ws-1")
-      ? { status: 200, data: { id: "ws-1", name: "api", state: "running", packages: [] } }
-      : { status: 200, data: [{ id: "ws-1", name: "api", state: "running" }, { id: "bench-deadbeef", name: "hidden", kind: "bench" }] },
+    // A bare `.raw` is all Bench.v1() calls; the real Platform's other methods are unused here.
+    platform: {
+      raw: async (_method: string, route: string) => route.startsWith("/v1/workspaces/ws-1")
+        ? { status: 200, data: { id: "ws-1", name: "api", state: "running", packages: [] } }
+        : { status: 200, data: [{ id: "ws-1", name: "api", state: "running" }, { id: "bench-deadbeef", name: "hidden", kind: "bench" }] },
+    } as unknown as Platform,
   });
   try {
     const args: Record<string, unknown> = {

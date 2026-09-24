@@ -1,6 +1,5 @@
 import fs from "node:fs";
 import path from "node:path";
-import { ExchangeLog } from "./exchanges.ts";
 import { Writable } from "./guard.ts";
 import { Procs, Tasks } from "./ledger.ts";
 import { Platform } from "./platform.ts";
@@ -14,7 +13,7 @@ import type { CapabilityAdapter, CapabilityRuntime } from "./operations/capabili
 import { createSharedAdapters, resolveWorkspaceProgress } from "./operations/adapters.ts";
 
 export type BenchEvent = { type: string; [k: string]: unknown };
-export type BenchOpts = { dir: string; readOnly: boolean; model: string; turn: Turn; platform?: Platform | ((method: string, p: string, body?: unknown) => Promise<{ status: number; data: unknown }>); extDir?: string };
+export type BenchOpts = { dir: string; readOnly: boolean; model: string; turn: Turn; platform?: Platform; extDir?: string };
 
 /** Everything a person's list/rows page shows: rows plus a page total. `messages` is kept for the old electron UI. */
 function page<T>(all: T[], after = 0, limit = all.length): { rows: T[]; messages: T[]; total: number } {
@@ -34,7 +33,6 @@ const isBench = (s: SessionRow) => (s.kind ?? "bench") === "bench";
  */
 export class Bench {
   readonly sessions: SessionList;
-  readonly exchanges: ExchangeLog;
   readonly tasks: Tasks;
   readonly procs: Procs;
   readonly writable: Writable;
@@ -49,7 +47,6 @@ export class Bench {
     this.opts = opts;
     fs.mkdirSync(path.join(opts.dir, "sessions"), { recursive: true });
     this.sessions = new SessionList(opts.dir);
-    this.exchanges = new ExchangeLog(opts.dir);
     this.tasks = new Tasks(opts.dir);
     this.procs = new Procs(opts.dir);
     this.writable = new Writable(opts.dir, (ok, reason) => this.emit({ type: "writable", ok, reason }));
@@ -65,6 +62,11 @@ export class Bench {
     return this.opts.model;
   }
 
+  /** The bench's own /v1 client: `server.ts` resolves a scope's tool-server address+token from it. */
+  get platform(): Platform | undefined {
+    return this.opts.platform;
+  }
+
   #capabilityRuntime?: Promise<CapabilityRuntime>;
   get capabilityRuntime(): Promise<CapabilityRuntime> {
     return (this.#capabilityRuntime ??= import("./operations/capabilities.ts").then((m) => m.createBenchCapabilityRuntime(this.procs, this.platformCapabilityAdapters())));
@@ -77,8 +79,6 @@ export class Bench {
   private v1(method: string, p: string, body?: unknown): Promise<{ status: number; data: unknown }> {
     const platform = this.opts.platform;
     if (!platform) return Promise.resolve({ status: 503, data: { error: "no platform configured" } });
-    // Tests wire a plain `(method, route, body) => {status, data}` function in place of a real Platform.
-    if (typeof platform === "function") return (platform as (m: string, p: string, b?: unknown) => Promise<{ status: number; data: unknown }>)(method, p, body);
     return platform.raw(method, p, body);
   }
 
@@ -87,8 +87,6 @@ export class Bench {
     const bench = async (method: string, route: string, body?: unknown) => {
       if (method !== "GET" || body !== undefined) return { ok: false, data: { error: "unsupported bench read" } };
       if (route === "/procs") return { ok: true, data: this.procs.all() };
-      // Exchanges/asks are dropped; workspace.progress still asks for them, so answer empty rather than "unsupported".
-      if (route.startsWith("/exchanges?workspace=")) return { ok: true, data: [] };
       const match = /^\/workspaces\/([^/]+)\/messages\?limit=10$/.exec(route);
       if (match) {
         const workspace = decodeURIComponent(match[1]);
@@ -119,8 +117,9 @@ export class Bench {
   }
 
   private async backendFor(ws: string): Promise<void> {
-    if (!this.opts.platform) return; // no platform (tests): leave the backend unset
-    setBackend(ws, httpBackend(await this.opts.platform.tools(ws)));
+    const platform = this.opts.platform;
+    if (!platform) return; // no platform (tests): leave the backend unset
+    setBackend(ws, httpBackend((fresh) => platform.tools(ws, fresh)));
   }
 
   private make(row: SessionRow): Session {
@@ -324,7 +323,6 @@ export class Bench {
     // automatic side effect of removing the session that happened to be working on it.
     this.writable.run(() => {
       for (const t of this.tasks.all().filter((t) => t.session === id && (t.state === "running" || t.state === "background"))) this.tasks.transition({ id: t.id, state: "cancelled", ended: Date.now() });
-      this.exchanges.discard(id);
       fs.rmSync(path.join(this.opts.dir, "btw", id), { recursive: true, force: true });
       const file = this.sessions.logFile(s);
       if (fs.existsSync(file)) {

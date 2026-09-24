@@ -102,5 +102,5 @@ test("no tool-server call bypasses the auth path", async () => {
   assert.match(server, /const toolsFor = async \(scope: string\)/, "the proxies resolve address AND token");
   assert.match(server, /const bearer = \(t\?: string\)/);
   // ttyd is a separate server on another port and takes no token: the shell splice is untouched.
-  assert.match(server, /spliceShell\(w, a, first\)/);
+  assert.match(server, /spliceShell\(w, a\.address, first\)/);
 });
