@@ -4,7 +4,7 @@ import { Writable } from "./guard.ts";
 import { Procs, Tasks } from "./ledger.ts";
 import { Platform } from "./platform.ts";
 import { setBackend, httpBackend } from "./engine/remote.ts";
-import { append, readRows, type Row } from "./rows.ts";
+import { append, readRows, nextTurn, type Row } from "./rows.ts";
 import { Scheduler } from "./scheduler.ts";
 import { Session, type Turn } from "./session.ts";
 import { Subs } from "./sub.ts";
@@ -218,9 +218,11 @@ export class Bench {
       this.write(() => this.sessions.update(id, { name: text.replace(/\s+/g, " ").slice(0, 40), lastActive: Date.now() }));
       this.emit({ type: "sessions" });
     }
+    // Read BEFORE kick: kick starts an idle session's turn synchronously (turn.start is written in
+    // the same tick), and counting after it named the turn after the one that answers this text.
+    const turn = nextTurn(readRows(this.sessions.logFile(s)));
     this.sched.kick();
-    const rows = readRows(this.sessions.logFile(s));
-    return { turn: 1 + rows.reduce((m, r) => ("turn" in r ? Math.max(m, r.turn) : m), 0) };
+    return { turn };
   }
 
   async abort(id: string): Promise<void> {

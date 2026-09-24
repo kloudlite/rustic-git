@@ -25,9 +25,10 @@ test("create + send runs a turn and logs user then turn.end", async () => {
   const r = await bench.send(s.id, "hi");
   assert.equal(typeof r.turn, "number");
   await new Promise((res) => setTimeout(res, 60));
-  const rows = (await bench.rows(s.id)).rows as { kind: string; answer?: string }[];
+  const rows = (await bench.rows(s.id)).rows as { kind: string; answer?: string; turn?: number }[];
   assert.ok(rows.some((row) => row.kind === "user"));
-  assert.ok(rows.some((row) => row.kind === "turn.end" && row.answer === "ok"));
+  // the turn send names is the one that answers it (the SLO probe waits on exactly that turn.end)
+  assert.ok(rows.some((row) => row.kind === "turn.end" && row.answer === "ok" && row.turn === r.turn));
   await bench.stop();
 });
 
