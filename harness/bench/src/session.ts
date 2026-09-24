@@ -5,7 +5,7 @@ import { TOOLS, type Tool, type User } from "./engine/index.ts";
 import { append, readRows, unread, nextTurn, openTurn, pending, type Row } from "./rows.ts";
 import type { SessionRow } from "./sessions.ts";
 
-export type TurnCtx = { prompt: string; cwd: string; tools: Tool[]; user: User; readOnly: boolean; log: (step: string) => void; signal: AbortSignal; history: Row[] };
+export type TurnCtx = { prompt: string; cwd: string; tools: Tool[]; user: User; readOnly: boolean; log: (step: string) => void; signal: AbortSignal; history: Row[]; model: string };
 export type Turn = (ctx: TurnCtx) => Promise<string>;
 export type Hooks = {
   delegate: (from: Session, target: string, instruction: string) => Promise<string>;
@@ -35,12 +35,14 @@ export class Session {
   private turnFn: Turn;
   private hooks: Hooks;
   private onRow?: (row: Row) => void;
-  constructor(row: SessionRow, file: string, turnFn: Turn, hooks: Hooks, onRow?: (row: Row) => void) {
+  private defaultModel: string;
+  constructor(row: SessionRow, file: string, turnFn: Turn, hooks: Hooks, onRow?: (row: Row) => void, defaultModel = "deepseek/deepseek-v4-pro") {
     this.row = row;
     this.file = file;
     this.turnFn = turnFn;
     this.hooks = hooks;
     this.onRow = onRow;
+    this.defaultModel = defaultModel;
   }
 
   private append(row: Row) { append(this.file, row); this.onRow?.(row); }
@@ -81,7 +83,7 @@ export class Session {
     const user: User = { tell: (m) => this.hooks.tell(this, m), ask: (q) => this.hooks.askPerson(this, q) };
     let end: Extract<Row, { kind: "turn.end" }>;
     try {
-      const answer = await this.turnFn({ prompt, cwd: this.row.workspace ?? `bench-${this.row.seq}`, tools: this.tools(), user, readOnly: this.row.tier !== "sub", log: (step) => this.append({ kind: "turn.step", ts: Date.now(), turn, step }), signal: this.ctl.signal, history: rows });
+      const answer = await this.turnFn({ prompt, cwd: this.row.workspace ?? `bench-${this.row.seq}`, tools: this.tools(), user, readOnly: this.row.tier !== "sub", log: (step) => this.append({ kind: "turn.step", ts: Date.now(), turn, step }), signal: this.ctl.signal, history: rows, model: this.row.model ?? this.defaultModel });
       if (this.ctl.signal.aborted) return;
       end = { kind: "turn.end", ts: Date.now(), turn, answer };
     } catch (e) {
@@ -93,6 +95,10 @@ export class Session {
     this.append(end);
     if (end.answer !== undefined && this.onAnswer) await this.onAnswer(this, end);
   }
+
+  /** Patch fields on the live row (the scheduler keeps one Session per seq; SessionList.update alone
+   * would only touch its own copy, so a mid-life change like the model never reached a running turn). */
+  setRow(patch: Partial<SessionRow>) { Object.assign(this.row, patch); }
 
   abort() {
     const turn = openTurn(this.rows());

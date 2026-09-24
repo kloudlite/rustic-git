@@ -128,7 +128,7 @@ export class Bench {
       tell: (s: Session, m: string) => this.emit({ type: "row", session: s.row.id, row: { kind: "tell", text: m } }),
       askPerson: (s: Session, q: string) => this.askPerson(s, q),
     };
-    const s = new Session(row, this.sessions.logFile(row), this.opts.turn, hooks, (r) => this.emit({ type: "row", session: row.id, row: r }));
+    const s = new Session(row, this.sessions.logFile(row), this.opts.turn, hooks, (r) => this.emit({ type: "row", session: row.id, row: r }), this.opts.model);
     // The scheduler (and Subs.delegate/finish) set onAnswer on every session it makes; a sub's
     // answer must always go through Subs.finish (push-back, clone delete), even across a
     // bench restart, so the setter is pinned rather than left to whoever assigns last.
@@ -266,6 +266,17 @@ export class Bench {
     if (!this.sessions.get(id)) throw new Error(`no session ${id}`);
     const s = this.writable.run(() => this.sessions.update(id, { archived: false, lastActive: Date.now() }));
     this.sched.kick();
+    this.emit({ type: "sessions" });
+    return s;
+  }
+
+  /** The next turn uses the new model; a turn already running is not affected (session.ts reads row.model per turn). */
+  setModel(id: string, model: string): SessionRow {
+    this.refuse(true);
+    const have = this.sessions.get(id);
+    if (!have) throw new Error(`no session ${id}`);
+    const s = this.writable.run(() => this.sessions.update(id, { model }));
+    this.sched.get(have.seq)?.setRow({ model });
     this.emit({ type: "sessions" });
     return s;
   }

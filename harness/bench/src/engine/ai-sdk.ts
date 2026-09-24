@@ -10,16 +10,26 @@ import { compressWithModel, RETRIEVE_TOOL } from "./headroom.ts";
 export const LLM_TIMEOUT_MS = 180_000;
 const MAX_STEPS = 40; // a session that never submits stops here
 
-// JEVHARN_MODEL is provider/id. The key is the provider's usual env var; any other provider is reached as
+// spec is provider/id. The key is the provider's usual env var; any other provider is reached as
 // OpenAI-compatible at JEVHARN_BASE_URL with JEVHARN_API_KEY.
-function modelFromEnv(): { provider: string; id: string; model: LanguageModel } {
-  const spec = process.env.JEVHARN_MODEL ?? "deepseek/deepseek-v4-pro";
+export function modelFrom(spec: string, env: NodeJS.ProcessEnv = process.env): { provider: string; id: string; model: LanguageModel } {
   const cut = spec.indexOf("/"), provider = spec.slice(0, cut), id = spec.slice(cut + 1);
-  if (provider === "anthropic") return { provider, id, model: createAnthropic()(id) };
-  if (provider === "deepseek") return { provider, id, model: createDeepSeek()(id) };
-  const baseURL = process.env.JEVHARN_BASE_URL;
+  if (provider === "anthropic") return { provider, id, model: createAnthropic({ apiKey: env.ANTHROPIC_API_KEY })(id) };
+  if (provider === "deepseek") return { provider, id, model: createDeepSeek({ apiKey: env.DEEPSEEK_API_KEY })(id) };
+  const baseURL = env.JEVHARN_BASE_URL;
   if (!baseURL) throw new Error(`JEVHARN_MODEL names provider "${provider}": set JEVHARN_BASE_URL (and JEVHARN_API_KEY) to reach it as OpenAI-compatible`);
-  return { provider, id, model: createOpenAICompatible({ name: provider, baseURL, apiKey: process.env.JEVHARN_API_KEY })(id) };
+  return { provider, id, model: createOpenAICompatible({ name: provider, baseURL, apiKey: env.JEVHARN_API_KEY })(id) };
+}
+
+const modelFromEnv = () => modelFrom(process.env.JEVHARN_MODEL ?? "deepseek/deepseek-v4-pro");
+
+// undefined when the spec can be reached with what's in env; an error sentence otherwise. Never throws.
+export function reachable(spec: string, env: NodeJS.ProcessEnv = process.env): string | undefined {
+  const cut = spec.indexOf("/"), provider = spec.slice(0, cut), id = spec.slice(cut + 1);
+  if (!provider || !id) return `"${spec}" is not "provider/id"`;
+  if (provider === "anthropic") return env.ANTHROPIC_API_KEY ? undefined : "anthropic needs ANTHROPIC_API_KEY set";
+  if (provider === "deepseek") return env.DEEPSEEK_API_KEY ? undefined : "deepseek needs DEEPSEEK_API_KEY set";
+  return env.JEVHARN_BASE_URL ? undefined : `provider "${provider}" needs JEVHARN_BASE_URL set to reach it as OpenAI-compatible`;
 }
 
 // A cache marker is a paid write, so it goes only where the text comes back as a prefix. Providers that cache by

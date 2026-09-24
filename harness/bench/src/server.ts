@@ -5,6 +5,7 @@ import { Idle } from "./idle.ts";
 import { holdFrames, spliceShell } from "./pty.ts";
 import { spliceWatch } from "./watch.ts";
 import { handleOperationControl, operationControlError, type OperationControlOptions } from "./operations/control.ts";
+import { reachable } from "./engine/index.ts";
 
 /**
  * harness-bench's surface. Where it listens is main's choice: the pod IP
@@ -113,6 +114,12 @@ export function serve(
       // `model` is the bench's DEFAULT model. A window that opens before any session row has loaded
       // still has to name what will answer; without it the composer said "no model" (owner, 2026-09-17).
       if (m === "GET" && u.pathname === "/healthz") return send(res, 200, { ok: true, model: bench.model, readOnly: bench.readOnly, writable: bench.writable.ok(), reason: bench.writable.reason(), ...idle.state() });
+      if (m === "GET" && u.pathname === "/models") {
+        const providers = ["anthropic", "deepseek"].filter((p) => !reachable(`${p}/x`));
+        const defaultProvider = bench.model.split("/")[0];
+        if (!providers.includes(defaultProvider) && !reachable(bench.model)) providers.push(defaultProvider);
+        return send(res, 200, { default: bench.model, providers });
+      }
       if (p[0] === "sessions") {
         if (p.length === 1 && m === "GET") return send(res, 200, bench.sessions.all());
         if (p.length === 1 && m === "POST") return send(res, 201, await bench.create());
@@ -135,6 +142,13 @@ export function serve(
         if (p.length === 3 && m === "POST" && p[2] === "abort") {
           await bench.abort(p[1]);
           return send(res, 204);
+        }
+        if (p.length === 3 && m === "POST" && p[2] === "model") {
+          if (!bench.sessions.get(p[1])) return send(res, 404, { error: `no session ${p[1]}` });
+          const model = String((await body(req)).model ?? "");
+          const why = reachable(model);
+          if (why) return send(res, 422, { error: why });
+          return send(res, 200, bench.setModel(p[1], model));
         }
       }
       if (p[0] === "workspaces") {
