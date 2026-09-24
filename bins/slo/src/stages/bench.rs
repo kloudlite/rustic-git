@@ -1773,8 +1773,6 @@ fn judge_reply(body: &str) -> Result<Reply> {
     Ok(Reply::Answered)
 }
 
-/// The transcript's last four messages as `role(tool): text`, each cut to 120 chars: enough to
-/// say why a turn did not do what it was asked, short enough for a step's detail.
 /// The name `ask` gave the agent it started, from its `agent {name} started` tool result.
 fn started_agent(body: &str) -> Option<String> {
     let doc: Value = serde_json::from_str(body).ok()?;
@@ -1785,6 +1783,8 @@ fn started_agent(body: &str) -> Option<String> {
     })
 }
 
+/// The transcript's last four messages as `role(tool): text`, each cut to 120 chars: enough to
+/// say why a turn did not do what it was asked, short enough for a step's detail.
 fn transcript_tail(body: &str) -> String {
     let doc: Value = serde_json::from_str(body).unwrap_or_default();
     let msgs = doc["messages"].as_array().cloned().unwrap_or_default();
