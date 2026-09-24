@@ -7,7 +7,6 @@ import WebSocket, { WebSocketServer } from "ws";
 import { Bench } from "../src/bench.ts";
 import { serve } from "../src/server.ts";
 import { authFrame, shellAddress, SHELL_PORT, TTYD_SUBPROTOCOL } from "../src/pty.ts";
-import { FAKE } from "./fake-pi.ts";
 import { until } from "./wait.ts";
 
 /**
@@ -16,7 +15,7 @@ import { until } from "./wait.ts";
  * there is no session, no reattach and no tmux behind it.
  */
 async function up(resolveTools?: (ws: string) => Promise<string>) {
-  const bench = new Bench({ dir: fs.mkdtempSync(path.join(os.tmpdir(), "bench-pty-")), readOnly: false, model: "fake/m", bin: FAKE });
+  const bench = new Bench({ dir: fs.mkdtempSync(path.join(os.tmpdir(), "bench-pty-")), readOnly: false, model: "fake/m", turn: async () => "ok" });
   await bench.start();
   const srv = await serve(bench, 0, "127.0.0.1", undefined, undefined, { resolveTools });
   return { srv, port: srv.port, down: async () => (await bench.stop(), await srv.close()) };

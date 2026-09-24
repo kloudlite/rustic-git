@@ -8,7 +8,6 @@ import { serve } from "../src/server.ts";
 import { createBenchOperationAuthorizer, type OperationAuthorizer, type OperationPrincipal, type OperationSource } from "../src/operations/control.ts";
 import type { OperationEvent, OperationSnapshot } from "../src/operations/contracts.ts";
 import { DEFAULT_BUDGETS } from "../src/operations/contracts.ts";
-import { FAKE } from "./fake-pi.ts";
 
 const DIGEST = `sha256:${"a".repeat(64)}`;
 
@@ -45,7 +44,7 @@ const event: OperationEvent = {
 };
 
 async function up(source?: OperationSource, authorize?: OperationAuthorizer) {
-  const bench = new Bench({ dir: fs.mkdtempSync(path.join(os.tmpdir(), "bench-ops-")), readOnly: false, model: "fake/m", bin: FAKE });
+  const bench = new Bench({ dir: fs.mkdtempSync(path.join(os.tmpdir(), "bench-ops-")), readOnly: false, model: "fake/m", turn: async () => "ok" });
   await bench.start();
   const srv = await serve(bench, 0, "127.0.0.1", undefined, undefined, { operationSource: source, operationAuthorizer: authorize });
   const request = async (method: string, route: string, value?: unknown, token = "person", identity = { owner: "alice", login: "alice" }) => {

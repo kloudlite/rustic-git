@@ -41,6 +41,16 @@ export class Platform {
     return text ? JSON.parse(text) : undefined;
   }
 
+  /** Status-carrying variant for callers (the operations executor's adapters) that need the code, not just a thrown error. */
+  async raw(method: string, p: string, body?: unknown): Promise<{ status: number; data: unknown }> {
+    try {
+      return { status: 200, data: await this.call(method, p, body) };
+    } catch (e) {
+      if (e instanceof PlatformError) return { status: e.status, data: e.body };
+      throw e;
+    }
+  }
+
   async tools(ws: string) { return ((await this.call("GET", `/v1/workspaces/${encodeURIComponent(ws)}/tools`)) as { address: string }).address; }
   async name(ws: string) { return ((await this.call("GET", `/v1/workspaces/${encodeURIComponent(ws)}`)) as { name: string }).name; }
   async clone(ws: string, name: string) { return ((await this.call("POST", `/v1/workspaces/${encodeURIComponent(ws)}/clone`, { name })) as { id: string }).id; }

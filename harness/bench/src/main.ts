@@ -7,11 +7,10 @@
  * as asleep: the pod's restartPolicy is Always, so idling by exiting would only
  * be restarted — idleness held for --idle-secs is a file (`{dir}/.idle`, see
  * idle.ts) and the process keeps serving. Nothing but a signal exits 0.
- * Children inherit this process's env, so KL_TEAM reaches pi's extensions as is.
  *
  * Only node: builtins are imported statically: `--ping` is an exec readiness
  * probe with a 1 s default timeout, and type-stripping the bench, server, ws and
- * pi SDK under gVisor would flap the bench unready. The server path imports them.
+ * ai-sdk under gVisor would flap the bench unready. The server path imports them.
  */
 import fs from "node:fs";
 import path from "node:path";
@@ -24,7 +23,7 @@ const { values: a } = parseArgs({
     // The pod IP: the gateway dials it, and the platform's NetworkPolicy admits only the gateway.
     host: { type: "string", default: "0.0.0.0" },
     port: { type: "string", default: "7789" },
-    model: { type: "string", default: process.env.KL_MODEL ?? process.env.HARNESS_PI_MODEL ?? "deepseek/deepseek-v4-flash" },
+    model: { type: "string", default: process.env.KL_MODEL ?? "deepseek/deepseek-v4-flash" },
     "read-only": { type: "boolean", default: false },
     wait: { type: "boolean", default: false },
     ping: { type: "boolean", default: false },
@@ -75,8 +74,22 @@ if (process.env.KLOUDLITE_OTLP_URL) {
   startTracing(process.env.OTEL_SERVICE_NAME ?? "harness-bench", process.env.KLOUDLITE_OTLP_URL);
 }
 
-const [{ Bench }, { Idle }, { serve }, { loadOperationControl }] = await Promise.all([import("./bench.ts"), import("./idle.ts"), import("./server.ts"), import("./operations/production.ts")]);
-const bench = new Bench({ dir, readOnly, model: a.model });
+const [{ Bench }, { Idle }, { serve }, { loadOperationControl }, { makeTurn }, { Platform }] = await Promise.all([
+  import("./bench.ts"),
+  import("./idle.ts"),
+  import("./server.ts"),
+  import("./operations/production.ts"),
+  import("./runtime.ts"),
+  import("./platform.ts"),
+]);
+const platform = (() => {
+  try {
+    return Platform.fromEnv();
+  } catch {
+    return undefined;
+  }
+})();
+const bench = new Bench({ dir, readOnly, model: a.model, turn: makeTurn(), platform });
 await bench.start();
 if (!readOnly) {
   fs.writeFileSync(path.join(dir, ".health"), ""); // the probe appends; start each process from empty

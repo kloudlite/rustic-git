@@ -88,20 +88,17 @@ test("the header helper sends nothing without a token", () => {
 /**
  * The header is sent from ONE place per file, not at each call site — five sites each forgot it
  * once already. A raw `fetch` at a tool-server address that does not go through the auth path is
- * the shape of that bug coming back.
+ * the shape of that bug coming back. `bench.ts` no longer makes raw tool-server fetches itself
+ * (the sys-1 engine's own calls run through `engine/remote.ts`'s backend map, keyed by workspace,
+ * not by scope+token); the proxy routes in `server.ts` are the surface this test still holds.
  */
 test("no tool-server call bypasses the auth path", async () => {
   const fs = await import("node:fs");
   const path = await import("node:path");
-  const bench = fs.readFileSync(path.resolve("bench/src/bench.ts"), "utf8");
-  // Every `/tools/*` the bench makes goes through `toolsFetch`, which carries the token.
-  for (const m of bench.matchAll(/fetch\(`http:\/\/\$\{([a-zA-Z.]+)\}\/(tools|fs|stream)\//g)) {
+  const server = fs.readFileSync(path.resolve("bench/src/server.ts"), "utf8");
+  for (const m of server.matchAll(/fetch\(`http:\/\/\$\{([a-zA-Z.]+)\}\/(tools|fs|stream)\//g)) {
     assert.match(m[1], /^at\.address$/, `a raw fetch to /${m[2]} at ${m[1]}: it must carry the token`);
   }
-  assert.match(bench, /private async toolsFetch\(/, "one place sends the header");
-  assert.match(bench, /authorization: `Bearer \$\{at\.token\}`/);
-
-  const server = fs.readFileSync(path.resolve("bench/src/server.ts"), "utf8");
   assert.match(server, /const toolsFor = async \(scope: string\)/, "the proxies resolve address AND token");
   assert.match(server, /const bearer = \(t\?: string\)/);
   // ttyd is a separate server on another port and takes no token: the shell splice is untouched.

@@ -5,7 +5,6 @@ import os from "node:os";
 import path from "node:path";
 import { Bench } from "../src/bench.ts";
 import { serve } from "../src/server.ts";
-import { FAKE } from "./fake-pi.ts";
 import { until } from "./wait.ts";
 import { BenchClient } from "../../src/bench-client.ts";
 import { checkPty, checkWatch, closeSocket, readTtydFrame } from "../../src/pty-ipc.ts";
@@ -109,7 +108,7 @@ test("BenchClient.pty: refused while offline, a shell from the pod's shell sidec
     });
   });
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), "desk-pty-"));
-  const bench = new Bench({ dir: path.join(dir, "bench"), readOnly: false, model: "fake/m", bin: FAKE });
+  const bench = new Bench({ dir: path.join(dir, "bench"), readOnly: false, model: "fake/m", turn: async () => "ok" });
   await bench.start();
   const srv = await serve(bench, 0, "127.0.0.1");
   const c = new BenchClient(`http://127.0.0.1:${srv.port}`, () => undefined, path.join(dir, "cache.json"));

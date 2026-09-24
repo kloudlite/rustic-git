@@ -71,7 +71,7 @@ test("delegate clones, writes child user row then parent delegate row, and the c
   await settle();
   // the child answered: pushed once, parent got the answer with the commit, clone deleted, child closed
   assert.equal(pushes, 1);
-  assert.match(clonePod.execs.find((c) => c.startsWith("git push"))!, /ssh:\/\/kl@127\.0\.0\.1\/home\/kl\/workspaces\/main-tree HEAD:feat\/x/);
+  assert.match(clonePod.execs.find((c) => c.startsWith("git push"))!, /ssh:\/\/kl@127\.0\.0\.1\/home\/kl\/workspace HEAD:feat\/x/);
   const got = readRows(list.logFile(main)).find((r) => r.kind === "user" && r.from === sub.seq) as { text: string };
   assert.match(got.text, /feature landed[\s\S]*abc123/);
   assert.deepEqual(deleted, ["/v1/workspaces/c"]);

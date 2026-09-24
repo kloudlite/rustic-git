@@ -6,7 +6,6 @@ import os from "node:os";
 import path from "node:path";
 import { Bench } from "../src/bench.ts";
 import { serve } from "../src/server.ts";
-import { FAKE } from "./fake-pi.ts";
 
 /**
  * The desktop renders a workspace from its tool server's `/fs/*` (spec §2): the bench proxies those
@@ -21,7 +20,7 @@ async function toolServer(handler: (req: http.IncomingMessage, res: http.ServerR
 
 async function up(address: string) {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), "bench-fs-"));
-  const bench = new Bench({ dir, readOnly: false, model: "fake/m", bin: FAKE });
+  const bench = new Bench({ dir, readOnly: false, model: "fake/m", turn: async () => "ok" });
   await bench.start();
   const srv = await serve(bench, 0, "127.0.0.1", undefined, undefined, { resolveTools: async () => address });
   return {
