@@ -1207,8 +1207,9 @@ async fn shell_roundtrip(c: &mut Ctx) {
 ///
 /// The transcript is the assertion (spec §3.4): asked to `cat /etc/hostname` the session must call
 /// no tool that acts — there is no `bash`, no `read`, no filesystem tool registered in the sessions
-/// container in any mode. The `ALWAYS_ON` tools only steer the session, so calling them (a
-/// `tool_search` for a shell, say) is allowed; any other tool result fails the id.
+/// container in any mode. The `ALWAYS_ON` tools only steer the session and the `READ_ONLY` ones only
+/// look, so calling them (a `tool_search` for a shell, `kl_workspaces`) is allowed; any other tool
+/// result fails the id.
 async fn no_hands(c: &mut Ctx) {
     let no_model: Arc<Mutex<Option<String>>> = Default::default();
     let nm = no_model.clone();
@@ -1230,7 +1231,8 @@ async fn no_hands(c: &mut Ctx) {
             let msgs = doc["messages"].as_array().context("messages answer has no messages")?;
             // `ALWAYS_ON` steers the session and touches nothing, and a model looking for a way to
             // run the command reaches for `tool_search` first (hourly 2026-09-23 19:53 IST): that
-            // is the session asking, not crossing. Any other tool, or one with no name, is.
+            // is the session asking, not crossing; so is a `READ_ONLY` look at the platform. Any other
+            // tool, or one with no name, is.
             if let Some(call) = msgs.iter().find(|m| crossed(m)) {
                 bail!("a bench session ran a tool: {}", super::clip(&call.to_string()));
             }
@@ -1605,12 +1607,22 @@ async fn tool_roundtrip(c: &mut Ctx) -> Option<String> {
     Some(thread)
 }
 
-/// The workspace the tool round trip runs in, or why it cannot: a workspace recorded but never
-/// ready already failed `ws.packages.add`, and must not fail a second id for the same fault.
-/// A message that says a tool outside `ALWAYS_ON` ran — `bench.no_hands`'s boundary.
+/// The platform tools that only look: every `kl_*` entry with `effect: "read"` in
+/// `harness/pi/catalog.ts`. Asked to run a command, a bench model checks which workspaces there
+/// are before saying it cannot (hourly 2026-09-24 00:39 and 01:05 IST, `kl_workspaces` both
+/// times); reading the platform is not having hands. Kept by hand: a catalogue entry turning
+/// `read` without landing here only makes this id stricter.
+const READ_ONLY: [&str; 15] = [
+    "kl_workspace_progress", "kl_pkg_list", "kl_repos", "kl_repo_branches", "kl_pulls", "kl_pull",
+    "kl_images", "kl_workspaces", "kl_workspace", "kl_workspace_snapshots", "kl_env_current",
+    "kl_environments", "kl_environment", "kl_environment_snapshots", "kl_capabilities",
+];
+
+/// A message that says a tool outside `ALWAYS_ON` and `READ_ONLY` ran — `bench.no_hands`'s
+/// boundary.
 fn crossed(m: &Value) -> bool {
     (m["role"] == "toolResult" || m["toolCallId"].is_string())
-        && !m["toolName"].as_str().is_some_and(|n| ALWAYS_ON.contains(&n))
+        && !m["toolName"].as_str().is_some_and(|n| ALWAYS_ON.contains(&n) || READ_ONLY.contains(&n))
 }
 
 /// The ids of this group that need a live workspace besides the bench.
@@ -2125,6 +2137,8 @@ mod tests {
         assert!(why.contains("isError=true") && why.contains("[exit 1]"), "{why}");
         assert!(!crossed(&serde_json::json!({"role": "toolResult", "toolName": "tool_search"})));
         assert!(crossed(&serde_json::json!({"role": "toolResult", "toolName": "kl_exec"})));
+        assert!(!crossed(&serde_json::json!({"role": "toolResult", "toolName": "kl_workspaces"})));
+        assert!(crossed(&serde_json::json!({"role": "toolResult", "toolName": "kl_pkg_add"})));
         assert!(crossed(&serde_json::json!({"role": "toolResult"})));
         assert!(!crossed(&serde_json::json!({"role": "assistant"})));
         assert!(tool_workspace(None, true).is_err());
