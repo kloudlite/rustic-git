@@ -288,7 +288,7 @@ pub struct ApiState {
     pub(crate) member_verdicts: std::sync::Mutex<std::collections::HashMap<(String, String), (std::time::Instant, Judged)>>,
     pub(crate) cli_live: std::sync::Mutex<std::collections::HashMap<String, std::time::Instant>>,
     /// The bench pod's engine credentials (`TYPESAFE_API_KEY`, `JEVHARN_API_KEY`,
-    /// `JEVHARN_MODEL`, `JEVHARN_BASE_URL`), read once at boot through
+    /// `JEVHARN_MODEL`, `JEVHARN_BASE_URL`, `DEEPSEEK_API_KEY`, `ANTHROPIC_API_KEY`), read once at boot through
     /// `kloudlite_core::secret::read` and carried into the owner's `user-key` Secret. Absent
     /// name = not in the map, never an empty string: `user_key_secret` writes only what is here.
     pub bench_engine: std::collections::BTreeMap<String, String>,

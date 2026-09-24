@@ -595,6 +595,8 @@ spec:
                     - { key: jevharn, path: JEVHARN_API_KEY }
                     - { key: model, path: JEVHARN_MODEL }
                     - { key: base-url, path: JEVHARN_BASE_URL }
+                    - { key: deepseek, path: DEEPSEEK_API_KEY }
+                    - { key: anthropic, path: ANTHROPIC_API_KEY }
 ---
 # A drain may not evict both api pods at once: this tier is the whole browse API and every /v1
 # write, and without the budget a two-node drain is a reschedule-long outage of both.

@@ -113,6 +113,10 @@ pub fn bench_container(ws_id: &str, spec: &WorkspaceSpec, image: &str, idle_secs
         bench_engine_var("JEVHARN_API_KEY"),
         bench_engine_var("JEVHARN_MODEL"),
         bench_engine_var("JEVHARN_BASE_URL"),
+        // A session's model picks its provider per turn (`engine/ai-sdk.ts` `modelFrom`); these two
+        // reach anthropic and deepseek natively, everything else goes through JEVHARN_BASE_URL.
+        bench_engine_var("DEEPSEEK_API_KEY"),
+        bench_engine_var("ANTHROPIC_API_KEY"),
     ];
     // Unset rather than empty when the agent has no `WS_API_URL`: the tools then fail closed.
     if !api_url.is_empty() {

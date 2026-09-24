@@ -406,6 +406,8 @@ async fn run() -> Result<()> {
                 "JEVHARN_API_KEY",
                 "JEVHARN_MODEL",
                 "JEVHARN_BASE_URL",
+                "DEEPSEEK_API_KEY",
+                "ANTHROPIC_API_KEY",
             ]
             .into_iter()
             .filter_map(|name| kloudlite_core::secret::read(name).map(|v| (name.to_string(), v)))
