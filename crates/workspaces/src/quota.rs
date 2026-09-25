@@ -238,11 +238,10 @@ pub async fn usage(c: &kube::Client, owner: &str) -> Result<Usage, kube::Error> 
         }
         u.workspaces += 1;
         if live(w.spec.desired_state) {
-            // The workspace container plus the SHELL sidecar every pod carries (spec §2.2): the
-            // charge is what the pod holds, and the pod holds both.
-            let (shell_cpu, shell_mem) = crate::model::shell_pod_extra();
-            millis += millicores(&w.spec.resources.cpu_limit) + shell_cpu;
-            mib += mebibytes(&w.spec.resources.memory_limit) + shell_mem;
+            // The one workspace container: the person's terminal runs inside it now (owner
+            // ruling 2026-09-25), so there is no sidecar to charge separately any more.
+            millis += millicores(&w.spec.resources.cpu_limit);
+            mib += mebibytes(&w.spec.resources.memory_limit);
         }
     }
     for e in env_own.items {

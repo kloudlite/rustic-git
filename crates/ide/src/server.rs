@@ -47,7 +47,8 @@ impl App {
 
 pub fn router(app: Arc<App>) -> Router {
     // Read from the config so a test can point it at a tempdir; the default is the file the keys
-    // beat projects into the workspace container and the shell sidecar does not mount.
+    // beat projects into the workspace container, which other pods (a bench's `sessions`
+    // container, another tenant) never mount.
     let tokens = Arc::new(crate::auth::Tokens {
         path: app.cfg.token_path.clone().unwrap_or_else(|| std::path::PathBuf::from(crate::auth::TOKEN_PATH)),
     });
@@ -64,8 +65,8 @@ pub fn router(app: Arc<App>) -> Router {
         .route("/fs/log", get(crate::fs::log))
         .route("/stream/process/{id}", get(crate::stream::process))
         .route("/stream/watch/{id}", get(crate::stream::watch))
-        // NO PTY route: a terminal is the SHELL SIDECAR's `ttyd` on 7790 now (spec §2.3), in its
-        // own container with the home and nothing else. The tool server used to carry one, with
+        // NO PTY route: a terminal is the workspace container's own `ttyd` on 7790 now (spec
+        // §2.3, owner ruling 2026-09-25: no shell sidecar). The tool server used to carry one, with
         // named sessions and replay; a dropped connection is a new shell instead, and the tool
         // server is only tools again.
         // Axum's own default is 2 MiB, which refused a `write` or `patch` body the file tools
@@ -75,7 +76,8 @@ pub fn router(app: Arc<App>) -> Router {
         // upgrade, never one per message. Untrusted like a public door: a caller's sampled flag
         // counts only for probe traffic, within the probe bucket (`kloudlite_trace::sampler`).
         // ABOVE the trace layer, so a refused request is still one line in the log — a 401 from
-        // the shell sidecar is the fence working, and the fleet should be able to count them.
+        // a pod with no token to send is the fence working, and the fleet should be able to count
+        // them.
         // Below nothing else: every route but `/healthz` needs the credential, including the two
         // WebSocket upgrades, which carry headers like any other request.
         .layer(axum::middleware::from_fn_with_state(tokens, crate::auth::require))
@@ -180,8 +182,8 @@ mod tests {
         assert!(!format!("{got:?}").contains("p-123"));
     }
 
-    /// The tool server carries NO terminal (spec §2.3, 2026-09-17): a terminal is the shell
-    /// sidecar's ttyd on 7790, in a container with the home and no code, no token and no tools.
+    /// The tool server carries NO terminal (spec §2.3, 2026-09-17): a terminal is the workspace
+    /// container's own ttyd on 7790 (owner ruling 2026-09-25: no shell sidecar).
     /// The three PTY routes and their named-session table are gone, and this is what keeps a
 /// `?tree=` on the URL must name the tree exactly as `{"tree": …}` in the body does.
 ///
@@ -251,10 +253,11 @@ mod tests {
         assert_eq!(st, 400, "{v}");
     }
 
-    /// The shell sidecar shares this pod's network namespace, so it reaches the tool server on
-    /// LOOPBACK, where no NetworkPolicy applies. A `curl` from a person's terminal ran a command
-    /// as the workspace user (2026-09-18, ws-632cf9f23d9f2fbf). The fence is the credential now,
-    /// and this is what the shell sends: nothing.
+    /// A caller sharing this pod's network namespace reaches the tool server on LOOPBACK, where
+    /// no NetworkPolicy applies. A `curl` from a person's terminal ran a command as the workspace
+    /// user (2026-09-18, ws-632cf9f23d9f2fbf, back when a separate shell container was meant to
+    /// hold no credential). The fence is the credential now, and a pod with no Secret mounted has
+    /// none to send.
     ///
     /// Every route FAMILY, not one route: the hole was that `/tools/exec` was reachable, and a
     /// test of `/tools/exec` alone would not have caught `/fs/file` reading the same tree.

@@ -65,7 +65,7 @@ fn has_cond(st: &serde_json::Value, t: &str, status: &str, reason: &str) -> bool
 /// A bench is a workspace pod plus the `bench` container, stamped with the agent's configured
 /// image and the region's `benchIdleSecs` — neither of which is a spec field.
 #[tokio::test]
-async fn a_running_bench_gets_one_pod_with_both_containers() {
+async fn a_running_bench_gets_one_pod_with_its_one_container() {
     let tmp = tempfile::tempdir().unwrap();
     let mut routes = ssh_routes();
     // Twice: the start's capacity gate asks whether a pod exists before `create_if_absent` does.
@@ -80,9 +80,10 @@ async fn a_running_bench_gets_one_pod_with_both_containers() {
     let sent = rec.sent("POST", PODS);
     assert_eq!(sent.len(), 1, "{:?}", rec.calls());
     let names: Vec<_> = sent[0]["spec"]["containers"].as_array().unwrap().iter().map(|c| c["name"].as_str().unwrap()).collect();
-    // A bench pod is the SESSIONS container and a terminal — no workspace container at all since
-    // 2026-09-17 (spec §2.2), so nothing on it serves tools, sshd or code.
-    assert_eq!(names, vec!["sessions", "shell"], "{:?}", sent[0]["spec"]["containers"]);
+    // A bench pod is the SESSIONS container alone — no workspace container since 2026-09-17
+    // (spec §2.2), and no shell either since owner ruling 2026-09-25 (engine API keys live in
+    // this container's env; a shell here would expose them).
+    assert_eq!(names, vec!["sessions"], "{:?}", sent[0]["spec"]["containers"]);
     let bench = &sent[0]["spec"]["containers"][0];
     assert_eq!(bench["image"], ctx.bench_image.as_str());
     let env = bench["env"].as_array().unwrap();

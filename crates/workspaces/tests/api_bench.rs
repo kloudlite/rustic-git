@@ -509,14 +509,13 @@ async fn a_bench_costs_the_person_only_while_it_has_a_pod() {
         let acme = kloudlite_workspaces::quota::usage(&client, "acme").await.unwrap();
         (alice.cpu, acme.cpu)
     };
-    // A bench pod is `sessions` + `shell` since 2026-09-17 (spec §2.2): no workspace container at
-    // all, so the fixture's `spec.resources` sizes nothing and the charge is those two containers.
-    // Read from the definitions, never literals — both were resized this month, and a number
-    // written out here would have to be found by a failing gate rather than following the change.
+    // A bench pod is `sessions` alone since 2026-09-17 (spec §2.2) and has no shell at all since
+    // owner ruling 2026-09-25 (no workspace container, no shell sidecar), so the fixture's
+    // `spec.resources` sizes nothing and the charge is that one container. Read from the
+    // definition, never a literal — it was resized this month, and a number written out here would
+    // have to be found by a failing gate rather than following the change.
     let cpu = |r: kloudlite_workspaces::crd::PodResources| kloudlite_workspaces::quota::millicores(&r.cpu_limit);
-    let want = ((cpu(kloudlite_workspaces::model::bench_container_resources())
-        + cpu(kloudlite_workspaces::model::shell_container_resources()))
-        / 1000) as u32;
+    let want = (cpu(kloudlite_workspaces::model::bench_container_resources()) / 1000) as u32;
     assert_eq!(usage(bench_obj("alice", "acme", "running", Some("ready"), "full")).await, (want, 0));
     assert_eq!(usage(bench_obj("alice", "acme", "running", Some("idle"), "full")).await, (0, 0));
     assert_eq!(usage(bench_obj("alice", "acme", "stopped", Some("ready"), "full")).await, (0, 0));

@@ -1,9 +1,9 @@
-//! The shell rc text both images share, in one place.
+//! The workspace's shell rc text.
 //!
-//! A workspace writes these from its pod prelude (`workspace::prelude`, as root into `/etc`), and
-//! that is now the only reader: the bench image used to bake the same bytes in at build time, but
-//! a bench shell is the WORKSPACE container's shell (`/pty` splices to the tool server over
-//! 127.0.0.1), so there is one prompt again and nothing left to hold equal.
+//! A workspace writes these from its pod prelude (`workspace::prelude`, as root into `/etc`) —
+//! the only reader now that there is no shell sidecar image to hold a second copy equal to
+//! (owner ruling 2026-09-25: the terminal runs in the workspace container itself). A bench pod
+//! has no shell at all.
 //!
 //! The prelude writes them with `printf`, which is why `printf_lines`/`printf_text` are here too:
 //! the constants are the FILE content, the helpers are the one place that knows how to quote it.
@@ -70,21 +70,6 @@ pub(super) fn printf_text(content: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    /// The shell sidecar is a different image with a different filesystem, so its rc is a FILE in
-    /// `deploy/shell-image/` rather than something a prelude writes. Held equal here so the two
-    /// prompts cannot drift: everything between the markers is `ZSHRC` verbatim.
-    #[test]
-    fn the_shell_image_rc_carries_the_shared_zshrc() {
-        let path = concat!(env!("CARGO_MANIFEST_DIR"), "/../../deploy/shell-image/zshrc");
-        let file = std::fs::read_to_string(path).expect("deploy/shell-image/zshrc");
-        let shared = file
-            .split_once("# --- shared with the workspace: begin ---\n")
-            .and_then(|(_, r)| r.split_once("# --- shared with the workspace: end ---\n"))
-            .expect("the markers are what make this checkable")
-            .0;
-        assert_eq!(shared, ZSHRC, "run the workspace's rc past the shell image's copy");
-    }
 
     #[test]
     fn printf_helpers_round_trip_through_a_real_shell() {

@@ -282,29 +282,6 @@ export class Kloudlite {
       .withEnvVariable("DO_NOT_TRACK", "1")
   }
 
-  // deploy/shell-image/Dockerfile: the shell image, a terminal and nothing else — same debian
-  // base, the same musl `kl` and gitignore-global the workspace image carries, plus rc files and
-  // the prelude that waits for the profile and execs ttyd.
-  private imageShell(source: Directory, built: Container): Container {
-    return dag
-      .container()
-      .from(DEBIAN_SLIM)
-      .withExec(["sh", "-c", [
-        "apt-get update",
-        "apt-get install -y --no-install-recommends ca-certificates",
-        "rm -rf /var/lib/apt/lists/*",
-        "groupadd -g 1000 kl",
-        "useradd -u 1000 -g 1000 -m -d /home/kl -s /bin/sh -p '*' kl",
-      ].join(" && ")])
-      .withFile("/usr/local/bin/kl", built.file("/out/musl/kl"), { permissions: 0o755 })
-      .withFile("/etc/kloudlite/gitignore-global", source.file("deploy/workspace-image/gitignore-global"))
-      .withFile("/etc/kl/.zshrc", source.file("deploy/shell-image/zshrc"))
-      .withFile("/etc/starship.toml", source.file("deploy/shell-image/starship.toml"))
-      .withFile("/usr/local/bin/prelude", source.file("deploy/shell-image/prelude.sh"), { permissions: 0o755 })
-      .withUser("1000:1000")
-      .withEntrypoint(["/usr/local/bin/prelude"])
-  }
-
   // deploy/bench/Dockerfile: harness-bench from its TypeScript source under Node 24 type
   // stripping, pi from the harness's own lockfile, and the musl kl. npm's cache is a named
   // volume so a lockfile-unchanged rebuild never re-downloads.
@@ -443,7 +420,6 @@ export class Kloudlite {
       [() => this.imageSlo(built), "kloudlite-slo"],
       [() => this.imageWorkspace(source, built), "kloudlite-workspace"],
       [() => this.imageBench(source, built), "kloudlite-bench"],
-      [() => this.imageShell(source, built), "kloudlite-shell"],
       [() => this.imageInterceptProxy(built), "kloudlite-intercept-proxy"],
       [() => this.imageKompress(source), "kloudlite-kompress"],
     ]

@@ -154,6 +154,16 @@ pub(super) fn git_ssh_url(host: &str, port: &str) -> String {
 /// `receive.denyCurrentBranch updateInstead`: a sys-1 sub-session's clone pod pushes straight
 /// onto this pod's checked-out branch over SSH (spec §4), which plain git refuses by default —
 /// safe here because main never holds uncommitted edits when a push lands.
+///
+/// The person's terminal (ttyd) starts here too now, in the BACKGROUND, as `kl` — no more shell
+/// sidecar (owner ruling 2026-09-25: "no need to have shell as sidecar we can run it directly in
+/// workspace container"). It is backgrounded (`( ... ) &`) so sshd still becomes pid 1
+/// immediately; the wait loop inside waits for `<profile>/bin/ttyd` (the same profile mount this
+/// container already has, published by the agent — a pod can start before it exists) rather than
+/// failing without it, and picks zsh from the profile, falling back to `/bin/sh`, exactly as the
+/// old sidecar's `prelude.sh` did. `-W` makes the terminal WRITABLE (ttyd is read-only without
+/// it); `-i 0.0.0.0` because the pod's own network namespace, fenced by the NetworkPolicy, is the
+/// only way in — ttyd's own basic auth is deliberately not used.
 pub(super) fn prelude(_name: &str) -> String {
     let profile = crate::packages::PROFILE_LINK;
     let path = crate::packages::path_env(None);
@@ -184,6 +194,10 @@ pub(super) fn prelude(_name: &str) -> String {
          echo prelude.chown.done\n\
          su {SSH_USER} -s /bin/sh -c 'mkdir -p {HOME_DIR}/.cache/zsh {HOME_DIR}/.cache/shell'\n\
          su {SSH_USER} -s /bin/sh -c 'cd {WORKSPACE_DIR} && KL_WORKSPACE={WORKSPACE_DIR} KLOUDLITE_OTLP_URL={OTLP_URL} OTEL_SERVICE_NAME=kl-ide exec kl ide serve --bind 0.0.0.0:{IDE_PORT} >> {IDE_LOG} 2>&1' &\n\
+         ( su {SSH_USER} -s /bin/sh -c 'PROFILE={profile}; TTYD=$PROFILE/bin/ttyd; \
+         waited=0; while [ ! -x \"$TTYD\" ]; do [ \"$waited\" -eq 30 ] && echo \"shell: still waiting for the workspace profile at $PROFILE\" >&2; sleep 1; waited=$((waited + 1)); done; \
+         SHELL_BIN=$PROFILE/bin/zsh; [ -x \"$SHELL_BIN\" ] || SHELL_BIN=/bin/sh; \
+         cd {HOME_DIR} && exec \"$TTYD\" -p {SHELL_PORT} -i 0.0.0.0 -W -t disableLeaveAlert=true -t \"fontFamily=IBM Plex Mono\" -t fontSize=13 \"$SHELL_BIN\" -l' ) &\n\
          echo prelude.sshd.start\n\
          exec {profile}/bin/sshd -D -e -f {SSHD_DIR}/sshd_config\n"
     )
@@ -268,60 +282,6 @@ pub(super) fn host_dir(name: &str, path: String) -> Volume {
     Volume {
         name: name.to_string(),
         host_path: Some(HostPathVolumeSource { path, type_: Some("Directory".into()) }),
-        ..Default::default()
-    }
-}
-
-
-/// The SHELL sidecar (spec §2): a terminal for the person, beside the container that does the
-/// work, on every workspace and every bench pod.
-///
-/// What it mounts is the whole boundary: a scratch home of its own and the workspace's Nix profile
-/// read-only — and NOT the live subvolume (which IS the workspace's home since 2026-09-22), not the tool token, not `/opt/harness`. "We are not providing access to the code
-/// directly via shell" (owner, 2026-09-17). Nothing here can exec into a sibling container either:
-/// the pod shares no process namespace.
-///
-/// The binaries a person types come from the profile, which is also why the image is nearly empty
-/// and its prelude WAITS for the profile symlink rather than failing without it.
-pub fn shell_container(image: &str, ws_id: &str) -> Container {
-    let var = |n: &str, v: String| EnvVar { name: n.into(), value: Some(v), ..Default::default() };
-    Container {
-        name: SHELL_CONTAINER.to_string(),
-        image: Some(image.to_string()),
-        env: Some(vec![
-            var("HOME", HOME_DIR.to_string()),
-            // The same locale the workspace container sets, for the same reason: zsh without it
-            // has MULTIBYTE off and starship's prompt counts as three columns.
-            var("LANG", "C.UTF-8".to_string()),
-            // ponytail: history and caches die with the pod; the shell may not see the volume
-            // and there is no NFS home left, so a persistent history needs a volume of its own.
-            var("HISTFILE", format!("{HOME_DIR}/.zsh_history")),
-            var("PATH", crate::packages::path_env(None)),
-            var("NIX_PROFILE", crate::packages::PROFILE_LINK.into()),
-            // `zsh -l` reads `$ZDOTDIR/.zshrc` and nothing else that this image can put bytes in:
-            // the home is a scratch emptyDir (no platform rc on it, and a bench pod has no
-            // workspace container to seed one) and `/etc` is unwritable to uid 1000. Without this
-            // the shell came up as a bare `ws%` with no starship, aliases or history (2026-09-18).
-            var("ZDOTDIR", "/etc/kl".to_string()),
-        ]),
-        ports: Some(vec![ContainerPort { container_port: SHELL_PORT as i32, name: Some("ttyd".into()), ..Default::default() }]),
-        volume_mounts: Some(vec![
-            VolumeMount { name: "shell-home".to_string(), mount_path: HOME_DIR.to_string(), ..Default::default() },
-            // The store and this workspace's profile, read-only — the same two subPaths the
-            // workspace container gets, and the reason `ttyd`, `zsh` and `starship` exist here.
-            VolumeMount { name: "nix".to_string(), mount_path: "/nix/store".to_string(), sub_path: Some("store".to_string()), read_only: Some(true), ..Default::default() },
-            VolumeMount { name: "nix".to_string(), mount_path: crate::packages::PROFILE_MOUNT.to_string(), sub_path: Some(format!("var/kloudlite/profiles/{ws_id}")), read_only: Some(true), ..Default::default() },
-        ]),
-        resources: Some(quantities(&crate::model::shell_container_resources())),
-        security_context: Some(hardened()),
-        // NO readiness probe, deliberately. A pod's `Ready` condition is every container's, and
-        // the agent, `/v1` and every probe read that one condition — so a probe here would make
-        // the workspace's and the bench's readiness wait on the shell, which waits on the Nix
-        // profile, which on a fresh node is an evaluation and a fetch. That is exactly what
-        // happened: a new bench took over 118 s to report ready and two hourly ids timed out
-        // (2026-09-18). The shell is the person's convenience (spec §2.1) and must never gate the
-        // thing it sits beside; a terminal dialled before ttyd is listening is refused, which the
-        // desktop already renders as a shell that ended.
         ..Default::default()
     }
 }
@@ -595,7 +555,12 @@ pub fn workspace_pod(
             // is made at start (see `prelude`) rather than baked in, so the image stays near-stock.
             command: default_image.then(|| vec!["/bin/sh".to_string(), "-c".to_string(), prelude(&spec.name)]),
             ports: default_image.then(|| {
-                vec![ContainerPort { container_port: 22, name: Some("ssh".into()), ..Default::default() }]
+                vec![
+                    ContainerPort { container_port: 22, name: Some("ssh".into()), ..Default::default() },
+                    // The person's terminal (ttyd), started in the background by `prelude()` —
+                    // no more shell sidecar.
+                    ContainerPort { container_port: SHELL_PORT as i32, name: Some("ttyd".into()), ..Default::default() },
+                ]
             }),
             // Ready means a person can get in, not that the container started. Without a probe
             // the pod's Ready condition flipped the instant the process ran, `/v1` said `ready`,
@@ -660,16 +625,15 @@ pub fn workspace_pod(
             security_context: Some(hardened()),
             ..Default::default()
         };
-        // Every pod carries the shell sidecar; a BENCH pod carries nothing else beside it. The
-        // bench's own container is `sessions` now and holds only its state volume — there is no
-        // workspace container on a bench pod any more, so no tool server, no sshd and no code
-        // where the sessions run (spec §2.2).
-        let shell = shell_container(ctx.shell_image, ws_id);
+        // A BENCH pod's only container is `sessions` — no workspace container, no shell (owner
+        // ruling 2026-09-25: engine API keys live in `sessions`' env, so a shell there would
+        // expose them). A workspace pod's terminal now runs inside `workspace` itself
+        // (`prelude()`), not a sidecar.
         match bench {
             Some((image, idle, kompress_url)) => {
-                vec![bench_container(ws_id, spec, image, idle, kompress_url, ctx.api_url, ctx.registry_host), shell]
+                vec![bench_container(ws_id, spec, image, idle, kompress_url, ctx.api_url, ctx.registry_host)]
             }
-            None => vec![workspace_container(), shell],
+            None => vec![workspace_container()],
         }
         },
         // Required, not optional, for a seeded workspace: the init container cannot clone without
@@ -678,7 +642,6 @@ pub fn workspace_pod(
             let mut v = vec![
                 live_worktree_volume(ctx.pool, id, ws_id),
                 Volume { name: "tmp".to_string(), empty_dir: Some(Default::default()), ..Default::default() },
-                Volume { name: "shell-home".to_string(), empty_dir: Some(Default::default()), ..Default::default() },
                 // The store, read-only, at its root because the profile lives under it too; the
                 // mounts pick the two subdirectories the pod may see.
                 host_dir("nix", NIX_ROOT.to_string()),

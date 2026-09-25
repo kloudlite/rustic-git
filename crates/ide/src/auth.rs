@@ -1,15 +1,21 @@
 //! The credential every tool call carries, and the one reason this crate has auth code at all.
 //!
 //! The namespace was supposed to be the whole fence (`allow-bench-tools`, spec §2.5). It is not:
-//! the SHELL sidecar shares the pod's network namespace, so from a person's terminal
-//! `curl 127.0.0.1:7788/tools/exec` reached the tool server on LOOPBACK, where no NetworkPolicy
-//! applies, and ran a command as the workspace user (2026-09-18). A NetworkPolicy cannot express
-//! "not from the container beside you"; a credential can.
+//! a loopback caller inside the workspace pod — the person's own terminal included — shares the
+//! pod's network namespace, so `curl 127.0.0.1:7788/tools/exec` reaches the tool server on
+//! LOOPBACK, where no NetworkPolicy applies, and would run a command as the workspace user
+//! (2026-09-18, back when a separate shell container was meant to hold no credential of its own).
+//! A NetworkPolicy cannot express "not from a caller inside your own pod"; a credential can.
+//!
+//! Since owner ruling 2026-09-25 the person's terminal (ttyd) runs inside the workspace container
+//! itself, as the `kl` user — no shell sidecar — so it CAN read this token, exactly as their ssh
+//! session into the same container already could: same person, no new access. What the token
+//! still fences is every OTHER pod — a bench's `sessions` container, another tenant — which mount
+//! no Secret of their own and so have no token to send.
 //!
 //! The credential is the `workspace-token` the keys beat already projects into the WORKSPACE
 //! container (`k8s::secrets::user_key_secret`, mounted at `USER_KEY_PATH`, the same file `kl`
-//! reads). Nothing new is minted and nothing new is mounted — the fence is that the shell
-//! container mounts no Secret at all, so it has no token to send and gets a 401.
+//! reads). Nothing new is minted and nothing new is mounted.
 //!
 //! Read from disk PER REQUEST, never cached: the beat re-mints it every `KEYS_RESYNC_SECS`, and a
 //! value cached at boot would start refusing the very callers it is meant to admit an hour in.
@@ -97,7 +103,8 @@ impl Tokens {
 ///
 /// A 401 with `WWW-Authenticate`, and a body that says what to send WITHOUT naming the file: the
 /// caller that should have a token has one, and the caller that should not is being told nothing
-/// it can act on. The shell sidecar reaching this is working as designed, not a bug to debug.
+/// it can act on. A bench's `sessions` container reaching this is working as designed, not a bug
+/// to debug.
 pub async fn require(State(tokens): State<Arc<Tokens>>, req: Request, next: Next) -> Response {
     if is_open(req.uri().path()) || tokens.admits(&req) {
         return next.run(req).await;
@@ -138,12 +145,13 @@ mod tests {
         assert!(!tokens.admits(&req(Some("Bearer s3crets"))), "nor is an extension of it");
         assert!(!tokens.admits(&req(Some("s3cret"))), "the scheme is required");
         assert!(!tokens.admits(&req(Some("Bearer "))), "an empty token is no token");
-        assert!(!tokens.admits(&req(None)), "this is what the shell sidecar sends");
+        assert!(!tokens.admits(&req(None)), "this is what a caller with no token sends");
     }
 
-    /// The shell container mounts no Secret, so it has no token FILE either — and a server that
-    /// cannot read its own credential must admit nobody. The reflex is the other way ("missing
-    /// config, allow"), which here would restore exactly the hole this closes.
+    /// A pod with no such Secret mounted (a bench's `sessions` container, say) has no token FILE
+    /// either — and a server that cannot read its own credential must admit nobody. The reflex is
+    /// the other way ("missing config, allow"), which here would restore exactly the hole this
+    /// closes.
     #[test]
     fn a_missing_token_file_admits_nobody() {
         let tmp = tempfile::tempdir().unwrap();

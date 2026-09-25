@@ -54,46 +54,19 @@ pub fn bench_container_resources() -> crate::crd::PodResources {
     }
 }
 
-/// The shell image when `KLOUDLITE_SHELL_IMAGE` is unset. Tagged, like the bench image and for
-/// the same reason: the agent — not a spec — stamps it on every pod.
-pub const DEFAULT_SHELL_IMAGE: &str = "ghcr.io/kloudlite/kloudlite-shell:latest";
-
-/// What the SHELL sidecar is sized at (spec §2): a `ttyd` and whatever the person types into it.
-/// Tiny on purpose — it is on EVERY workspace and bench pod, so its request is multiplied by the
-/// whole fleet, and the burst a real command needs is the limit's job. Charged by `quota` exactly
-/// like the bench container's, from this one definition.
-pub fn shell_container_resources() -> crate::crd::PodResources {
-    crate::crd::PodResources {
-        cpu_request: "50m".into(),
-        cpu_limit: "2".into(),
-        memory_request: "64Mi".into(),
-        memory_limit: "2Gi".into(),
-    }
-}
-
 /// The bench container's own ephemeral-storage pair, smaller than a workspace's for the same
 /// reason: it holds transcripts and a session dir, not a checkout and a build tree.
 pub const BENCH_EPHEMERAL: (&str, &str) = ("512Mi", "2Gi");
 
-/// What a BENCH pod holds on a node: both of its containers. `(millicores, mebibytes)`, the units
-/// `quota` sums in — LIMITS, as every other row in `quota` is charged, and read straight off the
-/// two definitions so the charge follows a resize rather than repeating it.
+/// What a BENCH pod holds on a node: its one container. `(millicores, mebibytes)`, the units
+/// `quota` sums in — LIMITS, as every other row in `quota` is charged, read straight off
+/// `bench_container_resources` so the charge follows a resize rather than repeating it.
 pub fn bench_pod_capacity(_workspace: &crate::crd::PodResources) -> (u64, u64) {
-    // A bench pod is `sessions` + `shell` since 2026-09-17 (spec §2.2) — there is no workspace
-    // container on it any more, so `spec.resources` sizes nothing here and the argument is kept
-    // only so every caller's shape is unchanged.
-    let (bench, shell) = (bench_container_resources(), shell_container_resources());
-    (
-        crate::quota::millicores(&bench.cpu_limit) + crate::quota::millicores(&shell.cpu_limit),
-        crate::quota::mebibytes(&bench.memory_limit) + crate::quota::mebibytes(&shell.memory_limit),
-    )
-}
-
-/// What an ordinary workspace pod holds BESIDE its workspace container: the shell sidecar, which
-/// every pod carries now. `quota` adds this to `spec.resources` so the charge and the pod agree.
-pub fn shell_pod_extra() -> (u64, u64) {
-    let shell = shell_container_resources();
-    (crate::quota::millicores(&shell.cpu_limit), crate::quota::mebibytes(&shell.memory_limit))
+    // A bench pod is `sessions` alone (owner ruling 2026-09-25: no shell on a bench pod) — there
+    // is no workspace container on it either, so `spec.resources` sizes nothing here and the
+    // argument is kept only so every caller's shape is unchanged.
+    let bench = bench_container_resources();
+    (crate::quota::millicores(&bench.cpu_limit), crate::quota::mebibytes(&bench.memory_limit))
 }
 
 /// `spec.model` when a create names none; passed to the pod as `KL_MODEL`.
@@ -527,16 +500,13 @@ mod tests {
 mod bench_capacity_tests {
     use super::*;
 
-    /// A bench pod is `sessions` + `shell` since 2026-09-17 (spec §2.2) — no workspace container
-    /// at all — so its charge is those two and `spec.resources` sizes nothing on it. Charging only
-    /// one of them handed out the other's worth of a node per bench, for free.
+    /// A bench pod is `sessions` alone (owner ruling 2026-09-25: no shell on a bench pod) — no
+    /// workspace container either — so its charge is that one container and `spec.resources`
+    /// sizes nothing on it.
     #[test]
-    fn a_bench_pod_costs_both_of_its_containers() {
-        let (bench, shell) = (bench_container_resources(), shell_container_resources());
-        let want = (
-            crate::quota::millicores(&bench.cpu_limit) + crate::quota::millicores(&shell.cpu_limit),
-            crate::quota::mebibytes(&bench.memory_limit) + crate::quota::mebibytes(&shell.memory_limit),
-        );
+    fn a_bench_pod_costs_its_one_container() {
+        let bench = bench_container_resources();
+        let want = (crate::quota::millicores(&bench.cpu_limit), crate::quota::mebibytes(&bench.memory_limit));
         assert_eq!(bench_pod_capacity(&crate::crd::PodResources::default()), want);
         // And a person's own `spec.resources` moves it not at all: there is nothing on a bench pod
         // that field sizes.

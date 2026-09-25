@@ -19,7 +19,7 @@
 //! - `environment`: a service's StatefulSet and its ClusterIP (an intercept is `intercept`'s now)
 //! - `intercept`: the proxy pod, the workspace-side target Service and the proxy's egress grant
 //! - `policies`: every NetworkPolicy
-//! - `shell_rc`: the zsh/starship rc text the workspace prelude and the bench image share
+//! - `shell_rc`: the zsh/starship rc text the workspace prelude writes
 //! - `bench`: the bench Pod, its home-relative folder, and its gateway-only ingress policy
 //! - `tests`: one file, since the fixtures are shared
 //!
@@ -105,12 +105,10 @@ pub const WORKSPACE_LABEL: &str = "kloudlite.io/workspace";
 /// there (`allow_bench_tools`), and `kl-connect ws ide` reaches it over the ssh tunnel.
 pub const IDE_PORT: u16 = 7788;
 
-/// The SHELL sidecar's container name and port (spec §2, 2026-09-17). Every workspace pod and
-/// every bench pod carries one: a terminal for the person, with the home and the Nix profile and
-/// nothing else — no workspace directory, no token, no tool server. `ttyd` listens here and the
-/// desktop splices to it through the bench tunnel; `allow_bench_tools` is what keeps anyone else
-/// from dialling it.
-pub const SHELL_CONTAINER: &str = "shell";
+/// The person's terminal (ttyd) port. It runs inside the `workspace` container now (owner ruling
+/// 2026-09-25: no shell sidecar) — a bench pod has no shell at all, engine API keys live in its
+/// `sessions` container env. The desktop splices to it through the bench tunnel;
+/// `allow_bench_tools` is what keeps anyone else from dialling it.
 pub const SHELL_PORT: u16 = 7790;
 
 
@@ -151,10 +149,6 @@ pub struct PodContext<'a> {
     /// each being configured with a second copy of it.
     pub git_ssh_host: &'a str,
     pub git_ssh_port: &'a str,
-    /// `KLOUDLITE_SHELL_IMAGE` — the shell sidecar every workspace and bench pod carries. On the
-    /// context rather than a parameter because BOTH pod kinds take it and neither caller chooses
-    /// it: it is the node's, pinned with the agent.
-    pub shell_image: &'a str,
 }
 
 

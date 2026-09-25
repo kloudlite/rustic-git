@@ -18,7 +18,7 @@ fn bench_tool_secret_carries_token_and_exp_only() {
 }
 
 
-// --- a bench IS a workspace: the second container of an ordinary workspace pod ---
+// --- a bench IS a workspace, but its ONE container, not a workspace pod's shape ---
 
 fn bench_ws_spec() -> WorkspaceSpec {
     WorkspaceSpec {
@@ -34,7 +34,8 @@ fn bench_ws_spec() -> WorkspaceSpec {
 ///
 /// An ordinary workspace pod gets away with a root-owned one because its `workspace` container's
 /// prelude runs `chown -Rh 1000 {HOME_DIR}` on every start. A bench pod has no workspace
-/// container — `sessions` + `shell` since spec §2.2 — so that prelude never runs, and the worktree
+/// container and no shell at all (owner ruling 2026-09-25) — `sessions` is its only container —
+/// so that prelude never runs, and the worktree
 /// `btrfs subvolume create` left owned by root stayed that way: `harness-bench` died on
 /// `EACCES: mkdir '/home/kl/workspaces/bench/.bench'` and every team bench crash-looped
 /// (2026-09-18). `Engine::checkout` hands a fresh subvolume to uid 1000 now.
@@ -71,14 +72,14 @@ fn a_bench_pod_has_no_prelude_to_chown_its_worktree() {
 
 
 #[test]
-fn a_bench_pod_carries_both_containers_and_the_tool_secret_optional() {
+fn a_bench_pod_carries_its_one_container_and_the_tool_secret_optional() {
     let p = workspace_pod(&bench_ws_spec(), "ws-1", "bench-1", &ctx(), None, Some(("cr.example/bench:v9", 420, ""))).unwrap();
     assert_eq!(p.metadata.labels.as_ref().unwrap()[KIND_LABEL], "bench");
     let spec = p.spec.unwrap();
     let names: Vec<&str> = spec.containers.iter().map(|c| c.name.as_str()).collect();
-    assert_eq!(names, ["sessions", "shell"], "a bench pod is the sessions container and a terminal, nothing else");
-    // The pod stays a workspace pod: sshd keeps it alive, so an exited bench container is the
-    // kubelet's to restart, not a pod phase.
+    assert_eq!(names, ["sessions"], "a bench pod is the sessions container, nothing else (owner ruling 2026-09-25: no shell)");
+    // The pod stays a workspace pod: sshd would keep an ordinary one alive, but a bench pod has no
+    // sshd either — the kubelet restarts the exited bench container itself, not a pod phase.
     assert_eq!(spec.restart_policy.as_deref(), Some("Always"));
 
     let v = spec.volumes.as_ref().unwrap().iter().find(|v| v.name == "bench-tool").expect("volume");
@@ -99,14 +100,9 @@ fn a_bench_pod_carries_both_containers_and_the_tool_secret_optional() {
     assert_eq!(m("live").mount_path, crate::k8s::HOME_DIR, "the bench's own volume, where `.bench/` lives");
     assert_eq!(m("bench-tool").read_only, Some(true));
     assert_eq!(m("user-key").read_only, Some(true));
-    // The SHELL beside it gets a scratch home of its own, never the worktree: no code in a shell.
-    let shell = &spec.containers[1];
-    assert_eq!(shell.name, crate::k8s::SHELL_CONTAINER);
-    let sm = |name: &str| shell.volume_mounts.as_ref().unwrap().iter().find(|m| m.name == name).cloned().expect(name);
-    assert_eq!(sm("shell-home").mount_path, crate::k8s::HOME_DIR);
-    assert!(shell.volume_mounts.as_ref().unwrap().iter().all(|m| m.name != "live"), "the shell must not see the worktree");
-    assert_eq!(shell.ports.as_ref().unwrap()[0].container_port, crate::k8s::SHELL_PORT as i32);
-    // sshd is the other container's, so the one capability it needs stays dropped here.
+    // No second container: no shell beside it, no ttyd port, no sidecar home mount.
+    assert_eq!(spec.containers.len(), 1);
+    // sshd never runs on a bench pod, so the one capability it needs stays dropped here too.
     let caps = c.security_context.as_ref().unwrap().capabilities.clone().unwrap();
     assert!(!caps.add.unwrap().contains(&"SYS_CHROOT".to_string()));
     assert_eq!(c.readiness_probe.as_ref().unwrap().period_seconds, Some(2));
@@ -123,12 +119,6 @@ fn a_bench_pod_carries_both_containers_and_the_tool_secret_optional() {
     assert_eq!(lim["cpu"].0, "2");
     assert_eq!(lim["memory"].0, "4Gi");
     assert_eq!(lim["ephemeral-storage"].0, "2Gi");
-    // And the SHELL beside it is a terminal's worth and no more: it is on every pod in the fleet,
-    // so its request is multiplied by all of them.
-    let sh = spec.containers[1].resources.as_ref().unwrap().requests.as_ref().unwrap();
-    assert_eq!(sh["cpu"].0, crate::model::shell_container_resources().cpu_request);
-    assert_eq!(sh["memory"].0, crate::model::shell_container_resources().memory_request);
-
     let get = |n: &str| c.env.as_ref().unwrap().iter().find(|e| e.name == n).and_then(|e| e.value.clone());
     assert_eq!(get("KL_TOOL_TOKEN_FILE").as_deref(), Some("/etc/kloudlite/bench-tool/token"));
     assert_eq!(get("KL_WORKSPACE_ID").as_deref(), Some("bench-1"));
@@ -140,15 +130,9 @@ fn a_bench_pod_carries_both_containers_and_the_tool_secret_optional() {
         get("PI_CODING_AGENT_DIR").as_deref(),
         Some("/home/kl/.bench/pi")
     );
-    // The pod's own address, from the downward API: the bench dials the shell sidecar beside it at
-    // `{KL_POD_IP}:7790`, and without it the splice would look for a terminal on loopback and find
-    // none (harness 067661a8).
-    let pod_ip = c.env.as_ref().unwrap().iter().find(|e| e.name == "KL_POD_IP").expect("KL_POD_IP");
-    assert_eq!(
-        pod_ip.value_from.as_ref().and_then(|f| f.field_ref.as_ref()).map(|f| f.field_path.as_str()),
-        Some("status.podIP")
-    );
-    assert!(pod_ip.value.is_none(), "an address is the kubelet's to fill in, never a literal");
+    // No `KL_POD_IP` any more (owner ruling 2026-09-25): there is no shell sidecar to dial, so a
+    // downward-API pod address would have no reader.
+    assert!(c.env.as_ref().unwrap().iter().all(|e| e.name != "KL_POD_IP"), "no shell sidecar left to dial");
     assert!(c.env.as_ref().unwrap().iter().all(|e| !e.value.as_deref().unwrap_or_default().contains("eyJ")), "no token in env");
 }
 
