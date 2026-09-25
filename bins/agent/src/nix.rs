@@ -470,7 +470,16 @@ mod tests {
         use std::os::unix::fs::PermissionsExt;
         std::fs::set_permissions(bin.join("nix"), std::fs::Permissions::from_mode(0o755)).unwrap();
         let nix = RealNix { bin: bin.clone() };
-        let store = nix.build("let x = \"$(id); rm -rf /\"; in x", Duration::from_secs(5)).await.unwrap();
+        // ETXTBSY: a sibling test forking between our write and close; see the test below.
+        let mut last = Err("never ran".to_string());
+        for _ in 0..10 {
+            last = nix.build("let x = \"$(id); rm -rf /\"; in x", Duration::from_secs(5)).await;
+            match &last {
+                Err(e) if e.contains("Text file busy") => tokio::time::sleep(Duration::from_millis(50)).await,
+                _ => break,
+            }
+        }
+        let store = last.unwrap();
         assert_eq!(store, PathBuf::from("/nix/store/deadbeef-ws-1-env"), "the store path is read off stdout");
         let argv = std::fs::read_to_string(&log).unwrap();
         assert!(argv.contains("let x = \"$(id); rm -rf /\"; in x\n"), "the expression is one argv element: {argv}");
