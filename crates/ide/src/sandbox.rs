@@ -376,7 +376,17 @@ mod tests {
         std::fs::write(&ok, "#!/bin/sh\nexit 0\n").unwrap();
         make_executable(&ok);
         let ok_path: &'static str = Box::leak(ok.to_string_lossy().into_owned().into_boxed_str());
-        assert_eq!(preflight(ok_path, &tree), Some(ok_path));
+        // ETXTBSY: a sibling test forking between our write and close holds the script open for
+        // writing and the spawn fails, which preflight rightly reads as "cannot start". Retry it.
+        let mut got = None;
+        for _ in 0..10 {
+            got = preflight(ok_path, &tree);
+            if got.is_some() {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(50));
+        }
+        assert_eq!(got, Some(ok_path));
     }
 
     fn make_executable(p: &std::path::Path) {
