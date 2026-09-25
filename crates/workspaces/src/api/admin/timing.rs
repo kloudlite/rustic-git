@@ -126,6 +126,10 @@ mod tests {
     }
 
     fn capture() -> (Arc<Mutex<Vec<u8>>>, tracing::subscriber::DefaultGuard) {
+        // A second dispatcher for the process keeps callsite interest a union; see `logged` in
+        // tests/api_bench.rs (tracing-core `has_just_one`).
+        static PIN: std::sync::OnceLock<tracing::Dispatch> = std::sync::OnceLock::new();
+        PIN.get_or_init(|| tracing::Dispatch::new(tracing::subscriber::NoSubscriber::default()));
         let buf = Arc::new(Mutex::new(Vec::new()));
         let b2 = buf.clone();
         let sub = kloudlite_core::log::subscriber(true, move || Sink(b2.clone()));

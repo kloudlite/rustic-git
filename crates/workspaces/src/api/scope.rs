@@ -346,6 +346,10 @@ mod tests {
                 Ok(())
             }
         }
+        // A second dispatcher for the process keeps callsite interest a union; see `logged` in
+        // tests/api_bench.rs (tracing-core `has_just_one`).
+        static PIN: std::sync::OnceLock<tracing::Dispatch> = std::sync::OnceLock::new();
+        PIN.get_or_init(|| tracing::Dispatch::new(tracing::subscriber::NoSubscriber::default()));
         let buf = Buf::default();
         let w = buf.clone();
         let sub = tracing_subscriber::fmt().with_ansi(false).with_writer(move || w.clone()).finish();

@@ -805,6 +805,12 @@ async fn logged<F: std::future::Future<Output = R>, R>(f: F) -> (R, String) {
             Ok(())
         }
     }
+    // tracing-core `has_just_one`: with one dispatcher, a parallel test with no subscriber that
+    // first hits a shared callsite caches `never` for everyone and this capture comes back empty
+    // (dagger ship 2026-09-25). A second dispatcher held for the process keeps interest a union;
+    // same pin as `trace::testing::subscriber` (55994d05).
+    static PIN: std::sync::OnceLock<tracing::Dispatch> = std::sync::OnceLock::new();
+    PIN.get_or_init(|| tracing::Dispatch::new(tracing::subscriber::NoSubscriber::default()));
     let buf = Buf::default();
     let w = buf.clone();
     let sub = tracing_subscriber::fmt().with_ansi(false).with_writer(move || w.clone()).finish();
