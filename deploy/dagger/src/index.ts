@@ -74,6 +74,8 @@ export class Kloudlite {
       .from("oven/bun:1")
       .withMountedDirectory("/work/src", source)
       .withWorkdir("/work/src/web")
+      // `test:node` needs real Node 22 (web.yml's setup-node); the bun image's `node` is bun.
+      .withFile("/usr/local/bin/node", dag.container().from(NODE_IMAGE).file("/usr/local/bin/node"))
       // node_modules is IGNOREd on upload, so every run installs; bun's global cache makes
       // that a link step rather than a download.
       .withMountedCache("/root/.bun/install/cache", dag.cacheVolume("kloudlite-bun"))
