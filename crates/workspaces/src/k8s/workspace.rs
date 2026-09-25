@@ -133,7 +133,7 @@ pub(super) fn git_ssh_url(host: &str, port: &str) -> String {
 /// The accounts are the image's too: `useradd -p '*'` writes "no password", NOT the `!` that sshd
 /// reads as "account locked" and refuses even a valid key for. `~/workspaces/<id>` is chowned every
 /// start because the seeder clones it as root and a restore can bring back files owned by
-/// anyone. `exec` so sshd is pid 1 and gets the kubelet's TERM.
+/// anyone.
 ///
 /// Root chowns the whole volume (`chown -Rh`, non-recursive would leave a root-owned git-seed
 /// checkout or a restored file owned by anyone unwritable by `kl`) before handing off to `su`:
@@ -155,15 +155,21 @@ pub(super) fn git_ssh_url(host: &str, port: &str) -> String {
 /// onto this pod's checked-out branch over SSH (spec §4), which plain git refuses by default —
 /// safe here because main never holds uncommitted edits when a push lands.
 ///
-/// The person's terminal (ttyd) starts here too now, in the BACKGROUND, as `kl` — no more shell
-/// sidecar (owner ruling 2026-09-25: "no need to have shell as sidecar we can run it directly in
-/// workspace container"). It is backgrounded (`( ... ) &`) so sshd still becomes pid 1
-/// immediately; the wait loop inside waits for `<profile>/bin/ttyd` (the same profile mount this
-/// container already has, published by the agent — a pod can start before it exists) rather than
-/// failing without it, and picks zsh from the profile, falling back to `/bin/sh`, exactly as the
-/// old sidecar's `prelude.sh` did. `-W` makes the terminal WRITABLE (ttyd is read-only without
-/// it); `-i 0.0.0.0` because the pod's own network namespace, fenced by the NetworkPolicy, is the
-/// only way in — ttyd's own basic auth is deliberately not used.
+/// The person's terminal (ttyd) starts here too, as `kl` — no more shell sidecar (owner ruling
+/// 2026-09-25: "no need to have shell as sidecar we can run it directly in workspace container").
+/// runit's `runsvdir` is pid 1 (owner ruling 2026-09-25: "can we use some master process and put
+/// ttyd and server under it?"): it reaps orphans and restarts each of sshd, the tool server and
+/// ttyd about 1 s after it exits, so a crash in any one no longer waits for the pod to restart.
+/// Root writes one `run` script per service under `/run/kl/sv/{name}/run`; each drops to `kl` via
+/// `chpst -u` (rather than `su`, so runsv's own child IS the server — no shell in between to
+/// reap) and `exec`s the real binary as its last line. `-W` makes ttyd's terminal WRITABLE (it is
+/// read-only without it); `-i 0.0.0.0` because the pod's own network namespace, fenced by the
+/// NetworkPolicy, is the only way in — ttyd's own basic auth is deliberately not used. No wait
+/// loop for `<profile>/bin/ttyd` any more: zsh and ttyd are base packages by the time this runs,
+/// and sshd is already `exec`'d from the same profile mount, so if that binary is missing this
+/// prelude never reaches `runsvdir` either.
+/// ponytail: `runsvdir` exits on TERM and the kernel SIGKILLs the services — same as the
+/// backgrounded ones before; graceful stop = trap TERM and send HUP to runsvdir if ever needed.
 pub(super) fn prelude(_name: &str) -> String {
     let profile = crate::packages::PROFILE_LINK;
     let path = crate::packages::path_env(None);
@@ -193,13 +199,14 @@ pub(super) fn prelude(_name: &str) -> String {
          SEED\n\
          echo prelude.chown.done\n\
          su {SSH_USER} -s /bin/sh -c 'mkdir -p {HOME_DIR}/.cache/zsh {HOME_DIR}/.cache/shell'\n\
-         su {SSH_USER} -s /bin/sh -c 'cd {WORKSPACE_DIR} && KL_WORKSPACE={WORKSPACE_DIR} KLOUDLITE_OTLP_URL={OTLP_URL} OTEL_SERVICE_NAME=kl-ide exec kl ide serve --bind 0.0.0.0:{IDE_PORT} >> {IDE_LOG} 2>&1' &\n\
-         ( su {SSH_USER} -s /bin/sh -c 'PROFILE={profile}; TTYD=$PROFILE/bin/ttyd; \
-         waited=0; while [ ! -x \"$TTYD\" ]; do [ \"$waited\" -eq 30 ] && echo \"shell: still waiting for the workspace profile at $PROFILE\" >&2; sleep 1; waited=$((waited + 1)); done; \
-         SHELL_BIN=$PROFILE/bin/zsh; [ -x \"$SHELL_BIN\" ] || SHELL_BIN=/bin/sh; \
-         cd {HOME_DIR} && exec \"$TTYD\" -p {SHELL_PORT} -i 0.0.0.0 -W -t disableLeaveAlert=true -t \"fontFamily=IBM Plex Mono\" -t fontSize=13 \"$SHELL_BIN\" -l' ) &\n\
-         echo prelude.sshd.start\n\
-         exec {profile}/bin/sshd -D -e -f {SSHD_DIR}/sshd_config\n"
+         mkdir -p /run/kl/sv/sshd /run/kl/sv/ide /run/kl/sv/ttyd\n\
+         chmod 0755 /run/kl/sv /run/kl/sv/sshd /run/kl/sv/ide /run/kl/sv/ttyd\n\
+         printf '%s\\n' '#!/bin/sh' 'exec {profile}/bin/sshd -D -e -f {SSHD_DIR}/sshd_config' > /run/kl/sv/sshd/run\n\
+         printf '%s\\n' '#!/bin/sh' 'cd {WORKSPACE_DIR} && exec env HOME={HOME_DIR} USER={SSH_USER} LOGNAME={SSH_USER} KL_WORKSPACE={WORKSPACE_DIR} KLOUDLITE_OTLP_URL={OTLP_URL} OTEL_SERVICE_NAME=kl-ide {profile}/bin/chpst -u {SSH_USER} kl ide serve --bind 0.0.0.0:{IDE_PORT} >> {IDE_LOG} 2>&1' > /run/kl/sv/ide/run\n\
+         printf '%s\\n' '#!/bin/sh' 'cd {HOME_DIR} && exec env HOME={HOME_DIR} USER={SSH_USER} LOGNAME={SSH_USER} {profile}/bin/chpst -u {SSH_USER} {profile}/bin/ttyd -p {SHELL_PORT} -i 0.0.0.0 -W -t disableLeaveAlert=true -t \"fontFamily=IBM Plex Mono\" -t fontSize=13 {profile}/bin/zsh -l' > /run/kl/sv/ttyd/run\n\
+         chmod 0755 /run/kl/sv/sshd/run /run/kl/sv/ide/run /run/kl/sv/ttyd/run\n\
+         echo prelude.runsvdir.start\n\
+         exec {profile}/bin/runsvdir -P /run/kl/sv\n"
     )
 }
 

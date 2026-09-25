@@ -495,30 +495,28 @@ pub(crate) fn the_login_env_tells_kl_where_it_is() {
     assert_eq!(get("DO_NOT_TRACK"), "1");
 }
 
-/// The tool server starts as `kl`, in the workspace dir, before sshd takes pid 1 — and never as
-/// root, which its own preflight would refuse anyway.
+/// The tool server, ttyd and sshd each run as a runit service under `/run/kl/sv`, never as root
+/// (except sshd, which drops privilege itself) and never backgrounded in the prelude's own shell —
+/// runsv is what restarts them, so the prelude just writes the run scripts and hands off.
 #[test]
 pub(crate) fn the_prelude_starts_kl_ide_serve_as_kl_before_sshd() {
     let s = prelude("api");
-    let serve = s.find("exec kl ide serve").expect("kl ide serve is started");
-    let sshd = s.find("exec /nix/profile/current/bin/sshd").or_else(|| s.find("/bin/sshd -D")).expect("sshd is exec'd");
-    assert!(serve < sshd, "the server must start before sshd takes over");
+    s.find("kl ide serve").expect("kl ide serve is started");
+    s.find("exec /nix/profile/current/bin/sshd").or_else(|| s.find("/bin/sshd -D")).expect("sshd is exec'd");
     let line = s.lines().find(|l| l.contains("kl ide serve")).unwrap();
-    assert!(line.trim_start().starts_with("su kl "), "{line}");
+    assert!(line.contains("/run/kl/sv/ide/run"), "{line}");
+    assert!(line.contains("chpst -u kl"), "{line}");
     assert!(line.contains("KL_WORKSPACE=/home/kl/workspace"), "{line}");
-    assert!(line.trim_end().ends_with('&'), "backgrounded: {line}");
-    // `su -c '…'` runs a fresh shell: a prelude variable inside the quotes is empty there, and the
-    // log redirect then fails before `exec` — which is how build fb3673f1 shipped a server that
-    // never started. Everything the inner shell needs is rendered, not referenced.
-    assert!(!line.contains("$H"), "no prelude variable survives into su -c: {line}");
     // The CONSTANT, not a literal: the `ide.sandbox.active` probe reads this same path, and a
     // literal here would let the two drift into a probe reading a file nothing writes.
     assert!(line.contains(&format!(">> {}", crate::k8s::IDE_LOG)), "{line}");
     assert!(crate::k8s::IDE_LOG.starts_with(&format!("{}/", crate::k8s::HOME_DIR)), "the log must be in the home volume, or it dies with the pod");
     // The bench dials the tool server on the pod IP (the bench spec's What runs where); the ssh tunnel still reaches it on loopback.
-    assert!(line.contains("exec kl ide serve --bind 0.0.0.0:7788 "), "{line}");
+    assert!(line.contains("kl ide serve --bind 0.0.0.0:7788 "), "{line}");
     // Traced to the node collector; on the serve line only, so a person's own shells never inherit `OTEL_SERVICE_NAME`.
-    assert!(line.contains("KLOUDLITE_OTLP_URL=http://kloudlite-otel-agent-otlp.kube-system.svc:4318 OTEL_SERVICE_NAME=kl-ide exec kl ide serve"), "{line}");
+    assert!(line.contains("KLOUDLITE_OTLP_URL=http://kloudlite-otel-agent-otlp.kube-system.svc:4318 OTEL_SERVICE_NAME=kl-ide"), "{line}");
+    // runsvdir is what's actually pid 1 now: sshd, ide and ttyd all restart under it.
+    assert!(s.trim_end().ends_with(&format!("exec {}/bin/runsvdir -P /run/kl/sv", crate::packages::PROFILE_LINK)), "{s}");
 }
 
 /// `/etc/profile` sources every `/etc/profile.d/*.sh`: an `exit` in one ends the login shell itself,
@@ -556,7 +554,12 @@ pub(crate) fn the_default_image_runs_sshd_with_its_own_host_key_and_the_owners_k
     let cmd = c.command.as_ref().unwrap();
     assert_eq!(cmd[0], "/bin/sh");
     assert!(
-        cmd[2].trim_end().ends_with(&format!("exec {}/bin/sshd -D -e -f {SSHD_DIR}/sshd_config", crate::packages::PROFILE_LINK)),
+        cmd[2].contains(&format!("exec {}/bin/sshd -D -e -f {SSHD_DIR}/sshd_config", crate::packages::PROFILE_LINK)),
+        "{}",
+        cmd[2]
+    );
+    assert!(
+        cmd[2].trim_end().ends_with(&format!("exec {}/bin/runsvdir -P /run/kl/sv", crate::packages::PROFILE_LINK)),
         "{}",
         cmd[2]
     );
@@ -625,7 +628,7 @@ pub(crate) fn the_default_image_runs_sshd_with_its_own_host_key_and_the_owners_k
     let home = tempfile::tempdir().unwrap();
     let seed: String = prelude
         .lines()
-        .filter(|l| l.contains("printf") || l.starts_with("H=") || l.starts_with("mkdir -p $H"))
+        .filter(|l| (l.contains("printf") || l.starts_with("H=") || l.starts_with("mkdir -p $H")) && !l.contains("/run/kl/sv"))
         .map(|l| l.replacen("H=/home/kl", &format!("H={}", home.path().display()), 1))
         .collect::<Vec<_>>()
         .join("\n");

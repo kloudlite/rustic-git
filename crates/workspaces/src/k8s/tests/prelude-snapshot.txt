@@ -18,6 +18,11 @@ git config --global receive.denyCurrentBranch updateInstead
 SEED
 echo prelude.chown.done
 su kl -s /bin/sh -c 'mkdir -p /home/kl/.cache/zsh /home/kl/.cache/shell'
-su kl -s /bin/sh -c 'cd /home/kl/workspace && KL_WORKSPACE=/home/kl/workspace KLOUDLITE_OTLP_URL=http://kloudlite-otel-agent-otlp.kube-system.svc:4318 OTEL_SERVICE_NAME=kl-ide exec kl ide serve --bind 0.0.0.0:7788 >> /home/kl/.local/state/kl-ide.log 2>&1' &
-echo prelude.sshd.start
-exec /nix/profile/current/bin/sshd -D -e -f /etc/ssh/sshd_config
+mkdir -p /run/kl/sv/sshd /run/kl/sv/ide /run/kl/sv/ttyd
+chmod 0755 /run/kl/sv /run/kl/sv/sshd /run/kl/sv/ide /run/kl/sv/ttyd
+printf '%s\n' '#!/bin/sh' 'exec /nix/profile/current/bin/sshd -D -e -f /etc/ssh/sshd_config' > /run/kl/sv/sshd/run
+printf '%s\n' '#!/bin/sh' 'cd /home/kl/workspace && exec env HOME=/home/kl USER=kl LOGNAME=kl KL_WORKSPACE=/home/kl/workspace KLOUDLITE_OTLP_URL=http://kloudlite-otel-agent-otlp.kube-system.svc:4318 OTEL_SERVICE_NAME=kl-ide /nix/profile/current/bin/chpst -u kl kl ide serve --bind 0.0.0.0:7788 >> /home/kl/.local/state/kl-ide.log 2>&1' > /run/kl/sv/ide/run
+printf '%s\n' '#!/bin/sh' 'cd /home/kl && exec env HOME=/home/kl USER=kl LOGNAME=kl /nix/profile/current/bin/chpst -u kl /nix/profile/current/bin/ttyd -p 7790 -i 0.0.0.0 -W -t disableLeaveAlert=true -t "fontFamily=IBM Plex Mono" -t fontSize=13 /nix/profile/current/bin/zsh -l' > /run/kl/sv/ttyd/run
+chmod 0755 /run/kl/sv/sshd/run /run/kl/sv/ide/run /run/kl/sv/ttyd/run
+echo prelude.runsvdir.start
+exec /nix/profile/current/bin/runsvdir -P /run/kl/sv
