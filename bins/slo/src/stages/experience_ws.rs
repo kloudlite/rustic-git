@@ -575,8 +575,8 @@ pub(crate) async fn ws_tool_within(c: &Ctx, id: &str, tool: &str, args: &Value, 
     // reports a fleet failure that is its own.
     let body = serde_json::to_string(args)?.replace('\'', r"'\''");
     // The token comes from the file the keys beat projects into THIS container — read inside the
-    // pod, never carried in from the probe, so the call is exactly the one a session makes. The
-    // shell sidecar has no such file, which is the whole fence (`shell.no_tools`).
+    // pod, never carried in from the probe, so the call is exactly the one a session makes. A
+    // bench pod has no such file, which is the whole fence.
     let script = format!(
         "curl -s -o /tmp/kl-tool.out -w '%{{http_code}}' -X POST http://127.0.0.1:7788/tools/{tool} \
          -H 'content-type: application/json' \

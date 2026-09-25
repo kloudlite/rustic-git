@@ -156,9 +156,9 @@ pub async fn trees(c: &mut Ctx) {
             //
             // `ttyd`, not `nc`: the base profile carries no netcat and no python (`WS_BASE_PACKAGES`
             // — `sh: nc: command not found` on the fleet, 2026-09-18), and this probe must not be
-            // the reason a package is added. `ttyd` is in the profile because the shell sidecar
-            // runs it, it binds a TCP port, and it prints a bind failure and exits — which is all a
-            // holder has to do.
+            // the reason a package is added. `ttyd` is in the profile because the workspace
+            // container's own prelude runs it, it binds a TCP port, and it prints a bind failure
+            // and exits — which is all a holder has to do.
             let held = 20_001;
             let listener = |port: u16| format!("ttyd -p {port} -i 127.0.0.1 {SLEEP}");
             let (code, _) =

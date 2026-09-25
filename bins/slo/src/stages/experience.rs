@@ -104,9 +104,6 @@ pub const IDS: &[&str] = &[
     "bench.session.roundtrip",
     "bench.two_clients",
     "shell.up",
-    "shell.fenced",
-    "shell.no_tools",
-    "bench.shell.roundtrip",
     "bench.tool.token",
     "bench.tool.audience",
     "bench.tool.revoked",
@@ -228,9 +225,9 @@ pub async fn run(c: &mut Ctx) {
             // Both shells are filed by the calls above: the bench shell with the session journey,
             // the workspace shell beside the tool round trip, in the group that owns the workspace.
             "bench.session.roundtrip" | "bench.two_clients" | "bench.workspace.tool_roundtrip" => {}
-            "bench.shell.roundtrip" | "bench.shell.workspace" => {}
-            // Filed by the bench journey's own call, in group 3 with the rest of the shell ids.
-            "shell.up" | "shell.fenced" | "shell.no_tools" => {}
+            "bench.shell.workspace" => {}
+            // Filed by the bench journey's own call, in group 3.
+            "shell.up" => {}
             // Recorded by `bench::hourly` itself, after the sleep/wake journey.
             "bench.delegate" => {}
             _ => c.skip(id, "not implemented yet"),

@@ -49,7 +49,7 @@ const IDLE_STAMP: Duration = Duration::from_secs(30);
 const START_WAIT: Duration = Duration::from_secs(90);
 /// `bench.session.roundtrip`: target 60 s.
 const ROUNDTRIP_CEILING: Duration = Duration::from_secs(60);
-/// `bench.shell.roundtrip`: target 15 s.
+/// `shell.up`: target 15 s.
 const SHELL_CEILING: Duration = Duration::from_secs(20);
 /// `bench.shell.workspace`: target 20 s; the bench resolves the workspace's tool server first,
 /// and the id now walks a named session twice plus its listing and its kill.
@@ -59,15 +59,11 @@ const SHELL_WS_CEILING: Duration = Duration::from_secs(45);
 const DELEGATE_CEILING: Duration = Duration::from_secs(600);
 pub const STUB: &str = "bench image is the stub";
 pub const NO_DELETE_GRANT: &str = "no pod-delete grant for the probe";
-/// The ids that need a live `harness-bench`, in journey order. The two shell ids need no model,
-/// but they need the same bench, so they skip with the same reasons.
-const SESSION_IDS: [&str; 8] = [
-    "bench.session.roundtrip",
+/// The ids that need a live `harness-bench`, in journey order.
+const SESSION_IDS: [&str; 5] = [
     "shell.up",
-    "shell.fenced",
-    "shell.no_tools",
+    "bench.session.roundtrip",
     "bench.two_clients",
-    "bench.shell.roundtrip",
     "bench.shell.workspace",
     "bench.workspace.tool_roundtrip",
 ];
@@ -85,45 +81,6 @@ async fn phase(c: &Ctx) -> Result<String> {
 /// it yet. The agent reads the same field.
 fn bench_ready(pod: &Pod) -> Option<bool> {
     pod.status.as_ref()?.container_statuses.as_ref()?.iter().find(|c| c.name == kloudlite_workspaces::k8s::BENCH_CONTAINER).map(|c| c.ready)
-}
-
-/// The SHELL container's readiness, the same way.
-fn shell_ready(pod: &Pod) -> Option<bool> {
-    pod.status.as_ref()?.container_statuses.as_ref()?.iter().find(|c| c.name == kloudlite_workspaces::k8s::SHELL_CONTAINER).map(|c| c.ready)
-}
-
-/// How long a shell may take to come up before its probes give up. The shell waits on the Nix
-/// profile — an evaluation and a fetch on a cold node — and since it no longer GATES the pod's
-/// readiness (2026-09-18) the pod is `Ready` well before ttyd is listening. So the probes wait for
-/// the shell container itself rather than dialling into a port nothing holds yet.
-const SHELL_WAIT: Duration = Duration::from_secs(150);
-
-/// Block until the bench pod's shell container reports ready, or say why it did not.
-///
-/// A pod with no shell container at all is an ERROR, not a wait: that is the sidecar missing from
-/// the pod spec, which is exactly what these ids exist to catch.
-async fn await_shell(c: &Ctx) -> Result<()> {
-    let Some(k) = c.kube.clone() else { return Ok(()) };
-    let owner = c.cfg.probe_user.clone();
-    let pods: Api<Pod> = Api::namespaced(k, &crd::ws_namespace(&owner, &owner));
-    let name = super::bench_pod(c, None).await?;
-    let start = Instant::now();
-    loop {
-        // Read on every pass and reported only on the way out, so the message names what the pod
-        // last said rather than a guess: `None` is no pod, `Some(None)` a pod with no shell
-        // container status yet, `Some(Some(false))` a shell still waiting on the profile.
-        let seen = match pods.get_opt(&name).await? {
-            Some(pod) => match shell_ready(&pod) {
-                Some(true) => return Ok(()),
-                other => Some(other),
-            },
-            None => None,
-        };
-        if start.elapsed() >= SHELL_WAIT {
-            bail!("the shell container was not ready after {} s (readiness {seen:?})", SHELL_WAIT.as_secs());
-        }
-        tokio::time::sleep(Duration::from_secs(2)).await;
-    }
 }
 
 /// One `POST /v1/bench/session`, polled to 201: 202 is the wake being asked for, not a failure.
@@ -379,6 +336,7 @@ pub async fn hourly(c: &mut Ctx) {
         None => return skip_sessions(c, "the bench could not be reached before the sleep"),
         Some(false) => {}
     }
+    shell_up(c).await;
     sessions(c).await;
     delegate(c).await;
 }
@@ -526,46 +484,26 @@ pub async fn tool_only(c: &mut Ctx) {
 
 /// The session journeys on a real harness-bench. One prompt feeds two ids: the round trip is timed
 /// and judged from the transcript, and the two sockets that watched it are compared afterwards.
+/// `shell.up`: the pod's own ttyd answers and opens in the home (spec §2.5).
+///
+/// One id, both pod kinds: the bench's own shell and a run's workspace shell are the same ttyd
+/// running inside their own container (owner ruling 2026-09-25: no shell sidecar), and a failure
+/// in either is the same defect. `pwd` says the shell opens in the home. No claim any more about
+/// what the workspace shell can or cannot see under the worktree — that IS the workspace's own
+/// container, so its code is right there on purpose.
+async fn shell_up(c: &mut Ctx) {
+    c.step("shell.up", SHELL_CEILING, move |c| {
+        async move {
+            let (_child, port) = forward(c).await?;
+            let (out, code) = pty_shell(port, "bench", "pwd; exit 0\n").await?;
+            judge_shell(&out, kloudlite_workspaces::k8s::HOME_DIR, code)
+        }
+        .boxed()
+    })
+    .await;
+}
+
 async fn sessions(c: &mut Ctx) {
-    // ONCE, before the first dial and outside every step: the shell waits on the Nix profile and
-    // no longer gates the pod's readiness (2026-09-18), so the pod is `Ready` while ttyd is still
-    // being fetched and `shell.up` and `bench.shell.roundtrip` timed out at 20 s and 45 s on a
-    // cold node. Waiting here keeps each ceiling measuring the DIAL, which is what they are the
-    // target for, rather than the profile build, which is `ws.packages.*`'s to measure.
-    own_workspace(c).await;
-    // The bench resolves a workspace-scoped shell or tool with its pod token (`harness/pi/
-    // kloudlite.ts` answers "sign in on the Kloudlite desktop app" without one), and only a live
-    // CLI login mints that token: the hourly 2026-09-23 22:19 IST run failed all three ids on it.
-    let login = if c.state.ux_workspace.is_some() && NEEDS_WORKSPACE.iter().any(|id| c.walks(id)) {
-        super::bench_tool::arm(c)
-            .await
-            .map_err(|why| tracing::warn!(error = %why, "slo.bench.tool_token.not_armed"))
-            .ok()
-    } else {
-        None
-    };
-    if c.walks("bench.shell.roundtrip") || c.walks("shell.up") || c.walks("shell.fenced") || c.walks("shell.no_tools") {
-        if let Err(e) = await_shell(c).await {
-            tracing::warn!(error = %format!("{e:#}"), "slo.bench.shell.not_ready");
-        }
-    }
-    if c.walks("bench.shell.roundtrip") {
-        shell_roundtrip(c).await;
-    }
-    if c.walks("shell.up") {
-        shell_up(c).await;
-    }
-    if c.walks("shell.fenced") {
-        shell_fenced(c).await;
-    }
-    if c.walks("shell.no_tools") {
-        shell_no_tools(c).await;
-    }
-    if let Some(login) = login {
-        if let Err(e) = super::bench_tool::revoke_login(c, &login).await {
-            tracing::warn!(error = %format!("{e:#}"), "slo.bench.tool_token.login.revoke");
-        }
-    }
     // What both `/events` sockets saw, filled by the round trip for `bench.two_clients` to judge.
     type Seen = Option<(Vec<String>, Vec<String>)>;
     let seen: Arc<Mutex<Seen>> = Default::default();
@@ -655,8 +593,8 @@ where
 /// goes as binary frames, output comes back as binary frames, and the server ends with one text
 /// control frame. Returns what the shell printed and its exit code.
 /// One shell exchange through the bench's `/pty` splice, which is a TRANSPARENT pipe to the
-/// sidecar's ttyd (`harness/bench/src/pty.ts`, `spliceShell`). So this speaks ttyd's own
-/// protocol, not the retired tool-server PTY's:
+/// target workspace container's own ttyd (`harness/bench/src/pty.ts`, `spliceShell`). So this
+/// speaks ttyd's own protocol, not the retired tool-server PTY's:
 ///
 /// | direction | opcode | payload |
 /// |---|---|---|
@@ -745,116 +683,6 @@ fn judge_shell(out: &str, want: &str, code: i64) -> Result<()> {
     Ok(())
 }
 
-/// `bench.shell.roundtrip`: a shell on the bench itself. `printf` builds the marker, so the echoed
-/// command line cannot pass the assertion on its own.
-async fn shell_roundtrip(c: &mut Ctx) {
-    c.step("bench.shell.roundtrip", SHELL_CEILING, move |c| {
-        async move {
-            let (_child, port) = forward(c).await?;
-            let (out, code) = pty_shell(port, "bench", "printf 'kl-%s\\n' ok; exit 0\n").await?;
-            judge_shell(&out, "kl-ok", code)
-        }
-        .boxed()
-    })
-    .await;
-}
-
-
-/// `shell.up`: the SHELL SIDECAR answers, and it sees only the home (spec §2.5).
-///
-/// One id, both pod kinds: the bench's own shell and the run's workspace shell are the same
-/// container image with the same mounts, and a failure in either is the same defect. `pwd` says
-/// the shell opens in the home; the workspaces root being ABSENT is what says the code is not
-/// there — the sidecar mounts the home and the profile and nothing else.
-async fn shell_up(c: &mut Ctx) {
-    let ws = tool_workspace(c.state.ux_workspace.clone(), c.state.ux_ready).ok();
-    c.step("shell.up", SHELL_CEILING, move |c| {
-        async move {
-            let (_child, port) = forward(c).await?;
-            let (out, code) = pty_shell(port, "bench", "pwd; exit 0\n").await?;
-            judge_shell(&out, kloudlite_workspaces::k8s::HOME_DIR, code)?;
-            let Some(ws) = ws else {
-                // The workspace half is a stronger assertion than the bench half; say it was not
-                // made rather than passing on half the id.
-                bail!("the stage's workspace was never created, so only the bench shell was checked");
-            };
-            // `ls` of the source directory: the sidecar has no such mount, so the shell must not
-            // find the workspace's code there. An empty answer and an error are both correct.
-            let (out, _) = pty_shell(port, &ws, &format!("ls {}; pwd; exit 0\n", kloudlite_workspaces::k8s::WORKSPACE_DIR)).await?;
-            if out.contains(&format!("{}/", kloudlite_workspaces::k8s::WORKSPACE_DIR)) {
-                bail!("the shell can see the workspaces root: {}", super::clip(&out));
-            }
-            if !out.contains(kloudlite_workspaces::k8s::HOME_DIR) {
-                bail!("the workspace shell did not open in the home: {}", super::clip(&out));
-            }
-            Ok(())
-        }
-        .boxed()
-    })
-    .await;
-}
-
-/// `shell.no_tools`: the tool server REFUSES the shell, and the refusal is a 401.
-///
-/// Deliberately not "the connection is refused" (spec §2.5): the two containers share the pod's
-/// network namespace, so a dial of 127.0.0.1:7788 from the shell CONNECTS. What stops it is that
-/// every tool-server request needs the bench token and the shell has none. Stated here so nobody
-/// later "fixes" the probe by expecting a refused connection.
-async fn shell_no_tools(c: &mut Ctx) {
-    let ws = match tool_workspace(c.state.ux_workspace.clone(), c.state.ux_ready) {
-        Ok(ws) => ws,
-        Err(why) => return c.skip("shell.no_tools", why),
-    };
-    c.step("shell.no_tools", SHELL_CEILING, move |c| {
-        async move {
-            let (_child, port) = forward(c).await?;
-            let script = format!(
-                "curl -s -o /dev/null -w '%{{http_code}}\\n' --max-time 5 http://127.0.0.1:{}/tools; exit 0\n",
-                kloudlite_workspaces::k8s::IDE_PORT
-            );
-            let (out, code) = pty_shell(port, &ws, &script).await?;
-            judge_shell(&out, "401", code).map_err(|e| {
-                anyhow!("{e:#} — the tool server must answer the token-less shell 401, never serve it")
-            })
-        }
-        .boxed()
-    })
-    .await;
-}
-
-/// `shell.fenced`: nothing outside the fence dials 7790.
-///
-/// From the PROBE pod, which is not the person's bench and is in another namespace: the
-/// `allow-bench-tools` policy admits the bench pod alone, so this connect must fail. A connect
-/// that SUCCEEDS is the whole finding — the shell has no auth of its own, the fence is the auth.
-async fn shell_fenced(c: &mut Ctx) {
-    let Some(k) = c.kube.clone() else {
-        return c.skip("shell.fenced", "no kubeconfig");
-    };
-    let owner = c.cfg.probe_user.clone();
-    c.step("shell.fenced", SHELL_CEILING, move |c| {
-        async move {
-            let pod = super::bench_pod(c, None).await?;
-            let ns = kloudlite_workspaces::crd::ws_namespace(&owner, &owner);
-            let ip = kube::Api::<Pod>::namespaced(k.clone(), &ns)
-                .get_opt(&pod)
-                .await?
-                .and_then(|p| p.status.and_then(|s| s.pod_ip))
-                .context("the bench pod has no address")?;
-            let addr = format!("{ip}:{}", kloudlite_workspaces::k8s::SHELL_PORT);
-            // A real socket, never a shell's `/dev/tcp`: the DIAL is the assertion, and a policy
-            // that dropped the packet must read as a timeout rather than as a shell's exit code.
-            match tokio::time::timeout(Duration::from_secs(5), tokio::net::TcpStream::connect(&addr)).await {
-                Err(_) => Ok(()),
-                Ok(Err(_)) => Ok(()),
-                Ok(Ok(_)) => bail!("{addr} accepted a connection from outside the fence"),
-            }
-        }
-        .boxed()
-    })
-    .await;
-}
-
 /// `bench.shell.workspace`: the same socket with a workspace scope, which the bench splices to
 /// that workspace's tool server — so `pwd` proves both the splice and the shell's cwd. Runs in
 /// group 0, which owns the workspace, beside `bench.workspace.tool_roundtrip`.
@@ -869,8 +697,8 @@ async fn shell_workspace(c: &mut Ctx) {
         Ok(id) => id,
         Err(why) => return c.skip(SHELL_WS, &why),
     };
-    // The shell sidecar opens in its own scratch home: it never mounts the worktree volume, which
-    // IS the workspace's home since 2026-09-22.
+    // ttyd runs inside the workspace container itself (owner ruling 2026-09-25: no shell sidecar),
+    // so it opens in the workspace's own home, which IS the worktree volume since 2026-09-22.
     let want = kloudlite_workspaces::k8s::HOME_DIR.to_string();
     c.step(SHELL_WS, SHELL_WS_CEILING, move |c| {
             async move {
@@ -880,10 +708,11 @@ async fn shell_workspace(c: &mut Ctx) {
                 // The PROMPT is the product here: starship's character is what says the splice landed
                 // in the workspace's own zsh rather than the `/bin/sh` the PTY used to fall back to.
                 judge_shell(&out, "❯", code)?;
-                // NO reattach assertion any more (spec §2.3): a terminal is a ttyd socket to the
-                // shell sidecar, named sessions and replay are retired, and "a dropped connection
-                // is a new shell". What this id still holds is the one thing that survived: the
-                // splice lands in the WORKSPACE's own shell, at its own directory, with its prompt.
+                // NO reattach assertion any more (spec §2.3): a terminal is a ttyd socket inside the
+                // workspace container itself (owner ruling 2026-09-25: no shell sidecar), named
+                // sessions and replay are retired, and "a dropped connection is a new shell". What
+                // this id still holds is the one thing that survived: the splice lands in the
+                // WORKSPACE's own shell, at its own directory, with its prompt.
                 Ok(())
             }
             .boxed()
@@ -1007,27 +836,6 @@ async fn tool_roundtrip(c: &mut Ctx) -> Option<String> {
     Some(thread)
 }
 
-/// The ids of this group that need a live workspace besides the bench.
-const NEEDS_WORKSPACE: [&str; 2] = ["shell.up", "shell.no_tools"];
-
-/// A workspace of this pod's own for `NEEDS_WORKSPACE`, when `ws.packages.add` (group 0) did not
-/// make one here. Grouping split the two after `shell.up` was written against the shared one, and
-/// every grouped hourly run since failed it as "never created" (hourly 2026-09-23 19:53 IST).
-/// Plain, no packages: these ids judge the shell and the tool server, not the profile.
-async fn own_workspace(c: &mut Ctx) {
-    if c.state.ux_workspace.is_some() || !NEEDS_WORKSPACE.iter().any(|id| c.walks(id)) {
-        return;
-    }
-    let name = format!("{}-b", c.prefix());
-    match super::experience_ws::create(c, &name, serde_json::json!({})).await {
-        Ok(id) => {
-            c.state.ux_workspace = Some(id);
-            c.state.ux_ready = true;
-        }
-        Err(e) => tracing::warn!(error = %format!("{e:#}"), "slo.bench.workspace.not_created"),
-    }
-}
-
 fn tool_workspace(ws: Option<String>, ready: bool) -> std::result::Result<String, &'static str> {
     match (ws, ready) {
         (None, _) => Err("the stage's workspace was never created"),
@@ -1139,8 +947,9 @@ pub async fn weekly(c: &mut Ctx) {
 }
 
 // `ws.terminal.persists` is RETIRED (spec §2.3, 2026-09-17): the tool server has no PTY any more
-// and a terminal is a ttyd socket to the shell sidecar, so nothing survives a restart by design —
-// "a dropped connection is a new shell". `shell.up` is what covers a terminal now.
+// and a terminal is a ttyd socket inside the workspace container itself (owner ruling 2026-09-25:
+// no shell sidecar), so nothing survives a restart by design — "a dropped connection is a new
+// shell". `bench.shell.workspace` is what covers a terminal now.
 
 #[cfg(test)]
 mod tests {
@@ -1311,7 +1120,7 @@ mod tests {
     #[test]
     fn ceilings_are_at_least_their_targets() {
         use kloudlite_workspaces::slo::catalogue::find;
-        for (id, cap) in [("bench.shell.roundtrip", SHELL_CEILING), (SHELL_WS, SHELL_WS_CEILING), ("bench.workspace.tool_roundtrip", TOOL_CEILING), ("bench.session.roundtrip", ROUNDTRIP_CEILING), ("bench.start.p95", START_CEILING), ("bench.tunnel", TUNNEL_CEILING), ("bench.idle.wake", WAKE_CEILING), ("bench.delegate", DELEGATE_CEILING)] {
+        for (id, cap) in [("shell.up", SHELL_CEILING), (SHELL_WS, SHELL_WS_CEILING), ("bench.workspace.tool_roundtrip", TOOL_CEILING), ("bench.session.roundtrip", ROUNDTRIP_CEILING), ("bench.start.p95", START_CEILING), ("bench.tunnel", TUNNEL_CEILING), ("bench.idle.wake", WAKE_CEILING), ("bench.delegate", DELEGATE_CEILING)] {
             assert!(cap.as_millis() >= find(id).unwrap().target.max_ms.unwrap() as u128, "{id}");
         }
     }

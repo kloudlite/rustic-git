@@ -162,7 +162,7 @@ pub const HOURLY_GROUPS: u8 = 4;
 
 /// Group 3. Not `bench.workspace.tool_roundtrip` or `bench.shell.workspace`: both run in group 0's
 /// workspace, so group 0 walks them after waiting for this group to finish (`suite::wait_for_group`).
-const BENCH_IDS: [&str; 15] = [
+const BENCH_IDS: [&str; 12] = [
     "bench.create",
     "bench.start.p95",
     "bench.tunnel",
@@ -173,9 +173,6 @@ const BENCH_IDS: [&str; 15] = [
     "bench.tool.audience",
     "bench.tool.revoked",
     "shell.up",
-    "shell.fenced",
-    "shell.no_tools",
-    "bench.shell.roundtrip",
     "bench.push.p95",
     "bench.pkg.add",
     ];
@@ -633,11 +630,11 @@ pub const CATALOGUE: &[Slo] = &[
     Slo { id: "bench.tool.audience", feature: "Benches", sli: "The pod's token is refused on `/v1/bench/session`, `/v1/cli/tokens` and `/v1/keys`", target: avail(99.9), suite: Suite::Hourly, stage: "14 · Experience" },
     Slo { id: "bench.tool.revoked", feature: "Benches", sli: "After a stop the next call with the pod's token is 401 at once; after the parent login is revoked a pod call is 401 within 60 s", target: bound(90_000), suite: Suite::Hourly, stage: "14 · Experience" },
     // The whole chain: `/v1`'s address, `allow-bench-tools`, the tool server on the pod IP and the
-    // thread file.
-    Slo { id: "shell.up", feature: "Benches", sli: "A shell sidecar answers on both pod kinds, opens in the home, and cannot see the workspaces root", target: bound(15_000), suite: Suite::Hourly, stage: "14 · Experience" },
-    Slo { id: "shell.fenced", feature: "Security", sli: "The shell port refuses a dial from outside the person's own bench", target: avail(100.0), suite: Suite::Hourly, stage: "14 · Experience" },
-    Slo { id: "shell.no_tools", feature: "Security", sli: "The tool server answers the token-less shell 401", target: avail(99.9), suite: Suite::Hourly, stage: "14 · Experience" },
-    Slo { id: "bench.shell.roundtrip", feature: "Benches", sli: "A shell opened on the bench through `/pty` echoes a marker and exits 0", target: bound(15_000), suite: Suite::Hourly, stage: "14 · Experience" },
+    // thread file. ttyd runs inside the workspace container itself since 2026-09-25 (no shell
+    // sidecar), so both pod kinds' own shell is just "the pod's shell" now.
+    Slo { id: "shell.up", feature: "Benches", sli: "A shell answers on both pod kinds and opens in the home", target: bound(15_000), suite: Suite::Hourly, stage: "14 · Experience" },
+    // The bench pod has no shell at all (owner ruling 2026-09-25); the terminal is the workspace
+    // container's own ttyd, dialled through the bench's splice.
     Slo { id: "bench.shell.workspace", feature: "Benches", sli: "A shell opened through the bench into the run's workspace starts in the workspace directory, and a named session reattaches to its own scrollback", target: bound(20_000), suite: Suite::Hourly, stage: "14 · Experience" },
     Slo { id: "bench.workspace.tool_roundtrip", feature: "Benches", sli: "A workspace session on the bench runs `exec echo` in a workspace through its tool server, and the turn lands under `/bench/workspaces/{ws}/`", target: bound(180_000), suite: Suite::Hourly, stage: "14 · Experience" },
     // A bench IS a Workspace now, so its transcripts are cut by the ordinary push and its package
@@ -789,7 +786,7 @@ mod tests {
                    "bench.session.roundtrip", "bench.two_clients",
                    "bench.survives.reschedule", "bench.workspace.tool_roundtrip",
                    "bench.tool.token", "bench.tool.audience", "bench.tool.revoked",
-                   "bench.shell.roundtrip", "bench.shell.workspace",
+                   "shell.up", "bench.shell.workspace",
                    "bench.push.p95", "bench.pkg.add", "bench.delegate"] {
             assert!(find(id).is_some(), "{id} missing from CATALOGUE");
         }
