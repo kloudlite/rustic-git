@@ -222,8 +222,8 @@ pub async fn run(c: &mut Ctx) {
                 crate::suite::wait_for_group(c, 3, std::time::Duration::from_secs(900)).await;
                 super::bench::tool_only(c).await
             }
-            // Both shells are filed by the calls above: the bench shell with the session journey,
-            // the workspace shell beside the tool round trip, in the group that owns the workspace.
+            // Filed by the calls above; the workspace shell beside the tool round trip, in the
+            // group that owns the workspace.
             "bench.session.roundtrip" | "bench.two_clients" | "bench.workspace.tool_roundtrip" => {}
             "bench.shell.workspace" => {}
             // Filed by the bench journey's own call, in group 3.
