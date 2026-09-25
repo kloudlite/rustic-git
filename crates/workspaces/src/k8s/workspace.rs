@@ -198,7 +198,7 @@ pub(super) fn prelude(_name: &str) -> String {
          [ -e $H/.config/fish/config.fish ] || printf 'set -gx PATH {path}\\nset -gx LS_COLORS (dircolors -b | string match -r \"LS_COLORS=.([^\\047]*)\")[2]\\nalias ls=\"ls --color=auto\"\\nalias grep=\"grep --color=auto\"\\nstarship init fish | source\\n' > $H/.config/fish/config.fish\n\
          SEED\n\
          echo prelude.chown.done\n\
-         su {SSH_USER} -s /bin/sh -c 'mkdir -p {HOME_DIR}/.cache/zsh {HOME_DIR}/.cache/shell'\n\
+         su {SSH_USER} -s /bin/sh -c 'mkdir -p {HOME_DIR}/.cache/zsh {HOME_DIR}/.cache/shell && touch {IDE_LOG}'\n\
          mkdir -p /run/kl/sv/sshd /run/kl/sv/ide /run/kl/sv/ttyd\n\
          chmod 0755 /run/kl/sv /run/kl/sv/sshd /run/kl/sv/ide /run/kl/sv/ttyd\n\
          printf '%s\\n' '#!/bin/sh' 'exec {profile}/bin/sshd -D -e -f {SSHD_DIR}/sshd_config' > /run/kl/sv/sshd/run\n\
@@ -564,7 +564,7 @@ pub fn workspace_pod(
             ports: default_image.then(|| {
                 vec![
                     ContainerPort { container_port: 22, name: Some("ssh".into()), ..Default::default() },
-                    // The person's terminal (ttyd), started in the background by `prelude()` —
+                    // The person's terminal (ttyd), supervised by runit in `prelude()` —
                     // no more shell sidecar.
                     ContainerPort { container_port: SHELL_PORT as i32, name: Some("ttyd".into()), ..Default::default() },
                 ]

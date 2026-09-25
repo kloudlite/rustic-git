@@ -17,7 +17,7 @@ git config --global receive.denyCurrentBranch updateInstead
 [ -e $H/.config/fish/config.fish ] || printf 'set -gx PATH /nix/profile/current/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin\nset -gx LS_COLORS (dircolors -b | string match -r "LS_COLORS=.([^\047]*)")[2]\nalias ls="ls --color=auto"\nalias grep="grep --color=auto"\nstarship init fish | source\n' > $H/.config/fish/config.fish
 SEED
 echo prelude.chown.done
-su kl -s /bin/sh -c 'mkdir -p /home/kl/.cache/zsh /home/kl/.cache/shell'
+su kl -s /bin/sh -c 'mkdir -p /home/kl/.cache/zsh /home/kl/.cache/shell && touch /home/kl/.local/state/kl-ide.log'
 mkdir -p /run/kl/sv/sshd /run/kl/sv/ide /run/kl/sv/ttyd
 chmod 0755 /run/kl/sv /run/kl/sv/sshd /run/kl/sv/ide /run/kl/sv/ttyd
 printf '%s\n' '#!/bin/sh' 'exec /nix/profile/current/bin/sshd -D -e -f /etc/ssh/sshd_config' > /run/kl/sv/sshd/run

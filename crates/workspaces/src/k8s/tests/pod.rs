@@ -826,7 +826,10 @@ pub(crate) fn workspace_pod_accepts_a_real_name() {
 /// shell-only container to bound with its own mounts any more.
 #[test]
 fn the_workspace_container_exposes_ttyd_and_no_shell_sidecar_exists() {
-    let p = workspace_pod(&ws_spec(), "ws-1", "ws-1", &ctx(), None, None).unwrap();
+    // Only the default image runs the prelude, so only it exposes ttyd.
+    let mut spec = ws_spec();
+    spec.image = crate::model::DEFAULT_WS_IMAGE.into();
+    let p = workspace_pod(&spec, "ws-1", "ws-1", &ctx(), None, None).unwrap();
     let spec = p.spec.unwrap();
     let names: Vec<&str> = spec.containers.iter().map(|c| c.name.as_str()).collect();
     assert_eq!(names, ["workspace"], "no shell sidecar: the terminal lives in the workspace container");
