@@ -91,9 +91,10 @@ test("watch ipc: a workspace scope opens one; a terminal id is not a scope", () 
   for (const bad of ["t3", "machine", "ws-51480ba5", "../events", 1, undefined]) assert.throws(() => checkWatch(bad), /not a shell scope/, String(bad));
 });
 
-test("BenchClient.pty: refused while offline, a shell from the pod's shell sidecar once connected", async (t) => {
-  // The bench scope splices to the `shell` sidecar in its own pod; stand that container in here,
-  // speaking ttyd: `0` input, `0` output (spec §2.3).
+test("BenchClient.pty: refused while offline, a shell from the workspace pod's own ttyd once connected", async (t) => {
+  // The bench pod carries no ttyd at all (owner ruling 2026-09-25): a workspace scope splices to
+  // that pod's own container; stand that container in here, speaking ttyd: `0` input, `0` output
+  // (spec §2.3).
   const tools = new WebSocketServer({ host: "127.0.0.1", port: 7790 });
   const listening = await new Promise<boolean>((r) => (tools.once("listening", () => r(true)), tools.once("error", () => r(false))));
   if (!listening) return void t.skip("127.0.0.1:7790 is busy on this machine");
@@ -110,14 +111,15 @@ test("BenchClient.pty: refused while offline, a shell from the pod's shell sidec
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), "desk-pty-"));
   const bench = new Bench({ dir: path.join(dir, "bench"), readOnly: false, model: "fake/m", turn: async () => "ok" });
   await bench.start();
-  const srv = await serve(bench, 0, "127.0.0.1");
+  const scope = "ws-0123456789abcdef";
+  const srv = await serve(bench, 0, "127.0.0.1", undefined, undefined, { resolveTools: async () => ({ address: "127.0.0.1:7788" }) });
   const c = new BenchClient(`http://127.0.0.1:${srv.port}`, () => undefined, path.join(dir, "cache.json"));
   try {
-    assert.throws(() => c.pty("bench"), /not connected/);
+    assert.throws(() => c.pty(scope), /not connected/);
     c.start();
     await until(() => c.connected(), 5_000, "the client to connect");
 
-    const w = c.pty("bench");
+    const w = c.pty(scope);
     let out = "";
     const json: Record<string, unknown>[] = [];
     w.on("message", (d: Buffer, binary: boolean) => {

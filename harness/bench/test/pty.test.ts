@@ -10,9 +10,9 @@ import { authFrame, shellAddress, SHELL_PORT, TTYD_SUBPROTOCOL } from "../src/pt
 import { until } from "./wait.ts";
 
 /**
- * A terminal is a socket to the pod's `shell` sidecar, which runs ttyd (spec §2.3). The bench
- * splices the two sockets and adds ttyd's opening frame; everything else crosses unchanged, and
- * there is no session, no reattach and no tmux behind it.
+ * A terminal is a socket to a workspace pod's own `ttyd` (spec §2.3, owner ruling 2026-09-25: no
+ * shell sidecar). The bench splices the two sockets and adds ttyd's opening frame; everything else
+ * crosses unchanged, and there is no session, no reattach and no tmux behind it.
  */
 async function up(resolveTools?: (ws: string) => Promise<{ address: string; token?: string }>) {
   const bench = new Bench({ dir: fs.mkdtempSync(path.join(os.tmpdir(), "bench-pty-")), readOnly: false, model: "fake/m", turn: async () => "ok" });
@@ -41,7 +41,7 @@ const resize = (w: WebSocket, cols: number, rows: number) => w.send(JSON.stringi
 /**
  * A stand-in ttyd: echoes what was typed, names itself, and closes on `exit`. It must listen on
  * the SHELL PORT, because the splice takes the tool server's address and swaps the port — same
- * pod, the sidecar beside it.
+ * pod, same container as the tool server.
  */
 function fakeTtyd() {
   const wss = new WebSocketServer({ host: "127.0.0.1", port: SHELL_PORT, handleProtocols: (s) => (s.has(TTYD_SUBPROTOCOL) ? TTYD_SUBPROTOCOL : false) });
@@ -64,7 +64,7 @@ function fakeTtyd() {
 test("the splice speaks ttyd: an auth frame, then input and output unchanged", async (t0) => {
   const shell = fakeTtyd();
   if (!(await shell.ready)) return void t0.skip(`127.0.0.1:${SHELL_PORT} is busy on this machine`);
-  // The workspace's tool-server address; the splice swaps the port to the sidecar's.
+  // The workspace's tool-server address; the splice swaps the port to ttyd's.
   const t = await up(async () => ({ address: "127.0.0.1:7788" }));
   const w = new WebSocket(`ws://127.0.0.1:${t.port}/pty?scope=ws-0123456789abcdef`);
   try {
@@ -121,7 +121,7 @@ test("nothing listening in the pod is one error frame and a close", async () => 
   }
 });
 
-test("the shell is the sidecar's port, in the same pod as the tool server", () => {
+test("the shell is ttyd's port, in the same pod as the tool server", () => {
   assert.equal(SHELL_PORT, 7790);
   assert.equal(shellAddress("10.42.3.190:7788"), "10.42.3.190:7790");
   assert.equal(shellAddress("10.42.3.190"), "10.42.3.190:7790");
@@ -132,6 +132,16 @@ test("a bad scope is refused at the handshake, and there is no session to name",
   const t = await up();
   try {
     const bad = new WebSocket(`ws://127.0.0.1:${t.port}/pty?scope=not-a-workspace`);
+    await assert.rejects(() => opened(bad), /Unexpected server response: 400/);
+  } finally {
+    await t.down();
+  }
+});
+
+test("scope=bench is refused: the bench pod has no shell, its container holds the engine keys", async () => {
+  const t = await up();
+  try {
+    const bad = new WebSocket(`ws://127.0.0.1:${t.port}/pty?scope=bench`);
     await assert.rejects(() => opened(bad), /Unexpected server response: 400/);
   } finally {
     await t.down();

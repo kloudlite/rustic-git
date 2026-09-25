@@ -442,8 +442,9 @@ export function App() {
   const tabsHere = () => tabs().filter((t) => t.owner === selected());
   /**
    * A terminal belongs to the session tab it was opened from, and its scope is that tab's. A tab
-   * IS a socket to the pod's shell sidecar (spec §2.3): there is nothing to adopt, nothing to
-   * reconcile and nothing to reattach — a new tab is a new shell, and a closed one is finished.
+   * IS a socket to that workspace pod's own ttyd (spec §2.3, owner ruling 2026-09-25: no shell
+   * sidecar): there is nothing to adopt, nothing to reconcile and nothing to reattach — a new tab
+   * is a new shell, and a closed one is finished.
    */
   const openShell = (owner = selected()) => {
     const scopeId = scopeOfTab(machine(), owner);

@@ -1,9 +1,11 @@
 import WebSocket from "ws";
 
 /**
- * The person's shell, spliced. Every pod carries a `shell` sidecar running `ttyd` on 7790 with the
- * home mounted and nothing else (spec §2): the terminal is a socket to THAT, never a PTY forked in
- * a container that holds code or a token. The tool server's own `/stream/pty` is retired with this.
+ * The person's shell, spliced. A workspace's own container runs `ttyd` on 7790 (owner ruling
+ * 2026-09-25: no shell sidecar) in its own home: the terminal is a socket to THAT, never a PTY
+ * forked by this process. The tool server's own `/stream/pty` is retired with this. The bench pod
+ * carries no ttyd at all — its `sessions` container holds the engine API keys, and a shell there
+ * would expose them (`/pty?scope=bench` is refused before upgrade).
  *
  * ttyd's protocol is one byte of opcode then the payload, subprotocol `tty`:
  *
@@ -24,10 +26,10 @@ export type Resize = { cols: number; rows: number };
 const OPEN_MS = 5_000;
 /** ttyd's own subprotocol name; it refuses a socket that does not ask for it. */
 export const TTYD_SUBPROTOCOL = "tty";
-/** The shell sidecar's port, in every pod (spec §2.2). */
+/** ttyd's port, on a workspace pod's own container (spec §2.2). */
 export const SHELL_PORT = 7790;
 
-/** `10.42.3.190:7788` → `10.42.3.190:7790`: same pod, the sidecar beside the tool server. */
+/** `10.42.3.190:7788` → `10.42.3.190:7790`: same pod, same container as the tool server. */
 export const shellAddress = (address: string): string => `${address.replace(/:\d+$/, "")}:${SHELL_PORT}`;
 
 /** ttyd's first client frame: an empty token (the NetworkPolicy is the fence, §2.3) and the size. */

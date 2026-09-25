@@ -52,15 +52,6 @@ const SCOPE_RE = /^ws-[0-9a-f]{16}$/;
 
 /** The tool server in this pod's workspace container; same pod, so no NetworkPolicy and no token. */
 const LOCAL_TOOLS = "127.0.0.1:7788";
-/**
- * This pod's own address, for its own shell sidecar. The sessions container cannot fork a shell —
- * that is the whole point of §3 — so the bench's terminal is the `shell` container beside it, and
- * a sidecar is reached on the POD IP, not on loopback's tool-server port. `KL_POD_IP` comes from
- * the downward API (`status.podIP`); with none set, loopback is the honest fallback for a bench
- * running on somebody's laptop.
- */
-const ownPod = (): string => `${process.env.KL_POD_IP ?? "127.0.0.1"}:7788`;
-
 export function serve(
   bench: Bench,
   port: number,
@@ -311,9 +302,13 @@ export function serve(
     }
     if (p.length === 1 && p[0] === "pty") {
       scope = u.searchParams.get("scope") ?? "";
-      // A scope that is neither the bench nor a workspace id is refused before anything is opened or dialled.
-      if (scope !== "bench" && !SCOPE_RE.test(scope)) return void socket.end("HTTP/1.1 400 Bad Request\r\nconnection: close\r\n\r\n");
-      // No session name: a terminal is a live socket to the pod's shell and nothing more.
+      // The bench pod has no shell (owner ruling 2026-09-25): the engine API keys live in this
+      // container's own env, and a shell here would read them straight off the process. Refused
+      // before anything is opened or dialled, exactly like a bad scope.
+      if (scope === "bench") return void socket.end("HTTP/1.1 400 Bad Request\r\nconnection: close\r\n\r\n");
+      // A scope that is not one of the person's own workspace ids is refused the same way.
+      if (!SCOPE_RE.test(scope)) return void socket.end("HTTP/1.1 400 Bad Request\r\nconnection: close\r\n\r\n");
+      // No session name: a terminal is a live socket to the workspace's shell and nothing more.
     }
     if (scope === undefined && watch === undefined && !(p.length === 1 && p[0] === "events")) return void socket.destroy();
     wss.handleUpgrade(req, socket, head, (w) => {
@@ -336,12 +331,6 @@ export function serve(
         // 80x24 is the fallback, never the shell a client that spoke gets.
         const held = holdFrames(w, 2_000);
         void held.first.then((first) => {
-          // The bench's own shell is the sidecar in ITS pod, reached by the pod IP the downward
-          // API gives us: the sessions container has no shell of its own to fork (spec §2.2).
-          if (scope === "bench") {
-            spliceShell(w, ownPod(), first);
-            return held.release();
-          }
           return resolveAuth(scope!).then(
             (a) => {
               // The tool server's address, with the port swapped: same pod, the shell beside it.
