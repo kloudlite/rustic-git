@@ -17,7 +17,7 @@
 # deploy/k3s/dev-push.sh loop. Only the five kloudlite binaries make it into the context — see
 # .dockerignore — so a fat `target/` costs nothing to send.
 
-FROM debian:bookworm-slim@sha256:abd67ffcfa541b485a3dff59865ab629aa048a6c613e639d36e7456b0b229241 AS server
+FROM debian:bookworm-slim@sha256:3783cc01769c7b2b1b83a5c5ad96c815348e28ed7da68e2e3687004faa906251 AS server
 # openssh-client: the server shells out to ssh-keygen to generate its host key on first start.
 # git: the merge worker performs merges by running it (see crates/pulls/src/merge_worker.rs) —
 # bookworm ships 2.39, past the 2.38 that `merge-tree --write-tree` needs. One image serves all
@@ -53,7 +53,7 @@ CMD ["serve"]
 # The node controller. A separate IMAGE, not a fourth binary in the server one: this runs as root
 # with btrfs-progs and the host pool mounted, and shipping root's toolchain to the three processes
 # that must never have it is exactly what the split prevents.
-FROM debian:bookworm-slim@sha256:abd67ffcfa541b485a3dff59865ab629aa048a6c613e639d36e7456b0b229241 AS agent
+FROM debian:bookworm-slim@sha256:3783cc01769c7b2b1b83a5c5ad96c815348e28ed7da68e2e3687004faa906251 AS agent
 # btrfs-progs: every storage operation shells out to it.
 # util-linux: losetup/mount for the block-layer restore path.
 # ca-certificates: the registry client and Azure blob store speak TLS.
@@ -81,7 +81,7 @@ ENTRYPOINT ["kloudlite-agent"]
 # The SSH gateway. Its own image rather than a fourth binary in the server one: this pod runs with
 # NET_BIND_SERVICE to hold hostPort 443 on a pool node, and that capability has no business on the
 # git server's pods.
-FROM debian:bookworm-slim@sha256:abd67ffcfa541b485a3dff59865ab629aa048a6c613e639d36e7456b0b229241 AS gateway
+FROM debian:bookworm-slim@sha256:3783cc01769c7b2b1b83a5c5ad96c815348e28ed7da68e2e3687004faa906251 AS gateway
 # ca-certificates only: the gateway talks to the kube API server over TLS and to nothing else.
 # libcap2-bin is build-time only, for the setcap below.
 RUN apt-get update && apt-get install -y --no-install-recommends ca-certificates libcap2-bin \
@@ -105,7 +105,7 @@ ENTRYPOINT ["kloudlite-gateway"]
 # The cluster controller. No capability, no hostPath, no secret: the API server is its only
 # dependency, and its one listener is the health route on 8080 — so none of the gateway's setcap
 # dance applies here.
-FROM debian:bookworm-slim@sha256:abd67ffcfa541b485a3dff59865ab629aa048a6c613e639d36e7456b0b229241 AS controller
+FROM debian:bookworm-slim@sha256:3783cc01769c7b2b1b83a5c5ad96c815348e28ed7da68e2e3687004faa906251 AS controller
 # ca-certificates only: the controller talks TLS to the kube API server and to nothing else.
 RUN apt-get update && apt-get install -y --no-install-recommends ca-certificates \
     && rm -rf /var/lib/apt/lists/*
@@ -118,7 +118,7 @@ ENTRYPOINT ["kloudlite-controller"]
 
 # The build gate. Its own image for the same reason the gateway has one: a different pod, a
 # different ServiceAccount, and no reason for the git server's pods to carry either binary.
-FROM debian:bookworm-slim@sha256:abd67ffcfa541b485a3dff59865ab629aa048a6c613e639d36e7456b0b229241 AS builder-gate
+FROM debian:bookworm-slim@sha256:3783cc01769c7b2b1b83a5c5ad96c815348e28ed7da68e2e3687004faa906251 AS builder-gate
 # ca-certificates only: the gate talks TLS to the kube API server and to the api tier's public
 # URL, and plain TCP to buildkit.
 RUN apt-get update && apt-get install -y --no-install-recommends ca-certificates \
@@ -171,7 +171,7 @@ ENTRYPOINT ["/kloudlite-intercept-proxy"]
 # `k8s::prelude`, not here.
 # Pinned by digest like every other stage (2026-09-12 review #69): a tag is a pointer Docker Hub
 # can move, and this is the image a person's whole working day runs inside.
-FROM debian:bookworm-slim@sha256:abd67ffcfa541b485a3dff59865ab629aa048a6c613e639d36e7456b0b229241 AS workspace
+FROM debian:bookworm-slim@sha256:3783cc01769c7b2b1b83a5c5ad96c815348e28ed7da68e2e3687004faa906251 AS workspace
 ARG PROFILE=release
 COPY --from=node:22-bookworm-slim@sha256:83f487e0a63425e5b4d146fb5e5be574bcbe1b7b843d3ebafdd95eaf7767a7e5 /usr/local/ /usr/local/
 COPY --from=docker:28-cli@sha256:625d9431a9f54c5a2bc90f24f0e1c3d55b1349fd857dd85035f98c2c9acbdd4d /usr/local/bin/docker /usr/bin/docker
@@ -219,7 +219,7 @@ ENV DO_NOT_TRACK=1
 # The SLO probe. Its own image because it is the only one that carries a toolbox — git, ssh,
 # crane, kubectl, dig, openssl — and shipping that to the three server processes would hand a
 # compromised request handler everything it needs to talk to the cluster.
-FROM debian:bookworm-slim@sha256:abd67ffcfa541b485a3dff59865ab629aa048a6c613e639d36e7456b0b229241 AS slo
+FROM debian:bookworm-slim@sha256:3783cc01769c7b2b1b83a5c5ad96c815348e28ed7da68e2e3687004faa906251 AS slo
 # git + openssh-client: stage 2 pushes and clones over both transports, with a real client, because
 # a probe that used our own library would pass on a bug only a real client trips.
 # curl is the build-time tool fetch below; the edge stage dials the origin with reqwest.
