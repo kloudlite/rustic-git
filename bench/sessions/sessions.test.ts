@@ -91,10 +91,9 @@ test("a running subagent is marked error, not left running, when the run loop di
     })();
   const s = new Sessions({ query: q as any, home: "/h", modDir: "/m", saved: {} });
   s.send("ws-a", "go");
-  // `settled()` resolves from inside the same catch block that marks the agent error, before the
-  // throw unwinds into Sessions.get()'s `.catch` (which deletes the session) — so this reads the
-  // state at the right moment.
   await s.settled("ws-a");
+  // Past Sessions.get()'s `.catch` too: the dead session must still show its error agent.
+  await new Promise((r) => setTimeout(r, 0));
   assert.equal(s.state()["ws-a"].agents[0].status, "error");
 });
 

@@ -10,7 +10,7 @@
 //! workspace image's own `prelude`), supervising four runit services under `/etc/kl/sv`: the agent
 //! CLI in a `tmux` session, `ttyd` attached to it, `sshd` (its host key persists at `~/.ssh-host`,
 //! logins land in the same tmux session via `ForceCommand`) and the `sessions` node service, a
-//! loopback-only HTTP server on `127.0.0.1:8917` that `BENCH_PORT`'s sshd and ttyd sit beside, not
+//! loopback-only HTTP server on `127.0.0.1:8917` that sshd (`BENCH_PORT`) and ttyd (`BENCH_TERM_PORT`) sit beside, not
 //! on. A crash in any one is restarted by runit in place — there is no second pod phase to fall
 //! back to.
 //!

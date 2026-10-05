@@ -232,6 +232,9 @@ export class Sessions {
   private modDir: string;
   private saved: Record<string, SavedSession>;
   private sessions = new Map<string, Session>();
+  // A session whose run loop died for good, kept for `state()` until the next send restarts it:
+  // deleting it outright erased the `error` agents before the pane could ever draw them.
+  private dead = new Map<string, Session>();
 
   constructor({ query, home, modDir, saved }: { query: QueryFn; home: string; modDir: string; saved: Record<string, SavedSession> }) {
     this.query = query;
@@ -244,11 +247,14 @@ export class Sessions {
     let s = this.sessions.get(ws);
     if (!s) {
       s = new Session(this.saved[ws]);
+      this.dead.delete(ws);
       this.sessions.set(ws, s);
+      const live = s;
       void s.run(this.query, ws, this.home, this.modDir, () => {}).catch(() => {
         // Run loop threw past the resume-once retry: drop the session so the next send restarts
         // it fresh (demo behaviour), matching the comment in sessions.ts's run().
         this.sessions.delete(ws);
+        this.dead.set(ws, live);
       });
     }
     return s;
@@ -273,6 +279,9 @@ export class Sessions {
     const out: Record<string, { lines: string[]; busy: boolean; queued: string[]; agents: Agent[] }> = {};
     for (const [ws, v] of Object.entries(this.saved)) {
       if (!this.sessions.has(ws)) out[ws] = { lines: v.lines ?? [], busy: false, queued: [], agents: [] };
+    }
+    for (const [ws, s] of this.dead) {
+      out[ws] = { lines: s.lines, busy: false, queued: [], agents: [...s.agents.values()] };
     }
     for (const [ws, s] of this.sessions) {
       out[ws] = { lines: s.lines, busy: s.busy, queued: [...s.queue], agents: [...s.agents.values()] };
