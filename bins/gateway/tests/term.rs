@@ -49,19 +49,27 @@ async fn fake_ttyd_http() -> u16 {
     port
 }
 
-/// A WebSocket echo standing in for ttyd's `/ws`.
-async fn fake_ttyd_ws() -> u16 {
+/// A WebSocket echo standing in for ttyd's `/ws`. `saw_tty` records whether the gateway's own
+/// request to this fake carried the `tty` subprotocol — the gateway is the client here, so this
+/// is the only way to assert what it sent, not what it's willing to echo back.
+async fn fake_ttyd_ws() -> (u16, std::sync::Arc<std::sync::atomic::AtomicBool>) {
+    let saw_tty = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
     let l = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let port = l.local_addr().unwrap().port();
+    let flag = saw_tty.clone();
     tokio::spawn(async move {
         while let Ok((s, _)) = l.accept().await {
+            let flag = flag.clone();
             tokio::spawn(async move {
                 use futures::{SinkExt, StreamExt};
                 // Echoes ttyd's own handshake: a client that asked for the `tty` subprotocol gets
                 // it confirmed, or tungstenite's client half refuses the handshake outright.
                 #[allow(clippy::result_large_err)]
-                let callback = |_req: &tokio_tungstenite::tungstenite::handshake::server::Request,
+                let callback = move |req: &tokio_tungstenite::tungstenite::handshake::server::Request,
                                 mut resp: tokio_tungstenite::tungstenite::handshake::server::Response| {
+                    if req.headers().get("sec-websocket-protocol").and_then(|v| v.to_str().ok()) == Some("tty") {
+                        flag.store(true, std::sync::atomic::Ordering::SeqCst);
+                    }
                     resp.headers_mut().insert(
                         "sec-websocket-protocol",
                         tokio_tungstenite::tungstenite::http::HeaderValue::from_static("tty"),
@@ -80,7 +88,7 @@ async fn fake_ttyd_ws() -> u16 {
             });
         }
     });
-    port
+    (port, saw_tty)
 }
 
 async fn serve(routes: Vec<Route>, term_port: u16) -> String {
@@ -117,7 +125,8 @@ async fn the_first_request_sets_the_cookie_and_proxies() {
     let set = res.headers().get("set-cookie").unwrap().to_str().unwrap().to_string();
     assert!(set.contains(&format!("kl_term={t}")), "cookie carries the token: {set}");
     assert!(set.contains("Path=/term/bench-1/"), "cookie scoped to this bench's path: {set}");
-    assert!(set.contains("HttpOnly") && set.contains("Secure") && set.contains("SameSite=Strict"));
+    assert!(set.contains("Max-Age="), "cookie expires with the token: {set}");
+    assert!(set.contains("HttpOnly") && set.contains("Secure") && set.contains("SameSite=None") && set.contains("Partitioned"));
     let body = res.text().await.unwrap();
     assert_eq!(body, "ttyd");
 
@@ -134,7 +143,7 @@ async fn the_first_request_sets_the_cookie_and_proxies() {
 
 #[tokio::test]
 async fn a_websocket_is_pumped_both_ways() {
-    let port = fake_ttyd_ws().await;
+    let (port, saw_tty) = fake_ttyd_ws().await;
     let base = serve(vec![get(BENCH, bench()), get(BENCH_POD, pod("127.0.0.1"))], port).await;
     let t = token("bench-1", REGION);
     let ws_base = base.replacen("http://", "ws://", 1);
@@ -143,4 +152,47 @@ async fn a_websocket_is_pumped_both_ways() {
     ws.send(tokio_tungstenite::tungstenite::Message::Binary(b"hello".to_vec().into())).await.unwrap();
     let reply = ws.next().await.unwrap().unwrap();
     assert_eq!(reply.into_data().as_ref(), b"hello");
+    assert!(saw_tty.load(std::sync::atomic::Ordering::SeqCst), "gateway's upstream request carried the tty subprotocol");
+}
+
+#[tokio::test]
+async fn a_websocket_with_a_token_for_another_bench_is_403() {
+    let (port, _saw_tty) = fake_ttyd_ws().await;
+    let base = serve(vec![get(BENCH, bench()), get(BENCH_POD, pod("127.0.0.1"))], port).await;
+    let t = token("bench-2", REGION);
+    let ws_base = base.replacen("http://", "ws://", 1);
+    let err = tokio_tungstenite::connect_async(format!("{ws_base}/term/bench-1/ws?token={t}")).await.unwrap_err();
+    let tokio_tungstenite::tungstenite::Error::Http(resp) = err else { panic!("expected an HTTP error, got {err:?}") };
+    assert_eq!(resp.status(), 403, "{resp:?}");
+}
+
+#[tokio::test]
+async fn a_websocket_authenticates_by_cookie_alone() {
+    let (port, _saw_tty) = fake_ttyd_ws().await;
+    let base = serve(vec![get(BENCH, bench()), get(BENCH_POD, pod("127.0.0.1"))], port).await;
+    let t = token("bench-1", REGION);
+    let ws_base = base.replacen("http://", "ws://", 1);
+    use futures::{SinkExt, StreamExt};
+    let req = {
+        use tokio_tungstenite::tungstenite::client::IntoClientRequest;
+        let mut r = format!("{ws_base}/term/bench-1/ws").into_client_request().unwrap();
+        r.headers_mut().insert("cookie", format!("kl_term={t}").parse().unwrap());
+        r
+    };
+    let (mut ws, _) = tokio_tungstenite::connect_async(req).await.unwrap();
+    ws.send(tokio_tungstenite::tungstenite::Message::Binary(b"hi".to_vec().into())).await.unwrap();
+    let reply = ws.next().await.unwrap().unwrap();
+    assert_eq!(reply.into_data().as_ref(), b"hi");
+}
+
+#[tokio::test]
+async fn a_crlf_injection_attempt_in_the_path_is_400() {
+    let base = serve(vec![get(BENCH, bench()), get(BENCH_POD, pod("127.0.0.1"))], 0).await;
+    let t = token("bench-1", REGION);
+    let res = reqwest::Client::builder().redirect(reqwest::redirect::Policy::none()).build().unwrap()
+        .get(format!("{base}/term/bench-1/x%0D%0AFoo:%20bar?token={t}"))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(res.status(), 400);
 }

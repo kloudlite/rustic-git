@@ -2,6 +2,7 @@
 
 import { tokenOr } from "@/lib/api-token";
 import { benchSession } from "@/lib/api";
+import { termUrl } from "@/lib/term-url";
 
 export type BenchSessionResult = { error: string } | { state: string } | { termUrl: string };
 
@@ -16,6 +17,5 @@ export async function getBenchSession(): Promise<BenchSessionResult> {
   if (!r.ok) return { error: r.message || "Could not reach your bench." };
   if ("state" in r.value) return { state: r.value.state };
 
-  const { termUrl } = await import("@/lib/term-url");
   return { termUrl: termUrl(r.value.gateway, r.value.id, r.value.token) };
 }

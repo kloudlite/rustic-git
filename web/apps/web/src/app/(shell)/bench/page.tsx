@@ -26,5 +26,5 @@ export default async function BenchPage() {
     );
   }
 
-  return <iframe src={r.termUrl} className="h-full w-full border-0" />;
+  return <iframe src={r.termUrl} title="Bench terminal" className="h-full w-full border-0" />;
 }

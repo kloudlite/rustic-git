@@ -22,6 +22,7 @@ use axum::routing::get;
 use axum::Router;
 use kloudlite_core::jwt::BenchSessionClaims;
 use std::sync::Arc;
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpStream;
 use tokio_tungstenite::tungstenite::client::IntoClientRequest;
@@ -31,6 +32,9 @@ const COOKIE: &str = "kl_term";
 /// ttyd buffers a whole HTTP reply before answering; its own assets are a few KiB, so this is
 /// generous headroom, not a tuning knob.
 const MAX_HTTP_REPLY: usize = 1 << 20;
+/// ttyd's own replies are tiny and local; this bounds a peer that ignores `Connection: close`
+/// rather than tuning for a slow one.
+const UPSTREAM_READ_TIMEOUT: Duration = Duration::from_secs(10);
 
 #[derive(serde::Deserialize)]
 struct TermQuery {
@@ -64,12 +68,26 @@ fn cookie_token(headers: &HeaderMap) -> Option<String> {
     })
 }
 
-/// `Path=/term/{bench}/` so a cookie minted for one bench is never sent on a request to another's
-/// path; `HttpOnly`/`Secure`/`SameSite=Strict` because this is a bearer credential, not a UI
-/// preference. Set only on the query-token path — a request already riding the cookie has nothing
-/// to re-set.
-fn set_cookie(bench: &str, token: &str) -> (axum::http::HeaderName, String) {
-    (axum::http::header::SET_COOKIE, format!("{COOKIE}={token}; Path=/term/{bench}/; HttpOnly; Secure; SameSite=Strict"))
+/// A `bench` or `rest` path segment that could smuggle something into the raw HTTP/1.1 request
+/// line or headers this module hand-writes to ttyd (`proxy_http` below) — axum percent-decodes
+/// `{*rest}` before we see it, so `%0D%0A` already landed as a real CRLF by the time it gets here.
+fn unsafe_path_segment(s: &str) -> bool {
+    s.chars().any(|c| c.is_control() || c.is_whitespace() || c == '%') || s.split('/').any(|seg| seg == "..")
+}
+
+/// The console (`dev.kloudlite.io`) and the terminal (`ws-{region}.khost.dev`) are different
+/// sites, so the iframe is a third-party context: `SameSite=Strict` is never sent there, and
+/// `SameSite=None` alone would still be third-party-cookie-blocked. CHIPS (`Partitioned`)
+/// partitions the cookie jar by the embedding page's top-level site, which is what makes a
+/// same-origin-with-the-iframe, cross-site-with-the-console cookie work at all. `Max-Age` is
+/// capped at the token's own `exp` so the cookie never outlives the credential it carries.
+fn set_cookie(bench: &str, token: &str, exp: u64) -> (axum::http::HeaderName, String) {
+    let now = SystemTime::now().duration_since(UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0);
+    let max_age = exp.saturating_sub(now);
+    (
+        axum::http::header::SET_COOKIE,
+        format!("{COOKIE}={token}; Path=/term/{bench}/; Max-Age={max_age}; HttpOnly; Secure; SameSite=None; Partitioned"),
+    )
 }
 
 async fn http_root(state: State<Arc<Gateway>>, path: Path<String>, headers: HeaderMap, query: Query<TermQuery>) -> Response {
@@ -85,6 +103,9 @@ async fn http_proxy(state: State<Arc<Gateway>>, path: Path<(String, String)>, he
 /// GET-only reverse proxy over a plain TCP HTTP/1.1 request: ttyd serves `/`, `/token` and a
 /// handful of static assets, nothing that needs a body or a second verb.
 async fn proxy_http(State(gw): State<Arc<Gateway>>, bench: String, rest: String, headers: HeaderMap, Query(q): Query<TermQuery>) -> Response {
+    if unsafe_path_segment(&bench) || unsafe_path_segment(&rest) {
+        return StatusCode::BAD_REQUEST.into_response();
+    }
     let claims = match authorize(&gw, &bench, &headers, q.token.as_deref()) {
         Ok(c) => c,
         Err(s) => return s.into_response(),
@@ -110,7 +131,10 @@ async fn proxy_http(State(gw): State<Arc<Gateway>>, bench: String, rest: String,
     let mut raw = Vec::new();
     // `Connection: close` above is what makes reading to EOF the end of the reply rather than a
     // hang — no chunked-encoding or Content-Length parsing needed for ttyd's small, static replies.
-    if tcp.take(MAX_HTTP_REPLY as u64).read_to_end(&mut raw).await.is_err() {
+    // The timeout catches a peer that ignores `Connection: close`; the length check catches a
+    // reply that hit the cap and was silently truncated by `take`.
+    let read = tokio::time::timeout(UPSTREAM_READ_TIMEOUT, tcp.take(MAX_HTTP_REPLY as u64).read_to_end(&mut raw)).await;
+    if !matches!(read, Ok(Ok(_))) || raw.len() >= MAX_HTTP_REPLY {
         return StatusCode::BAD_GATEWAY.into_response();
     }
     let Some((head, body)) = split_once_crlf2(&raw) else {
@@ -131,9 +155,8 @@ async fn proxy_http(State(gw): State<Arc<Gateway>>, bench: String, rest: String,
     // Only the first GET of the page carries `?token=`; a later request already riding the cookie
     // has one set and nothing to refresh. The cookie carries the SAME token (never a fresh mint),
     // so it expires exactly when the bench-session token does.
-    let _ = &claims;
     if let Some(t) = &q.token {
-        let (name, val) = set_cookie(&bench, t);
+        let (name, val) = set_cookie(&bench, t, claims.exp);
         resp = resp.header(name, val);
     }
     match resp.body(axum::body::Body::from(body.to_vec())) {
@@ -147,8 +170,11 @@ fn split_once_crlf2(raw: &[u8]) -> Option<(&[u8], &[u8])> {
 }
 
 async fn ws_proxy(State(gw): State<Arc<Gateway>>, Path(bench): Path<String>, headers: HeaderMap, Query(q): Query<TermQuery>, upgrade: WebSocketUpgrade) -> Response {
-    if authorize(&gw, &bench, &headers, q.token.as_deref()).is_err() {
-        return StatusCode::UNAUTHORIZED.into_response();
+    if unsafe_path_segment(&bench) {
+        return StatusCode::BAD_REQUEST.into_response();
+    }
+    if let Err(status) = authorize(&gw, &bench, &headers, q.token.as_deref()) {
+        return status.into_response();
     }
     let target = match resolve_bench(&gw.kube, &bench, gw.term_port).await {
         Ok(t) => t,
