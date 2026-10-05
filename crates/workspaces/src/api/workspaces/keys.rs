@@ -310,28 +310,36 @@ async fn project_bench_tools(s: &ApiState, c: &kube::Client, ns: &str, owner: &s
         if crate::api::bench::bench_paused(&w) {
             continue;
         }
-        let id = w.metadata.name.clone().unwrap_or_default();
-        let (token, claims) = match s.jwt.mint_bench_tool(owner, &w.spec.team, &id, BENCH_TOOL_BEAT_TTL_SECS) {
-            Ok(t) => t,
-            Err(e) => {
-                tracing::warn!(%owner, bench = %id, error = %e, "bench-tool-token.mint.failed");
-                continue;
-            }
-        };
-        let secret = crate::k8s::bench_tool_secret(ns, &token, claims.exp);
-        let api: Api<k8s_openapi::api::core::v1::Secret> = Api::namespaced(c.clone(), ns);
-        if let Err(e) = api
-            .patch(
-                crate::k8s::BENCH_TOOL_SECRET,
-                &kube::api::PatchParams::apply("kloudlite-api").force(),
-                &kube::api::Patch::Apply(&secret),
-            )
-            .await
-        {
-            // The kind, never the text: an apply error can quote the request body, which holds the
-            // token (same exposure the deleted on-demand route guarded against).
-            tracing::warn!(%owner, bench = %id, error = crate::api::bench::kube_kind(&e), "bench-tool-secret.install.failed");
+        mint_bench_tool_secret(s, c, ns, owner, &w).await;
+    }
+}
+
+/// Mint and write the `bench-tool` Secret for one bench Workspace. Shared by the beat
+/// (`project_bench_tools`, every un-paused bench on a resync) and `bench.rs`'s create/start
+/// handlers, called right after the spec write that makes the bench Running, so a bench is never
+/// without a token for a whole `KEYS_RESYNC_SECS` beat.
+pub(crate) async fn mint_bench_tool_secret(s: &ApiState, c: &kube::Client, ns: &str, owner: &str, w: &crd::Workspace) {
+    let id = w.metadata.name.clone().unwrap_or_default();
+    let (token, claims) = match s.jwt.mint_bench_tool(owner, &w.spec.team, &id, BENCH_TOOL_BEAT_TTL_SECS) {
+        Ok(t) => t,
+        Err(e) => {
+            tracing::warn!(%owner, bench = %id, error = %e, "bench-tool-token.mint.failed");
+            return;
         }
+    };
+    let secret = crate::k8s::bench_tool_secret(ns, &token, claims.exp);
+    let api: Api<k8s_openapi::api::core::v1::Secret> = Api::namespaced(c.clone(), ns);
+    if let Err(e) = api
+        .patch(
+            crate::k8s::BENCH_TOOL_SECRET,
+            &kube::api::PatchParams::apply("kloudlite-api").force(),
+            &kube::api::Patch::Apply(&secret),
+        )
+        .await
+    {
+        // The kind, never the text: an apply error can quote the request body, which holds the
+        // token (same exposure the deleted on-demand route guarded against).
+        tracing::warn!(%owner, bench = %id, error = crate::api::bench::kube_kind(&e), "bench-tool-secret.install.failed");
     }
 }
 
@@ -360,11 +368,18 @@ mod tests {
     use super::{ApiState, Refusal, install_refusal, keep_or_mint, project_bench_tools, retry_backoff};
 
     fn bench_ws(owner: &str, team: &str, access: &str) -> serde_json::Value {
+        bench_ws_full(owner, team, access, "running", owner)
+    }
+
+    /// `bench_ws` plus the two fields the Stopped filter and the owner re-check look at: a
+    /// `desiredState` override, and a label owner that can differ from `spec.owner` (the label is
+    /// a view, CLAUDE.md — the beat must not trust it alone).
+    fn bench_ws_full(owner: &str, team: &str, access: &str, desired_state: &str, label_owner: &str) -> serde_json::Value {
         serde_json::json!({
             "apiVersion": "kloudlite.io/v1alpha1", "kind": "Workspace",
-            "metadata": {"name": crate::crd::bench_id(owner, team), "labels": {"kloudlite.io/owner": owner}},
+            "metadata": {"name": crate::crd::bench_id(owner, team), "labels": {"kloudlite.io/owner": label_owner}},
             "spec": {"owner": owner, "team": team, "name": "bench", "region": "r1", "image": "i",
-                     "desiredState": "running", "access": access, "bench": {"model": "m"},
+                     "desiredState": desired_state, "access": access, "bench": {"model": "m"},
                      "storage": {"quotaGb": 10},
                      "resources": {"cpuRequest": "1", "cpuLimit": "1", "memoryRequest": "1Gi", "memoryLimit": "1Gi"}},
         })
@@ -438,7 +453,30 @@ mod tests {
         let jwt = std::sync::Arc::new(kloudlite_core::jwt::Jwt::new("test-secret-that-is-at-least-32-bytes-long").unwrap());
         let s = ApiState::new(jwt);
         let (_, logs) = logged(project_bench_tools(&s, &client, &ns, "alice")).await;
+        // The warn line must actually have fired — a route that stopped matching would also leave
+        // the canary absent, and pass this test without testing anything.
+        assert!(logs.contains("bench-tool-secret.install.failed"), "logs: {logs}");
         assert!(!logs.contains("a-secret-token-value-that-must-never-appear-in-logs"), "logs: {logs}");
+    }
+
+    /// Important 3 + the `spec.owner` re-check (`keys.rs:306-308`): a Stopped bench keeps the
+    /// Secret stop already deleted, and a label that claims this owner while `spec.owner` says
+    /// someone else is not trusted either way. The LIST must still run.
+    #[tokio::test]
+    async fn a_stopped_or_foreign_owner_bench_gets_no_bench_tool_secret() {
+        let ns = crate::crd::ws_namespace("alice", "acme");
+        let stopped = bench_ws_full("alice", "acme", "full", "stopped", "alice");
+        let foreign_owner = bench_ws_full("mallory", "acme", "full", "running", "alice");
+        let list = serde_json::json!({
+            "apiVersion": "kloudlite.io/v1alpha1", "kind": "WorkspaceList", "metadata": {},
+            "items": [stopped, foreign_owner],
+        });
+        let (client, rec) = crate::kube_test::mock_client(vec![crate::kube_test::get("/apis/kloudlite.io/v1alpha1/workspaces", list)]);
+        let jwt = std::sync::Arc::new(kloudlite_core::jwt::Jwt::new("test-secret-that-is-at-least-32-bytes-long").unwrap());
+        let s = ApiState::new(jwt);
+        project_bench_tools(&s, &client, &ns, "alice").await;
+        assert!(rec.calls().iter().any(|c| c.contains("/apis/kloudlite.io/v1alpha1/workspaces")), "the list itself must have run");
+        assert!(rec.sent("PATCH", &format!("/api/v1/namespaces/{ns}/secrets/bench-tool")).is_empty());
     }
 
     /// Every log line written while `f` runs, as text — ported from the deleted on-demand route's

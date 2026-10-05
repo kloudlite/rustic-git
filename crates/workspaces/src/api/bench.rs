@@ -28,7 +28,7 @@
 //! workspace container's, exactly as on any other workspace.
 
 use super::scope::may_allocate_for;
-use super::workspaces::{allocate_and_create, clamp_quota, gateway_url, set_desired};
+use super::workspaces::{allocate_and_create, clamp_quota, gateway_url, mint_bench_tool_secret, set_desired};
 use super::{caller, check_region, guard_alloc, kube, kube_err, ApiState, Caller};
 use crate::crd::{self, Access, DesiredState, Phase};
 use axum::{
@@ -287,6 +287,9 @@ pub(crate) async fn create_bench(
             .patch(&name, &PatchParams::default(), &Patch::Merge(&wake_patch(true, &now())))
             .await
             .map_err(kube_err)?;
+        // Re-starting a bench the beat's Stopped filter just lost its Secret over: mint it now
+        // rather than leaving the pod without one for up to `KEYS_RESYNC_SECS`.
+        mint_bench_tool_secret(&s, kube(&s)?, &crd::ws_namespace(&w.spec.owner, &w.spec.team), &w.spec.owner, &w).await;
         return Ok(Json(bench_doc(&w, &region)).into_response());
     }
     let id = crd::bench_id(&caller.name, &team);
@@ -330,6 +333,10 @@ pub(crate) async fn create_bench(
         },
     )
     .await?;
+    // `allocate_and_create` spawns the key install once the bench is `Placed` (up to 5s), which
+    // reaches this Secret too through `write_user_key` — but the ruling wants the bench's own
+    // token minted right here, not just inherited off that unrelated wait.
+    mint_bench_tool_secret(&s, kube(&s)?, &crd::ws_namespace(&w.spec.owner, &w.spec.team), &w.spec.owner, &w).await;
     Ok((StatusCode::CREATED, Json(bench_doc(&w, &region))).into_response())
 }
 
@@ -350,9 +357,13 @@ pub(crate) async fn start_bench(
     if !crd::wants_pod(&b) {
         guard_alloc(&s, &caller.name, false, &wake_cost(&b.spec.resources)).await?;
     }
-    api.patch(&b.metadata.name.clone().unwrap_or_default(), &PatchParams::default(), &Patch::Merge(&wake_patch(true, &now())))
+    let b = api
+        .patch(&b.metadata.name.clone().unwrap_or_default(), &PatchParams::default(), &Patch::Merge(&wake_patch(true, &now())))
         .await
         .map_err(kube_err)?;
+    // Same gap as the re-POST branch of `create_bench`: stop deleted the Secret, so start mints a
+    // fresh one immediately rather than waiting for the beat.
+    mint_bench_tool_secret(&s, kube(&s)?, &crd::ws_namespace(&b.spec.owner, &b.spec.team), &b.spec.owner, &b).await;
     Ok(StatusCode::ACCEPTED.into_response())
 }
 

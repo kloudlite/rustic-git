@@ -228,6 +228,34 @@ async fn creating_a_bench_twice_is_one_object_and_starts_it() {
     assert_eq!(quota_reads, 2, "the re-POST start is an allocation too: {:?}", t.rec.calls());
 }
 
+/// New Breakage 1 (re-review): stop deletes the `bench-tool` Secret and the beat's Stopped filter
+/// no longer re-creates it, so `/v1/bench/start` must mint a fresh one itself rather than leaving
+/// the pod without a tool credential until the next `KEYS_RESYNC_SECS` beat.
+#[tokio::test]
+async fn starting_a_bench_mints_its_tool_token_immediately() {
+    let ns = kloudlite_workspaces::crd::ws_namespace("alice", "acme");
+    let path = bench_path("alice", "acme");
+    let t = setup(
+        with(
+            vec![
+                get(path.clone(), bench_obj("alice", "acme", "stopped", None, "full")),
+                patch(path.clone(), bench_obj("alice", "acme", "running", None, "full")),
+                patch(format!("/api/v1/namespaces/{ns}/secrets/bench-tool"), json!({"apiVersion": "v1", "kind": "Secret", "metadata": {"name": "bench-tool"}})),
+                region("r1"),
+            ],
+            alloc("alice", vec![]),
+        ),
+        Stub::new(&[("alice", "acme")], &[("acme", "r1")]),
+    );
+    let tok = t.tok("alice");
+    let (st, _) = t.call("POST", "/v1/bench/start?team=acme", &tok, None).await;
+    assert_eq!(st, 202);
+    let sent = t.rec.sent("PATCH", &format!("/api/v1/namespaces/{ns}/secrets/bench-tool"));
+    assert_eq!(sent.len(), 1, "{:?}", t.rec.calls());
+    let token = sent[0]["stringData"]["token"].as_str().unwrap();
+    t.jwt.verify_bench_tool(token).unwrap();
+}
+
 #[tokio::test]
 async fn a_non_member_without_a_bench_cannot_see_create_or_tunnel_to_a_teams_bench() {
     let t = setup(
