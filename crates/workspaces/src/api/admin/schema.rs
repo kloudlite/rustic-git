@@ -197,7 +197,7 @@ fn cluster_default(name: &str) -> serde_json::Value {
         "peerServeTimeoutSecs" => defaults::peer_serve_timeout_secs().into(),
         "peerReceiveSlack" => defaults::peer_receive_slack().into(),
         "nixTimeoutSecs" => defaults::nix_timeout_secs().into(),
-        "nixpkgs" => serde_json::Value::String(String::new()),
+        "nixpkgs" | "benchProviderUrl" => serde_json::Value::String(String::new()),
         "basePackages" => defaults::base_packages().into(),
         "defaultReplicas" => defaults::default_replicas().into(),
         "quotaGbCeiling" => defaults::quota_gb_ceiling().into(),

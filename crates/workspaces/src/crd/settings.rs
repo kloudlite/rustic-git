@@ -200,7 +200,7 @@ pub const CLUSTER_SETTING_META: &[(&str, kloudlite_core::settings::Mark, &[&str]
     ("stallDumps", kloudlite_core::settings::Mark::Live, &[]),
     ("memberRemovalDeletes", kloudlite_core::settings::Mark::Live, &[]),
     ("benchIdleSecs", kloudlite_core::settings::Mark::Live, &[]),
-    ("benchProviderUrl", kloudlite_core::settings::Mark::Boot, &[]),
+    ("benchProviderUrl", kloudlite_core::settings::Mark::Boot, &["kloudlite-agent"]),
     ("replicaSecs", kloudlite_core::settings::Mark::Live, &[]),
     ("decommissionSecs", kloudlite_core::settings::Mark::Live, &[]),
     ("nodeDeadSecs", kloudlite_core::settings::Mark::Live, &[]),

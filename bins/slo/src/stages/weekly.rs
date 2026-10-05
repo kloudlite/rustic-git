@@ -236,7 +236,7 @@ const AGENT: &str = "kloudlite-agent";
 /// The cluster-scoped Boot fields, in the order `CLUSTER_SETTING_META` lists them. Repeated
 /// rather than imported: what this step needs is a field the SAVE will carry, which is a fact
 /// about the wire shape, and the test below is what holds the two lists together.
-const BOOT_FIELDS: [&str; 4] = ["defaultImage", "interceptProxyImage", "gitInitImage", "runtimeClass"];
+const BOOT_FIELDS: [&str; 5] = ["benchProviderUrl", "defaultImage", "interceptProxyImage", "gitInitImage", "runtimeClass"];
 
 /// The Boot field this step will try to save: the first one the settings actually STORE, and
 /// otherwise simply the first the meta names. A stored value is preferred only because the

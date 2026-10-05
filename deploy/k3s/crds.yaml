@@ -2458,6 +2458,11 @@
                         "nullable": true,
                         "type": "integer"
                       },
+                      "benchProviderUrl": {
+                        "description": "The base URL bench agents send model requests to; the token is the user's\n`provider-token`. **Boot** — stamped into the pod's `ANTHROPIC_BASE_URL` at create, so a\nchange reaches the next pod only. `None`/empty = unset, the agent CLI talks to Anthropic\ndirectly.",
+                        "nullable": true,
+                        "type": "string"
+                      },
                       "decommissionSecs": {
                         "description": "Decommission-beat interval. 5..=600 seconds.",
                         "format": "uint64",
