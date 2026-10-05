@@ -101,17 +101,14 @@ pub const IDS: &[&str] = &[
     "kl.commands",
     "admin.reads",
     "bench.idle.wake",
-    "bench.session.roundtrip",
-    "bench.two_clients",
+    "bench.claude.tool_roundtrip",
+    "bench.builtin.refused",
     "shell.up",
     "bench.tool.token",
     "bench.tool.audience",
-    "bench.tool.revoked",
     "bench.push.p95",
     "bench.pkg.add",
     "bench.workspace.tool_roundtrip",
-    "bench.shell.workspace",
-    "bench.delegate",
     "feed.experience",
     "home.travels",
 ];
@@ -209,9 +206,14 @@ pub async fn run(c: &mut Ctx) {
             // One call: the wake runs first, with every client gone, then the four session ids.
             "team.member.paused" => super::experience_teams::member_paused(c).await,
             "bench.idle.wake" => super::bench::hourly(c).await,
-            // One call: the pod's token, its audience, then its revocation and the stop.
+            // No SSH identity to drive these through (ruling 4, task 9 brief): the laptop's
+            // tunnel carries raw bytes to sshd now, and the probe holds no key the owner's
+            // bench trusts. Skipped, not invented.
+            "bench.claude.tool_roundtrip" => c.skip(id, "no probe ssh identity"),
+            "bench.builtin.refused" => c.skip(id, "no probe ssh identity"),
+            // One call: the pod's token, then its audience, then the stop.
             "bench.tool.token" => super::bench_tool::run(c).await,
-            "bench.tool.audience" | "bench.tool.revoked" => {}
+            "bench.tool.audience" => {}
             // Last in group 3: the package edit recreates the bench pod, so nothing in this group
             // may run after it. One call reports both ids.
             "bench.push.p95" => super::bench_ws::run(c).await,
@@ -222,14 +224,10 @@ pub async fn run(c: &mut Ctx) {
                 crate::suite::wait_for_group(c, 3, std::time::Duration::from_secs(900)).await;
                 super::bench::tool_only(c).await
             }
-            // Filed by the calls above; the workspace shell beside the tool round trip, in the
-            // group that owns the workspace.
-            "bench.session.roundtrip" | "bench.two_clients" | "bench.workspace.tool_roundtrip" => {}
-            "bench.shell.workspace" => {}
+            // Filed by the call above, in the group that owns the workspace.
+            "bench.workspace.tool_roundtrip" => {}
             // Filed by the bench journey's own call, in group 3.
             "shell.up" => {}
-            // Recorded by `bench::hourly` itself, after the sleep/wake journey.
-            "bench.delegate" => {}
             _ => c.skip(id, "not implemented yet"),
         }
     }

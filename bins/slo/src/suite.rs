@@ -625,8 +625,8 @@ mod tests {
             ("env.intercept", 1, &stages::env_intercept::INTERCEPT_IDS),
             ("builder.hidden", 0, &[]),
             ("request.approve", 0, &["superadmin.grant"]),
-            ("bench.idle.wake", 3, &["bench.session.roundtrip", "bench.two_clients"]),
-            ("bench.tool.token", 3, &["bench.tool.audience", "bench.tool.revoked"]),
+            ("bench.idle.wake", 3, &[]),
+            ("bench.tool.token", 3, &["bench.tool.audience"]),
         ];
         for (gate, g, block) in gates {
             assert!(find(gate).is_some(), "{gate} is not catalogued");

@@ -70,7 +70,6 @@ fn bench_url(c: &Ctx, path: &str, team: &str) -> String {
 struct Prep {
     tool: String,
     gateway: String,
-    cli_id: String,
 }
 
 async fn in_bench(c: &Ctx, team: &str, js: &str, arg: &str) -> Result<String> {
@@ -134,12 +133,10 @@ async fn prepare(c: &Ctx, team: &str) -> Result<Prep> {
     in_bench(c, team, &canary_js(r#"require("fs").writeFileSync(p,process.argv[1])"#), CANARY)
         .await
         .context("could not write the canary")?;
-    let (cli, cli_id) = super::super::experience_gaps::cli_login(c, &c.probe_jwt, &format!("{team}-tool")).await?;
+    // Minted straight from the probe's `kloudlite-jwt` (ruling 3, task 9 brief): the route that
+    // used to do this on demand is gone.
     let prep = async {
-        let (status, text) = raw(c, reqwest::Method::POST, &bench_url(c, "/tool-token", team), &cli, None, &[]).await?;
-        if status != reqwest::StatusCode::NO_CONTENT {
-            return Err(anyhow!("tool-token mint answered {status}: {}", clip(&text)));
-        }
+        c.mint_bench_tool(&c.probe_user, team).await.context("tool-token mint")?;
         let start = Instant::now();
         let tool = loop {
             let t = in_bench(c, team, TOKEN_JS, "").await.unwrap_or_default();
@@ -156,17 +153,8 @@ async fn prepare(c: &Ctx, team: &str) -> Result<Prep> {
         anyhow::Ok((tool, gateway.to_string()))
     }
     .await;
-    match prep {
-        Ok((tool, gateway)) => Ok(Prep { tool, gateway, cli_id }),
-        Err(e) => {
-            revoke(c, &cli_id).await;
-            Err(e)
-        }
-    }
-}
-
-async fn revoke(c: &Ctx, id: &str) {
-    let _ = call(c, reqwest::Method::DELETE, &api(c, &format!("/v1/cli/tokens/{id}")), &c.probe_jwt, None).await;
+    let (tool, gateway) = prep?;
+    Ok(Prep { tool, gateway })
 }
 
 /// One pass over the five surfaces; `Err` names the first that still lets the member in.
@@ -235,7 +223,7 @@ pub(crate) async fn member_paused(c: &mut Ctx) {
     let (t, gw, tool) = (team.clone(), prep.gateway.clone(), prep.tool.clone());
     c.step(PAUSED_ID, PAUSED_CEILING, move |c| {
         async move {
-            let p = Prep { tool, gateway: gw, cli_id: String::new() };
+            let p = Prep { tool, gateway: gw };
             let member = format!("/v1/teams/{t}/members/{}", c.probe_email);
             let (pause, unpause) = (api(c, &format!("{member}/pause")), api(c, &format!("{member}/unpause")));
             let c: &Ctx = c;
@@ -268,7 +256,6 @@ pub(crate) async fn member_paused(c: &mut Ctx) {
         .boxed()
     })
     .await;
-    revoke(c, &prep.cli_id).await;
     teardown(c, &team).await;
 }
 

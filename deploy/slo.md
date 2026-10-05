@@ -91,7 +91,7 @@ first destructive stage.
 | `env.quota.refused` | Workspaces | A restore, a clone and a push are each refused with 409 when the owner's limit is below what the run occupies or holds | 99.9 % | fast | 5 · Workspace |
 | `bench.create` | Benches | `POST /v1/bench` answers, and a second POST names the same id | 99.9 % | fast | 5 · Workspace |
 | `bench.start.p95` | Benches | A started bench reaches phase `ready` | 95 % ≤ 90000 ms | fast | 5 · Workspace |
-| `bench.tunnel` | Benches | A bench token opens the tunnel and `/healthz` answers through it | 99.9 % ≤ 20000 ms | fast | 5 · Workspace |
+| `bench.tunnel` | Benches | A bench token opens the tunnel, port 7789's SSH banner reads back, and the gateway's term route answers 200 | 99.9 % ≤ 20000 ms | fast | 5 · Workspace |
 | `ws.build.p95` | Workspaces | `kl container build` of a two-line Dockerfile in the probe workspace, from a non-login exec, is pushed to the probe owner's own image and its manifest is readable through `/v2`; the builder was Stopped before the step | 95 % ≤ 180000 ms | hourly | 5 · Workspace |
 | `ws.build.promote` | Workspaces | `kl container push` copies the probe's just-built image to a second tag and `docker buildx imagetools inspect` reads that tag's digest back | 99.9 % ≤ 30000 ms | hourly | 5 · Workspace |
 | `ws.kl.pkg.add` | Workspaces | `kl pkg add cowsay` inside the probe workspace exits 0 and `GET /v1/workspaces/{id}` then declares the package | 99.9 % ≤ 20000 ms | hourly | 5 · Workspace |
@@ -239,18 +239,15 @@ first destructive stage.
 | `id.session.reads` | Identity | The passkey `used` mark stays peer-only, and the legacy quota-request create and the api's own settings read answer | 99.9 % ≤ 10000 ms | hourly | 14 · Experience |
 | `kl.commands` | Identity | `kl-connect ws`, `kl-connect ws list --team` and `kl-connect logout` answer | 99.9 % ≤ 30000 ms | hourly | 14 · Experience |
 | `admin.reads` | Admin | `/admin/nodes`, `/admin/settings/schema` and a cluster status write answer, and an unknown history series is a 404 | 99.9 % ≤ 10000 ms | hourly | 14 · Experience |
-| `bench.idle.wake` | Benches | With every client gone past `benchIdleSecs` the bench has no pod, a new connection starts it, and the session list and a transcript read back unchanged | 99.9 % ≤ 480000 ms | hourly | 14 · Experience |
-| `bench.session.roundtrip` | Benches | A session is created, a no-tools prompt answered, and read back from `/sessions/{id}/messages` | 99.9 % ≤ 60000 ms | hourly | 14 · Experience |
-| `bench.two_clients` | Benches | Two WebSockets on one session see the same events in the same order | 99.9 % | hourly | 14 · Experience |
+| `bench.idle.wake` | Benches | With every client gone past `benchIdleSecs` the bench has no pod, a new connection starts it, and `kl-sessions`' `/state` session list and a transcript read back unchanged | 99.9 % ≤ 480000 ms | hourly | 14 · Experience |
+| `bench.claude.tool_roundtrip` | Benches | `POST /send` on a probe workspace asks the agent to read the workspace's README, and `/state` shows a `read` call answered from the workspace | 99.9 % ≤ 120000 ms | hourly | 14 · Experience |
+| `bench.builtin.refused` | Benches | A prompt forcing the built-in Bash tool is denied, never run | 99.9 % | hourly | 14 · Experience |
 | `bench.tool.token` | Benches | The probe's login mints a tool token and a `/v1/regions` call inside the bench pod answers JSON | 99.9 % ≤ 120000 ms | hourly | 14 · Experience |
 | `bench.tool.audience` | Benches | The pod's token is refused on `/v1/bench/session`, `/v1/cli/tokens` and `/v1/keys` | 99.9 % | hourly | 14 · Experience |
-| `bench.tool.revoked` | Benches | After a stop the next call with the pod's token is 401 at once; after the parent login is revoked a pod call is 401 within 60 s | 99.9 % ≤ 90000 ms | hourly | 14 · Experience |
 | `shell.up` | Benches | A shell answers on both pod kinds and opens in the home | 99.9 % ≤ 15000 ms | hourly | 14 · Experience |
-| `bench.shell.workspace` | Benches | A shell opened through the bench into the run's workspace starts in the workspace directory, and a named session reattaches to its own scrollback | 99.9 % ≤ 20000 ms | hourly | 14 · Experience |
 | `bench.workspace.tool_roundtrip` | Benches | A workspace session on the bench runs `exec echo` in a workspace through its tool server, and the turn lands under `/bench/workspaces/{ws}/` | 99.9 % ≤ 180000 ms | hourly | 14 · Experience |
 | `bench.push.p95` | Benches | `POST /v1/workspaces/{bench}/push` completes and the volume's history lists the snapshot as ready | 95 % ≤ 60000 ms | hourly | 14 · Experience |
 | `bench.pkg.add` | Benches | a package added through the API lands in the bench's `spec.packages` | 99.9 % ≤ 20000 ms | hourly | 14 · Experience |
-| `bench.delegate` | Benches | top → main → sub: the push lands on main's branch, the clone is gone, the child is closed | 99.9 % ≤ 600000 ms | hourly | 14 · Experience |
 | `git.push.large` | Git hosting | Push of a large commit succeeds — 90 MiB over HTTP, under Cloudflare's 100 MB upload cap, and 100 MiB over SSH, which has no proxy in front of it | 99.9 % | weekly | 12 · Weekly |
 | `reg.push.large` | Container registry | Pushing a large image layer succeeds | 99.9 % | weekly | 12 · Weekly |
 | `ws.cold.profile` | Workspaces | A cold package profile builds successfully | 99.9 % | weekly | 12 · Weekly |
