@@ -31,18 +31,11 @@ pub async fn bench(team: Option<&str>, port: u16, start: bool, region: Option<&s
     let known_hosts = crate::config::dir().join("bench_known_hosts");
     let mut cmd = std::process::Command::new("ssh");
     cmd.args(ssh_argv(bound_port, &known_hosts));
-    // exec, not spawn: ssh owns the terminal (job control, window resizes, the exit status), same
-    // rule as `ws.rs`'s `ssh_with`.
-    #[cfg(unix)]
-    {
-        use std::os::unix::process::CommandExt;
-        Err(format!("running ssh: {}", cmd.exec()))
-    }
-    #[cfg(not(unix))]
-    {
-        let st = cmd.status().map_err(|e| e.to_string())?;
-        std::process::exit(st.code().unwrap_or(1));
-    }
+    // spawn and wait, not exec (unlike `ws.rs`'s `ssh_with`): ssh dials the listener this process
+    // serves, so exec would kill the tunnel before ssh's first byte. ssh still owns the terminal:
+    // it inherits stdio, and with `-t` the tty is raw, so ^C reaches the remote, not us.
+    let st = tokio::process::Command::from(cmd).status().await.map_err(|e| format!("running ssh: {e}"))?;
+    std::process::exit(st.code().unwrap_or(1));
 }
 
 /// The ssh argv for the bench: `-t` because the remote's `ForceCommand` is a `tmux` session, not
