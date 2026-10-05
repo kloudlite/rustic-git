@@ -182,29 +182,3 @@ test("an unreachable identity endpoint is not a revoked login", async () => {
   // Nothing listening: unreachable must never sign anybody out.
   assert.equal(await stillValid("http://127.0.0.1:1", "tok"), true);
 });
-
-/**
- * A BENCH-route 401 never signs anybody out. `mintSession` runs on EVERY tunnel connection, not
- * once — so with `/events` reconnecting every 79–136 s the desktop minted a session that often, and
- * one 401 among them ended the login. That is the loop the api saw as a new `parent8` every ~40 s
- * while logging zero 401s of its own.
- */
-test("a bench route's 401 is a refusal to retry, not an expiry", async () => {
-  const s = await stub({ "POST /v1/bench/session?team=acme": { status: 401, body: { error: "no" } } });
-  try {
-    const { mintSession } = await import("../../src/connect/bench.ts");
-    const e = await mintSession(s.api, "tok", "acme").then(() => undefined, (x: Error) => x);
-    assert.ok(e, "the mint fails");
-    // It still reports as Expired from the api's own call helper — what changed is what main DOES
-    // with it: `benchRefused` re-mints and only checks the login, rather than ending it outright.
-    assert.equal((e as Error & { route?: string }).route, "/v1/bench/session?team=acme", "the route is named for the log");
-    const main = fs.readFileSync(path.resolve("src/main.ts"), "utf8");
-    assert.match(main, /keepToolToken\(.*benchRefused/, "the tool-token beat refuses, it does not expire");
-    assert.match(main, /benchRefused\(c, \(e as \{ route\?: string \}\)\.route/, "and so does the tunnel");
-    assert.ok(!/onExpired.*auth\.expired|\(\) => auth\.expired\(\)/.test(main), "no bench path signs out directly any more");
-    // Only a rejected session JWT ends the login, and only after the identity endpoint says so.
-    assert.match(main, /e\.name === "Expired" && !\(await stillValid\(c\)\)/);
-  } finally {
-    s.close();
-  }
-});

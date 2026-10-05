@@ -4,9 +4,9 @@
 //! A bench is a Workspace with `spec.bench` set (`crd::is_bench`) whose pod carries a `bench`
 //! container beside the `workspace` one. Its lifecycle channel therefore moved from the POD
 //! (`Succeeded`, exit 0) to `status.containerStatuses[name=bench]`: the pod's `restartPolicy` is
-//! the workspace's `Always`, so `harness-bench` no longer exits when it goes idle — it keeps
-//! serving and reports through its readiness probe, and only a HELD FOLDER still exits (75), which
-//! the kubelet restarts with backoff exactly as it should.
+//! the workspace's `Always`, so the `sessions` service no longer exits when it goes idle — it
+//! keeps serving and reports through its readiness probe, and only a HELD FOLDER still exits (75),
+//! which the kubelet restarts with backoff exactly as it should.
 //!
 //! The idle clock is the pod's own `Ready` condition transition, never this node's clock, so a
 //! replayed pass writes the identical `status.idleSince`.
@@ -21,7 +21,7 @@ use kube::runtime::controller::Action;
 use kube::{Api, ResourceExt};
 use std::sync::Arc;
 
-/// `harness-bench`'s exit when another pod holds the folder lock; its message names the holder.
+/// The `sessions` service's exit when another pod holds the folder lock; its message names the holder.
 const EXIT_LOCKED: i32 = 75;
 
 /// How long readiness must have been false before idleness is believed. The probe's period is 5 s
@@ -66,8 +66,8 @@ fn crash_looping(c: &ContainerStatus) -> Option<String> {
     if t.exit_code == 0 {
         return None;
     }
-    // The message, else the code: `harness-bench`'s EACCES arrives as a message, but a container
-    // killed by a signal has none and the number is all there is.
+    // The message, else the code: the sessions service's EACCES arrives as a message, but a
+    // container killed by a signal has none and the number is all there is.
     Some(match t.message.as_deref().map(str::trim).filter(|m| !m.is_empty()) {
         Some(m) => m.to_string(),
         None => format!("exit {}", t.exit_code),

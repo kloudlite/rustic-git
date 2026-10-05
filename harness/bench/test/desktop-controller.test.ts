@@ -1,7 +1,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { createAuth, type AuthState, type Deps } from "../../src/auth/controller.ts";
-import type { Team } from "../../src/connect/bench.ts";
+type Team = { slug: string; name: string; region: string; personal: boolean };
 
 const cred = { api: "https://k.test", token: "t", expiresAt: "2030", username: "karthik" };
 const expired = () => Object.assign(new Error("your login has expired"), { name: "Expired" });

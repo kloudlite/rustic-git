@@ -29,8 +29,9 @@ pub(crate) const PAUSED_ID: &str = "team.member.paused";
 ///
 /// Raised from 240 s with the number measured on the fleet (2026-09-18): a fresh team bench takes
 /// ~120 s from create to `Ready` and one took 480 s, of which the packages are 1–17 s — the rest
-/// is `harness-bench --ping` not serving yet, and the pod is not Ready until it does. The shell
-/// sidecar is no longer part of this (89dbef10); this is the sessions container's own start.
+/// is the `sessions` service's own `--ping` readiness check not serving yet, and the pod is not
+/// Ready until it does. The shell sidecar is no longer part of this (89dbef10); this is the
+/// sessions container's own start.
 const PAUSED_BODY: Duration = Duration::from_secs(360);
 pub(super) const PAUSED_CEILING: Duration = Duration::from_secs(PAUSED_BODY.as_secs() + UNDO_SLACK);
 /// Pause reconciles the member's bench at once (`on_member_state`); the rest is the api's
@@ -46,7 +47,7 @@ const CANARY: &str = "kloudlite-slo-pause-canary";
 
 /// The canary's path, computed INSIDE the bench container from the same two facts the container
 /// itself is built from: `HOME` (the live worktree IS the home since 2026-09-22) and
-/// `k8s::BENCH_SUBDIR`, which is what `harness-bench --dir` is given as `{HOME}/.bench`. It read
+/// `k8s::BENCH_SUBDIR`, which is `{HOME}/.bench` — where the chat transcripts and sessions live. It read
 /// `KL_WORKSPACE`, which is `~/workspace` since that ruling, and ENOENT'd (hourly 2026-09-23). It used
 /// to be the literal `/bench`, the retired Bench pod's own mount — nothing mounts that now, and
 /// the write failed `ENOENT` on every run (hourly, 2026-09-17). One expression for the write and

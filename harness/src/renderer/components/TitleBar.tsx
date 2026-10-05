@@ -4,7 +4,7 @@ import { Button } from "../ui/Button";
 import { Menu, MenuItem } from "../ui/Menu";
 import { cycleTheme, mode, THEME_ICON } from "../theme";
 import type { Machine } from "../model";
-import type { Team } from "../../connect/bench";
+type Team = { slug: string; name: string; region: string; personal: boolean };
 
 /**
  * The TEAM, which is what the window is scoped by: a developer has exactly one

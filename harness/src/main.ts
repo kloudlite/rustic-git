@@ -8,7 +8,6 @@ import { batchImport, isLaptopRow, safeJsonlName, toItem, type ImportRow } from 
 import { createStore } from "./auth/store";
 import { claim, isAuthorizeUrl, startLogin, type Credential } from "./auth/device";
 import { createAuth, type AuthState, type Deps } from "./auth/controller";
-import { ensureBench, keepToolToken, listTeams, mintSession, mintToolToken, revokeLogin } from "./connect/bench";
 import { openTunnel } from "./connect/tunnel";
 import { clearMyEnvironment, getEnvironment, listEnvironments, listRepos, listWorkspaces, myEnvironment, setMyEnvironment, volumeHistory } from "./connect/platform";
 import { checkPty, checkWatch, closeSocket, readTtydFrame } from "./pty-ipc";

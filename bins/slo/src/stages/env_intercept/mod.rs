@@ -115,7 +115,8 @@ const WS_CEILING: Duration = Duration::from_secs(300);
 /// 150 s was under what a cold bench costs, so this reported "creating, never ready within 90 s"
 /// on a bench that was starting normally. Measured on the fleet 2026-09-18: create to `Ready` was
 /// ~120 s on one team bench and 480 s on another, with the packages 1–17 s of it — the rest is
-/// `harness-bench --ping` before it first serves, which is what holds the pod un-Ready.
+/// the `sessions` service's own `--ping` readiness check before it first serves, which is what
+/// holds the pod un-Ready.
 const SPACE_BENCH_CEILING: Duration = Duration::from_secs(330);
 /// The bench's own dial, once it is awake and following the environment.
 const BENCH_DIAL_CEILING: Duration = Duration::from_secs(120);

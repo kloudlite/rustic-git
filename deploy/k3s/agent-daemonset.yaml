@@ -228,7 +228,7 @@ spec:
             # `alpine:3.20` are mapped to it too (`model::is_default_image`).
             - name: WS_DEFAULT_IMAGE
               value: ghcr.io/kloudlite/kloudlite-workspace:e285c7408c04f7824e693906c094b85ceb267f9b@sha256:9a9a4e4b7e26c15f5e596c4ba48bf71284e0fa181ed7baf9ce2fc5c67e8ce4bf
-            # The harness-bench container a bench workspace's pod carries beside the workspace
+            # The sessions container a bench workspace's pod carries beside the workspace
             # container (a bench IS a Workspace since 2026-09-16). Pinned by deploy/pin.sh.
             - name: KLOUDLITE_BENCH_IMAGE
               value: ghcr.io/kloudlite/kloudlite-bench:e285c7408c04f7824e693906c094b85ceb267f9b@sha256:b8e1c52fe10b40f915e4724866977dbd39d5c91dd977ec9d2784b13b1028aaef

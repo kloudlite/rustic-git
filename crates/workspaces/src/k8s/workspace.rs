@@ -151,7 +151,7 @@ pub(super) fn git_ssh_url(host: &str, port: &str) -> String {
 /// ponytail: `chown -R` walks the whole volume on every start; fine for source trees. `$H` is the
 /// volume's own mount point and the rc files are seeded only if absent, so a person's own edits
 /// survive a restart and a new workspace alike. The seed also sets
-/// `receive.denyCurrentBranch updateInstead`: a sys-1 sub-session's clone pod pushes straight
+/// `receive.denyCurrentBranch updateInstead`: a workspace clone's pod pushes straight
 /// onto this pod's checked-out branch over SSH (spec §4), which plain git refuses by default —
 /// safe here because main never holds uncommitted edits when a push lands.
 ///

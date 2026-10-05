@@ -2,8 +2,8 @@
 //! the team's region, the wake, and the bench's share of the person's quota.
 //!
 //! A bench is a WORKSPACE now (`spec.bench`), so every object here is one and every route is the
-//! facade over it — the statuses and bodies asserted are the ones the shipped desktop
-//! (`harness/src/connect/bench.ts`) and `kl-connect` branch on, pinned verbatim.
+//! facade over it — the statuses and bodies asserted are the ones `kl-connect` branches on,
+//! pinned verbatim.
 
 mod common;
 use common::{admin_token_as, token};
@@ -489,8 +489,7 @@ async fn a_session_wakes_an_idle_bench_waits_on_a_starting_one_and_refuses_a_sto
     assert!(t.rec.sent("PATCH", &path).is_empty());
 }
 
-/// The shipped desktop's `ensureBench` loop branches on these four answers and nothing else
-/// (`harness/src/connect/bench.ts`), and `kl-connect` reads the same. They are pinned verbatim
+/// `kl-connect` branches on these four answers and nothing else. They are pinned verbatim
 /// because the facade may be rewritten under them but never change what a released client sees.
 #[tokio::test]
 async fn the_desktops_four_answers_are_unchanged_by_the_facade() {

@@ -1,5 +1,5 @@
 import type { AuthState } from "../auth/controller.ts";
-import type { Team } from "../connect/bench.ts";
+type Team = { slug: string; name: string; region: string; personal: boolean };
 import type { ApiEnvironment, ApiRepo, ApiSnapshot, ApiWorkspace } from "../connect/platform.ts";
 import type { OperationEvent, OperationSnapshot } from "../../bench/src/operations/contracts.ts";
 

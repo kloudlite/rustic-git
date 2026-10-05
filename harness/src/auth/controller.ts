@@ -1,5 +1,5 @@
 import type { Credential } from "./device";
-import type { Team } from "../connect/bench";
+type Team = { slug: string; name: string; region: string; personal: boolean };
 
 /**
  * What the window shows, decided here and nowhere else. Every effect (keychain, network,

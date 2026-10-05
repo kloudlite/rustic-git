@@ -1,6 +1,6 @@
 import { contextBridge, ipcRenderer } from "electron";
 import type { AuthState } from "./auth/controller";
-import type { Team } from "./connect/bench";
+type Team = { slug: string; name: string; region: string; personal: boolean };
 import type { ApiEnvironment, ApiRepo, ApiSnapshot, ApiWorkspace } from "./connect/platform";
 
 type OperationSnapshot = import("../bench/src/operations/contracts").OperationSnapshot;

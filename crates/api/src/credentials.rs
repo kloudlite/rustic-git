@@ -306,8 +306,8 @@ pub fn authorized_keys_union(sets: &[&[Credential]]) -> String {
 
 /// `authorized_keys_union`'s output plus zero or more platform keys, deduped the same way.
 ///
-/// Pure so the sys-1 clone-push test can assert on it directly without a directory or a store:
-/// a sub-session's clone pod pushes over SSH using a platform key every workspace mounts (spec:
+/// Pure so the clone-push test can assert on it directly without a directory or a store:
+/// a workspace clone's pod pushes over SSH using a platform key every workspace mounts (spec:
 /// Facts), so main's `authorized_keys` has to admit it or the push never authenticates. A slice,
 /// not one `Option`: a team pod mounts the pushing MEMBER's key while sshd reads the TEAM's
 /// file, so the team file has to carry every member's platform key, not one.

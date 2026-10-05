@@ -11,7 +11,7 @@ import { TerminalPanel } from "./components/terminal/TerminalPanel";
 import { makeTab, nextIndex, scopeOfTab, type TermTab } from "./components/terminal/tabs";
 import { IMAGES, MACHINE, threadOf, type Repo, type Environment, type Snapshot, type Thread, type Workspace } from "./model";
 import { LOADING, ipcError, toEnvironment, toRepo, toSnapshot, toWorkspace } from "./platform";
-import type { Team } from "../connect/bench";
+type Team = { slug: string; name: string; region: string; personal: boolean };
 import { cycleMotion, motionChoice } from "./components/Motion";
 import { playDemo, wantsDemo } from "./demo";
 import { KEYS, LEADER, LEADER_FORGET_MS, inTerminal, keyHint, leaderIndex, mayAct, threadIndex, underLeader } from "./keys";

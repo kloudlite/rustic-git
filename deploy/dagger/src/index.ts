@@ -284,81 +284,50 @@ export class Kloudlite {
       .withEnvVariable("DO_NOT_TRACK", "1")
   }
 
-  // deploy/bench/Dockerfile: harness-bench from its TypeScript source under Node 24 type
-  // stripping, pi from the harness's own lockfile, and the musl kl. npm's cache is a named
-  // volume so a lockfile-unchanged rebuild never re-downloads.
+  // deploy/bench/Dockerfile: the agent CLI (@anthropic-ai/claude-code), tmux, ttyd and sshd,
+  // supervised by runit, plus the `sessions` node service and the `kloudlite` mod it loads as a
+  // plugin. npm's cache is a named volume so a lockfile-unchanged rebuild never re-downloads.
   private imageBench(source: Directory, built: Container): Container {
     const deps = dag
       .container()
       .from("node:24-bookworm-slim")
       .withMountedCache("/root/.npm", dag.cacheVolume("kloudlite-npm"))
-      .withWorkdir("/opt/harness")
-      .withFile("package.json", source.file("harness/package.json"))
-      .withFile("package-lock.json", source.file("harness/package-lock.json"))
+      .withWorkdir("/opt/kl/sessions")
+      .withFile("package.json", source.file("bench/sessions/package.json"))
+      .withFile("package-lock.json", source.file("bench/sessions/package-lock.json"))
       .withExec(["npm", "ci", "--omit=dev"])
-      // The bench's own deps (ai, @ai-sdk/*, @sinclair/typebox) live in bench/package.json, not the
-      // harness root — the fleet's first 228b7610 bench died at import with ERR_MODULE_NOT_FOUND.
-      .withFile("bench/package.json", source.file("harness/bench/package.json"))
-      .withFile("bench/package-lock.json", source.file("harness/bench/package-lock.json"))
-      .withExec(["sh", "-c", "cd bench && npm ci --omit=dev"])
     return dag
       .container()
       .from("node:24-bookworm-slim")
       .withExec(["sh", "-c",
-        "apt-get update && apt-get install -y --no-install-recommends ca-certificates util-linux " +
+        "apt-get update && apt-get install -y --no-install-recommends ca-certificates runit tmux openssh-server " +
         "&& rm -rf /var/lib/apt/lists/*"])
-      .withFile("/usr/local/bin/kl", built.file("/out/musl/kl"), { permissions: 0o755 })
-      .withFile("/opt/harness/package.json", source.file("harness/package.json"))
-      .withFile("/opt/harness/package-lock.json", source.file("harness/package-lock.json"))
-      .withDirectory("/opt/harness/node_modules", deps.directory("/opt/harness/node_modules"))
-      .withFile("/opt/harness/bench/package.json", source.file("harness/bench/package.json"))
-      .withDirectory("/opt/harness/bench/node_modules", deps.directory("/opt/harness/bench/node_modules"))
-      .withDirectory("/opt/harness/bench/src", source.directory("harness/bench/src"))
-      .withDirectory("/opt/harness/pi", source.directory("harness/pi"))
-      .withDirectory("/opt/harness/skills", source.directory("harness/skills"))
+      // ttyd: no Debian release packages it, so the upstream static build, pinned by digest.
       .withExec(["sh", "-c",
-        "chmod 0755 /opt/harness/bench/src/main.ts " +
-        "&& ln -s /opt/harness/bench/src/main.ts /usr/local/bin/harness-bench " +
-        "&& mkdir -p /home/kl && chown 1000:1000 /home/kl"])
+        "curl -fsSL -o /usr/local/bin/ttyd https://github.com/tsl0922/ttyd/releases/download/1.7.7/ttyd.x86_64 " +
+        '&& echo "8a217c968aba172e0dbf3f34447218dc015bc4d5e59bf51db2f2cd12b7be4f55  /usr/local/bin/ttyd" | sha256sum -c - ' +
+        "&& chmod 0755 /usr/local/bin/ttyd"])
+      // Pinned exact (plan R5): `npm view @anthropic-ai/claude-code version` on 2026-10-05.
+      .withExec(["npm", "install", "-g", "@anthropic-ai/claude-code@2.1.289"])
+      .withFile("/usr/local/bin/kl", built.file("/out/musl/kl"), { permissions: 0o755 })
+      .withFile("/opt/kl/sessions/package.json", source.file("bench/sessions/package.json"))
+      .withFile("/opt/kl/sessions/package-lock.json", source.file("bench/sessions/package-lock.json"))
+      .withDirectory("/opt/kl/sessions/node_modules", deps.directory("/opt/kl/sessions/node_modules"))
+      .withDirectory("/opt/kl/sessions", source.directory("bench/sessions"))
+      .withDirectory("/opt/kl/mod", source.directory("bench/mod"))
+      .withDirectory("/etc/kl/sv", source.directory("bench/sv"), { owner: "1000:1000" })
+      .withExec(["chmod", "0755", "/etc/kl/sv/sessions/run", "/etc/kl/sv/sshd/run", "/etc/kl/sv/tmux/run", "/etc/kl/sv/ttyd/run"])
+      .withFile("/etc/kl/sshd_config", source.file("bench/sshd_config"))
+      .withFile("/etc/kl/tmux.conf", source.file("bench/tmux.conf"))
+      .withExec(["mkdir", "-p", "/etc/claude-code"])
+      .withFile("/etc/claude-code/managed-settings.json", source.file("bench/settings.json"))
+      .withEnvVariable("CLAUDE_CODE_PLUGIN_DIRS", "/opt/kl/mod")
+      .withExec(["sh", "-c",
+        "usermod -l kl -d /home/kl node && groupmod -n kl node " +
+        "&& mkdir -p /home/kl && chown kl:kl /home/kl"])
       .withUser("1000:1000")
       .withWorkdir("/home/kl")
       .withEntrypoint([])
-  }
-
-  // deploy/kompress/Dockerfile: the model (chopratejas/kompress-v2-base, int8 ONNX) is baked in
-  // at build time — the owner's call, no runtime download for something this small. pip's cache
-  // is a named volume; the offline-load RUN is what proves the runtime image needs no network.
-  private imageKompress(source: Directory): Container {
-    const builder = dag
-      .container()
-      .from("python:3.13-slim")
-      .withMountedCache("/root/.cache/pip", dag.cacheVolume("kloudlite-pip"))
-      .withExec(["pip", "install", "--no-cache-dir", "headroom-ai[proxy]==0.38.0", "huggingface-hub>=1.5.0,<2.0"])
-      .withEnvVariable("HF_HOME", "/opt/hf")
-      .withExec(["python", "-c",
-        "from headroom.transforms.kompress_compressor import KompressCompressor as K; K().preload(allow_download=True)"])
-      .withEnvVariable("HF_HUB_OFFLINE", "1")
-      .withEnvVariable("TRANSFORMERS_OFFLINE", "1")
-      .withExec(["python", "-c",
-        "from headroom.transforms.kompress_compressor import KompressCompressor as K; " +
-        "k = K(); k.preload(allow_download=False); assert k.is_ready()"])
-      .withExec(["sh", "-c", "find /opt/hf -iname '*fp32*onnx*' -delete"])
-    return dag
-      .container()
-      .from("python:3.13-slim")
-      .withDirectory("/usr/local/lib/python3.13/site-packages", builder.directory("/usr/local/lib/python3.13/site-packages"))
-      .withDirectory("/usr/local/bin", builder.directory("/usr/local/bin"))
-      .withDirectory("/opt/hf", builder.directory("/opt/hf"))
-      .withEnvVariable("HF_HOME", "/opt/hf")
-      .withEnvVariable("HF_HUB_OFFLINE", "1")
-      .withEnvVariable("TRANSFORMERS_OFFLINE", "1")
-      .withEnvVariable("PYTHONUNBUFFERED", "1")
-      .withEnvVariable("HEADROOM_KOMPRESS_ONNX_INTRA_THREADS", "2")
-      .withWorkdir("/opt/kompress")
-      .withFile("server.py", source.file("deploy/kompress/server.py"))
-      .withUser("1001:1001")
-      .withExposedPort(8787)
-      .withEntrypoint(["uvicorn", "server:app", "--host", "0.0.0.0", "--port", "8787"])
   }
 
   // web/Dockerfile `deps`+`build` stages: bun installs (owns the lockfile), node runs `next
@@ -423,7 +392,6 @@ export class Kloudlite {
       [() => this.imageWorkspace(source, built), "kloudlite-workspace"],
       [() => this.imageBench(source, built), "kloudlite-bench"],
       [() => this.imageInterceptProxy(built), "kloudlite-intercept-proxy"],
-      [() => this.imageKompress(source), "kloudlite-kompress"],
     ]
 
     for (const [make, image] of IMAGE_BUILDERS) {
