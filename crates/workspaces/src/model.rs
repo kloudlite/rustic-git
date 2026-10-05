@@ -70,7 +70,7 @@ pub fn bench_pod_capacity(_workspace: &crate::crd::PodResources) -> (u64, u64) {
     (crate::quota::millicores(&bench.cpu_limit), crate::quota::mebibytes(&bench.memory_limit))
 }
 
-/// `spec.model` when a create names none; passed to the pod as `KL_MODEL`.
+/// `spec.model` when a create names none; passed to the pod as `ANTHROPIC_MODEL` (plan R7).
 pub const DEFAULT_BENCH_MODEL: &str = "deepseek/deepseek-v4-flash";
 
 /// Whether a spec's image means "the platform's own": the marker, a tagged form of it, or the

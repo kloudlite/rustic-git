@@ -4,7 +4,7 @@
 # .github/workflows/image.yml, context ".", same as the root Dockerfile's stages, so it can reach
 # target/x86_64.../kl.
 #
-# Node 24 (plan R4: overrides the spec's 22) — .ts type stripping is unflagged, needed by the
+# Node 24 (plan R5: overrides the spec's 22) — .ts type stripping is unflagged, needed by the
 # `sessions` service and the mod.
 FROM node:24-bookworm-slim
 

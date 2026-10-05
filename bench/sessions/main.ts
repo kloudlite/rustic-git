@@ -8,7 +8,7 @@ import fs from "node:fs";
 import path from "node:path";
 import { execFileSync } from "node:child_process";
 import { query } from "@anthropic-ai/claude-agent-sdk";
-import { Sessions } from "./sessions.ts";
+import { Sessions, WS_PATTERN } from "./sessions.ts";
 
 const PORT = 8917;
 const HOME = process.env.HOME ?? "/home/kl";
@@ -33,7 +33,11 @@ const sessions = new Sessions({ query: mkQuery as any, home: HOME, modDir: MOD_D
 
 function persist() {
   fs.mkdirSync(path.dirname(STORE), { recursive: true });
-  fs.writeFileSync(STORE, JSON.stringify(sessions.toJSON()));
+  // Write-then-rename: a crash mid-write leaves the tmp file orphaned, never a half-written
+  // STORE, so the next boot's read never sees a truncated/corrupt file.
+  const tmp = `${STORE}.${process.pid}.tmp`;
+  fs.writeFileSync(tmp, JSON.stringify(sessions.toJSON()));
+  fs.renameSync(tmp, STORE);
 }
 // Persist on a slow beat rather than on every single SDK message; a turn-granular write (every
 // `result`) is plenty durable for a bench that can be rebuilt from the workspace anyway.
@@ -70,7 +74,22 @@ const server = http.createServer(async (req, res) => {
   if (req.method === "POST" && url.pathname === "/send") {
     let body = "";
     for await (const c of req) body += c;
-    const { ws, text, agentId } = JSON.parse(body);
+    let parsed: any;
+    try {
+      parsed = JSON.parse(body);
+    } catch {
+      res.statusCode = 400;
+      res.end();
+      return;
+    }
+    const { ws, text, agentId } = parsed;
+    // `ws` becomes the session cwd (`~/sessions/{ws}`), so an unvalidated value is a traversal
+    // ("..") vector in-pod. This is the only place that boundary is crossed.
+    if (typeof ws !== "string" || !WS_PATTERN.test(ws)) {
+      res.statusCode = 400;
+      res.end();
+      return;
+    }
     sessions.send(ws, text, agentId);
     res.end("{}");
     return;

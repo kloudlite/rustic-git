@@ -76,8 +76,8 @@ pub(super) fn gitconfig(name: &str, email: &str) -> String {
 }
 
 
-/// The bench pod's short-lived platform token, minted by `POST /v1/bench/tool-token` into the
-/// bench's namespace and deleted when the bench stops.
+/// The bench pod's short-lived platform token, minted by `mint_bench_tool_secret`
+/// (`api/workspaces/keys.rs`) into the bench's namespace and deleted when the bench stops.
 pub const BENCH_TOOL_SECRET: &str = "bench-tool";
 
 

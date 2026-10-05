@@ -257,7 +257,7 @@ subjects:
 #
 #   Secret       verbs                      written by
 #   user-key     get update patch           keys beat, workspace/bench create
-#   bench-tool   get patch delete           /v1/bench/tool-token, stop_bench
+#   bench-tool   get patch delete           mint_bench_tool_secret, stop_bench
 #   (any name)   create                     first apply of either
 apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRole
@@ -279,8 +279,9 @@ rules:
     # reads like a missing binding. No `delete`: the Secret carries an ownerReference and is
     # reclaimed with its namespace.
     verbs: ["get", "update", "patch"]
-  # `bench-tool`: the bench pod's 15-minute platform token (`k8s::BENCH_TOOL_SECRET`), applied by
-  # `POST /v1/bench/tool-token` and deleted by its DELETE and by `stop_bench`. Named for the same
+  # `bench-tool`: the bench pod's short-lived platform token (`k8s::BENCH_TOOL_SECRET`), applied
+  # by `mint_bench_tool_secret` (the keys beat, create and the create re-POST) and deleted by
+  # `stop_bench`. Named for the same
   # host-key reason as above; `delete` is here and not on `user-key` because a stopped bench must
   # not keep a token lying in its namespace.
   - apiGroups: [""]

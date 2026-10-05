@@ -18,7 +18,11 @@ const MOD_TOOL_PREFIX = "mcp__kloudlite__";
 
 type SavedSession = { lines: string[]; sessionId?: string };
 
-type Agent = { id: string; label: string; status: "running" | "done"; lines: string[] };
+type Agent = { id: string; label: string; status: "running" | "done" | "error"; lines: string[] };
+
+// What main.ts's `/send` requires of `ws` before using it as a path segment (`~/sessions/{ws}`):
+// cheap, pure, and testable without the HTTP layer around it.
+export const WS_PATTERN = /^[a-z0-9-]+$/;
 
 type QueryFn = (args: { prompt: AsyncGenerator<unknown>; options: Record<string, unknown> }) => AsyncIterable<any>;
 
@@ -120,6 +124,9 @@ class Session {
         return;
       }
       this.lines.push(`s:(error) ${String(err).slice(0, 200)}`);
+      // A dead run loop never emits a `result` for any subagent still mid-flight, so without
+      // this they'd stay "running" forever. The mod does render an "error" status (register.tsx).
+      for (const a of this.agents.values()) if (a.status === "running") a.status = "error";
       this.busy = false;
       this.inflight = false;
       onSettle();

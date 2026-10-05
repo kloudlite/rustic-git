@@ -2,7 +2,7 @@
 // way (one session per workspace, queue semantics, subagent routing, resume-once recovery).
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { Sessions } from "./sessions.ts";
+import { Sessions, WS_PATTERN } from "./sessions.ts";
 
 // A fake query(): yields an init, echoes each user message as one assistant text, then a result.
 function fakeQuery(log: unknown[]) {
@@ -72,6 +72,30 @@ test("a failed resume starts fresh and says why, once", async () => {
   await s.settled("ws-a");
   assert.equal(calls, 2);
   assert.ok(s.state()["ws-a"].lines.some((l: string) => l.startsWith("s:(error) resume failed")));
+});
+
+test("WS_PATTERN admits a plain slug and refuses traversal", () => {
+  assert.ok(WS_PATTERN.test("ws-a"));
+  assert.ok(!WS_PATTERN.test("../etc"));
+  assert.ok(!WS_PATTERN.test("ws/a"));
+  assert.ok(!WS_PATTERN.test(""));
+});
+
+test("a running subagent is marked error, not left running, when the run loop dies", async () => {
+  // No `system`/`init` event: `sessionId` stays unset, so the catch in run() skips the
+  // resume-once retry and goes straight to the terminal-failure branch this is testing.
+  const q = () =>
+    (async function* () {
+      yield { type: "assistant", parent_tool_use_id: "tu-1", message: { content: [{ type: "tool_use", name: "Agent", input: { description: "d" }, id: "tu-1" }] } };
+      throw new Error("sdk died");
+    })();
+  const s = new Sessions({ query: q as any, home: "/h", modDir: "/m", saved: {} });
+  s.send("ws-a", "go");
+  // `settled()` resolves from inside the same catch block that marks the agent error, before the
+  // throw unwinds into Sessions.get()'s `.catch` (which deletes the session) — so this reads the
+  // state at the right moment.
+  await s.settled("ws-a");
+  assert.equal(s.state()["ws-a"].agents[0].status, "error");
 });
 
 test("idle: no clients and nothing busy", () => {

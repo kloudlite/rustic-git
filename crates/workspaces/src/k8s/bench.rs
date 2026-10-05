@@ -8,14 +8,16 @@
 //!
 //! The image runs `runsvdir` as pid 1 (R2/R3 of the 2026-10-05 bench plan, same shape as the
 //! workspace image's own `prelude`), supervising four runit services under `/etc/kl/sv`: the agent
-//! CLI in a `tmux` session, `ttyd` attached to it, `sshd` (its own ephemeral host key, logins land
-//! in the same tmux session via `ForceCommand`) and the `sessions` node service that owns the
-//! WebSocket/HTTP surface on `BENCH_PORT`. A crash in any one is restarted by runit in place —
-//! there is no second pod phase to fall back to.
+//! CLI in a `tmux` session, `ttyd` attached to it, `sshd` (its host key persists at `~/.ssh-host`,
+//! logins land in the same tmux session via `ForceCommand`) and the `sessions` node service, a
+//! loopback-only HTTP server on `127.0.0.1:8917` that `BENCH_PORT`'s sshd and ttyd sit beside, not
+//! on. A crash in any one is restarted by runit in place — there is no second pod phase to fall
+//! back to.
 //!
 //! The pod's `restartPolicy` is the workspace's `Always`, so the idle/locked channel is per
 //! CONTAINER now (`status.containerStatuses[name=sessions]`), not a pod phase: idle keeps serving
-//! and reports through the readiness probe, a held lock exits 75 and the kubelet backs off.
+//! and reports through the readiness probe (`sessions --ping` against the idle tracking `/idle`
+//! exposes), a stale/never-up service fails the probe and the kubelet never marks it ready.
 
 use super::*;
 use k8s_openapi::api::core::v1::{EnvVarSource, ExecAction, ObjectFieldSelector};
