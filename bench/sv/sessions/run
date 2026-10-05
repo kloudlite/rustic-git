@@ -1,0 +1,2 @@
+#!/bin/sh
+exec node /opt/kl/sessions/main.ts

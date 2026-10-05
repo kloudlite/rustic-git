@@ -140,9 +140,10 @@ ln -f "$CARGO_TARGET_DIR/x86_64-unknown-linux-musl/$PROFILE/kloudlite-intercept-
 # the pod only ever builds dev-image, so link it under the name the Dockerfile expects too.
 mkdir -p "$CTX/target/x86_64-unknown-linux-musl/release"
 ln -f "$CARGO_TARGET_DIR/x86_64-unknown-linux-musl/$PROFILE/kl" "$CTX/target/x86_64-unknown-linux-musl/release/kl"
-# Same CTX: the bench image's own build context (Task 6 rewrites deploy/bench/Dockerfile to stop
-# pulling harness/ sources in; this ship no longer copies them).
+# Same CTX: the bench image's own build context. deploy/bench/ holds the Dockerfile; top-level
+# bench/ holds everything it COPYs (sessions, mod, sv, sshd_config, settings.json).
 cp -r deploy/bench "$CTX/deploy/"
+cp -r bench "$CTX/"
 
 source_provenance_verify "$PWD" "$SHA"
 for t in server:kloudlite agent:kloudlite-agent gateway:kloudlite-gateway controller:kloudlite-controller builder-gate:kloudlite-builder-gate slo:kloudlite-slo workspace:kloudlite-workspace intercept-proxy:kloudlite-intercept-proxy; do

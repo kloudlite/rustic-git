@@ -1,47 +1,59 @@
-# The bench image: harness-bench (the real program, run from its TypeScript source by Node's type
-# stripping, driving the sys-1 engine in-process) and kl (workspace CLI, for a bench to build/push
-# like any workspace). Built by .github/workflows/image.yml, context ".", same as the root
-# Dockerfile's stages, so it can reach target/x86_64.../kl.
-FROM node:24-bookworm-slim AS deps
-WORKDIR /opt/harness
-COPY harness/package.json harness/package-lock.json ./
-# No toolchain: nothing left in the bench's dependency tree builds from source (node-pty went with
-# the pty — a bench shell is now the workspace container's, spliced over 127.0.0.1:7788).
-RUN npm ci --omit=dev
-# The bench's own deps (the sys-1 engine: ai, @ai-sdk/*, @sinclair/typebox) live in bench/package.json,
-# not the harness root — the fleet's first 228b7610 bench died at import with ERR_MODULE_NOT_FOUND.
-COPY harness/bench/package.json harness/bench/package-lock.json ./bench/
-RUN cd bench && npm ci --omit=dev
-
-# Node 24: .ts type stripping is unflagged, and it is what the bench suite ran on.
+# The bench image: the agent CLI (@anthropic-ai/claude-code), tmux, ttyd and sshd, all supervised
+# by runit (pid 1 is `runsvdir`, see `bench/sv/*/run`), plus the `sessions` node service that owns
+# the pod's WebSocket/HTTP surface and the `kloudlite` mod it loads as a plugin. Built by
+# .github/workflows/image.yml, context ".", same as the root Dockerfile's stages, so it can reach
+# target/x86_64.../kl.
+#
+# Node 24 (plan R4: overrides the spec's 22) — .ts type stripping is unflagged, needed by the
+# `sessions` service and the mod.
 FROM node:24-bookworm-slim
-# util-linux: flock. No shell furniture — harness-bench spawns no shell of its own; `/pty` splices
-# to the workspace container's tool server, which has the person's Nix profile and prompt.
-RUN apt-get update && apt-get install -y --no-install-recommends ca-certificates util-linux \
+
+# ca-certificates: the agent CLI and `kl` both talk TLS. runit: the pid-1 supervisor (R2/R3) —
+# a crash in tmux/ttyd/sshd/sessions restarts in place, no second pod phase to fall back to. tmux:
+# the one session a person's ssh/ttyd logins and the agent CLI all share. ttyd: the browser
+# terminal, attaches to that same tmux session. openssh-server: `sshd`, same tmux session via
+# `ForceCommand` in bench/sshd_config.
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    ca-certificates runit tmux ttyd openssh-server \
     && rm -rf /var/lib/apt/lists/*
 
-# musl binary — statically linked, so it runs fine on this glibc base — built by the same CI job
-# that builds this image and downloaded as the kl-musl artifact.
+# Pinned exact (plan R5): `npm view @anthropic-ai/claude-code version` on 2026-10-05.
+RUN npm install -g @anthropic-ai/claude-code@2.1.289
+
+# The musl `kl` binary — statically linked, so it runs fine on this glibc base — built by the same
+# CI job that builds this image and downloaded as the kl-musl artifact. A bench builds/pushes like
+# any workspace.
 COPY target/x86_64-unknown-linux-musl/release/kl /usr/local/bin/kl
 RUN chmod 0755 /usr/local/bin/kl
 
-# The harness tree, never under a node_modules path (type stripping refuses those).
-COPY harness/package.json harness/package-lock.json /opt/harness/
-COPY --from=deps /opt/harness/node_modules /opt/harness/node_modules
-COPY harness/bench/package.json /opt/harness/bench/package.json
-COPY --from=deps /opt/harness/bench/node_modules /opt/harness/bench/node_modules
-COPY harness/bench/src /opt/harness/bench/src
-COPY harness/skills /opt/harness/skills
-# Node resolves the symlink, so bench/package.json's "type":"module" applies.
-RUN chmod 0755 /opt/harness/bench/src/main.ts \
-    && ln -s /opt/harness/bench/src/main.ts /usr/local/bin/harness-bench
+# The `sessions` node service: owns the WebSocket/HTTP surface on 127.0.0.1:8917, answers `--ping`.
+COPY bench/sessions/package.json bench/sessions/package-lock.json /opt/kl/sessions/
+RUN cd /opt/kl/sessions && npm ci --omit=dev
+COPY bench/sessions /opt/kl/sessions
 
-# node:24-bookworm-slim already ships uid/gid 1000 as `node` — reuse it rather than useradd a
-# second uid 1000. harness-bench writes only ~/.bench inside the home volume, $HOME and /tmp, all
-# mounts in the pod.
-RUN mkdir -p /home/kl && chown 1000:1000 /home/kl
+# The `kloudlite` mod: a Claude Code plugin read via CLAUDE_CODE_PLUGIN_DIRS below.
+COPY bench/mod /opt/kl/mod
+
+# runit service directories: each `run` script is `exec`'d last, so runit supervises the real
+# process directly (no wrapper pid to lose signals through).
+COPY bench/sv /etc/kl/sv
+RUN chmod 0755 /etc/kl/sv/*/run
+
+COPY bench/sshd_config /etc/kl/sshd_config
+
+# Managed settings: `apiKeyHelper` reads the provider token off the mounted `user-key` Secret, so
+# the token is never an env var (ps e, crash dumps, child processes all see env).
+RUN mkdir -p /etc/claude-code
+COPY bench/settings.json /etc/claude-code/managed-settings.json
+
+ENV CLAUDE_CODE_PLUGIN_DIRS=/opt/kl/mod
+
+# node:24-bookworm-slim ships uid/gid 1000 as `node`; rename rather than useradd a second uid 1000
+# (plan R3). Home is the workspace volume (2026-09-22 ruling): /home/kl IS the mounted volume.
+RUN usermod -l kl -d /home/kl node && groupmod -n kl node \
+    && mkdir -p /home/kl && chown kl:kl /home/kl
 
 USER 1000:1000
 WORKDIR /home/kl
-# The pod sets `command` (harness-bench, or harness-bench --ping via the probe); no default here.
+# The pod sets `command` (runsvdir /etc/kl/sv); no default here.
 ENTRYPOINT []

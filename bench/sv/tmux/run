@@ -1,0 +1,3 @@
+#!/bin/sh
+# The one session ttyd and sshd's ForceCommand both attach to.
+exec tmux -D new -A -s kl claude

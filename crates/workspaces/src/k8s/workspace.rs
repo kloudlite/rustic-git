@@ -519,18 +519,19 @@ pub fn owner_slug<'a>(owner: &'a str, team: &'a str) -> &'a str {
 /// (`id` is the source volume; `ws_id` is this workspace's own
 /// worktree name) — see `Pool::worktree`.
 ///
-/// `bench` is `Some((configured bench image, idle seconds))` exactly when `crd::is_bench(ws)`:
-/// the pod then grows a second container running `harness-bench` and is labelled `kind=bench`.
-/// The image is not a spec field on purpose — a bench follows the configured image on every
-/// start — and `idle_secs` is stamped in at create like every other `Mark::Live` value, so a
-/// setting change never reaches a session already running.
+/// `bench` is `Some((configured bench image, idle seconds, provider base URL))` exactly when
+/// `crd::is_bench(ws)`: the pod's ONE container then runs the bench image under `runsvdir` and is
+/// labelled `kind=bench`. The image is not a spec field on purpose — a bench follows the
+/// configured image on every start — and `idle_secs`/`provider_url` are stamped in at create like
+/// every other `Mark::Live`/`Mark::Boot` value, so a setting change never reaches a session
+/// already running.
 pub fn workspace_pod(
     spec: &WorkspaceSpec,
     id: &str,
     ws_id: &str,
     ctx: &PodContext,
     init: Option<Container>,
-    bench: Option<(&str, u64)>,
+    bench: Option<(&str, u64, &str)>,
 ) -> Result<Pod, String> {
     // The last place before `spec.name` becomes a root `/bin/sh -c` word, an sshd `SetEnv` value
     // and this container's `mount_path`. `/v1` checked it; this covers a Workspace written by any
@@ -637,8 +638,8 @@ pub fn workspace_pod(
         // expose them). A workspace pod's terminal now runs inside `workspace` itself
         // (`prelude()`), not a sidecar.
         match bench {
-            Some((image, idle)) => {
-                vec![bench_container(ws_id, spec, image, idle, ctx.api_url, ctx.registry_host)]
+            Some((image, idle, provider_url)) => {
+                vec![bench_container(ws_id, spec, image, idle, ctx.api_url, ctx.registry_host, provider_url)]
             }
             None => vec![workspace_container()],
         }
@@ -663,7 +664,7 @@ pub fn workspace_pod(
                 v.extend([ws_ssh_volume(ws_id), keys_volume(ctx.pool, keys_owner(spec))]);
             }
             if bench.is_some() {
-                v.extend([
+                v.push(
                     // A Secret of its own, never a key in `user-key`: only the bench container
                     // mounts it, and an ordinary workspace pod never sees this token at all.
                     // Optional because /v1 mints it after the namespace exists.
@@ -672,7 +673,12 @@ pub fn workspace_pod(
                         secret: Some(SecretVolumeSource { secret_name: Some(BENCH_TOOL_SECRET.to_string()), optional: Some(true), default_mode: Some(0o444), ..Default::default() }),
                         ..Default::default()
                     },
-                ]);
+                );
+                // `sshd`'s login, projected the same way an ordinary workspace pod's `default_image`
+                // branch above does — not duplicated when that branch already added it.
+                if !default_image {
+                    v.push(keys_volume(ctx.pool, keys_owner(spec)));
+                }
             }
             v
         }),

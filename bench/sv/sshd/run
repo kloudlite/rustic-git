@@ -1,0 +1,6 @@
+#!/bin/sh
+# One host key per bench, generated once into the home volume so it survives a restart (a new key
+# every boot would make every known_hosts entry stale).
+mkdir -p ~/.ssh-host
+[ -f ~/.ssh-host/ed25519 ] || ssh-keygen -q -t ed25519 -N '' -f ~/.ssh-host/ed25519
+exec /usr/sbin/sshd -D -e -f /etc/kl/sshd_config

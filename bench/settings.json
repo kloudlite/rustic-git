@@ -1,0 +1,3 @@
+{
+  "apiKeyHelper": "cat /etc/kloudlite/ssh/provider-token"
+}

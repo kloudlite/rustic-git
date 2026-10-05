@@ -151,5 +151,5 @@ pub(crate) fn every_space_pod_builder_carries_the_resolv_conf_mount() {
     // A bench is the same builder with its second container, so it is covered by the same rule.
     let mut bench = ws_spec();
     bench.bench = Some(crate::crd::BenchOptions { model: "sonnet".into(), wake_at: None });
-    has_mount(workspace_pod(&bench, "ws-1", "bench-1", &ctx(), None, Some(("cr.example/bench:v1", 600))).unwrap(), "bench-1");
+    has_mount(workspace_pod(&bench, "ws-1", "bench-1", &ctx(), None, Some(("cr.example/bench:v1", 600, ""))).unwrap(), "bench-1");
 }
