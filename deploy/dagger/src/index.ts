@@ -11,7 +11,7 @@ import { dag, object, func, argument, Directory, Container, Secret } from "@dagg
 
 // The staging list ship.sh's `--source` walk must never see: worktree noise, build output and
 // caches too big to upload, and the docs this repo keeps out of git already.
-const IGNORE = [".git", "target", ".local", "**/node_modules", "web/.next", "harness/**/dist", ".superpowers"]
+const IGNORE = [".git", "target", ".local", "**/node_modules", "web/.next", ".superpowers"]
 
 const RUST_IMAGE = "rust:1-bookworm"
 const DEBIAN_SLIM = "debian:bookworm-slim@sha256:abd67ffcfa541b485a3dff59865ab629aa048a6c613e639d36e7456b0b229241"

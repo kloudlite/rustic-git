@@ -413,7 +413,7 @@ fn intercept_body(ws: &str, service_port: u16, ws_port: u16) -> Value {
 
 /// `env.space.bench`: the probe owner's bench in THIS TEAM is a pod of the same space, so the
 /// choice reaches its `/etc/resolv.conf` too. Read as a file rather than a lookup: the bench image
-/// is the harness's, and the platform mount is the thing under test. Woken first — an idle bench
+/// is the agent CLI's, and the platform mount is the thing under test. Woken first — an idle bench
 /// has no pod.
 async fn space_bench(c: &mut Ctx, j: &Journey) {
     if let Some(why) = &j.bench {
@@ -465,7 +465,7 @@ async fn bench_ready(c: &Ctx, team: &str, cap: Duration) -> Result<()> {
 /// One exec in the team bench's pod — the bench's own path, the one `env.space.bench` reads its
 /// `resolv.conf` through. The pod is named by the bench's workspace id, so it is asked for
 /// (`stages::bench_pod`) rather than assumed.
-/// An argv, not a script: the bench image is the harness's, and a shell there is not a promise.
+/// An argv, not a script: the bench image is the agent CLI's, and a shell there is not a promise.
 async fn bench_exec(c: &Ctx, team: &str, ns: &str, argv: &[&str]) -> Result<String> {
     let k = c.kube.as_ref().ok_or_else(|| anyhow!("no kubeconfig"))?;
     let pod = super::bench_pod(c, Some(team)).await?;

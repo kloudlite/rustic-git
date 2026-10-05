@@ -423,7 +423,7 @@ pub async fn serve(
 /// What a BENCH may do on this tier, acting as the person its token was minted for.
 ///
 /// A bench-tool token is not a session and is refused everywhere else here (`identify`), which is
-/// what made the harness's repo tools 401. The decision (owner, 2026-09-17): a bench acts as ITS
+/// what made the bench's repo tools 401. The decision (owner, 2026-09-17): a bench acts as ITS
 /// PERSON on repositories and on the team READS a repository page needs — never a key route, never
 /// a credential route, never an admin one. This table is that decision, and the complement is
 /// everything not in it: a bench token on any other path is simply not a credential.

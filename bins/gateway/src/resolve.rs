@@ -44,7 +44,7 @@ pub async fn resolve(client: &kube::Client, ws_id: &str, ssh_port: u16) -> Resul
     target(client, ws, ssh_port, "workspace not ready").await
 }
 
-/// The bench's harness address. A bench IS a workspace now, so this is `resolve` plus the one
+/// The bench's address. A bench IS a workspace now, so this is `resolve` plus the one
 /// predicate that says the id names a bench — `is_bench`, never the name prefix — and an ordinary
 /// workspace is 404 here exactly as a missing object is: the caller asked for a bench.
 pub async fn resolve_bench(client: &kube::Client, id: &str, port: u16) -> Result<Target, Refusal> {
