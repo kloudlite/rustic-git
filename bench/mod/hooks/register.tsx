@@ -7,8 +7,8 @@
 // gives it "claude-code" and its own relative files (`claude plugin validate` enforces this) — env
 // vars go through `$.env.get`, file reads through `$.fs.read`.
 import { atom, read, update } from "claude-code";
-import type { Register } from "claude-code";
-import { callTool, DISABLED, listTools, toolsAt, workspaceContext, type At } from "../lib/platform.ts";
+import type { Register, StateDollar } from "claude-code";
+import { callTool, listTools, toolArgsOf, toolsAt, workspaceContext, type At } from "../lib/platform.ts";
 import { buildView, type EnvRow, type Row, type SessionsState, type V1Environment, type V1Workspace } from "../lib/view.ts";
 
 const TOOL_PREFIX = "mcp__kloudlite__";
@@ -70,7 +70,7 @@ const FRAMES = ["·", "✢", "✳", "✻", "✽", "✻", "✳", "✢"];
 // open workspace) and by the process_kill action handler's one-shot refresh. Own try/catch so a
 // tasks fetch failure never wipes the rest of the poll or the pane's main view (ruling 5).
 async function refreshTasks(
-  $: Env & Fs,
+  $: Env & Fs & StateDollar,
   fetch: (url: string, init?: Record<string, unknown>) => Promise<Response>,
   api: string,
   ws: string,
@@ -214,7 +214,7 @@ export const register: Register = (on) => {
       cached = await toolsAt(fetch, api, await readToken($), ws);
       return cached;
     };
-    const r = await callTool(fetch, getAt, ws, name, e.input);
+    const r = await callTool(fetch, getAt, ws, name, toolArgsOf(e));
     return r.ok ? { result: r.text } : { result: r.error, isError: true };
   });
 
@@ -230,7 +230,8 @@ export const register: Register = (on) => {
       return cached;
     };
     try {
-      return { blocks: [await workspaceContext(fetch, getAt, ws)] };
+      const text = await workspaceContext(fetch, getAt, ws);
+      return { blocks: [...e.blocks, { name: "kloudlite", text }] };
     } catch {
       return next(e); // workspace unreachable at session start — no context, not a crash
     }

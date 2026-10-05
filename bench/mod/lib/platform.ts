@@ -29,6 +29,14 @@ export const DISABLED = [
   "WebFetch",
 ];
 
+// `tool.call`'s event is `{ tool, tool_use_id, agentId?, ...toolArguments }` (no `e.input`): the
+// envelope fields (plus the reserved `consent`) sit alongside the tool's own arguments, so the
+// only way to get the arguments is to strip the envelope's own keys back off.
+export function toolArgsOf(e: Record<string, unknown>): Record<string, unknown> {
+  const { tool, tool_use_id, agentId, consent, ...args } = e;
+  return args;
+}
+
 const V1_TIMEOUT_MS = 10_000;
 const TOOLS_LIST_TIMEOUT_MS = 10_000;
 const TOOL_CALL_TIMEOUT_MS = 600_000;

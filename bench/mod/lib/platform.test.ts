@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { callTool, listTools, toolsAt } from "./platform.ts";
+import { callTool, listTools, toolArgsOf, toolsAt } from "./platform.ts";
 
 const res = (status: number, body: unknown) => new Response(JSON.stringify(body), { status });
 
@@ -53,4 +53,9 @@ test("a timed-out remote call says unreachable, not an AbortError", async () => 
   const r = await callTool(f as any, async () => ({ address: "x:7788", token: "t" }), "ws-1", "read", {});
   assert.equal(r.ok, false);
   assert.match((r as any).error, /ws-1 is unreachable.*start it/);
+});
+
+test("toolArgsOf strips the envelope and keeps the tool's own arguments", () => {
+  const args = toolArgsOf({ tool: "mcp__kloudlite__read", tool_use_id: "x", agentId: "a", path: "README.md" });
+  assert.deepEqual(args, { path: "README.md" });
 });
