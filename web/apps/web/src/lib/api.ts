@@ -4,6 +4,7 @@ export * from "./api/auth";
 export * from "./api/teams";
 export * from "./api/repos";
 export * from "./api/keys";
+export * from "./api/bench";
 export * from "./api/pulls";
 export * from "./api/workspaces";
 export * from "./api/me";

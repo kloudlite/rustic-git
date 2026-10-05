@@ -54,7 +54,14 @@ async fn main() {
         Err(e) => fatal(format!("kube client: {e}")),
     };
 
-    let gw = Arc::new(Gateway::new(jwt, region, kube, 22, kloudlite_workspaces::k8s::BENCH_PORT));
+    let gw = Arc::new(Gateway::new(
+        jwt,
+        region,
+        kube,
+        22,
+        kloudlite_workspaces::k8s::BENCH_PORT,
+        kloudlite_workspaces::k8s::BENCH_TERM_PORT,
+    ));
     kloudlite_core::settings::bind_trace(&gw.central);
     // The one object-store touch this binary makes: a minimal, read-only client for one key.
     // `object_store_views` (not `open_store`) so this stays free of the SlateDB pool machinery

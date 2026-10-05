@@ -29,15 +29,19 @@ axum-server = { workspace = true }
 rustls = { workspace = true }
 tokio = { workspace = true }
 futures = { workspace = true }
+serde = { workspace = true }
 serde_json = { workspace = true }
 # The tunnel's read buffer: a frame is split out of a `BytesMut` rather than copied into a `Vec`.
 bytes = { workspace = true }
+# `term.rs`'s ttyd-side socket: axum's `ws` feature is the client side of the SAME library, so this
+# pins one version for both halves of the pump.
+tokio-tungstenite = { workspace = true }
 
 [dev-dependencies]
 kloudlite-workspaces = { path = "../../crates/workspaces", features = ["testkit"] }
-# The tests are the gateway's own CLIENT — the same library axum's `ws` feature is built on, so
-# the lock pins one version for both.
-tokio-tungstenite = { workspace = true }
+# `tests/term.rs`'s client for the plain-HTTP half of the proxy; the WS half reuses
+# tokio-tungstenite, already a dependency above.
+reqwest = { workspace = true }
 # Minting an ALREADY-EXPIRED token: `Jwt::mint_ssh_session` always signs 60s into the future, and
 # a test that waits out a real TTL is a minute of CI for one assertion.
 jsonwebtoken = { workspace = true }

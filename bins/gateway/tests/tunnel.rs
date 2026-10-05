@@ -89,7 +89,7 @@ async fn serve(routes: Vec<Route>, ssh_port: u16) -> String {
 
 async fn serve_with(routes: Vec<Route>, ssh_port: u16, bench_port: u16) -> String {
     let (client, _) = mock_client(routes);
-    let gw = Arc::new(Gateway::new(Jwt::new(SECRET).unwrap(), REGION.into(), client, ssh_port, bench_port));
+    let gw = Arc::new(Gateway::new(Jwt::new(SECRET).unwrap(), REGION.into(), client, ssh_port, bench_port, 0));
     let l = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = l.local_addr().unwrap();
     tokio::spawn(async move { axum::serve(l, kloudlite_gateway::tunnel::app(gw)).await.unwrap() });
