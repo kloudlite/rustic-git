@@ -63,7 +63,26 @@ const viewAtom = atom(
 const rawAgents = atom({ plugin: "kloudlite", key: "rawAgents" } as const, {} as SessionsState);
 const pollError = atom({ plugin: "kloudlite", key: "pollError" } as const, null as string | null);
 const tickAtom = atom({ plugin: "kloudlite", key: "tick" } as const, 0);
+const tasksAtom = atom({ plugin: "kloudlite", key: "tasks" } as const, [] as { id: string; cmd: string; state: string }[]);
 const FRAMES = ["·", "✢", "✳", "✻", "✽", "✻", "✳", "✢"];
+
+// Fetches process_list for `ws` and writes it into tasksAtom. Shared by the 2s poll (gated to the
+// open workspace) and by the process_kill action handler's one-shot refresh. Own try/catch so a
+// tasks fetch failure never wipes the rest of the poll or the pane's main view (ruling 5).
+async function refreshTasks(
+  $: Env & Fs,
+  fetch: (url: string, init?: Record<string, unknown>) => Promise<Response>,
+  api: string,
+  ws: string,
+): Promise<void> {
+  try {
+    const getAt = async () => toolsAt(fetch, api, await readToken($), ws);
+    const r = await callTool(fetch, getAt, ws, "process_list", {});
+    if (r.ok) await update($, tasksAtom, () => (JSON.parse(r.text).processes ?? []) as { id: string; cmd: string; state: string }[]);
+  } catch (err) {
+    await update($, pollError, () => (err instanceof Error ? err.message : String(err)));
+  }
+}
 
 const STATUS_STYLE = {
   idle: { color: "cyan", glyph: "◆" },
@@ -125,6 +144,13 @@ export const register: Register = (on) => {
         // ruling 5: never throw out of the clock callback; keep the last good view, show one line
         await update($, pollError, () => (err instanceof Error ? err.message : String(err)));
       }
+
+      // Poll tasks only for the workspace whose detail view is open, and only while it's open.
+      const sel = await read($, selected);
+      const view = await read($, viewAtom);
+      const openWs = sel && view.workspaces.some((w) => w.id === sel) ? sel : null;
+      if (openWs) await refreshTasks($, fetch, api, openWs);
+      else await update($, tasksAtom, () => []);
     });
 
     $.clock.every(120, async () => {
@@ -239,18 +265,10 @@ export const register: Register = (on) => {
       const lines = wsRow ? (await read($, rawAgents))[ws]?.lines ?? [] : (await read($, rawAgents))[ws]?.agents.find((a) => a.id === sel)?.lines ?? [];
       const slice = lines.slice(-(rows - 8));
 
-      // TASKS: the workspace's own detached processes, over its tool server — never cached in an
-      // atom, re-fetched on open since it only needs to be right while the detail is on screen.
-      let tasks: { id: string; cmd: string; state: string }[] = [];
-      if (wsRow) {
-        try {
-          const getAt = async () => toolsAt(fetch, api, await readToken($), ws);
-          const r = await callTool(fetch, getAt, ws, "process_list", {});
-          if (r.ok) tasks = (JSON.parse(r.text).processes ?? []) as typeof tasks;
-        } catch {
-          // unreachable workspace: no tasks shown, not a crash
-        }
-      }
+      // TASKS: polled into tasksAtom by the 2s clock while this workspace's detail is open; render
+      // only reads it, never fetches (the 120ms spinner clock re-runs render, so a fetch here would
+      // hit the tool server far faster than this screen needs).
+      const tasks = wsRow ? await read($, tasksAtom) : [];
 
       return (
         <Box flexDirection="column" paddingX={1} height={rows} overflow="hidden">
@@ -318,7 +336,9 @@ export const register: Register = (on) => {
                       label="✕ kill"
                       variant="secondary"
                       onPress={() =>
-                        void callTool(fetch, async () => toolsAt(fetch, api, await readToken($), ws), ws, "process_kill", { id: t.id })
+                        void callTool(fetch, async () => toolsAt(fetch, api, await readToken($), ws), ws, "process_kill", { id: t.id }).then(() =>
+                          refreshTasks($, fetch, api, ws),
+                        )
                       }
                     />
                   )}

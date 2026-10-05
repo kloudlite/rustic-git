@@ -16,6 +16,7 @@ export type KloudliteEnvRow = {
 };
 export type KloudliteSessionAgent = { id: string; label: string; status: string; lines?: string[] };
 export type KloudliteSessionWs = { lines: string[]; busy: boolean; queued: string[]; agents: KloudliteSessionAgent[] };
+export type KloudliteTask = { id: string; cmd: string; state: string };
 
 declare module "claude-code" {
   interface PluginState {
@@ -27,6 +28,7 @@ declare module "claude-code" {
       rawAgents: Record<string, KloudliteSessionWs>;
       pollError: string | null;
       tick: number;
+      tasks: KloudliteTask[];
     };
   }
 }
