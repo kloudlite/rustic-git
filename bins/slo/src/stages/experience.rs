@@ -108,7 +108,7 @@ pub const IDS: &[&str] = &[
     "bench.tool.audience",
     "bench.push.p95",
     "bench.pkg.add",
-    "bench.workspace.tool_roundtrip",
+    "bench.tool.revoked",
     "feed.experience",
     "home.travels",
 ];
@@ -206,26 +206,18 @@ pub async fn run(c: &mut Ctx) {
             // One call: the wake runs first, with every client gone, then the four session ids.
             "team.member.paused" => super::experience_teams::member_paused(c).await,
             "bench.idle.wake" => super::bench::hourly(c).await,
-            // No SSH identity to drive these through (ruling 4, task 9 brief): the laptop's
-            // tunnel carries raw bytes to sshd now, and the probe holds no key the owner's
-            // bench trusts. Skipped, not invented.
-            "bench.claude.tool_roundtrip" => c.skip(id, "no probe ssh identity"),
-            "bench.builtin.refused" => c.skip(id, "no probe ssh identity"),
-            // One call: the pod's token, then its audience, then the stop.
+            // kube-exec into the pod, no tunnel/SSH identity needed (ruling 3, task 9 fix round 1).
+            "bench.claude.tool_roundtrip" => super::bench::claude_tools(c).await,
+            // Filed by the call above.
+            "bench.builtin.refused" => {}
+            // One call: the pod's token, then its audience, then the stop/restart (files
+            // `bench.tool.revoked` too).
             "bench.tool.token" => super::bench_tool::run(c).await,
-            "bench.tool.audience" => {}
+            "bench.tool.audience" | "bench.tool.revoked" => {}
             // Last in group 3: the package edit recreates the bench pod, so nothing in this group
             // may run after it. One call reports both ids.
             "bench.push.p95" => super::bench_ws::run(c).await,
             "bench.pkg.add" => {}
-            // A grouped run walks the bench journey in group 3; this dial would reset its idle
-            // wait, so it waits for that group to finish first.
-            "bench.workspace.tool_roundtrip" if c.group.is_some() => {
-                crate::suite::wait_for_group(c, 3, std::time::Duration::from_secs(900)).await;
-                super::bench::tool_only(c).await
-            }
-            // Filed by the call above, in the group that owns the workspace.
-            "bench.workspace.tool_roundtrip" => {}
             // Filed by the bench journey's own call, in group 3.
             "shell.up" => {}
             _ => c.skip(id, "not implemented yet"),

@@ -133,10 +133,8 @@ async fn prepare(c: &Ctx, team: &str) -> Result<Prep> {
     in_bench(c, team, &canary_js(r#"require("fs").writeFileSync(p,process.argv[1])"#), CANARY)
         .await
         .context("could not write the canary")?;
-    // Minted straight from the probe's `kloudlite-jwt` (ruling 3, task 9 brief): the route that
-    // used to do this on demand is gone.
+    // The api mints the tool token on bench create/start; poll the pod for it to land there.
     let prep = async {
-        c.mint_bench_tool(&c.probe_user, team).await.context("tool-token mint")?;
         let start = Instant::now();
         let tool = loop {
             let t = in_bench(c, team, TOKEN_JS, "").await.unwrap_or_default();

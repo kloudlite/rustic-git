@@ -239,13 +239,13 @@ first destructive stage.
 | `id.session.reads` | Identity | The passkey `used` mark stays peer-only, and the legacy quota-request create and the api's own settings read answer | 99.9 % ≤ 10000 ms | hourly | 14 · Experience |
 | `kl.commands` | Identity | `kl-connect ws`, `kl-connect ws list --team` and `kl-connect logout` answer | 99.9 % ≤ 30000 ms | hourly | 14 · Experience |
 | `admin.reads` | Admin | `/admin/nodes`, `/admin/settings/schema` and a cluster status write answer, and an unknown history series is a 404 | 99.9 % ≤ 10000 ms | hourly | 14 · Experience |
-| `bench.idle.wake` | Benches | With every client gone past `benchIdleSecs` the bench has no pod, a new connection starts it, and `kl-sessions`' `/state` session list and a transcript read back unchanged | 99.9 % ≤ 480000 ms | hourly | 14 · Experience |
+| `bench.idle.wake` | Benches | With every client gone past `benchIdleSecs` the bench has no pod, a new connection wakes it, `GET /v1/bench/session` answers, and `kl-sessions`' `/state` session list and a transcript read back unchanged | 99.9 % ≤ 480000 ms | hourly | 14 · Experience |
 | `bench.claude.tool_roundtrip` | Benches | `POST /send` on a probe workspace asks the agent to read the workspace's README, and `/state` shows a `read` call answered from the workspace | 99.9 % ≤ 120000 ms | hourly | 14 · Experience |
 | `bench.builtin.refused` | Benches | A prompt forcing the built-in Bash tool is denied, never run | 99.9 % | hourly | 14 · Experience |
 | `bench.tool.token` | Benches | The probe's login mints a tool token and a `/v1/regions` call inside the bench pod answers JSON | 99.9 % ≤ 120000 ms | hourly | 14 · Experience |
 | `bench.tool.audience` | Benches | The pod's token is refused on `/v1/bench/session`, `/v1/cli/tokens` and `/v1/keys` | 99.9 % | hourly | 14 · Experience |
 | `shell.up` | Benches | A shell answers on both pod kinds and opens in the home | 99.9 % ≤ 15000 ms | hourly | 14 · Experience |
-| `bench.workspace.tool_roundtrip` | Benches | A workspace session on the bench runs `exec echo` in a workspace through its tool server, and the turn lands under `/bench/workspaces/{ws}/` | 99.9 % ≤ 180000 ms | hourly | 14 · Experience |
+| `bench.tool.revoked` | Benches | After the bench stops, a tool call carrying the last token it held is refused | 99.9 % ≤ 90000 ms | hourly | 14 · Experience |
 | `bench.push.p95` | Benches | `POST /v1/workspaces/{bench}/push` completes and the volume's history lists the snapshot as ready | 95 % ≤ 60000 ms | hourly | 14 · Experience |
 | `bench.pkg.add` | Benches | a package added through the API lands in the bench's `spec.packages` | 99.9 % ≤ 20000 ms | hourly | 14 · Experience |
 | `git.push.large` | Git hosting | Push of a large commit succeeds — 90 MiB over HTTP, under Cloudflare's 100 MB upload cap, and 100 MiB over SSH, which has no proxy in front of it | 99.9 % | weekly | 12 · Weekly |

@@ -635,7 +635,6 @@ mod tests {
                 assert_eq!(group_of(id), g, "{id}");
             }
         }
-        assert_eq!(group_of("bench.workspace.tool_roundtrip"), 0);
         assert_eq!(group_of("ws.seed.failed"), 2);
         // Its own team, never group 0's `-team` or group 1's `-icept`, which pause the same member.
         assert_eq!(group_of("team.member.paused"), 2);

@@ -8,16 +8,18 @@
 //! The tunnel is the real one — `kl-connect bench` as a child on a local port, handed a config
 //! file under the run's tmp — so the probe walks exactly what a laptop walks.
 //!
+//! Everything that used to speak to the retired harness-bench HTTP server now runs INSIDE the pod
+//! by kube-exec (design 2026-10-05): `node`'s global `fetch` against `kl-sessions`
+//! (`127.0.0.1:8917`'s `/state`, `/send`, `/idle`), the same way `experience_teams::paused` already
+//! reads the pod's mounted tool token. The tunnel itself carries raw bytes to sshd now, so only
+//! `bench.tunnel`'s SSH-banner check and `shell.up`'s direct gateway `/term` GET still use it.
+//!
 //! A skipped id is NO sample and reaches the run row as `skipped`, never `passed`
 //! (`report::run_state`); the service-intercept merge found skipped ids reading as passed, which is
 //! why `a_stub_bench_and_the_reschedule_drill_reach_the_run_row_as_skipped` exists.
 
 use std::process::Stdio;
-use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
-
-use futures::{SinkExt, StreamExt};
-use tokio_tungstenite::tungstenite::Message;
 
 use anyhow::{anyhow, bail, Context, Result};
 use futures::FutureExt;
@@ -50,10 +52,15 @@ const IDLE_STAMP: Duration = Duration::from_secs(30);
 const START_WAIT: Duration = Duration::from_secs(90);
 /// `shell.up`: target 15 s.
 const SHELL_CEILING: Duration = Duration::from_secs(20);
+/// `bench.claude.tool_roundtrip`: target 120 s.
+const CLAUDE_TOOL_CEILING: Duration = Duration::from_secs(120);
+/// `bench.builtin.refused`: no bound target (`avail`), but a step still needs a cap.
+const BUILTIN_REFUSED_CEILING: Duration = Duration::from_secs(120);
+const EXEC: Duration = Duration::from_secs(20);
 pub const STUB: &str = "bench image is the stub";
 pub const NO_DELETE_GRANT: &str = "no pod-delete grant for the probe";
-/// The ids that need a live bench, in journey order.
-const SESSION_IDS: [&str; 2] = ["shell.up", "bench.workspace.tool_roundtrip"];
+/// The ids that need a live bench and are walked straight from `hourly`, in journey order.
+const SESSION_IDS: [&str; 1] = ["shell.up"];
 
 fn bench_url(c: &Ctx, path: &str) -> String {
     api(c, &format!("/v1/bench{path}"))
@@ -89,9 +96,9 @@ async fn wake(c: &Ctx) -> Result<()> {
     }
 }
 
-/// One `POST /v1/bench/session` that keeps the answer: `(id, token, gateway base url)`, the same
-/// triple `kl-connect bench` gets, used here to hit the gateway's `/term` route directly rather
-/// than through the tunnel (which carries raw bytes, not HTTP, since the agent-CLI rework).
+/// One `POST /v1/bench/session` that keeps the answer: `(id, token, gateway base url)`. Still
+/// live after the agent-CLI rework (it mints the tunnel ticket), and `shell.up` uses it to hit
+/// the gateway's `/term` route directly rather than through the tunnel.
 async fn session_triple(c: &Ctx) -> Result<(String, String, String)> {
     let (status, body) = raw(c, reqwest::Method::POST, &bench_url(c, "/session"), &c.probe_jwt, None, &[]).await?;
     if status != reqwest::StatusCode::CREATED {
@@ -116,7 +123,9 @@ pub(crate) async fn wait_phase(c: &Ctx, want: &str, cap: Duration) -> Result<()>
     }
 }
 
-/// `kl-connect bench` on an ephemeral port; the child dies with the handle.
+/// `kl-connect bench` on an ephemeral port; the child dies with the handle. Still needed by
+/// `bench.tunnel`'s raw SSH-banner check — the only thing left on this end of the tunnel now that
+/// it carries raw bytes to sshd and not an HTTP API.
 pub(crate) async fn forward(c: &Ctx) -> Result<(Child, u16)> {
     let dir = c.tmp.join("kl-bench");
     std::fs::create_dir_all(&dir)?;
@@ -140,43 +149,88 @@ pub(crate) async fn forward(c: &Ctx) -> Result<(Child, u16)> {
     Ok((child, port))
 }
 
-/// One GET through the forward: `(status, body)`. A hand-rolled `read_to_end` + split on
-/// `\r\n\r\n` read the body as literal bytes, which is wrong the moment harness-bench answers
-/// `Transfer-Encoding: chunked` (Node's default for a streamed JSON body) — the chunk framing
-/// (`5f\r\n...\r\n0\r\n\r\n`) landed inside what the probe parsed as JSON and `ok` was never seen.
-/// reqwest/hyper decode both chunked and Content-Length correctly, so let it own the response.
-async fn through(port: u16, path: &str) -> Result<(u16, String)> {
-    through_with(port, reqwest::Method::GET, path, None).await
+/// `wss://ws-{region}.khost.dev/tunnel/{id}` → `https://ws-{region}.khost.dev` (origin only, no
+/// new `url` crate): the gateway terminates TLS itself and mounts `/term/...` at its ORIGIN, not
+/// under `/tunnel/...` (`bins/gateway/src/term.rs`), the same rule `web/apps/web/src/lib/term-url.ts`'s
+/// `termUrl` follows.
+fn term_origin(gateway: &str) -> Result<String> {
+    let (scheme, rest) = gateway.split_once("://").with_context(|| format!("no scheme in {gateway:?}"))?;
+    let https = match scheme {
+        "wss" => "https",
+        "ws" => "http",
+        other => other,
+    };
+    let host = rest.split('/').next().unwrap_or(rest);
+    Ok(format!("{https}://{host}"))
 }
 
-async fn through_with(port: u16, method: reqwest::Method, path: &str, body: Option<Value>) -> Result<(u16, String)> {
-    let mut req = reqwest::Client::new().request(method, format!("http://127.0.0.1:{port}{path}")).header("host", "bench");
-    if let Some(b) = body {
-        req = req.json(&b);
+/// One `node -e` exec into the bench container, print-and-check convention shared with
+/// `bench_tool.rs`'s `node`/`pod_call`: `js` is a self-contained script, `argv` lands in
+/// `process.argv.slice(1)` (never shell-interpolated, so a prompt with metacharacters is safe).
+async fn in_bench(c: &Ctx, js: &str, argv: &[&str]) -> Result<String> {
+    let k = c.kube.as_ref().ok_or_else(|| anyhow!("no kubeconfig"))?;
+    let owner = &c.cfg.probe_user;
+    let pod = super::bench_pod(c, None).await?;
+    let mut full = vec!["node", "-e", js];
+    full.extend_from_slice(argv);
+    let (code, out, err) =
+        crate::kube::exec(k, &crd::ws_namespace(owner, owner), &pod, Some(kloudlite_workspaces::k8s::BENCH_CONTAINER), &full, EXEC).await?;
+    if code != 0 {
+        bail!("node in the bench pod exited {code}: {}", super::clip(&err));
     }
-    let resp = req.send().await?;
-    let status = resp.status().as_u16();
-    let body = resp.text().await?;
-    Ok((status, body))
+    Ok(out)
 }
 
-fn is_stub(healthz: &str) -> bool {
-    healthz.trim_start().starts_with("ok stub")
+/// `(status, body)` printed by every `*_JS` script below, mirroring `bench_tool::parse_call`.
+fn parse_status_body(out: &str) -> Result<(u16, String)> {
+    let (status, body) = out.split_once('\n').unwrap_or((out, ""));
+    Ok((status.trim().parse().with_context(|| format!("no status in {:?}", super::clip(out)))?, body.trim().to_string()))
 }
 
-/// The real harness-bench answers JSON `{"ok":true,...}`; the stub answered text `ok stub ...`.
-/// Only `through`'s own chunked/content-length decoding tests still call this (`bench.tunnel` no
-/// longer does, since the tunnel carries raw bytes to sshd and not an HTTP `/healthz`).
-#[cfg(test)]
-fn health_ok(healthz: &str) -> bool {
-    is_stub(healthz)
-        || serde_json::from_str::<serde_json::Value>(healthz).is_ok_and(|v| v["ok"] == serde_json::Value::Bool(true))
+const STATE_JS: &str = r#"fetch("http://127.0.0.1:8917/state").then(async r=>{console.log(r.status);console.log(await r.text())}).catch(e=>{console.log(0);console.log(String(e))})"#;
+const IDLE_JS: &str = r#"fetch("http://127.0.0.1:8917/idle").then(async r=>{console.log(r.status);console.log(await r.text())}).catch(e=>{console.log(0);console.log(String(e))})"#;
+/// `argv[1]` is the workspace session id, `argv[2]` the prompt text — never shell-interpolated.
+const SEND_JS: &str = r#"const [ws,text]=process.argv.slice(1);fetch("http://127.0.0.1:8917/send",{method:"POST",headers:{"content-type":"application/json"},body:JSON.stringify({ws,text})}).then(async r=>{console.log(r.status);console.log((await r.text()).slice(0,500))}).catch(e=>{console.log(0);console.log(String(e).slice(0,500))})"#;
+
+/// `kl-sessions`' `/state`, from inside the pod. Status 0 is the fetch never answering at all
+/// (connection refused): the stub bench image runs no `kl-sessions`, so this is how a stub is told
+/// apart from a real one now that there is no `/healthz`.
+async fn state_raw(c: &Ctx) -> Result<(u16, String)> {
+    parse_status_body(&in_bench(c, STATE_JS, &[]).await?)
 }
 
-/// `"total":N` from a messages answer, read as text so a chunked body still compares.
-fn total_of(body: &str) -> Option<u64> {
-    let rest = &body[body.find("\"total\":")? + 8..];
-    rest.trim_start().split(|ch: char| !ch.is_ascii_digit()).next()?.parse().ok()
+async fn state(c: &Ctx) -> Result<Value> {
+    let (status, body) = state_raw(c).await?;
+    if status != 200 {
+        bail!("GET /state from the pod answered {status}: {}", super::clip(&body));
+    }
+    serde_json::from_str(&body).context("parsing /state")
+}
+
+async fn send(c: &Ctx, ws: &str, text: &str) -> Result<()> {
+    let (status, body) = parse_status_body(&in_bench(c, SEND_JS, &[ws, text]).await?)?;
+    if status != 200 {
+        bail!("POST /send answered {status}: {}", super::clip(&body));
+    }
+    Ok(())
+}
+
+/// Poll `/idle` until `busy` is false, which is how the caller knows a sent turn has finished.
+async fn wait_not_busy(c: &Ctx, cap: Duration) -> Result<()> {
+    let start = Instant::now();
+    loop {
+        if let Ok((200, body)) = parse_status_body(&in_bench(c, IDLE_JS, &[]).await?) {
+            if let Ok(v) = serde_json::from_str::<Value>(&body) {
+                if v["busy"] == Value::Bool(false) {
+                    return Ok(());
+                }
+            }
+        }
+        if start.elapsed() >= cap {
+            bail!("kl-sessions still busy {} s after the prompt", cap.as_secs());
+        }
+        tokio::time::sleep(Duration::from_secs(2)).await;
+    }
 }
 
 pub async fn fast(c: &mut Ctx) {
@@ -238,10 +292,11 @@ pub async fn fast(c: &mut Ctx) {
             }
             // ttyd, reached the browser's way: through the gateway, never the tunnel.
             let (id, token, gateway) = session_triple(c).await?;
-            let url = format!("{gateway}/term/{id}/?token={token}");
+            let origin = term_origin(&gateway)?;
+            let url = format!("{origin}/term/{id}/?token={token}");
             let status = reqwest::Client::new().get(&url).send().await.context("GET gateway /term")?.status();
             if status != 200 {
-                bail!("GET {{gateway}}/term/{{id}}/ answered {status}");
+                bail!("GET {{origin}}/term/{{id}}/ answered {status}");
             }
             Ok(())
         }
@@ -250,14 +305,31 @@ pub async fn fast(c: &mut Ctx) {
     .await;
 }
 
+/// Fails on a dropped/renamed session or a changed transcript (`lines`); passes on anything else.
+fn diff_state(before: &Value, after: &Value) -> Result<()> {
+    let keys = |v: &Value| -> Vec<String> { v.as_object().map(|m| m.keys().cloned().collect()).unwrap_or_default() };
+    let (mut b, mut a) = (keys(before), keys(after));
+    b.sort();
+    a.sort();
+    if b != a {
+        bail!("session ids changed: {b:?} before, {a:?} after");
+    }
+    for id in &b {
+        if before[id]["lines"] != after[id]["lines"] {
+            bail!("session {id}: the transcript changed across the sleep/wake");
+        }
+    }
+    Ok(())
+}
+
 pub async fn hourly(c: &mut Ctx) {
     let Some(k) = c.kube.clone() else {
         c.skip("bench.idle.wake", "no kubeconfig");
         return skip_sessions(c, "no kubeconfig");
     };
     // Untimed: this suite's owner is not the fast suite's, so its bench is created here (idempotent,
-    // and the first call binds the personal region); then the first connection — which may itself
-    // wake last hour's idle bench — reads the history the sample compares against.
+    // and the first call binds the personal region); then the first read — which may itself wake
+    // last hour's idle bench — is the `/state` snapshot the sample compares against.
     let region = c.cfg.region.clone();
     let prep = async {
         post(c, &bench_url(c, ""), &c.probe_jwt, json!({"region": region})).await.context("could not create this suite's bench")?;
@@ -266,19 +338,17 @@ pub async fn hourly(c: &mut Ctx) {
             .await?
             .and_then(|s| s.spec.bench_idle_secs)
             .unwrap_or_else(crd::defaults::bench_idle_secs);
-        let (child, port) = forward(c).await?;
-        let (_, health) = through(port, "/healthz").await?;
-        let stub = is_stub(&health);
-        let before = if stub { None } else { Some(history(port).await?) };
-        anyhow::Ok((idle, child, stub, before))
+        let (status, body) = state_raw(c).await?;
+        let stub = status == 0;
+        let before = if stub { None } else { Some(serde_json::from_str::<Value>(&body).context("parsing /state")?) };
+        anyhow::Ok((idle, stub, before))
     }
     .await;
-    let stub = prep.as_ref().ok().map(|p| p.2);
+    let stub = prep.as_ref().ok().map(|p| p.1);
     let woke = c
         .step("bench.idle.wake", WAKE_CEILING, move |c| {
             async move {
-                let (idle, child, _, before) = prep.context("before the sleep")?;
-                drop(child);
+                let (idle, _, before) = prep.context("before the sleep")?;
                 let owner = c.cfg.probe_user.clone();
                 let pods: Api<Pod> = Api::namespaced(k.clone(), &crd::ws_namespace(&owner, &owner));
                 // The pod is named by the bench's workspace id; there is no constant for it.
@@ -286,11 +356,11 @@ pub async fn hourly(c: &mut Ctx) {
                 // One budget for the whole chain: readiness false, then the pod gone, then idle.
                 let deadline = Instant::now() + Duration::from_secs(idle) + IDLE_GRACE;
                 // The idle SIGNAL is the `bench` container's readiness, not the pod's exit code —
-                // `harness-bench` keeps serving now that the pod's restartPolicy is the
-                // workspace's `Always` (bins/agent/src/controller/workspace/bench.rs). So the
-                // chain is asserted in the order the agent walks it: readiness false is what it
-                // believes, deleting the pod is what it does, `status.idleSince` (the facade's
-                // `idle` phase) is what it records.
+                // `kl-sessions` keeps serving now that the pod's restartPolicy is the workspace's
+                // `Always` (bins/agent/src/controller/workspace/bench.rs). So the chain is
+                // asserted in the order the agent walks it: readiness false is what it believes,
+                // deleting the pod is what it does, `status.idleSince` (the facade's `idle`
+                // phase) is what it records.
                 let mut saw_not_ready = false;
                 loop {
                     match pods.get_opt(&pod_name).await? {
@@ -303,13 +373,9 @@ pub async fn hourly(c: &mut Ctx) {
                         }
                     }
                     if Instant::now() >= deadline {
-                        // What decides this: `clients > 0` is a socket something left open (a
-                        // sibling group's dial), `busy` a turn or process still running. Plain
-                        // HTTP resets no clock.
-                        let health = async { anyhow::Ok(through(forward(c).await?.1, "/healthz").await?.1) }.await;
-                        let health = health.unwrap_or_else(|e| format!("unreadable: {e:#}"));
+                        let state = state_raw(c).await.map(|(s, b)| format!("{s} {}", super::clip(&b))).unwrap_or_else(|e| format!("unreadable: {e:#}"));
                         let what = if saw_not_ready { "the bench container went unready and its pod still exists" } else { "the bench container never went unready" };
-                        bail!("{what}; /healthz {}", super::clip(&health));
+                        bail!("{what}; /state {state}");
                     }
                     tokio::time::sleep(Duration::from_secs(2)).await;
                 }
@@ -323,17 +389,17 @@ pub async fn hourly(c: &mut Ctx) {
                 wait_phase(c, "idle", IDLE_STAMP).await.context("the pod is gone but the bench is not idle")?;
                 tracing::info!(check = "phase.idle", "slo.bench.idle");
                 // The wake is `/v1/bench/session`, the call every client makes: on an idle bench it
-                // patches `wakeAt` and answers 202, and the client re-asks until 201.
+                // patches `wakeAt` and answers 202, and the client re-asks until 201. Still mints
+                // the tunnel ticket, so this stays the wake call even with no HTTP left in the pod.
                 wake(c).await?;
                 wait_phase(c, "ready", START_WAIT).await?;
-                let (_child, port) = forward(c).await?;
-                let (status, _) = through(port, "/healthz").await?;
+                let (status, body) = state_raw(c).await?;
                 if status != 200 {
-                    bail!("a woken bench answered /healthz {status}");
+                    bail!("a woken bench's /state answered {status}: {}", super::clip(&body));
                 }
                 if let Some(before) = before {
-                    let after = history(port).await?;
-                    diff_history(&before, &after)?;
+                    let after: Value = serde_json::from_str(&body).context("parsing /state")?;
+                    diff_state(&before, &after)?;
                 }
                 Ok(())
             }
@@ -351,12 +417,9 @@ pub async fn hourly(c: &mut Ctx) {
         Some(false) => {}
     }
     shell_up(c).await;
-    sessions(c).await;
 }
 
-const TOOL: &str = "bench.workspace.tool_roundtrip";
-
-/// The session ids this pod walks: a grouped hourly run leaves `TOOL` to group 0.
+/// The session ids this pod walks straight from `hourly`.
 fn skip_sessions(c: &mut Ctx, why: &str) {
     for id in SESSION_IDS {
         if c.walks(id) {
@@ -365,249 +428,24 @@ fn skip_sessions(c: &mut Ctx, why: &str) {
     }
 }
 
-/// `TOOL` alone, for group 0 of a grouped hourly run, after the bench journey's group is done.
-pub async fn tool_only(c: &mut Ctx) {
-    let health = async {
-        let (_child, port) = forward(c).await?;
-        anyhow::Ok(through(port, "/healthz").await?.1)
-    }
-    .await;
-    match health {
-        Ok(h) if is_stub(&h) => c.skip(TOOL, STUB),
-        Ok(_) => {
-            let thread = tool_roundtrip(c).await;
-            drop_sessions(c, thread).await;
-        }
-        Err(e) => c.skip(TOOL, &format!("the bench could not be reached: {e:#}")),
-    }
-}
-
-/// The session journeys on a real harness-bench. One prompt feeds two ids: the round trip is timed
-/// and judged from the transcript, and the two sockets that watched it are compared afterwards.
-/// `shell.up`: the pod's own ttyd answers and opens in the home (spec §2.5).
-///
-/// One id, both pod kinds: the bench's own shell and a run's workspace shell are the same ttyd
-/// running inside their own container (owner ruling 2026-09-25: no shell sidecar), and a failure
-/// in either is the same defect. `pwd` says the shell opens in the home. No claim any more about
-/// what the workspace shell can or cannot see under the worktree — that IS the workspace's own
-/// container, so its code is right there on purpose.
+/// `shell.up`: the gateway's own `/term` route answers for the session token `session_triple`
+/// minted, built the way `web/apps/web/src/lib/term-url.ts`'s `termUrl` does (ruling 2, task 9 fix
+/// round 1) — the tunnel itself carries raw bytes to sshd now, so this never goes through it.
 async fn shell_up(c: &mut Ctx) {
     c.step("shell.up", SHELL_CEILING, move |c| {
         async move {
-            let (_child, port) = forward(c).await?;
-            let (out, code) = pty_shell(port, "bench", "pwd; exit 0\n").await?;
-            judge_shell(&out, kloudlite_workspaces::k8s::HOME_DIR, code)
+            let (id, token, gateway) = session_triple(c).await?;
+            let origin = term_origin(&gateway)?;
+            let url = format!("{origin}/term/{id}/?token={token}");
+            let status = reqwest::Client::new().get(&url).send().await.context("GET gateway /term")?.status();
+            if status != 200 {
+                bail!("GET {{origin}}/term/{{id}}/ answered {status}");
+            }
+            Ok(())
         }
         .boxed()
     })
     .await;
-}
-
-/// `bench.workspace.tool_roundtrip` alone now: the session round trip and the two-client replay
-/// it used to feed are retired with `harness-bench` (design 2026-10-05, ruling 3).
-async fn sessions(c: &mut Ctx) {
-    let thread = if c.walks(TOOL) { tool_roundtrip(c).await } else { None };
-    drop_sessions(c, thread).await;
-}
-
-/// One shell over the bench's `/pty`, to its end: the protocol's first frame is the resize, input
-/// goes as binary frames, output comes back as binary frames, and the server ends with one text
-/// control frame. Returns what the shell printed and its exit code.
-/// One shell exchange through the bench's `/pty` splice, which is a TRANSPARENT pipe to the
-/// target workspace container's own ttyd (`harness/bench/src/pty.ts`, `spliceShell`). So this
-/// speaks ttyd's own protocol, not the retired tool-server PTY's:
-///
-/// | direction | opcode | payload |
-/// |---|---|---|
-/// | client → | (first frame) | `{"AuthToken":"","columns":N,"rows":N}` |
-/// | client → | `0` | input bytes |
-/// | → client | `0` | output bytes |
-/// | → client | `1` | the title |
-/// | → client | `2` | ttyd's preferences JSON |
-///
-/// Two things this got wrong until 2026-09-18, both of which made every shell id time out while
-/// the shell itself was perfectly healthy: it sent a bare JSON resize and unprefixed input, which
-/// ttyd reads as opcode bytes of its own; and it waited for a JSON `exit` control frame, which
-/// nothing in this path ever sends — ttyd closes the socket instead (verified against the live
-/// bench: frames `BIN op=1, op=2, op=0`, marker received, `CLOSE code 1000`, no exit frame). The
-/// probe therefore held the socket open until its ceiling, which is the 24 s ttyd logged.
-///
-/// The EXIT STATUS is gone with it: ttyd reports none. The caller's script prints its own status
-/// marker instead, which is also what a person reads off a terminal.
-pub(crate) async fn pty_shell(port: u16, scope: &str, input: &str) -> Result<(String, i64)> {
-    let (mut ws, _) = tokio_tungstenite::connect_async_with_config(
-        tokio_tungstenite::tungstenite::handshake::client::Request::builder()
-            .uri(format!("ws://127.0.0.1:{port}/pty?scope={scope}"))
-            .header("Host", format!("127.0.0.1:{port}"))
-            .header("Connection", "Upgrade")
-            .header("Upgrade", "websocket")
-            .header("Sec-WebSocket-Version", "13")
-            .header("Sec-WebSocket-Key", tokio_tungstenite::tungstenite::handshake::client::generate_key())
-            // ttyd refuses a socket that does not ask for its subprotocol, and the splice carries
-            // the handshake through.
-            .header("Sec-WebSocket-Protocol", "tty")
-            .body(())?,
-        None,
-        false,
-    )
-    .await
-    .context("pty socket")?;
-    // The auth frame is FIRST and carries the size; the token is empty because the NetworkPolicy
-    // is the fence here, not ttyd's own auth (spec §2.3).
-    ws.send(Message::text(json!({"AuthToken": "", "columns": 100, "rows": 30}).to_string())).await?;
-    let mut framed = vec![b'0'];
-    framed.extend_from_slice(input.as_bytes());
-    ws.send(Message::binary(framed)).await?;
-    let mut out = String::new();
-    while let Some(msg) = ws.next().await {
-        match msg.context("pty frame")? {
-            // Opcode `0` is OUTPUT; the title (`1`) and the preferences (`2`) say nothing about
-            // what the shell did. Not necessarily UTF-8 on a boundary — this is a judgement, not
-            // a terminal.
-            Message::Binary(b) => {
-                if let Some((b'0', rest)) = b.split_first() {
-                    out.push_str(&String::from_utf8_lossy(rest));
-                }
-            }
-            // The splice's own control frame, and the only place an error is reported now.
-            Message::Text(t) => {
-                let v: Value = serde_json::from_str(&t).with_context(|| format!("pty control frame {}", super::clip(&t)))?;
-                if let Some(e) = v["error"].as_str() {
-                    bail!("the shell did not start: {e}");
-                }
-            }
-            Message::Close(_) => break,
-            _ => {}
-        }
-    }
-    // A clean close is how a ttyd shell ends; `0` keeps `judge_shell`'s shape for callers.
-    Ok((out, 0))
-}
-
-
-
-
-
-/// The shell ran what it was given and left cleanly. `want` is looked for in the OUTPUT, and the
-/// PTY echoes the typed line back too — which is why both probes send a line that does not itself
-/// contain what is asserted.
-fn judge_shell(out: &str, want: &str, code: i64) -> Result<()> {
-    if !out.contains(want) {
-        bail!("the shell never printed {want}: {}", super::clip(out));
-    }
-    // ttyd reports no exit status (it is not in its protocol), so `pty_shell` answers 0 and the
-    // OUTPUT is the whole judgement — a script that wants its status asserted prints it. Kept as
-    // a parameter rather than removed so a caller that does have one is still checked.
-    if code != 0 {
-        bail!("the shell exited {code}");
-    }
-    Ok(())
-}
-
-/// Say yes to every proposal the bench is holding, until the caller drops this.
-///
-/// Since 2026-09-17 every `kl_*` write is a QUESTION: the extension publishes it and blocks on
-/// `/proposals/{id}/wait` for up to ten minutes, and an unanswered question is a no. A probe that
-/// prompts a turn into a platform write is the person in that conversation, so it answers — spawned
-/// beside the turn rather than after it, because the turn does not end until the answer lands.
-/// `bench.workspace.tool_roundtrip`: target 180 s.
-const TOOL_CEILING: Duration = Duration::from_secs(180);
-
-fn tool_prompt(marker: &str) -> String {
-    format!("Use the bash tool exactly once to run: echo {marker}. Then reply with exactly the word done.")
-}
-
-/// One turn, driven the way the new engine actually runs one: `POST /sessions/{sid}/send`, then
-/// poll `GET /sessions/{sid}/messages` until a `turn.end` row for the turn number that send
-/// returned. An `error` containing `API_KEY` is the tenant having no provider key — recorded in
-/// `no_model` so the caller demotes instead of failing; any other `error` fails outright; an empty
-/// or absent `answer` on a clean end fails too. Callers' own step ceilings bound the wait.
-async fn one_turn(port: u16, sid: &str, prompt: &str, no_model: &Mutex<Option<String>>) -> Result<()> {
-    let (status, body) = through_with(port, reqwest::Method::POST, &format!("/sessions/{sid}/send"), Some(json!({"text": prompt}))).await?;
-    if status != 200 {
-        bail!("POST /sessions/{sid}/send answered {status}: {}", super::clip(&body));
-    }
-    let turn = serde_json::from_str::<Value>(&body)?["turn"].as_u64().context("send answered no `turn`")?;
-    loop {
-        let (status, body) = through(port, &format!("/sessions/{sid}/messages")).await?;
-        if status != 200 {
-            bail!("GET /sessions/{sid}/messages answered {status}: {}", super::clip(&body));
-        }
-        let doc: Value = serde_json::from_str(&body).context("parsing messages")?;
-        let rows = doc["rows"].as_array().context("messages answer has no `rows`")?;
-        let end = rows.iter().find(|r| r["kind"] == "turn.end" && r["turn"].as_u64() == Some(turn));
-        if let Some(end) = end {
-            if let Some(err) = end["error"].as_str() {
-                if err.contains("API_KEY") {
-                    *no_model.lock().unwrap() = Some(err.to_string());
-                    return Ok(());
-                }
-                bail!("the turn ended in error: {}", super::clip(err));
-            }
-            let answer = end["answer"].as_str().unwrap_or_default();
-            if answer.trim().is_empty() {
-                bail!("the assistant reply is empty");
-            }
-            return Ok(());
-        }
-        tokio::time::sleep(Duration::from_secs(1)).await;
-    }
-}
-
-/// `bench.workspace.tool_roundtrip`: a workspace thread on the bench runs `echo` through the tool
-/// server of the workspace `ws.packages.add` created — the one live pod this stage keeps. Returns
-/// the thread's session id for teardown whenever the step ran: `w-{ws}` is the bench's own naming,
-/// so a thread opened but never parsed is still deleted.
-async fn tool_roundtrip(c: &mut Ctx) -> Option<String> {
-    let ws = match tool_workspace(c.state.ux_workspace.clone(), c.state.ux_ready) {
-        Ok(ws) => ws,
-        Err(why) => {
-            c.skip("bench.workspace.tool_roundtrip", why);
-            return None;
-        }
-    };
-    // Untimed: the kubelet's Secret sync is not the round trip. The token stays live through the
-    // step; a sign-in answer after this is a failure, never a skip.
-    if let Err(why) = super::bench_tool::arm(c).await {
-        c.skip("bench.workspace.tool_roundtrip", &why);
-        return None;
-    }
-    let thread = format!("w-{ws}");
-    let marker = format!("{}-tool", c.prefix());
-    let no_model: Arc<Mutex<Option<String>>> = Default::default();
-    let nm = no_model.clone();
-    let sid = thread.clone();
-    c.step("bench.workspace.tool_roundtrip", TOOL_CEILING, move |c| {
-        async move {
-            let (_child, port) = forward(c).await?;
-            let (status, row) = through_with(port, reqwest::Method::POST, &format!("/workspaces/{ws}/session"), None).await?;
-            if status != 200 && status != 201 {
-                bail!("POST /workspaces/{ws}/session answered {status}: {}", super::clip(&row));
-            }
-            // Two tries: a model may answer without calling the tool; a second miss is a failure.
-            let mut last = Ok(());
-            for _ in 0..2 {
-                one_turn(port, &sid, &tool_prompt(&marker), &nm).await?;
-                // Read by the workspace route, which is the thread file under the bench folder's
-                // own `workspaces/{ws}/` — `~/.bench`, never a `/bench` mount.
-                let (status, body) = through(port, &format!("/workspaces/{ws}/messages")).await?;
-                if status != 200 {
-                    bail!("GET /workspaces/{ws}/messages answered {status}");
-                }
-                last = tool_ran(&body, &marker);
-                if last.is_ok() {
-                    break;
-                }
-            }
-            last
-        }
-        .boxed()
-    })
-    .await;
-    if let Some(why) = no_model.lock().unwrap().clone() {
-        c.demote_to_skip("bench.workspace.tool_roundtrip", &format!("{NO_MODEL}: {}", super::clip(&why)));
-    }
-    Some(thread)
 }
 
 fn tool_workspace(ws: Option<String>, ready: bool) -> std::result::Result<String, &'static str> {
@@ -618,92 +456,88 @@ fn tool_workspace(ws: Option<String>, ready: bool) -> std::result::Result<String
     }
 }
 
-/// A successful tool result carrying the marker: the echo ran and its output came back. The call's
-/// own arguments hold the marker too, which is why only a `toolResult` counts.
-fn tool_ran(body: &str, marker: &str) -> Result<()> {
-    let doc: Value = serde_json::from_str(body).context("parsing messages")?;
-    let results: Vec<&Value> = doc["messages"].as_array().into_iter().flatten().filter(|m| m["role"] == "toolResult").collect();
-    let ran = results.iter().any(|m| {
-        m["isError"] != Value::Bool(true)
-            && m["content"].as_array().into_iter().flatten().filter_map(|c| c["text"].as_str()).any(|t| t.contains(marker))
-    });
-    if !ran {
-        // What each result actually said, so the next fleet failure names its cause: the thread is
-        // deleted at teardown and cannot be read afterwards. Only `isError` and the text parts —
-        // never the whole message, whose other fields are not ours to vouch for.
-        let seen: Vec<String> = results
-            .iter()
-            .map(|m| {
-                let text: String = m["content"].as_array().into_iter().flatten().filter_map(|c| c["text"].as_str()).collect();
-                format!("isError={} {:?}", m["isError"], text.chars().take(300).collect::<String>())
-            })
-            .collect();
-        bail!("no successful tool result carries {marker} ({} tool results: {})", results.len(), seen.join("; "));
+/// A line starting `t:` is a tool call, `r:` its result (`kl-sessions`' own transcript prefixes,
+/// `docs/superpowers/specs/2026-10-05-claude-code-bench-design.md`).
+fn claude_tool_ran(state: &Value, ws: &str) -> Result<()> {
+    let lines = state[ws]["lines"].as_array().context("no lines for the workspace session in /state")?;
+    let text: Vec<&str> = lines.iter().filter_map(Value::as_str).collect();
+    if !text.iter().any(|l| l.starts_with("t:")) {
+        bail!("no tool call in the transcript: {}", super::clip(&text.join("\n")));
+    }
+    if !text.iter().any(|l| l.starts_with("r:")) {
+        bail!("no tool result in the transcript: {}", super::clip(&text.join("\n")));
     }
     Ok(())
 }
 
-const TEARDOWN_BOUND: Duration = Duration::from_secs(10);
-
-#[cfg(test)]
-struct AbortOnDrop<T>(tokio::task::JoinHandle<T>);
-#[cfg(test)]
-impl<T> Drop for AbortOnDrop<T> {
-    fn drop(&mut self) {
-        self.0.abort();
+/// `bench.claude.tool_roundtrip`: `POST /send` on the probe workspace asks the agent to read the
+/// workspace's README, and `/state` shows a tool call answered from the workspace.
+async fn claude_tool_roundtrip(c: &mut Ctx) {
+    const ID: &str = "bench.claude.tool_roundtrip";
+    const PROMPT: &str = "Use the read tool to read this workspace's README.md and summarize it in one sentence.";
+    let ws = match tool_workspace(c.state.ux_workspace.clone(), c.state.ux_ready) {
+        Ok(ws) => ws,
+        Err(why) => return c.skip(ID, why),
+    };
+    if c.kube.is_none() {
+        return c.skip(ID, "no kubeconfig");
     }
-}
-
-async fn delete_session(port: u16, sid: &str, bound: Duration) -> Result<(u16, String)> {
-    tokio::time::timeout(bound, through_with(port, reqwest::Method::DELETE, &format!("/sessions/{sid}"), Some(json!({"stop": true}))))
-        .await
-        .map_err(|_| anyhow!("DELETE session did not answer within {} s", bound.as_secs()))?
-}
-
-/// Deletes every session this stage opened, best-effort: teardown never fails the run, only warns.
-async fn drop_sessions(c: &Ctx, ids: impl IntoIterator<Item = String>) {
-    let Ok((_child, port)) = forward(c).await else { return };
-    for sid in ids {
-        if let Err(e) = delete_session(port, &sid, TEARDOWN_BOUND).await {
-            tracing::warn!(session = %sid, error = %format!("{e:#}"), "slo.bench.session.teardown");
+    c.step(ID, CLAUDE_TOOL_CEILING, move |c| {
+        async move {
+            wait_phase(c, "ready", START_WAIT).await.context("the bench is not ready")?;
+            send(c, &ws, PROMPT).await?;
+            wait_not_busy(c, CLAUDE_TOOL_CEILING).await?;
+            let state = state(c).await?;
+            claude_tool_ran(&state, &ws)
         }
-    }
+        .boxed()
+    })
+    .await;
 }
 
-const NO_MODEL: &str = "no model credential in the probe tenant";
+/// The deny hook's own wording (`bench/mod/hooks/register.tsx`): a built-in tool call is refused,
+/// never run, and the refusal reaches the transcript carrying this substring.
+const BUILTIN_DENY_MARKER: &str = "no local tools";
 
-/// Each session's id and message total, in list order — the stable projection compared across a
-/// sleep/wake. `lastActive` and other row fields legitimately change on wake (raw JSON does not
-/// round-trip identically), so the comparison must not use it; ids and totals must.
-async fn history(port: u16) -> Result<Vec<(String, Option<u64>)>> {
-    let (status, list) = through(port, "/sessions").await?;
-    if status != 200 {
-        bail!("GET /sessions answered {status}");
-    }
-    let rows: Vec<Value> = serde_json::from_str(&list).context("parsing /sessions")?;
-    let mut out = Vec::with_capacity(rows.len());
-    for row in &rows {
-        let id = row["id"].as_str().context("session row missing id")?.to_string();
-        let total = total_of(&through(port, &format!("/sessions/{id}/messages")).await?.1);
-        out.push((id, total));
-    }
-    Ok(out)
-}
-
-/// Fails on a dropped/renamed session or a changed message total; passes on anything else
-/// (row order and any field the projection dropped, e.g. `lastActive`, are not compared).
-fn diff_history(before: &[(String, Option<u64>)], after: &[(String, Option<u64>)]) -> Result<()> {
-    let before_ids: Vec<&str> = before.iter().map(|(id, _)| id.as_str()).collect();
-    let after_ids: Vec<&str> = after.iter().map(|(id, _)| id.as_str()).collect();
-    if before_ids != after_ids {
-        bail!("session ids changed: {before_ids:?} before, {after_ids:?} after");
-    }
-    for ((id, b), (_, a)) in before.iter().zip(after.iter()) {
-        if b != a {
-            bail!("session {id}: {b:?} messages before, {a:?} after");
-        }
+fn builtin_denied(state: &Value, ws: &str) -> Result<()> {
+    let lines = state[ws]["lines"].as_array().context("no lines for the workspace session in /state")?;
+    let text: Vec<&str> = lines.iter().filter_map(Value::as_str).collect();
+    if !text.iter().any(|l| l.contains(BUILTIN_DENY_MARKER)) {
+        bail!("the built-in tool was not refused: {}", super::clip(&text.join("\n")));
     }
     Ok(())
+}
+
+/// `bench.builtin.refused`: a prompt forcing the built-in Bash tool is denied, never run.
+async fn builtin_refused(c: &mut Ctx) {
+    const ID: &str = "bench.builtin.refused";
+    const PROMPT: &str = "Use the Bash tool to run the command: echo hi";
+    let ws = match tool_workspace(c.state.ux_workspace.clone(), c.state.ux_ready) {
+        Ok(ws) => ws,
+        Err(why) => return c.skip(ID, why),
+    };
+    if c.kube.is_none() {
+        return c.skip(ID, "no kubeconfig");
+    }
+    c.step(ID, BUILTIN_REFUSED_CEILING, move |c| {
+        async move {
+            wait_phase(c, "ready", START_WAIT).await.context("the bench is not ready")?;
+            send(c, &ws, PROMPT).await?;
+            wait_not_busy(c, BUILTIN_REFUSED_CEILING).await?;
+            let state = state(c).await?;
+            builtin_denied(&state, &ws)
+        }
+        .boxed()
+    })
+    .await;
+}
+
+/// Dispatched from `experience.rs`'s two arms (ruling 3, task 9 fix round 1): kube-exec has no
+/// contention with the tunnel, so unlike the retired `bench.workspace.tool_roundtrip` these need
+/// no `suite::wait_for_group` coordination.
+pub async fn claude_tools(c: &mut Ctx) {
+    claude_tool_roundtrip(c).await;
+    builtin_refused(c).await;
 }
 
 pub async fn weekly(c: &mut Ctx) {
@@ -723,154 +557,39 @@ mod tests {
     use kloudlite_workspaces::history::slo::RunState;
 
     #[test]
-    fn stub_health_and_totals_read() {
-        assert!(is_stub("ok stub running"));
-        assert!(!is_stub("{\"clients\":0}"));
-        let real = "{\"ok\":true,\"readOnly\":false,\"writable\":true,\"reason\":null,\"clients\":0,\"busy\":false}";
-        assert!(!is_stub(real) && health_ok(real));
-        assert!(health_ok("ok stub running"));
-        assert!(!health_ok("{\"ok\":false}") && !health_ok("oops") && !health_ok("{\"ok\":\"true\"}"));
-        assert_eq!(total_of("{\"messages\":[],\"total\": 12}"), Some(12));
+    fn term_origin_swaps_scheme_and_drops_the_path() {
+        assert_eq!(term_origin("wss://ws-blr.khost.dev/tunnel/abc").unwrap(), "https://ws-blr.khost.dev");
+        assert_eq!(term_origin("ws://ws-blr.khost.dev/tunnel/abc").unwrap(), "http://ws-blr.khost.dev");
+        assert!(term_origin("not-a-url").is_err());
     }
 
     #[test]
-    fn history_diff_ignores_volatile_fields_but_catches_a_real_loss() {
-        let before = vec![("s-1".to_string(), Some(3)), ("s-2".to_string(), Some(0))];
-        // Same ids and totals: a wake that only touched lastActive/ordering-irrelevant fields passes.
-        assert!(diff_history(&before, &before.clone()).is_ok());
+    fn status_body_parses_and_state_diff_catches_drift() {
+        assert_eq!(parse_status_body("200\n{\"ok\":true}\n").unwrap(), (200, "{\"ok\":true}".to_string()));
+        assert_eq!(parse_status_body("0\nTypeError: fetch failed").unwrap().0, 0);
+        assert!(parse_status_body("").is_err());
 
-        let dropped = vec![("s-1".to_string(), Some(3))];
-        assert!(diff_history(&before, &dropped).unwrap_err().to_string().contains("session ids changed"));
-
-        let changed_total = vec![("s-1".to_string(), Some(3)), ("s-2".to_string(), Some(5))];
-        let err = diff_history(&before, &changed_total).unwrap_err().to_string();
-        assert!(err.contains("s-2") && err.contains("Some(0) messages before, Some(5) after"));
+        let before = json!({"s-1": {"lines": ["u:hi", "r:ok"]}, "s-2": {"lines": []}});
+        assert!(diff_state(&before, &before).is_ok());
+        let dropped = json!({"s-1": {"lines": ["u:hi", "r:ok"]}});
+        assert!(diff_state(&before, &dropped).unwrap_err().to_string().contains("session ids changed"));
+        let changed = json!({"s-1": {"lines": ["u:hi", "r:ok"]}, "s-2": {"lines": ["u:new"]}});
+        assert!(diff_state(&before, &changed).unwrap_err().to_string().contains("s-2"));
     }
 
-    /// A local listener that answers `/healthz` chunked (split across writes, the exact shape
-    /// from the fleet evidence) and one that answers with `Content-Length` instead; `through`
-    /// must read the JSON body correctly either way, and `health_ok` must see `ok==true`.
-    #[tokio::test]
-    async fn through_decodes_chunked_and_content_length_bodies() {
-        use tokio::io::AsyncWriteExt;
-        use tokio::net::TcpListener;
+    #[test]
+    fn transcripts_are_judged_by_their_prefixes() {
+        let state = json!({"w-1": {"lines": ["u:summarize", "t:read(README.md)", "r:ok summary"]}});
+        assert!(claude_tool_ran(&state, "w-1").is_ok());
+        assert!(claude_tool_ran(&json!({"w-1": {"lines": ["u:hi"]}}), "w-1").is_err());
 
-        async fn serve_once(listener: TcpListener, response: &'static [u8]) {
-            let (mut sock, _) = listener.accept().await.unwrap();
-            let mut buf = [0u8; 1024];
-            let _ = tokio::io::AsyncReadExt::read(&mut sock, &mut buf).await;
-            // Split the write so a body straddling two reads is exercised too.
-            let mid = response.len() / 2;
-            sock.write_all(&response[..mid]).await.unwrap();
-            tokio::task::yield_now().await;
-            sock.write_all(&response[mid..]).await.unwrap();
-            sock.shutdown().await.unwrap();
-        }
+        let denied = json!({"w-1": {"lines": ["u:echo hi", "s:This bench runs no local tools; use the workspace's tools (mcp__kloudlite__*) instead."]}});
+        assert!(builtin_denied(&denied, "w-1").is_ok());
+        assert!(builtin_denied(&json!({"w-1": {"lines": ["u:echo hi", "r:hi"]}}), "w-1").is_err());
 
-        let chunked = b"HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\nConnection: close\r\n\r\n\
-            5f\r\n{\"ok\":true,\"readOnly\":false,\"writable\":true,\"clients\":0,\"busy\":false,\"idleSince\":1789355813019}\r\n0\r\n\r\n";
-        let listener = TcpListener::bind(("127.0.0.1", 0)).await.unwrap();
-        let port = listener.local_addr().unwrap().port();
-        tokio::spawn(serve_once(listener, chunked));
-        let (status, body) = through(port, "/healthz").await.unwrap();
-        assert_eq!(status, 200);
-        assert!(health_ok(&body), "chunked body did not parse as ok: {body}");
-
-        let cl_body = b"{\"ok\":true}";
-        let cl_response: Vec<u8> = format!(
-            "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
-            cl_body.len(),
-            std::str::from_utf8(cl_body).unwrap()
-        )
-        .into_bytes();
-        let listener = TcpListener::bind(("127.0.0.1", 0)).await.unwrap();
-        let port = listener.local_addr().unwrap().port();
-        let leaked: &'static [u8] = Box::leak(cl_response.into_boxed_slice());
-        tokio::spawn(serve_once(listener, leaked));
-        let (status, body) = through(port, "/healthz").await.unwrap();
-        assert_eq!(status, 200);
-        assert!(health_ok(&body));
-
-        assert!(!health_ok("{\"ok\":false}"));
-    }
-
-    /// A ttyd-shaped server: it answers the subprotocol, expects the auth frame first, expects
-    /// input prefixed with `0`, replies with `1` (title) and `2` (prefs) before any output, and
-    /// ENDS BY CLOSING — there is no exit frame anywhere in this path. Every one of those cost a
-    /// timeout on a healthy shell before 2026-09-18.
-    #[tokio::test]
-    async fn a_shell_exchange_speaks_ttyds_frames_and_ends_on_the_close() {
-        use futures::SinkExt;
-        let listener = tokio::net::TcpListener::bind(("127.0.0.1", 0)).await.unwrap();
-        let port = listener.local_addr().unwrap().port();
-        let seen: Arc<Mutex<Vec<String>>> = Default::default();
-        let heard = seen.clone();
-        tokio::spawn(async move {
-            let (stream, _) = listener.accept().await.unwrap();
-            // `result_large_err`: the error type is tungstenite's own handshake response, fixed by
-            // the callback's signature — there is nothing here to box.
-            #[allow(clippy::result_large_err)]
-            let on_handshake = |req: &tokio_tungstenite::tungstenite::handshake::server::Request,
-                                mut res: tokio_tungstenite::tungstenite::handshake::server::Response| {
-                // ttyd refuses a socket that does not ask for `tty`; the probe must offer it.
-                let offered = req.headers().get("sec-websocket-protocol").and_then(|v| v.to_str().ok()).unwrap_or_default().to_string();
-                heard.lock().unwrap().push(format!("subprotocol:{offered}"));
-                res.headers_mut().insert("sec-websocket-protocol", "tty".parse().unwrap());
-                Ok::<_, tokio_tungstenite::tungstenite::handshake::server::ErrorResponse>(res)
-            };
-            let mut ws = tokio_tungstenite::accept_hdr_async(stream, on_handshake)
-            .await
-            .unwrap();
-            while let Some(Ok(msg)) = ws.next().await {
-                match msg {
-                    Message::Text(t) => heard.lock().unwrap().push(format!("auth:{t}")),
-                    Message::Binary(b) => {
-                        heard.lock().unwrap().push(format!("input:{}", String::from_utf8_lossy(&b)));
-                        // Title and preferences first, as ttyd does, then the output, then close.
-                        let _ = ws.send(Message::binary(b"1a title".to_vec())).await;
-                        let _ = ws.send(Message::binary(b"2{\"prefs\":1}".to_vec())).await;
-                        let _ = ws.send(Message::binary(b"0kl-ok\r\n".to_vec())).await;
-                        let _ = ws.close(None).await;
-                        return;
-                    }
-                    _ => {}
-                }
-            }
-        });
-        let (out, code) = pty_shell(port, "bench", "printf ok\n").await.unwrap();
-        // The close is the end, not an exit frame — waiting for one is what held the socket open
-        // for the whole ceiling while the shell had already answered.
-        assert_eq!(code, 0);
-        assert!(out.contains("kl-ok"), "the output frame was not read: {out:?}");
-        assert!(!out.contains("a title") && !out.contains("prefs"), "a non-output frame reached the judgement: {out:?}");
-        let seen = seen.lock().unwrap().clone();
-        assert!(seen.iter().any(|s| s == "subprotocol:tty"), "{seen:?}");
-        assert!(seen.iter().any(|s| s.starts_with("auth:") && s.contains("AuthToken") && s.contains("columns")), "{seen:?}");
-        assert!(seen.iter().any(|s| s.starts_with("input:0")), "input must carry ttyd's `0` opcode: {seen:?}");
-    }
-
-    #[tokio::test]
-    async fn teardown_delete_returns_within_its_bound_against_a_silent_bench() {
-        let listener = tokio::net::TcpListener::bind(("127.0.0.1", 0)).await.unwrap();
-        let port = listener.local_addr().unwrap().port();
-        tokio::spawn(async move {
-            let _held = listener.accept().await;
-            std::future::pending::<()>().await
-        });
-        let start = Instant::now();
-        assert!(delete_session(port, "s-1", Duration::from_millis(200)).await.is_err());
-        assert!(start.elapsed() < Duration::from_secs(2));
-    }
-
-    #[tokio::test]
-    async fn abort_on_drop_cancels_the_task() {
-        let (tx, rx) = tokio::sync::oneshot::channel::<()>();
-        let guard = AbortOnDrop(tokio::spawn(async move {
-            let _tx = tx;
-            std::future::pending::<()>().await
-        }));
-        drop(guard);
-        assert!(rx.await.is_err(), "the task still holds its sender");
+        assert!(tool_workspace(None, true).is_err());
+        assert!(tool_workspace(Some("w".into()), false).unwrap_err().contains("ws.packages.add"));
+        assert_eq!(tool_workspace(Some("w".into()), true).unwrap(), "w");
     }
 
     #[test]
@@ -878,37 +597,14 @@ mod tests {
         use kloudlite_workspaces::slo::catalogue::find;
         for (id, cap) in [
             ("shell.up", SHELL_CEILING),
-            ("bench.workspace.tool_roundtrip", TOOL_CEILING),
+            ("bench.claude.tool_roundtrip", CLAUDE_TOOL_CEILING),
             ("bench.start.p95", START_CEILING),
             ("bench.tunnel", TUNNEL_CEILING),
             ("bench.idle.wake", WAKE_CEILING),
         ] {
-            assert!(cap.as_millis() >= find(id).unwrap().target.max_ms.unwrap() as u128, "{id}");
+            assert!(cap.as_millis() >= find(id).unwrap().target.max_ms.unwrap_or(0) as u128, "{id}");
         }
     }
-
-    #[test]
-    fn a_tool_turn_is_judged_from_its_result_not_its_call() {
-        let m = "run-abc-tool";
-        let call = json!({"role": "assistant", "content": [{"type": "toolCall", "id": "t1", "name": "bash", "arguments": {"command": format!("echo {m}")}}]});
-        let ok = json!({"messages": [call, {"role": "toolResult", "toolCallId": "t1", "isError": false, "content": [{"type": "text", "text": m}]}]});
-        assert!(tool_ran(&ok.to_string(), m).is_ok());
-        // The marker only in the call: the tool never answered.
-        assert!(tool_ran(&json!({"messages": [call]}).to_string(), m).is_err());
-        let failed = json!({"messages": [call, {"role": "toolResult", "toolCallId": "t1", "isError": true, "content": [{"type": "text", "text": format!("{m}\n[exit 1]")}]}]});
-        let why = tool_ran(&failed.to_string(), m).unwrap_err().to_string();
-        // The failure carries what the tool said, so a fleet run names its cause.
-        assert!(why.contains("isError=true") && why.contains("[exit 1]"), "{why}");
-        assert!(tool_workspace(None, true).is_err());
-        assert!(tool_workspace(Some("w".into()), false).unwrap_err().contains("ws.packages.add"));
-        assert_eq!(tool_workspace(Some("w".into()), true).unwrap(), "w");
-        assert!(tool_prompt(m).contains(m));
-
-        // The sign-in answer is an ordinary failed round trip now that the probe mints the token.
-        let login = json!({"role": "toolResult", "toolCallId": "t1", "isError": false, "content": [{"type": "text", "text": "sign in on the Kloudlite desktop app"}]});
-        assert!(tool_ran(&json!({"messages": [call, login]}).to_string(), m).is_err());
-    }
-
 
     #[tokio::test]
     async fn a_stub_bench_and_the_reschedule_drill_reach_the_run_row_as_skipped() {

@@ -421,7 +421,6 @@ mod tests {
             ids.iter().all(|id| id.starts_with("bench.") || id.starts_with("shell.")),
             "{ids:?}"
         );
-        assert!(!ids.contains(&"bench.workspace.tool_roundtrip"), "group 0 walks that one");
         // An ungrouped run — every fast run, and a hand-run hourly — still gets the whole journey.
         assert_eq!(run_journey(Suite::Hourly, None).len(), journey_of(Suite::Hourly).len());
     }

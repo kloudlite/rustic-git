@@ -357,39 +357,6 @@ impl Ctx {
         Ok(self.jwt.mint_bench_session(owner, bench, &self.cfg.region).map_err(|e| anyhow::anyhow!("mint bench session: {e}"))?.0)
     }
 
-    /// Mint a `bench-tool` token for `owner`'s bench under `team` (personal bench: `team == owner`)
-    /// and apply its Secret into the bench namespace — what the deleted `POST /v1/bench/tool-token`
-    /// route did, now minted straight from the probe's `kloudlite-jwt` the way the api's resync beat
-    /// does (`api::workspaces::keys::mint_bench_tool_secret`). Never log the token itself: an apply
-    /// error is reported by kind only, same rule as that function's own comment.
-    pub async fn mint_bench_tool(&self, owner: &str, team: &str) -> anyhow::Result<()> {
-        let k = self.kube.clone().ok_or_else(|| anyhow::anyhow!("no kubeconfig"))?;
-        let id = kloudlite_workspaces::crd::bench_id(owner, team);
-        let ns = kloudlite_workspaces::crd::ws_namespace(owner, team);
-        const BENCH_TOOL_TTL_SECS: u64 = 15 * 60;
-        let (token, claims) = self
-            .jwt
-            .mint_bench_tool(owner, team, &id, BENCH_TOOL_TTL_SECS)
-            .map_err(|e| anyhow::anyhow!("mint bench tool: {e}"))?;
-        let secret = kloudlite_workspaces::k8s::bench_tool_secret(&ns, &token, claims.exp);
-        let api: kube::Api<k8s_openapi::api::core::v1::Secret> = kube::Api::namespaced(k, &ns);
-        api.patch(
-            kloudlite_workspaces::k8s::BENCH_TOOL_SECRET,
-            &kube::api::PatchParams::apply("kloudlite-slo").force(),
-            &kube::api::Patch::Apply(&secret),
-        )
-        .await
-        .map_err(|e| {
-            // Kind, never text: an apply error can quote the request body, which holds the token.
-            let kind = match &e {
-                kube::Error::Api(ae) => format!("api {}", ae.code),
-                _ => "transport".to_string(),
-            };
-            anyhow::anyhow!("apply bench-tool secret: {kind}")
-        })?;
-        Ok(())
-    }
-
     pub fn bearer(&self, token: &str) -> String {
         format!("Bearer {token}")
     }
