@@ -639,7 +639,6 @@ pub(crate) async fn bench_tool_check(
     }
     match bench_credential_admission(state, claims).await? {
         BenchCredentialAdmission::Live => {}
-        BenchCredentialAdmission::ParentRevoked => return Ok(Err("parent")),
         BenchCredentialAdmission::BenchInactive => return Ok(Err("bench")),
     }
     Ok(Ok(Caller {
@@ -654,17 +653,16 @@ pub(crate) async fn bench_tool_check(
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum BenchCredentialAdmission {
     Live,
-    ParentRevoked,
     BenchInactive,
 }
 
+/// A beat-minted bench-tool token has no login credential behind it to ask `is_live` about:
+/// liveness is the beat not minting for a paused member or a stopped bench, the short expiry, and
+/// this check alone.
 pub async fn bench_credential_admission(
     state: &ApiState,
     claims: &kloudlite_core::jwt::BenchToolClaims,
 ) -> Result<BenchCredentialAdmission, Response> {
-    if !cli_token_live(state, &claims.parent).await {
-        return Ok(BenchCredentialAdmission::ParentRevoked);
-    }
     let benches: Api<crd::Workspace> = Api::all(kube(state)?.clone());
     let bench = benches.get_opt(&claims.bench).await.map_err(kube_err)?;
     if !bench.is_some_and(|b| bench_admits_tool(&b, &claims.sub, &claims.team)) {
@@ -1054,12 +1052,11 @@ mod bench_tool_check_tests {
         }
     }
 
-    fn claims(parent: &str) -> BenchToolClaims {
+    fn claims() -> BenchToolClaims {
         BenchToolClaims {
             sub: "alice".into(),
             team: "acme".into(),
             bench: "b1".into(),
-            parent: parent.into(),
             jti: "0123456789abcdef".into(),
             iat: 0,
             exp: u64::MAX,
@@ -1091,12 +1088,11 @@ mod bench_tool_check_tests {
     #[tokio::test]
     async fn each_gate_refuses_with_its_own_reason() {
         let good = || spec("alice", "acme", "running", "full");
-        let ok = reason(&claims("live"), Method::GET, "/v1/workspaces", good()).await.unwrap();
+        let ok = reason(&claims(), Method::GET, "/v1/workspaces", good()).await.unwrap();
         assert_eq!((ok.name.as_str(), ok.scope.as_deref(), ok.jti8.as_deref()), ("alice", Some("acme"), Some("01234567")));
         assert!(ok.parent.is_none());
 
-        assert_eq!(reason(&claims("live"), Method::POST, "/v1/workspaces/w1/ssh-session", good()).await.err(), Some("audience"));
-        assert_eq!(reason(&claims("revoked"), Method::GET, "/v1/workspaces", good()).await.err(), Some("parent"));
+        assert_eq!(reason(&claims(), Method::POST, "/v1/workspaces/w1/ssh-session", good()).await.err(), Some("audience"));
         for (sp, why) in [
             (spec("alice", "acme", "stopped", "full"), "stopped"),
             (spec("alice", "acme", "running", "readOnly"), "stored read-only"),
@@ -1107,8 +1103,54 @@ mod bench_tool_check_tests {
             (spec("alice", "acme", "running", "full").map(|mut v| { v.as_object_mut().unwrap().remove("bench"); v }), "not a bench"),
             (None, "missing"),
         ] {
-            assert_eq!(reason(&claims("live"), Method::GET, "/v1/workspaces", sp).await.err(), Some("bench"), "{why}");
+            assert_eq!(reason(&claims(), Method::GET, "/v1/workspaces", sp).await.err(), Some("bench"), "{why}");
         }
+    }
+
+    /// A beat-minted token has no login credential: admission must stay `Live` even when the
+    /// directory would refuse the bench id outright, because nothing here ever asks it to.
+    #[tokio::test]
+    async fn admission_does_not_depend_on_directory_liveness() {
+        struct NeverLive;
+        #[async_trait::async_trait]
+        impl Directory for NeverLive {
+            async fn teams_for(&self, _u: &str) -> Vec<String> {
+                Vec::new()
+            }
+            async fn is_live(&self, _j: &str) -> bool {
+                false
+            }
+            async fn for_owner(&self, _o: &str) -> Option<OwnerMaterial> {
+                None
+            }
+            async fn authorized_keys_for_owner(&self, _o: &str) -> Option<String> {
+                None
+            }
+            async fn owners_of(&self, _e: &str) -> Vec<String> {
+                Vec::new()
+            }
+            async fn team_role(&self, _u: &str, _t: &str) -> Option<TeamRole> {
+                None
+            }
+            async fn is_team(&self, _s: &str) -> bool {
+                true
+            }
+            async fn ensure_user(&self, _e: &str, _n: &str, _u: &str) -> Result<(), String> {
+                Err("no".into())
+            }
+            async fn add_superadmin(&self, _e: &str, _b: &str) -> Result<(), String> {
+                Err("no".into())
+            }
+        }
+        let routes = vec![crate::kube_test::get(
+            "/apis/kloudlite.io/v1alpha1/workspaces/b1",
+            serde_json::json!({"apiVersion": "kloudlite.io/v1alpha1", "kind": "Workspace", "metadata": {"name": "b1"},
+                "spec": spec("alice", "acme", "running", "full").unwrap()}),
+        )];
+        let (client, _) = crate::kube_test::mock_client(routes);
+        let jwt = Arc::new(Jwt::new("test-secret-that-is-at-least-32-bytes-long").unwrap());
+        let s = ApiState::new(jwt).with_kube(client).with_directory(Arc::new(NeverLive));
+        assert_eq!(bench_credential_admission(&s, &claims()).await.unwrap(), BenchCredentialAdmission::Live);
     }
 }
 
@@ -1159,7 +1201,7 @@ mod workspace_tool_tests {
         let (cli, _) = s.jwt.mint_cli("a@b.c", "A", Some("a")).unwrap();
         assert!(gate(&s, &cli, Method::GET, "/v1/workspaces/w1").is_none());
         assert!(gate(&s, "not-a-token", Method::GET, "/v1/workspaces/w1").is_none());
-        let (bench, _) = s.jwt.mint_bench_tool("alice", "acme", "b1", "p", 900).unwrap();
+        let (bench, _) = s.jwt.mint_bench_tool("alice", "acme", "b1", 900).unwrap();
         assert!(gate(&s, &bench, Method::GET, "/v1/workspaces/w1").is_none());
     }
 }

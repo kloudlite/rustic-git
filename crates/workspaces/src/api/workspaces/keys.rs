@@ -234,7 +234,9 @@ pub(crate) async fn write_user_key(s: &ApiState, c: &kube::Client, ns: &str, own
                 Refusal::Fault => {}
             }
         }
-        tracing::warn!(%owner, error = %e, "key.install.failed");
+        // The kind, never the text: this apply carries the provider token too now, and a kube
+        // error can quote the request body.
+        tracing::warn!(%owner, error = crate::api::bench::kube_kind(&e), "key.install.failed");
         return;
     }
 }
@@ -283,6 +285,12 @@ const BENCH_TOOL_BEAT_TTL_SECS: u64 = crate::api::keys::KEYS_RESYNC_SECS * 3;
 /// old on-demand `POST /v1/bench/tool-token` route: the beat now mints it the same place it mints
 /// everything else in this namespace's `user-key` Secret, so a bench never has to call out for one.
 async fn project_bench_tools(s: &ApiState, c: &kube::Client, ns: &str, owner: &str) {
+    // ponytail: a fresh cluster-wide list per owner namespace per beat, while `project_all`
+    // (keys/mod.rs) already listed every Workspace once this pass. Threading that list down here
+    // would mean a `&[crd::Workspace]` parameter through `project_all` -> `refresh_user_key_secrets`
+    // -> `write_user_key` -> this function, and `project_all` keeping full objects instead of the
+    // `WorkspaceSpec`s it reduces to today — real surgery on a function other call sites share, not
+    // a local fix. Left as its own list; revisit if the beat's list volume ever matters.
     let sel = ListParams::default().labels(&format!("{}={owner}", crate::k8s::OWNER_LABEL));
     let benches = match Api::<crd::Workspace>::all(c.clone()).list(&sel).await {
         Ok(l) => l.items,
@@ -291,12 +299,19 @@ async fn project_bench_tools(s: &ApiState, c: &kube::Client, ns: &str, owner: &s
             return;
         }
     };
-    for w in benches.into_iter().filter(|w| crd::is_bench(w) && crd::ws_namespace(owner, &w.spec.team) == ns) {
+    // The label selected these, but a label is a view (CLAUDE.md): re-check `spec.owner` itself
+    // before minting a credential off this list.
+    for w in benches.into_iter().filter(|w| {
+        crd::is_bench(w)
+            && w.spec.owner == owner
+            && crd::ws_namespace(owner, &w.spec.team) == ns
+            && w.spec.desired_state != crd::DesiredState::Stopped
+    }) {
         if crate::api::bench::bench_paused(&w) {
             continue;
         }
         let id = w.metadata.name.clone().unwrap_or_default();
-        let (token, claims) = match s.jwt.mint_bench_tool(owner, &w.spec.team, &id, &id, BENCH_TOOL_BEAT_TTL_SECS) {
+        let (token, claims) = match s.jwt.mint_bench_tool(owner, &w.spec.team, &id, BENCH_TOOL_BEAT_TTL_SECS) {
             Ok(t) => t,
             Err(e) => {
                 tracing::warn!(%owner, bench = %id, error = %e, "bench-tool-token.mint.failed");
@@ -313,7 +328,9 @@ async fn project_bench_tools(s: &ApiState, c: &kube::Client, ns: &str, owner: &s
             )
             .await
         {
-            tracing::warn!(%owner, bench = %id, error = %e, "bench-tool-secret.install.failed");
+            // The kind, never the text: an apply error can quote the request body, which holds the
+            // token (same exposure the deleted on-demand route guarded against).
+            tracing::warn!(%owner, bench = %id, error = crate::api::bench::kube_kind(&e), "bench-tool-secret.install.failed");
         }
     }
 }
@@ -354,26 +371,38 @@ mod tests {
     }
 
     /// Replaces the old on-demand `POST /v1/bench/tool-token` route: the beat mints the same
-    /// Secret for every un-paused bench it finds in the namespace.
+    /// Secret for every un-paused bench it finds in the namespace, and the token it mints is one
+    /// `bench_credential_admission` actually admits — not merely a well-signed one.
     #[tokio::test]
     async fn the_keys_beat_writes_a_bench_tool_secret_for_the_bench() {
         let ns = crate::crd::ws_namespace("alice", "acme");
-        let list = serde_json::json!({"apiVersion": "kloudlite.io/v1alpha1", "kind": "WorkspaceList", "metadata": {}, "items": [bench_ws("alice", "acme", "full")]});
+        let bench = bench_ws("alice", "acme", "full");
+        let list = serde_json::json!({"apiVersion": "kloudlite.io/v1alpha1", "kind": "WorkspaceList", "metadata": {}, "items": [bench.clone()]});
+        let bench_id = crate::crd::bench_id("alice", "acme");
         let (client, rec) = crate::kube_test::mock_client(vec![
             crate::kube_test::get("/apis/kloudlite.io/v1alpha1/workspaces", list),
             crate::kube_test::patch(format!("/api/v1/namespaces/{ns}/secrets/bench-tool"), serde_json::json!({"apiVersion": "v1", "kind": "Secret", "metadata": {"name": "bench-tool"}})),
+            crate::kube_test::get(format!("/apis/kloudlite.io/v1alpha1/workspaces/{bench_id}"), bench),
         ]);
         let jwt = std::sync::Arc::new(kloudlite_core::jwt::Jwt::new("test-secret-that-is-at-least-32-bytes-long").unwrap());
         let s = ApiState::new(jwt.clone());
         project_bench_tools(&s, &client, &ns, "alice").await;
         let sent = rec.sent("PATCH", &format!("/api/v1/namespaces/{ns}/secrets/bench-tool"));
         assert_eq!(sent.len(), 1);
+        assert!(sent[0]["metadata"]["annotations"]["kloudlite.io/exp"].as_str().unwrap().parse::<u64>().is_ok());
         let token = sent[0]["stringData"]["token"].as_str().unwrap();
-        assert!(jwt.verify_bench_tool(token).is_ok());
+        let claims = jwt.verify_bench_tool(token).unwrap();
+        assert_eq!((claims.sub.as_str(), claims.team.as_str(), claims.bench.as_str()), ("alice", "acme", bench_id.as_str()));
+
+        assert_eq!(
+            crate::api::bench_credential_admission(&ApiState::new(jwt).with_kube(client), &claims).await.unwrap(),
+            crate::api::BenchCredentialAdmission::Live,
+        );
     }
 
     /// `spec.access` is written only by the keys beat; a paused bench must not keep getting a
-    /// fresh tool token out from under a revoked member.
+    /// fresh tool token out from under a revoked member. The LIST itself must have succeeded, or
+    /// this would pass vacuously on an outage too.
     #[tokio::test]
     async fn a_paused_member_gets_no_bench_tool_secret() {
         let ns = crate::crd::ws_namespace("alice", "acme");
@@ -382,7 +411,60 @@ mod tests {
         let jwt = std::sync::Arc::new(kloudlite_core::jwt::Jwt::new("test-secret-that-is-at-least-32-bytes-long").unwrap());
         let s = ApiState::new(jwt);
         project_bench_tools(&s, &client, &ns, "alice").await;
+        assert!(rec.calls().iter().any(|c| c.contains("/apis/kloudlite.io/v1alpha1/workspaces")), "the list itself must have run");
         assert!(rec.sent("PATCH", &format!("/api/v1/namespaces/{ns}/secrets/bench-tool")).is_empty());
+    }
+
+    /// `bench.rs:240`'s rule applies to this write too now: a failed Secret apply must never log
+    /// the token, which a kube error can echo through the request body.
+    #[tokio::test]
+    async fn a_failed_bench_tool_write_does_not_echo_the_token() {
+        let ns = crate::crd::ws_namespace("alice", "acme");
+        let list = serde_json::json!({"apiVersion": "kloudlite.io/v1alpha1", "kind": "WorkspaceList", "metadata": {}, "items": [bench_ws("alice", "acme", "full")]});
+        let (client, _rec) = crate::kube_test::mock_client(vec![
+            crate::kube_test::get("/apis/kloudlite.io/v1alpha1/workspaces", list),
+            crate::kube_test::Route {
+                method: "PATCH",
+                path: format!("/api/v1/namespaces/{ns}/secrets/bench-tool"),
+                status: 422,
+                body: serde_json::to_value(kube::core::Status::failure(
+                    "Secret \"bench-tool\" is invalid: stringData.token: a-secret-token-value-that-must-never-appear-in-logs",
+                    "Invalid",
+                )
+                .with_code(422))
+                .unwrap(),
+            },
+        ]);
+        let jwt = std::sync::Arc::new(kloudlite_core::jwt::Jwt::new("test-secret-that-is-at-least-32-bytes-long").unwrap());
+        let s = ApiState::new(jwt);
+        let (_, logs) = logged(project_bench_tools(&s, &client, &ns, "alice")).await;
+        assert!(!logs.contains("a-secret-token-value-that-must-never-appear-in-logs"), "logs: {logs}");
+    }
+
+    /// Every log line written while `f` runs, as text — ported from the deleted on-demand route's
+    /// own no-echo test (`git show d48ab575:crates/workspaces/tests/api_bench.rs`), since the
+    /// property still holds for this write path.
+    async fn logged<F: std::future::Future<Output = R>, R>(f: F) -> (R, String) {
+        #[derive(Clone, Default)]
+        struct Buf(std::sync::Arc<std::sync::Mutex<Vec<u8>>>);
+        impl std::io::Write for Buf {
+            fn write(&mut self, b: &[u8]) -> std::io::Result<usize> {
+                self.0.lock().unwrap().extend_from_slice(b);
+                Ok(b.len())
+            }
+            fn flush(&mut self) -> std::io::Result<()> {
+                Ok(())
+            }
+        }
+        static PIN: std::sync::OnceLock<tracing::Dispatch> = std::sync::OnceLock::new();
+        PIN.get_or_init(|| tracing::Dispatch::new(tracing::subscriber::NoSubscriber::default()));
+        let buf = Buf::default();
+        let w = buf.clone();
+        let sub = tracing_subscriber::fmt().with_ansi(false).with_writer(move || w.clone()).finish();
+        let _g = tracing::subscriber::set_default(sub);
+        let r = f.await;
+        let text = String::from_utf8(buf.0.lock().unwrap().clone()).unwrap();
+        (r, text)
     }
 
     #[test]

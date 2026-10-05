@@ -95,7 +95,6 @@ pub struct BenchToolClaims {
     pub sub: String,
     pub team: String,
     pub bench: String,
-    pub parent: String,
     pub jti: String,
     pub iat: u64,
     pub exp: u64,
@@ -307,18 +306,18 @@ impl Jwt {
         self.verify_typed(token, "bench-session")
     }
 
-    /// A token a bench's tools act under for one team — short-lived so a leaked copy dies fast,
-    /// `parent` names the credential it was minted from. `ttl` is the caller's: the on-demand
-    /// mint used `BENCH_TOOL_TTL_SECS` (15 min); the keys beat mints one a few beats long so a
-    /// missed beat never strands a live bench.
+    /// A token a bench's tools act under for one team — short-lived so a leaked copy dies fast.
+    /// No `parent`: liveness is the beat not minting for a paused member or a stopped bench, plus
+    /// the short expiry, plus `bench_admits_tool` — there is no login credential behind it to
+    /// revoke. `ttl` is the caller's: the on-demand mint used `BENCH_TOOL_TTL_SECS` (15 min); the
+    /// keys beat mints one a few beats long so a missed beat never strands a live bench.
     /// Its own `typ`, so neither `verify` nor `verify_any_user` ever takes it for a person.
-    pub fn mint_bench_tool(&self, handle: &str, team: &str, bench: &str, parent: &str, ttl: u64) -> Result<(String, BenchToolClaims)> {
+    pub fn mint_bench_tool(&self, handle: &str, team: &str, bench: &str, ttl: u64) -> Result<(String, BenchToolClaims)> {
         let now = now()?;
         let claims = BenchToolClaims {
             sub: handle.to_string(),
             team: team.to_string(),
             bench: bench.to_string(),
-            parent: parent.to_string(),
             jti: new_jti(),
             iat: now,
             exp: now + ttl,
@@ -542,16 +541,29 @@ mod tests {
         assert!(j.verify_registry(&t).is_none(), "typ keeps audiences apart");
     }
 
+    /// A provider token is a Secret-file credential, never a login or a bench-tool call: every
+    /// other verifier must refuse it by `typ`, same as every other audience pair in this module.
+    #[test]
+    fn a_provider_token_is_refused_by_every_other_verifier() {
+        let j = jwt();
+        let t = j.mint_provider("alice", 86_400).unwrap();
+        assert!(j.verify(&t).is_err(), "not a session");
+        assert!(j.verify_any_user(&t).is_err(), "not a user token of any kind");
+        assert!(j.verify_bench_tool(&t).is_err(), "not a bench tool token");
+        let (bench, _) = j.mint_bench_tool("alice", "acme", "bench-1", 900).unwrap();
+        assert!(j.verify_provider(&bench).is_err(), "and the reverse: a bench tool token is not a provider token");
+    }
+
     #[test]
     fn a_bench_tool_token_round_trips_and_lives_fifteen_minutes() {
         let j = jwt();
-        let (tok, c) = j.mint_bench_tool("alice", "acme", "bench-1", "parent-jti", 900).unwrap();
+        let (tok, c) = j.mint_bench_tool("alice", "acme", "bench-1", 900).unwrap();
         assert_eq!(c.exp - c.iat, 900);
         let back = j.verify_bench_tool(&tok).unwrap();
         assert_eq!(back, c);
         assert_eq!(
-            (back.sub.as_str(), back.team.as_str(), back.bench.as_str(), back.parent.as_str(), back.typ.as_str()),
-            ("alice", "acme", "bench-1", "parent-jti", "bench-tool")
+            (back.sub.as_str(), back.team.as_str(), back.bench.as_str(), back.typ.as_str()),
+            ("alice", "acme", "bench-1", "bench-tool")
         );
         assert_eq!(back.jti.len(), 32);
     }
@@ -559,7 +571,7 @@ mod tests {
     #[test]
     fn a_bench_tool_token_is_not_a_user() {
         let j = jwt();
-        let (tok, _) = j.mint_bench_tool("alice", "acme", "bench-1", "p", 900).unwrap();
+        let (tok, _) = j.mint_bench_tool("alice", "acme", "bench-1", 900).unwrap();
         assert!(j.verify(&tok).is_err());
         assert!(j.verify_any_user(&tok).is_err());
     }
@@ -594,7 +606,7 @@ mod tests {
         assert!(j.verify(&tok).is_err());
         assert!(j.verify_any_user(&tok).is_err());
         assert!(j.verify_bench_tool(&tok).is_err());
-        let (bench, _) = j.mint_bench_tool("alice", "acme", "bench-1", "p", 900).unwrap();
+        let (bench, _) = j.mint_bench_tool("alice", "acme", "bench-1", 900).unwrap();
         assert!(j.verify_workspace_tool(&bench).is_err());
     }
 

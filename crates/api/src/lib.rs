@@ -484,8 +484,7 @@ async fn bench_session(
     };
     match check(claims.clone()).await {
         Ok(kloudlite_workspaces::api::BenchCredentialAdmission::Live) => {}
-        Ok(kloudlite_workspaces::api::BenchCredentialAdmission::ParentRevoked)
-        | Ok(kloudlite_workspaces::api::BenchCredentialAdmission::BenchInactive) => {
+        Ok(kloudlite_workspaces::api::BenchCredentialAdmission::BenchInactive) => {
             return Some(Err((StatusCode::UNAUTHORIZED, "this bench credential is no longer valid").into_response()))
         }
         Err(()) => return Some(Err((StatusCode::SERVICE_UNAVAILABLE, "could not check this bench credential").into_response())),
@@ -759,7 +758,7 @@ mod tests {
     async fn a_bench_tool_token_is_not_a_user_here() {
         let mut api = test_api_with_secret("s").await;
         let jwt = Arc::new(kloudlite_core::jwt::Jwt::new("test-secret-at-least-32-bytes-long!!").unwrap());
-        let (tok, _) = jwt.mint_bench_tool("alice", "acme", "bench-1", "parent").unwrap();
+        let (tok, _) = jwt.mint_bench_tool("alice", "acme", "bench-1", 900).unwrap();
         api.jwt = Some(jwt);
         let mut h = axum::http::HeaderMap::new();
         h.insert("authorization", format!("Bearer {tok}").parse().unwrap());
@@ -769,13 +768,10 @@ mod tests {
 
     #[tokio::test]
     async fn an_invalidated_bench_is_refused_before_directory_identity_conversion() {
-        for admission in [
-            kloudlite_workspaces::api::BenchCredentialAdmission::ParentRevoked,
-            kloudlite_workspaces::api::BenchCredentialAdmission::BenchInactive,
-        ] {
+        for admission in [kloudlite_workspaces::api::BenchCredentialAdmission::BenchInactive] {
             let mut api = test_api_with_secret("s").await;
             let jwt = Arc::new(kloudlite_core::jwt::Jwt::new("test-secret-at-least-32-bytes-long!!").unwrap());
-            let tok = jwt.mint_bench_tool("alice", "acme", "bench-1", "parent").unwrap().0;
+            let tok = jwt.mint_bench_tool("alice", "acme", "bench-1", 900).unwrap().0;
             api.jwt = Some(jwt);
             api.bench_admission = Some(Arc::new(move |_| {
                 Box::pin(async move { Ok(admission) }) as BenchAdmissionFuture
@@ -794,7 +790,7 @@ mod tests {
         for failing in [false, true] {
             let mut api = test_api_with_secret("s").await;
             let jwt = Arc::new(kloudlite_core::jwt::Jwt::new("test-secret-at-least-32-bytes-long!!").unwrap());
-            let tok = jwt.mint_bench_tool("alice", "acme", "bench-1", "parent").unwrap().0;
+            let tok = jwt.mint_bench_tool("alice", "acme", "bench-1", 900).unwrap().0;
             api.jwt = Some(jwt);
             if failing {
                 api.bench_admission = Some(Arc::new(|_| Box::pin(async { Err(()) }) as BenchAdmissionFuture));

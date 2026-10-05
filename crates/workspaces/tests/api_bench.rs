@@ -20,10 +20,6 @@ use std::sync::{Arc, Mutex};
 use tower::ServiceExt;
 
 const API: &str = "/apis/kloudlite.io/v1alpha1";
-/// The one CLI jti the stub directory calls live.
-const LIVE_PARENT: &str = "parent-live";
-/// The one the stub calls revoked; every other jti (a real `mint_cli`'s) is live.
-const REVOKED_PARENT: &str = "parent-revoked";
 
 #[derive(Default)]
 struct Stub {
@@ -49,8 +45,10 @@ impl Directory for Stub {
     async fn teams_for(&self, user: &str) -> Vec<String> {
         self.members.iter().filter(|(u, _)| *u == user).map(|(_, t)| t.to_string()).collect()
     }
-    async fn is_live(&self, jti: &str) -> bool {
-        jti != REVOKED_PARENT
+    async fn is_live(&self, _jti: &str) -> bool {
+        // A beat-minted bench-tool token has no `parent` to ask this about any more
+        // (`bench_credential_admission` never calls it); this stays for ordinary CLI sessions.
+        true
     }
     async fn for_owner(&self, _owner: &str) -> Option<kloudlite_workspaces::api::OwnerMaterial> {
         None
@@ -633,8 +631,8 @@ async fn re_posting_a_stopped_bench_at_the_cpu_limit_is_refused() {
 }
 
 
-fn tool_tok(t: &T, parent: &str) -> String {
-    t.jwt.mint_bench_tool("alice", "acme", &bench_id("alice", "acme"), parent, 900).unwrap().0
+fn tool_tok(t: &T) -> String {
+    t.jwt.mint_bench_tool("alice", "acme", &bench_id("alice", "acme"), 900).unwrap().0
 }
 
 fn tool_setup(bench: Value) -> T {
@@ -647,16 +645,16 @@ fn tool_setup(bench: Value) -> T {
 #[tokio::test]
 async fn a_bench_tool_token_lists_workspaces() {
     let t = tool_setup(bench_obj("alice", "acme", "running", Some("ready"), "full"));
-    let (st, body) = t.call("GET", "/v1/workspaces?team=acme", &tool_tok(&t, LIVE_PARENT), None).await;
+    let (st, body) = t.call("GET", "/v1/workspaces?team=acme", &tool_tok(&t), None).await;
     assert_eq!(st, 200, "{body}");
-    let (st, body) = t.call("GET", "/v1/workspaces", &tool_tok(&t, LIVE_PARENT), None).await;
+    let (st, body) = t.call("GET", "/v1/workspaces", &tool_tok(&t), None).await;
     assert_eq!(st, 200, "{body}");
 }
 
 #[tokio::test]
 async fn a_bench_tool_token_is_refused_off_its_routes() {
     let t = tool_setup(bench_obj("alice", "acme", "running", Some("ready"), "full"));
-    let tok = tool_tok(&t, LIVE_PARENT);
+    let tok = tool_tok(&t);
     // `/v1/cli/*` and `/v1/keys*` live in crates/api, whose own test refuses this token.
     for (m, uri) in [
         ("POST", "/v1/bench/session?team=acme"),
@@ -677,7 +675,7 @@ async fn a_bench_tool_token_is_refused_off_its_routes() {
 #[tokio::test]
 async fn an_expired_bench_tool_token_is_refused_as_expired() {
     let t = tool_setup(bench_obj("alice", "acme", "running", Some("ready"), "full"));
-    let (_, mut c) = t.jwt.mint_bench_tool("alice", "acme", &bench_id("alice", "acme"), LIVE_PARENT, 900).unwrap();
+    let (_, mut c) = t.jwt.mint_bench_tool("alice", "acme", &bench_id("alice", "acme"), 900).unwrap();
     c.iat = 1;
     c.exp = 2;
     let tok = jsonwebtoken::encode(
@@ -693,26 +691,19 @@ async fn an_expired_bench_tool_token_is_refused_as_expired() {
 }
 
 #[tokio::test]
-async fn a_bench_tool_token_dies_with_its_parent() {
-    let t = tool_setup(bench_obj("alice", "acme", "running", Some("ready"), "full"));
-    let (st, _) = t.call("GET", "/v1/workspaces", &tool_tok(&t, REVOKED_PARENT), None).await;
-    assert_eq!(st, 401);
-}
-
-#[tokio::test]
 async fn a_bench_tool_token_dies_when_the_bench_stops() {
     let t = tool_setup(bench_obj("alice", "acme", "stopped", Some("ready"), "full"));
-    let (st, _) = t.call("GET", "/v1/workspaces", &tool_tok(&t, LIVE_PARENT), None).await;
+    let (st, _) = t.call("GET", "/v1/workspaces", &tool_tok(&t), None).await;
     assert_eq!(st, 401);
 }
 
 #[tokio::test]
 async fn a_bench_tool_token_is_refused_for_a_paused_bench() {
     let t = tool_setup(bench_obj("alice", "acme", "running", Some("ready"), "readOnly"));
-    let (st, _) = t.call("GET", "/v1/workspaces", &tool_tok(&t, LIVE_PARENT), None).await;
+    let (st, _) = t.call("GET", "/v1/workspaces", &tool_tok(&t), None).await;
     assert_eq!(st, 401, "a stored readOnly bench is paused");
     let t = tool_setup(bench_obj("alice", "acme", "running", Some("ready"), "paused"));
-    let (st, _) = t.call("GET", "/v1/workspaces", &tool_tok(&t, LIVE_PARENT), None).await;
+    let (st, _) = t.call("GET", "/v1/workspaces", &tool_tok(&t), None).await;
     assert_eq!(st, 401);
 }
 
@@ -722,7 +713,7 @@ async fn a_bench_tool_token_gets_403_on_another_team() {
         with(vec![get(bench_path("alice", "acme"), bench_obj("alice", "acme", "running", Some("ready"), "full"))], alloc("alice", vec![])),
         Stub::new(&[("alice", "acme"), ("alice", "t2")], &[("acme", "r1")]),
     );
-    let (st, body) = t.call("GET", "/v1/volumes?owner=t2", &tool_tok(&t, LIVE_PARENT), None).await;
+    let (st, body) = t.call("GET", "/v1/volumes?owner=t2", &tool_tok(&t), None).await;
     assert_eq!(st, 403, "{body}");
     assert_eq!(body, Value::String("bench tools act only for alice and acme".into()));
 }
@@ -742,7 +733,7 @@ async fn a_bench_tool_token_chooses_environments_only_in_its_own_spaces() {
     };
     let dir = || Stub::new(&[("alice", "acme"), ("alice", "t2")], &[]);
     let t = setup(routes(), dir());
-    let tok = tool_tok(&t, LIVE_PARENT);
+    let tok = tool_tok(&t);
     for (m, uri, body) in [
         ("PUT", "/v1/me/environments/t2", Some(json!({"environment": "env-1"}))),
         ("PUT", "/v1/me/environments/T2", Some(json!({"environment": "env-1"}))),

@@ -390,7 +390,7 @@ pub(crate) async fn delete_tool_secret(c: &kube::Client, owner: &str, team: &str
 }
 
 /// The error's kind, never its text: an apply error can quote the request body, which holds the token.
-fn kube_kind(e: &kube::Error) -> String {
+pub(crate) fn kube_kind(e: &kube::Error) -> String {
     match e {
         kube::Error::Api(ae) => format!("api {}", ae.code),
         _ => "transport".into(),
