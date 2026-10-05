@@ -61,11 +61,11 @@ pub fn bench_container(
         // they are in.
         var("KL_TEAM", crate::crd::space_slug(&spec.owner, &spec.team)),
         var("KL_BENCH", ws_id.to_string()),
-        // Same two names the workspace container carries, so `kl` and the tool server agree with
-        // the bench about which workspace this is and where it lives. `KL_WORKSPACE` is also what
-        // the mod reads via `KL_TOOL_TOKEN_FILE`'s sibling env to scope a session.
+        // Same name the workspace container carries, so `kl` and the tool server agree on which
+        // workspace this is. Never `KL_WORKSPACE`: the mod reads that var to mean "I am a
+        // per-workspace session" (`bench/mod/hooks/register.tsx`), and the main agent CLI is not
+        // one — setting it here made the main session believe it was scoped to a workspace.
         var("KL_WORKSPACE_ID", ws_id.to_string()),
-        var("KL_WORKSPACE", WORKSPACE_DIR.to_string()),
         var("KL_REGISTRY_HOST", registry_host.to_string()),
         var("KL_BENCH_IDLE_SECS", idle_secs.to_string()),
         // The PATH to the tool token, never the token: env shows up in `ps e`, crash dumps and

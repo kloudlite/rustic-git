@@ -140,7 +140,9 @@ fn a_bench_pod_carries_its_one_container_and_the_tool_secret_optional() {
     let get = |n: &str| c.env.as_ref().unwrap().iter().find(|e| e.name == n).and_then(|e| e.value.clone());
     assert_eq!(get("KL_TOOL_TOKEN_FILE").as_deref(), Some("/etc/kloudlite/bench-tool/token"));
     assert_eq!(get("KL_WORKSPACE_ID").as_deref(), Some("bench-1"));
-    assert_eq!(get("KL_WORKSPACE").as_deref(), Some(crate::k8s::WORKSPACE_DIR));
+    // Never set on the bench: the mod reads `KL_WORKSPACE` to mean "I am a per-workspace
+    // session", and the main agent CLI running in this pod is not one (final review C1).
+    assert_eq!(get("KL_WORKSPACE"), None);
     assert_eq!(get("ANTHROPIC_MODEL").as_deref(), Some("sonnet"));
     assert_eq!(get("KL_BENCH_IDLE_SECS").as_deref(), Some("420"));
     // No `KL_POD_IP` any more (owner ruling 2026-09-25): there is no shell sidecar to dial, so a
