@@ -153,6 +153,12 @@ fn paused(team: &str) -> Response {
     err(StatusCode::FORBIDDEN, format!("your access to {team} is paused"))
 }
 
+/// `spec.access` is written only by the keys beat, mirroring directory membership onto the CRD —
+/// the cheap local check every bench-tool mint uses instead of a directory round trip per call.
+pub(crate) fn bench_paused(b: &crd::Workspace) -> bool {
+    b.spec.access == Access::Paused
+}
+
 /// The spec patch that starts or wakes a bench: `spec.bench.wakeAt`, plus `desiredState` when it
 /// is a start. A MERGE patch, so `spec.bench.model` survives it — nothing else here writes spec.
 fn wake_patch(running: bool, at: &str) -> serde_json::Value {
@@ -391,59 +397,6 @@ fn kube_kind(e: &kube::Error) -> String {
     }
 }
 
-/// The desktop app mints the bench pod a 15-minute platform token, written where only that pod
-/// reads it. A CLI login only: a session cookie has no parent to die with (403), and a bench-tool
-/// token never reaches here (`caller` 401s it), so a pod cannot extend itself.
-pub(crate) async fn mint_tool_token(
-    State(s): State<Arc<ApiState>>,
-    headers: HeaderMap,
-    Query(q): Query<TeamQuery>,
-) -> Result<Response, Response> {
-    let (caller, team, _, b) = my_bench(&s, &headers, q.team.as_deref(), None).await?;
-    let Some(parent) = caller.parent.clone() else {
-        return Err(err(StatusCode::FORBIDDEN, "sign in on the Kloudlite desktop app"));
-    };
-    let b = found(b)?;
-    // A member whose beat has not caught up still holds a Paused bench: no tools either way.
-    if b.spec.access == Access::Paused {
-        return Err(paused(&team));
-    }
-    if b.spec.desired_state == DesiredState::Stopped {
-        return Err(err(StatusCode::CONFLICT, "bench is stopped; start it"));
-    }
-    let id = b.metadata.name.clone().unwrap_or_default();
-    let (token, claims) = s.jwt.mint_bench_tool(&caller.name, &team, &id, &parent).map_err(|e| {
-        tracing::error!(error = %e, "bench.tool_token.mint.failed");
-        err(StatusCode::INTERNAL_SERVER_ERROR, "could not mint a tool token")
-    })?;
-    let ns = crd::ws_namespace(&caller.name, &team);
-    let api: Api<k8s_openapi::api::core::v1::Secret> = Api::namespaced(kube(&s)?.clone(), &ns);
-    let secret = crate::k8s::bench_tool_secret(&ns, &token, claims.exp);
-    if let Err(e) = api
-        .patch(crate::k8s::BENCH_TOOL_SECRET, &PatchParams::apply("kloudlite-api").force(), &Patch::Apply(&secret))
-        .await
-    {
-        tracing::warn!(owner = %caller.name, %team, kind = %kube_kind(&e), "bench.tool_token.write.failed");
-        return Err(err(StatusCode::SERVICE_UNAVAILABLE, "could not write the bench tool token"));
-    }
-    let short = |x: &str| x.chars().take(8).collect::<String>();
-    tracing::info!(owner = %caller.name, %team, jti8 = %short(&claims.jti), parent8 = %short(&parent), exp = claims.exp, "bench.tool_token.written");
-    Ok(StatusCode::NO_CONTENT.into_response())
-}
-
-pub(crate) async fn revoke_tool_token(
-    State(s): State<Arc<ApiState>>,
-    headers: HeaderMap,
-    Query(q): Query<TeamQuery>,
-) -> Result<Response, Response> {
-    let (caller, team, _, _) = my_bench(&s, &headers, q.team.as_deref(), None).await?;
-    delete_tool_secret(kube(&s)?, &caller.name, &team).await.map_err(|e| {
-        tracing::warn!(owner = %caller.name, %team, kind = %kube_kind(&e), "bench.tool_token.delete.failed");
-        err(StatusCode::SERVICE_UNAVAILABLE, "could not delete the bench tool token")
-    })?;
-    Ok(StatusCode::NO_CONTENT.into_response())
-}
-
 /// Every tunnel connection asks here; an idle bench is woken and the client re-asks until 201.
 pub(crate) async fn bench_session(
     State(s): State<Arc<ApiState>>,
@@ -453,7 +406,7 @@ pub(crate) async fn bench_session(
     let (caller, team, region, b) = my_bench(&s, &headers, q.team.as_deref(), None).await?;
     let b = found(b)?;
     let api = bench_api(&s)?;
-    if b.spec.access == Access::Paused {
+    if bench_paused(&b) {
         return Err(paused(&team));
     }
     if b.spec.desired_state == DesiredState::Stopped {

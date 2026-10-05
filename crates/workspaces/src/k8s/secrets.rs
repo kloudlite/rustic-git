@@ -20,6 +20,7 @@ pub const USER_KEY_PATH: &str = "/etc/kloudlite/ssh";
 
 /// The owner's private key as a namespace Secret. Written by the API tier, which holds `secrets`
 /// only in namespaces the controller has vouched for — see `api_secret_binding`.
+#[allow(clippy::too_many_arguments)]
 pub fn user_key_secret(
     owner: &str,
     namespace: &str,
@@ -28,6 +29,7 @@ pub fn user_key_secret(
     authorized_keys: &str,
     registry_token: &str,
     workspace_token: &str,
+    provider_token: &str,
 ) -> Secret {
     Secret {
         // No ownerReference: the key belongs to the OWNER, not to any one workspace, so deleting
@@ -58,6 +60,9 @@ pub fn user_key_secret(
             // same beat as its sibling, so a revoked owner loses it with their keys rather than
             // through revocation code of its own. Read per call and never cached by `kl`.
             ("workspace-token".to_string(), workspace_token.to_string()),
+            // The per-user provider credential, 24 h, re-minted on the same beat — see
+            // `jwt::mint_provider`.
+            ("provider-token".to_string(), provider_token.to_string()),
         ])),
         type_: Some("Opaque".to_string()),
         ..Default::default()

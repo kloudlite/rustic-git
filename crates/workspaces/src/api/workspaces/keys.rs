@@ -179,7 +179,17 @@ pub(crate) async fn write_user_key(s: &ApiState, c: &kube::Client, ns: &str, own
             String::new()
         }
     };
-    let secret = crate::k8s::user_key_secret(owner, ns, &private, &material, &authorized, &registry_token, &workspace_token);
+    // The per-user credential other provider-facing surfaces read, re-minted on the same beat so
+    // a revoked owner loses it with everything else rather than through revocation code of its own.
+    let provider_token = match s.jwt.mint_provider(owner, 86_400) {
+        Ok(t) => t,
+        Err(e) => {
+            tracing::warn!(%owner, error = %e, "provider-token.mint.failed");
+            return;
+        }
+    };
+    project_bench_tools(s, c, ns, owner).await;
+    let secret = crate::k8s::user_key_secret(owner, ns, &private, &material, &authorized, &registry_token, &workspace_token, &provider_token);
     for attempt in 1u32.. {
         let Err(e) = api
             .patch(
@@ -263,6 +273,51 @@ fn install_refusal(read: Option<Option<&k8s_openapi::api::core::v1::Namespace>>,
     if young { Refusal::Young } else { Refusal::Fault }
 }
 
+/// A few beats long (R1): the on-demand route minted `BENCH_TOOL_TTL_SECS` (15 min) per call, but
+/// the beat has no caller to re-ask every 15 min, so it mints wide enough that a missed beat never
+/// strands a live bench, and tight enough that a paused member's bench loses the token within a
+/// few `KEYS_RESYNC_SECS` ticks.
+const BENCH_TOOL_BEAT_TTL_SECS: u64 = crate::api::keys::KEYS_RESYNC_SECS * 3;
+
+/// Mint and write the `bench-tool` Secret for every un-paused bench Workspace in `ns`. Replaces the
+/// old on-demand `POST /v1/bench/tool-token` route: the beat now mints it the same place it mints
+/// everything else in this namespace's `user-key` Secret, so a bench never has to call out for one.
+async fn project_bench_tools(s: &ApiState, c: &kube::Client, ns: &str, owner: &str) {
+    let sel = ListParams::default().labels(&format!("{}={owner}", crate::k8s::OWNER_LABEL));
+    let benches = match Api::<crd::Workspace>::all(c.clone()).list(&sel).await {
+        Ok(l) => l.items,
+        Err(e) => {
+            tracing::warn!(kind = "Workspace", %owner, error = %e, "listing.failed");
+            return;
+        }
+    };
+    for w in benches.into_iter().filter(|w| crd::is_bench(w) && crd::ws_namespace(owner, &w.spec.team) == ns) {
+        if crate::api::bench::bench_paused(&w) {
+            continue;
+        }
+        let id = w.metadata.name.clone().unwrap_or_default();
+        let (token, claims) = match s.jwt.mint_bench_tool(owner, &w.spec.team, &id, &id, BENCH_TOOL_BEAT_TTL_SECS) {
+            Ok(t) => t,
+            Err(e) => {
+                tracing::warn!(%owner, bench = %id, error = %e, "bench-tool-token.mint.failed");
+                continue;
+            }
+        };
+        let secret = crate::k8s::bench_tool_secret(ns, &token, claims.exp);
+        let api: Api<k8s_openapi::api::core::v1::Secret> = Api::namespaced(c.clone(), ns);
+        if let Err(e) = api
+            .patch(
+                crate::k8s::BENCH_TOOL_SECRET,
+                &kube::api::PatchParams::apply("kloudlite-api").force(),
+                &kube::api::Patch::Apply(&secret),
+            )
+            .await
+        {
+            tracing::warn!(%owner, bench = %id, error = %e, "bench-tool-secret.install.failed");
+        }
+    }
+}
+
 /// The workspace-token to project: the one the Secret already holds while it verifies for this
 /// owner and space with more than half its day left, else a fresh one. Re-minting on every rewrite
 /// had `/v1/workspaces/{id}/tools` hand out a token the pod's mounted file only sees after the
@@ -285,7 +340,50 @@ fn keep_or_mint(jwt: &kloudlite_core::jwt::Jwt, current: Option<&str>, owner: &s
 
 #[cfg(test)]
 mod tests {
-    use super::{Refusal, install_refusal, keep_or_mint, retry_backoff};
+    use super::{ApiState, Refusal, install_refusal, keep_or_mint, project_bench_tools, retry_backoff};
+
+    fn bench_ws(owner: &str, team: &str, access: &str) -> serde_json::Value {
+        serde_json::json!({
+            "apiVersion": "kloudlite.io/v1alpha1", "kind": "Workspace",
+            "metadata": {"name": crate::crd::bench_id(owner, team), "labels": {"kloudlite.io/owner": owner}},
+            "spec": {"owner": owner, "team": team, "name": "bench", "region": "r1", "image": "i",
+                     "desiredState": "running", "access": access, "bench": {"model": "m"},
+                     "storage": {"quotaGb": 10},
+                     "resources": {"cpuRequest": "1", "cpuLimit": "1", "memoryRequest": "1Gi", "memoryLimit": "1Gi"}},
+        })
+    }
+
+    /// Replaces the old on-demand `POST /v1/bench/tool-token` route: the beat mints the same
+    /// Secret for every un-paused bench it finds in the namespace.
+    #[tokio::test]
+    async fn the_keys_beat_writes_a_bench_tool_secret_for_the_bench() {
+        let ns = crate::crd::ws_namespace("alice", "acme");
+        let list = serde_json::json!({"apiVersion": "kloudlite.io/v1alpha1", "kind": "WorkspaceList", "metadata": {}, "items": [bench_ws("alice", "acme", "full")]});
+        let (client, rec) = crate::kube_test::mock_client(vec![
+            crate::kube_test::get("/apis/kloudlite.io/v1alpha1/workspaces", list),
+            crate::kube_test::patch(format!("/api/v1/namespaces/{ns}/secrets/bench-tool"), serde_json::json!({"apiVersion": "v1", "kind": "Secret", "metadata": {"name": "bench-tool"}})),
+        ]);
+        let jwt = std::sync::Arc::new(kloudlite_core::jwt::Jwt::new("test-secret-that-is-at-least-32-bytes-long").unwrap());
+        let s = ApiState::new(jwt.clone());
+        project_bench_tools(&s, &client, &ns, "alice").await;
+        let sent = rec.sent("PATCH", &format!("/api/v1/namespaces/{ns}/secrets/bench-tool"));
+        assert_eq!(sent.len(), 1);
+        let token = sent[0]["stringData"]["token"].as_str().unwrap();
+        assert!(jwt.verify_bench_tool(token).is_ok());
+    }
+
+    /// `spec.access` is written only by the keys beat; a paused bench must not keep getting a
+    /// fresh tool token out from under a revoked member.
+    #[tokio::test]
+    async fn a_paused_member_gets_no_bench_tool_secret() {
+        let ns = crate::crd::ws_namespace("alice", "acme");
+        let list = serde_json::json!({"apiVersion": "kloudlite.io/v1alpha1", "kind": "WorkspaceList", "metadata": {}, "items": [bench_ws("alice", "acme", "paused")]});
+        let (client, rec) = crate::kube_test::mock_client(vec![crate::kube_test::get("/apis/kloudlite.io/v1alpha1/workspaces", list)]);
+        let jwt = std::sync::Arc::new(kloudlite_core::jwt::Jwt::new("test-secret-that-is-at-least-32-bytes-long").unwrap());
+        let s = ApiState::new(jwt);
+        project_bench_tools(&s, &client, &ns, "alice").await;
+        assert!(rec.sent("PATCH", &format!("/api/v1/namespaces/{ns}/secrets/bench-tool")).is_empty());
+    }
 
     #[test]
     fn a_fresh_token_for_the_same_owner_and_space_is_kept() {

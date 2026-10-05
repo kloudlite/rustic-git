@@ -134,7 +134,7 @@ pub(crate) fn the_user_key_secret_carries_the_private_key_the_git_identity_and_t
         git_name: "Alice \"Al\" Liddell".into(),
         git_email: "alice@example.com".into(),
     };
-    let s = user_key_secret("alice", "ws-alice", "PRIVATE", &m, "ssh-ed25519 AAAA alice\n", "TOKEN", "WSTOKEN");
+    let s = user_key_secret("alice", "ws-alice", "PRIVATE", &m, "ssh-ed25519 AAAA alice\n", "TOKEN", "WSTOKEN", "PROVIDERTOKEN");
     let data = s.string_data.unwrap();
     assert_eq!(data["id_ed25519"], "PRIVATE");
     // Who may ssh in is `OwnerKeys` now; this entry only keeps an old agent's pods working

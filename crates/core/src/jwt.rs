@@ -78,6 +78,18 @@ pub struct BenchSessionClaims {
 
 pub const BENCH_TOOL_TTL_SECS: u64 = 900;
 
+/// A day, projecting the owner's credential into the `user-key` Secret on the keys beat — like
+/// `registry` but naming no scope, since the services it reaches each check authorization of
+/// their own.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct ProviderClaims {
+    pub sub: String,
+    pub jti: String,
+    pub iat: u64,
+    pub exp: u64,
+    pub typ: String,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct BenchToolClaims {
     pub sub: String,
@@ -218,6 +230,25 @@ impl Jwt {
         data.claims["sub"].as_str().map(str::to_string)
     }
 
+    /// A per-user provider token, minted on the keys beat beside `registry_token` and written into
+    /// the `user-key` Secret's `provider-token` key.
+    pub fn mint_provider(&self, owner: &str, ttl: u64) -> Result<String> {
+        let now = now()?;
+        let claims = ProviderClaims {
+            sub: owner.to_string(),
+            jti: new_jti(),
+            iat: now,
+            exp: now + ttl,
+            typ: "provider".into(),
+        };
+        encode(&Header::new(Algorithm::HS256), &claims, &self.encoding)
+            .map_err(|e| err(format!("minting provider token: {e}")))
+    }
+
+    pub fn verify_provider(&self, token: &str) -> Result<ProviderClaims> {
+        self.verify_typed(token, "provider")
+    }
+
     /// Decode into a `serde_json::Value` first to read `typ` cheaply, refusing anything
     /// signed for a different purpose before paying for the concrete deserialize.
     fn verify_typed<T: for<'de> Deserialize<'de>>(&self, token: &str, typ: &str) -> Result<T> {
@@ -276,10 +307,12 @@ impl Jwt {
         self.verify_typed(token, "bench-session")
     }
 
-    /// A 15 min token a bench's tools act under for one team — short so a leaked copy dies
-    /// fast, `parent` names the credential it was minted from.
+    /// A token a bench's tools act under for one team — short-lived so a leaked copy dies fast,
+    /// `parent` names the credential it was minted from. `ttl` is the caller's: the on-demand
+    /// mint used `BENCH_TOOL_TTL_SECS` (15 min); the keys beat mints one a few beats long so a
+    /// missed beat never strands a live bench.
     /// Its own `typ`, so neither `verify` nor `verify_any_user` ever takes it for a person.
-    pub fn mint_bench_tool(&self, handle: &str, team: &str, bench: &str, parent: &str) -> Result<(String, BenchToolClaims)> {
+    pub fn mint_bench_tool(&self, handle: &str, team: &str, bench: &str, parent: &str, ttl: u64) -> Result<(String, BenchToolClaims)> {
         let now = now()?;
         let claims = BenchToolClaims {
             sub: handle.to_string(),
@@ -288,7 +321,7 @@ impl Jwt {
             parent: parent.to_string(),
             jti: new_jti(),
             iat: now,
-            exp: now + BENCH_TOOL_TTL_SECS,
+            exp: now + ttl,
             typ: "bench-tool".into(),
         };
         let tok = encode(&Header::new(Algorithm::HS256), &claims, &self.encoding)
@@ -502,9 +535,17 @@ mod tests {
     }
 
     #[test]
+    fn a_provider_token_verifies_and_is_not_a_registry_token() {
+        let j = jwt();
+        let t = j.mint_provider("alice", 86_400).unwrap();
+        assert_eq!(j.verify_provider(&t).unwrap().sub, "alice");
+        assert!(j.verify_registry(&t).is_none(), "typ keeps audiences apart");
+    }
+
+    #[test]
     fn a_bench_tool_token_round_trips_and_lives_fifteen_minutes() {
         let j = jwt();
-        let (tok, c) = j.mint_bench_tool("alice", "acme", "bench-1", "parent-jti").unwrap();
+        let (tok, c) = j.mint_bench_tool("alice", "acme", "bench-1", "parent-jti", 900).unwrap();
         assert_eq!(c.exp - c.iat, 900);
         let back = j.verify_bench_tool(&tok).unwrap();
         assert_eq!(back, c);
@@ -518,7 +559,7 @@ mod tests {
     #[test]
     fn a_bench_tool_token_is_not_a_user() {
         let j = jwt();
-        let (tok, _) = j.mint_bench_tool("alice", "acme", "bench-1", "p").unwrap();
+        let (tok, _) = j.mint_bench_tool("alice", "acme", "bench-1", "p", 900).unwrap();
         assert!(j.verify(&tok).is_err());
         assert!(j.verify_any_user(&tok).is_err());
     }
@@ -553,7 +594,7 @@ mod tests {
         assert!(j.verify(&tok).is_err());
         assert!(j.verify_any_user(&tok).is_err());
         assert!(j.verify_bench_tool(&tok).is_err());
-        let (bench, _) = j.mint_bench_tool("alice", "acme", "bench-1", "p").unwrap();
+        let (bench, _) = j.mint_bench_tool("alice", "acme", "bench-1", "p", 900).unwrap();
         assert!(j.verify_workspace_tool(&bench).is_err());
     }
 
