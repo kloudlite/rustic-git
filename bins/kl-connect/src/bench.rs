@@ -25,11 +25,39 @@ pub async fn bench(team: Option<&str>, port: u16, start: bool, region: Option<&s
     let listener = TcpListener::bind(("127.0.0.1", port))
         .await
         .map_err(|e| e.to_string())?;
-    println!("127.0.0.1:{}", listener.local_addr().map_err(|e| e.to_string())?.port());
-    use std::io::Write;
-    std::io::stdout().flush().map_err(|e| e.to_string())?;
-    bench_on(listener, cfg, team.map(str::to_string)).await;
-    Ok(())
+    let bound_port = listener.local_addr().map_err(|e| e.to_string())?.port();
+    tokio::spawn(bench_on(listener, cfg, team.map(str::to_string)));
+
+    let known_hosts = crate::config::dir().join("bench_known_hosts");
+    let mut cmd = std::process::Command::new("ssh");
+    cmd.args(ssh_argv(bound_port, &known_hosts));
+    // exec, not spawn: ssh owns the terminal (job control, window resizes, the exit status), same
+    // rule as `ws.rs`'s `ssh_with`.
+    #[cfg(unix)]
+    {
+        use std::os::unix::process::CommandExt;
+        Err(format!("running ssh: {}", cmd.exec()))
+    }
+    #[cfg(not(unix))]
+    {
+        let st = cmd.status().map_err(|e| e.to_string())?;
+        std::process::exit(st.code().unwrap_or(1));
+    }
+}
+
+/// The ssh argv for the bench: `-t` because the remote's `ForceCommand` is a `tmux` session, not
+/// a one-shot command, so ssh must allocate a pty for it.
+fn ssh_argv(port: u16, known_hosts: &std::path::Path) -> Vec<String> {
+    vec![
+        "-p".to_string(),
+        port.to_string(),
+        "-o".to_string(),
+        "StrictHostKeyChecking=accept-new".to_string(),
+        "-o".to_string(),
+        format!("UserKnownHostsFile={}", known_hosts.display()),
+        "-t".to_string(),
+        "kl@127.0.0.1".to_string(),
+    ]
 }
 
 /// The testable core: takes a pre-bound listener (and no stdout line) so a test needs no port
@@ -126,6 +154,24 @@ mod tests {
                 }
             }
         })
+    }
+
+    #[test]
+    fn ssh_argv_matches_the_bench_ssh_invocation() {
+        let kh = std::path::Path::new("/home/k/.config/kl-connect/bench_known_hosts");
+        assert_eq!(
+            ssh_argv(2222, kh),
+            vec![
+                "-p".to_string(),
+                "2222".to_string(),
+                "-o".to_string(),
+                "StrictHostKeyChecking=accept-new".to_string(),
+                "-o".to_string(),
+                "UserKnownHostsFile=/home/k/.config/kl-connect/bench_known_hosts".to_string(),
+                "-t".to_string(),
+                "kl@127.0.0.1".to_string(),
+            ]
+        );
     }
 
     #[tokio::test]
