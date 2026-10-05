@@ -1,4 +1,5 @@
 #!/bin/sh
 # -W: writable (keys reach the shared tmux session). -i 0.0.0.0: the pod's own interface only,
-# the gateway NetworkPolicy is the fence (k8s::allow_gateway_bench).
-exec ttyd -W -i 0.0.0.0 -p 7681 tmux attach -t kl
+# the gateway NetworkPolicy is the fence (k8s::allow_gateway_bench). `new -A`, same as sshd's
+# ForceCommand: attach, or recreate the session if the agent CLI exited.
+exec ttyd -W -i 0.0.0.0 -p 7681 tmux new -A -s kl claude

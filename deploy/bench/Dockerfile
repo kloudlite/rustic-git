@@ -40,11 +40,12 @@ COPY bench/sessions /opt/kl/sessions
 COPY bench/mod /opt/kl/mod
 
 # runit service directories: each `run` script is `exec`'d last, so runit supervises the real
-# process directly (no wrapper pid to lose signals through).
-COPY bench/sv /etc/kl/sv
+# process directly (no wrapper pid to lose signals through). Owned by kl: runsv runs as uid 1000
+# and creates `supervise/` beside each `run` (root-owned, every service died on supervise/lock).
+COPY --chown=1000:1000 bench/sv /etc/kl/sv
 RUN chmod 0755 /etc/kl/sv/*/run
 
-COPY bench/sshd_config /etc/kl/sshd_config
+COPY bench/sshd_config bench/tmux.conf /etc/kl/
 
 # Managed settings: `apiKeyHelper` reads the provider token off the mounted `user-key` Secret, so
 # the token is never an env var (ps e, crash dumps, child processes all see env).
