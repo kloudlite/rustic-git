@@ -186,6 +186,43 @@ async fn a_websocket_authenticates_by_cookie_alone() {
 }
 
 #[tokio::test]
+async fn a_cross_site_origin_on_the_websocket_is_403() {
+    let (port, _saw_tty) = fake_ttyd_ws().await;
+    let base = serve(vec![get(BENCH, bench()), get(BENCH_POD, pod("127.0.0.1"))], port).await;
+    let t = token("bench-1", REGION);
+    let ws_base = base.replacen("http://", "ws://", 1);
+    let req = {
+        use tokio_tungstenite::tungstenite::client::IntoClientRequest;
+        let mut r = format!("{ws_base}/term/bench-1/ws?token={t}").into_client_request().unwrap();
+        r.headers_mut().insert("origin", "https://evil.example".parse().unwrap());
+        r
+    };
+    let err = tokio_tungstenite::connect_async(req).await.unwrap_err();
+    let tokio_tungstenite::tungstenite::Error::Http(resp) = err else { panic!("expected an HTTP error, got {err:?}") };
+    assert_eq!(resp.status(), 403, "{resp:?}");
+}
+
+#[tokio::test]
+async fn a_same_host_origin_on_the_websocket_passes() {
+    let (port, _saw_tty) = fake_ttyd_ws().await;
+    let base = serve(vec![get(BENCH, bench()), get(BENCH_POD, pod("127.0.0.1"))], port).await;
+    let t = token("bench-1", REGION);
+    let ws_base = base.replacen("http://", "ws://", 1);
+    let host = base.replacen("http://", "", 1);
+    use futures::{SinkExt, StreamExt};
+    let req = {
+        use tokio_tungstenite::tungstenite::client::IntoClientRequest;
+        let mut r = format!("{ws_base}/term/bench-1/ws?token={t}").into_client_request().unwrap();
+        r.headers_mut().insert("origin", format!("http://{host}").parse().unwrap());
+        r
+    };
+    let (mut ws, _) = tokio_tungstenite::connect_async(req).await.unwrap();
+    ws.send(tokio_tungstenite::tungstenite::Message::Binary(b"hi".to_vec().into())).await.unwrap();
+    let reply = ws.next().await.unwrap().unwrap();
+    assert_eq!(reply.into_data().as_ref(), b"hi");
+}
+
+#[tokio::test]
 async fn a_crlf_injection_attempt_in_the_path_is_400() {
     let base = serve(vec![get(BENCH, bench()), get(BENCH_POD, pod("127.0.0.1"))], 0).await;
     let t = token("bench-1", REGION);

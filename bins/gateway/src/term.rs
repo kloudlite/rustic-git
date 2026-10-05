@@ -60,6 +60,20 @@ fn authorize(gw: &Gateway, bench: &str, headers: &HeaderMap, query: Option<&str>
     Ok(claims)
 }
 
+/// `Origin`'s host must match `Host`: refuses a cross-site WS upgrade while still allowing the
+/// same ttyd origin that opens this connection (no `Origin` header at all, e.g. a non-browser
+/// client, is let through — there is nothing to compare).
+fn same_host_origin(headers: &HeaderMap) -> bool {
+    let Some(origin) = headers.get(axum::http::header::ORIGIN).and_then(|v| v.to_str().ok()) else {
+        return true;
+    };
+    let Some(host) = headers.get(axum::http::header::HOST).and_then(|v| v.to_str().ok()) else {
+        return false;
+    };
+    let origin_host = origin.split("://").nth(1).unwrap_or(origin);
+    origin_host == host
+}
+
 fn cookie_token(headers: &HeaderMap) -> Option<String> {
     let raw = headers.get(axum::http::header::COOKIE)?.to_str().ok()?;
     raw.split(';').find_map(|kv| {
@@ -172,6 +186,13 @@ fn split_once_crlf2(raw: &[u8]) -> Option<(&[u8], &[u8])> {
 async fn ws_proxy(State(gw): State<Arc<Gateway>>, Path(bench): Path<String>, headers: HeaderMap, Query(q): Query<TermQuery>, upgrade: WebSocketUpgrade) -> Response {
     if unsafe_path_segment(&bench) {
         return StatusCode::BAD_REQUEST.into_response();
+    }
+    // Checked before authorize: the `kl_term` cookie is `SameSite=None` (CHIPS-partitioned, but
+    // not every browser honours `Partitioned` yet), so without this a third-party page could open
+    // this socket riding the cookie alone — a writable shell into the agent's session. No console
+    // origin setting exists yet, so same-host is the only thing to compare against.
+    if !same_host_origin(&headers) {
+        return StatusCode::FORBIDDEN.into_response();
     }
     if let Err(status) = authorize(&gw, &bench, &headers, q.token.as_deref()) {
         return status.into_response();
