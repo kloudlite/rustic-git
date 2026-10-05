@@ -24,7 +24,12 @@ try {
   // first boot, or a corrupt/missing store: start from nothing rather than crash the service
 }
 
-const sessions = new Sessions({ query: query as any, home: HOME, modDir: MOD_DIR, saved: saved as any });
+// The session cwd must exist before the SDK spawns into it; done here so sessions.ts stays I/O-free.
+const mkQuery = (args: any) => {
+  fs.mkdirSync(args.options.cwd, { recursive: true });
+  return query(args);
+};
+const sessions = new Sessions({ query: mkQuery as any, home: HOME, modDir: MOD_DIR, saved: saved as any });
 
 function persist() {
   fs.mkdirSync(path.dirname(STORE), { recursive: true });
