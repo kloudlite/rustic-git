@@ -12,7 +12,7 @@
 //! reports through the readiness probe, a held lock exits 75 and the kubelet backs off.
 
 use super::*;
-use k8s_openapi::api::core::v1::{EnvVarSource, ExecAction, ObjectFieldSelector, SecretKeySelector};
+use k8s_openapi::api::core::v1::{EnvVarSource, ExecAction, ObjectFieldSelector};
 
 pub const BENCH_PORT: u16 = 7789;
 /// The container every session's pi runs in. Named `sessions` since 2026-09-17 (spec §2.2): a
@@ -27,18 +27,6 @@ pub const BENCH_TOOL_PATH: &str = "/etc/kloudlite/bench-tool";
 pub const BENCH_SUBDIR: &str = ".bench";
 
 
-fn bench_engine_var(key: &str) -> EnvVar {
-    EnvVar {
-        name: key.to_string(),
-        value_from: Some(EnvVarSource {
-            secret_key_ref: Some(SecretKeySelector { name: BENCH_ENGINE_SECRET.to_string(), key: key.to_string(), optional: Some(true) }),
-            ..Default::default()
-        }),
-        ..Default::default()
-    }
-}
-
-
 /// The `harness-bench` container of a bench workspace's pod.
 ///
 /// It runs the binary directly, not through a shell: there is nothing to seed (the workspace
@@ -50,7 +38,7 @@ fn bench_engine_var(key: &str) -> EnvVar {
 /// sized their workspace small would OOM mid-turn. The same function `quota` charges, so what
 /// runs and what is billed cannot drift apart.
 #[allow(clippy::too_many_arguments)]
-pub fn bench_container(ws_id: &str, spec: &WorkspaceSpec, image: &str, idle_secs: u64, kompress_url: &str, api_url: &str, registry_host: &str) -> Container {
+pub fn bench_container(ws_id: &str, spec: &WorkspaceSpec, image: &str, idle_secs: u64, api_url: &str, registry_host: &str) -> Container {
     let data = format!("{HOME_DIR}/{BENCH_SUBDIR}");
     let var = |n: &str, v: String| EnvVar { name: n.into(), value: Some(v), ..Default::default() };
     let model = spec.bench.as_ref().map(|b| b.model.clone()).unwrap_or_default();
@@ -92,27 +80,10 @@ pub fn bench_container(ws_id: &str, spec: &WorkspaceSpec, image: &str, idle_secs
         },
         var("HOME", HOME_DIR.to_string()),
         var("LANG", "C.UTF-8".to_string()),
-        // The sys-1 engine's credentials, from the bench-only `bench-engine` Secret (never
-        // `user-key`, which every workspace pod mounts whole). `optional: true` so a fleet without
-        // the entries still starts the pod and `harness/bench/src/runtime.ts` reports the missing
-        // key itself rather than the pod hitting CreateContainerConfigError.
-        bench_engine_var("TYPESAFE_API_KEY"),
-        bench_engine_var("JEVHARN_API_KEY"),
-        bench_engine_var("JEVHARN_MODEL"),
-        bench_engine_var("JEVHARN_BASE_URL"),
-        // A session's model picks its provider per turn (`engine/ai-sdk.ts` `modelFrom`); these two
-        // reach anthropic and deepseek natively, everything else goes through JEVHARN_BASE_URL.
-        bench_engine_var("DEEPSEEK_API_KEY"),
-        bench_engine_var("ANTHROPIC_API_KEY"),
     ];
     // Unset rather than empty when the agent has no `WS_API_URL`: the tools then fail closed.
     if !api_url.is_empty() {
         env.push(var("KL_API_URL", api_url.to_string()));
-    }
-    // Empty means no Kompress service in this region; the engine then falls back to its
-    // rule-based compressors.
-    if !kompress_url.is_empty() {
-        env.push(var("KL_KOMPRESS_URL", kompress_url.to_string()));
     }
 
     // sshd is the other container's; without it nothing here chroots, so the one capability the

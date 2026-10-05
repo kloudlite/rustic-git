@@ -46,7 +46,7 @@ fn bench_ws_spec() -> WorkspaceSpec {
 #[test]
 fn a_bench_pod_has_no_prelude_to_chown_its_worktree() {
     let spec = bench_ws_spec();
-    let p = workspace_pod(&spec, "ws-1", "bench-1", &ctx(), None, Some(("cr.example/bench:v9", 420, ""))).unwrap();
+    let p = workspace_pod(&spec, "ws-1", "bench-1", &ctx(), None, Some(("cr.example/bench:v9", 420))).unwrap();
     let pod = p.spec.unwrap();
     // The bench's own container runs the binary directly — no shell, so no seeding of any kind.
     let sessions = pod.containers.iter().find(|c| c.name == "sessions").expect("the sessions container");
@@ -73,7 +73,7 @@ fn a_bench_pod_has_no_prelude_to_chown_its_worktree() {
 
 #[test]
 fn a_bench_pod_carries_its_one_container_and_the_tool_secret_optional() {
-    let p = workspace_pod(&bench_ws_spec(), "ws-1", "bench-1", &ctx(), None, Some(("cr.example/bench:v9", 420, ""))).unwrap();
+    let p = workspace_pod(&bench_ws_spec(), "ws-1", "bench-1", &ctx(), None, Some(("cr.example/bench:v9", 420))).unwrap();
     assert_eq!(p.metadata.labels.as_ref().unwrap()[KIND_LABEL], "bench");
     let spec = p.spec.unwrap();
     let names: Vec<&str> = spec.containers.iter().map(|c| c.name.as_str()).collect();

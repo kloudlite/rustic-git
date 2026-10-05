@@ -147,17 +147,6 @@ pub(crate) fn the_user_key_secret_carries_the_private_key_the_git_identity_and_t
     assert_eq!(data["workspace-token"], "WSTOKEN");
 }
 
-#[test]
-pub(crate) fn the_bench_engine_secret_carries_whatever_is_set_and_nothing_else() {
-    let s = bench_engine_secret("alice", "ws-alice", &BTreeMap::from([("TYPESAFE_API_KEY".to_string(), "x".to_string())]));
-    let data = s.string_data.unwrap();
-    assert_eq!(data["TYPESAFE_API_KEY"], "x");
-
-    let empty = bench_engine_secret("alice", "ws-alice", &BTreeMap::new());
-    assert!(empty.string_data.unwrap().is_empty());
-}
-
-
 /// The build credential the docker helper reads: minted for the owner, ttl exactly what
 /// `keys::write_user_key` passes (`86_400`), and verifiable with the same `Jwt` the api tier
 /// signs everything else with. The ttl itself is `mint_registry`'s own contract

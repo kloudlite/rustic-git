@@ -421,9 +421,9 @@ pub async fn apply_workspace(w: &crd::Workspace, ctx: &Arc<Ctx>) -> Result<Actio
             // `Some` exactly when `is_bench`: the image is the agent's configured one (a bench
             // follows it on every start, so it is not a spec field) and `benchIdleSecs` is stamped
             // in at create like every other `Mark::Live` value, so a setting change never reaches
-            // a session already running. `kompressUrl` likewise.
+            // a session already running.
             let settings = ctx.settings.load();
-            let bench = crd::is_bench(w).then(|| (ctx.bench_image.as_str(), settings.bench_idle_secs, settings.kompress_url.as_str()));
+            let bench = crd::is_bench(w).then(|| (ctx.bench_image.as_str(), settings.bench_idle_secs));
             let pod = match k8s::workspace_pod(&w.spec, &id, &w.name_any(), &pod_ctx, init, bench) {
                 Ok(p) => p,
                 // Unreachable while `validate_ws_spec` runs at the top of this function; kept

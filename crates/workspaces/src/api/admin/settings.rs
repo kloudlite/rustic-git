@@ -342,7 +342,6 @@ fn merge_cluster_spec(mut current: crd::ClusterSettingsSpec, patch: &crd::Cluste
     }
     over!(sync_secs);
     over!(bench_idle_secs);
-    over!(kompress_url);
     over!(trace_sample_ratio);
     over!(trace_probe_rate);
     over!(trace_probe_burst);
@@ -589,7 +588,7 @@ mod tests {
                 .map(|(wire, _, _)| {
                     let v = match *wire {
                         n if n.starts_with("trace") => serde_json::json!(0.125 * tag as f64),
-                        "nixpkgs" | "basePackages" | "defaultImage" | "interceptProxyImage" | "gitInitImage" | "runtimeClass" | "kompressUrl" => {
+                        "nixpkgs" | "basePackages" | "defaultImage" | "interceptProxyImage" | "gitInitImage" | "runtimeClass" => {
                             serde_json::json!(format!("test-{wire}-{tag}"))
                         }
                         "stallDumps" | "memberRemovalDeletes" => serde_json::json!(tag.is_multiple_of(2)),
@@ -642,7 +641,7 @@ mod cluster_tests {
                 .map(|(name, _, _)| {
                     let x = match *name {
                         n if n.starts_with("trace") => serde_json::json!(if bump { 0.25 } else { 0.5 }),
-                        "nixpkgs" | "basePackages" | "defaultImage" | "interceptProxyImage" | "gitInitImage" | "runtimeClass" | "kompressUrl" => serde_json::json!(if bump { "b" } else { "a" }),
+                        "nixpkgs" | "basePackages" | "defaultImage" | "interceptProxyImage" | "gitInitImage" | "runtimeClass" => serde_json::json!(if bump { "b" } else { "a" }),
                         "stallDumps" | "memberRemovalDeletes" => serde_json::json!(bump),
                         _ => serde_json::json!(if bump { 61 } else { 62 }),
                     };

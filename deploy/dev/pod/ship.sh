@@ -29,11 +29,10 @@ GATE_RECORD_DIR=${KL_GATE_RECORD_DIR:-/work/gate-records}
 GATE_RECORD="$GATE_RECORD_DIR/$SHA"
 GATE_RECORD_TMP=
 GATE_RECORD_PENDING=0
-HARNESS_GATE_RECORD=/tmp/harness-gate-$SHA
 cleanup_gate_record() {
   local status=$?
   if [ "$GATE_RECORD_PENDING" = 1 ]; then
-    rm -f "$GATE_RECORD" "$HARNESS_GATE_RECORD"
+    rm -f "$GATE_RECORD"
     if [ -n "$GATE_RECORD_TMP" ]; then rm -f "$GATE_RECORD_TMP"; fi
   fi
   return "$status"
@@ -46,7 +45,7 @@ case "${1:-}" in
 esac
 if [ "${1:-}" != "--no-gate" ]; then
   GATE_RECORD_PENDING=1
-  rm -f "$GATE_RECORD" "$HARNESS_GATE_RECORD"
+  rm -f "$GATE_RECORD"
 fi
 source_provenance_require_clean "$PWD"
 # Any origin OR platform branch, not only master: a feature branch is verified on the fleet BEFORE
@@ -92,11 +91,6 @@ if [ "${1:-}" != "--no-gate" ]; then
     done
   done
   wait $NX || { grep -E 'FAIL|panicked|^error|Summary' /tmp/ship-test.log | head -20; exit 1; }
-  echo "==> harness: typecheck + bench + renderer boot"
-  KL_NODE24_BIN=${KL_NODE24_BIN:-/work/review-node24/node_modules/node/bin} \
-  KL_HARNESS_GATE_RECORD="$HARNESS_GATE_RECORD" \
-    ./deploy/dev/pod/harness-gate.sh > /tmp/ship-harness.log 2>&1 \
-    || { tail -40 /tmp/ship-harness.log; exit 1; }
   # The web's own gate (web.yml's exact steps), since the web image ships from here too.
   ( cd web && export PATH=/work/node/bin:/work/bun/bin:$PATH \
     && bun install --frozen-lockfile > /tmp/ship-web.log 2>&1 \
@@ -146,12 +140,9 @@ ln -f "$CARGO_TARGET_DIR/x86_64-unknown-linux-musl/$PROFILE/kloudlite-intercept-
 # the pod only ever builds dev-image, so link it under the name the Dockerfile expects too.
 mkdir -p "$CTX/target/x86_64-unknown-linux-musl/release"
 ln -f "$CARGO_TARGET_DIR/x86_64-unknown-linux-musl/$PROFILE/kl" "$CTX/target/x86_64-unknown-linux-musl/release/kl"
-# Same CTX: the bench image needs the harness sources CI's context carries, none of which
-# .dockerignore admits from anywhere but these exact paths (deploy/bench/, harness/{package*,bench,pi}).
+# Same CTX: the bench image's own build context (Task 6 rewrites deploy/bench/Dockerfile to stop
+# pulling harness/ sources in; this ship no longer copies them).
 cp -r deploy/bench "$CTX/deploy/"
-mkdir -p "$CTX/harness"
-cp harness/package.json harness/package-lock.json "$CTX/harness/"
-cp -r harness/bench harness/pi harness/skills "$CTX/harness/"
 
 source_provenance_verify "$PWD" "$SHA"
 for t in server:kloudlite agent:kloudlite-agent gateway:kloudlite-gateway controller:kloudlite-controller builder-gate:kloudlite-builder-gate slo:kloudlite-slo workspace:kloudlite-workspace intercept-proxy:kloudlite-intercept-proxy; do
