@@ -45,6 +45,15 @@ async function errorOf(res: Response, fallback: string): Promise<string> {
   return fallback;
 }
 
+// `crates/ide/src/auth.rs` `require`: every tool-server route except `/healthz` 401s without
+// `authorization: Bearer <token>`. Never send one of these requests unauthenticated — missing a
+// token is a known, named state (before the keys beat has written `workspace-token` into the pod,
+// `ws_tools` answers with no `token` field at all), not a reason to probe the server anyway.
+function tokenHeader(at: At, ws: string): Record<string, string> {
+  if (!at.token) throw new Error(`workspace ${ws} no tool token yet; retry shortly`);
+  return { authorization: `Bearer ${at.token}` };
+}
+
 /// `GET {api}/v1/workspaces/{ws}/tools`: the owner's tool server address. A non-2xx throws
 /// `Error(body.error)` so a stopped/between-pods workspace surfaces its own message verbatim.
 export async function toolsAt(fetch: FetchLike, api: string, token: string, ws: string): Promise<At> {
@@ -57,8 +66,11 @@ export async function toolsAt(fetch: FetchLike, api: string, token: string, ws: 
 }
 
 /// `GET http://{address}/tools`: `{"tools": [{name, description, schema}]}` per `crates/ide/src/api.rs`.
-export async function listTools(fetch: FetchLike, at: At): Promise<Tool[]> {
-  const res = await fetch(`http://${at.address}/tools`, { signal: AbortSignal.timeout(TOOLS_LIST_TIMEOUT_MS) });
+export async function listTools(fetch: FetchLike, at: At, ws: string): Promise<Tool[]> {
+  const res = await fetch(`http://${at.address}/tools`, {
+    headers: tokenHeader(at, ws),
+    signal: AbortSignal.timeout(TOOLS_LIST_TIMEOUT_MS),
+  });
   if (!res.ok) throw new Error(await errorOf(res, `request failed with status ${res.status}`));
   const body = (await res.json()) as { tools?: { name: string; description: string; schema: Record<string, unknown> }[] };
   return (body.tools ?? []).map((t) => ({ name: t.name, description: t.description, input_schema: t.schema }));
@@ -76,21 +88,21 @@ export async function callTool(
   name: string,
   input: unknown,
 ): Promise<CallResult> {
-  const post = (at: At) => {
-    const headers: Record<string, string> = { "content-type": "application/json" };
-    if (at.token) headers.authorization = `Bearer ${at.token}`;
-    return fetch(`http://${at.address}/tools/${encodeURIComponent(name)}`, {
+  const noToken = (): CallResult => ({ ok: false, error: `workspace ${ws} no tool token yet; retry shortly` });
+  const post = (at: At) =>
+    fetch(`http://${at.address}/tools/${encodeURIComponent(name)}`, {
       method: "POST",
-      headers,
+      headers: { "content-type": "application/json", ...tokenHeader(at, ws) },
       body: JSON.stringify(input ?? {}),
       signal: AbortSignal.timeout(TOOL_CALL_TIMEOUT_MS),
     });
-  };
   try {
     let at = await getAt();
+    if (!at.token) return noToken();
     let res = await post(at);
     if (res.status === 401) {
       at = await getAt(true);
+      if (!at.token) return noToken();
       res = await post(at);
     }
     if (!res.ok) return { ok: false, error: await errorOf(res, `request failed with status ${res.status}`) };
@@ -105,20 +117,26 @@ export async function callTool(
 /// Everything the first prompt gets for free: the workspace's own `CLAUDE.md` plus `GET /fs/git`
 /// (`crates/ide/src/fs/mod.rs`, `git_state`). Each section is best-effort — a missing CLAUDE.md or
 /// a not-yet-a-repo workspace must not make the whole context call fail.
-export async function workspaceContext(fetch: FetchLike, getAt: (fresh?: boolean) => Promise<At>): Promise<string> {
+export async function workspaceContext(fetch: FetchLike, getAt: (fresh?: boolean) => Promise<At>, ws: string): Promise<string> {
   const at = await getAt();
   const sections: string[] = [];
   try {
-    const res = await fetch(`http://${at.address}/fs/file?path=CLAUDE.md`, { signal: AbortSignal.timeout(TOOLS_LIST_TIMEOUT_MS) });
+    const res = await fetch(`http://${at.address}/fs/file?path=CLAUDE.md`, {
+      headers: tokenHeader(at, ws),
+      signal: AbortSignal.timeout(TOOLS_LIST_TIMEOUT_MS),
+    });
     if (res.ok) sections.push(await res.text());
   } catch {
-    // no CLAUDE.md, or the pod isn't reachable — skip this section, not the whole context
+    // no token yet, no CLAUDE.md, or the pod isn't reachable — skip this section, not the whole context
   }
   try {
-    const res = await fetch(`http://${at.address}/fs/git`, { signal: AbortSignal.timeout(TOOLS_LIST_TIMEOUT_MS) });
+    const res = await fetch(`http://${at.address}/fs/git`, {
+      headers: tokenHeader(at, ws),
+      signal: AbortSignal.timeout(TOOLS_LIST_TIMEOUT_MS),
+    });
     if (res.ok) sections.push(JSON.stringify(await res.json(), null, 2));
   } catch {
-    // not a repo yet, or unreachable — skip
+    // no token yet, not a repo yet, or unreachable — skip
   }
   return sections.join("\n\n");
 }

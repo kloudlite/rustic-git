@@ -55,7 +55,7 @@ export function register(on: Register) {
     const fetch = adaptFetch($);
     try {
       const at = await toolsAt(fetch, api, await readToken($), ws);
-      const tools = await listTools(fetch, at);
+      const tools = await listTools(fetch, at, ws);
       for (const t of tools) {
         await $.tool.register({ name: t.name, description: t.description, inputSchema: t.input_schema });
       }
@@ -111,7 +111,7 @@ export function register(on: Register) {
       return cached;
     };
     try {
-      return { blocks: [await workspaceContext(fetch, getAt)] };
+      return { blocks: [await workspaceContext(fetch, getAt, ws)] };
     } catch {
       return next(e); // workspace unreachable at session start — no context, not a crash
     }
