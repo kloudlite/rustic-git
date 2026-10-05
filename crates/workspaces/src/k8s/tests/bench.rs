@@ -5,6 +5,15 @@
 use super::*;
 
 #[test]
+fn a_bench_pods_user_key_mount_carries_the_whole_secret() {
+    let p = workspace_pod(&bench_ws_spec(), "ws-1", "bench-1", &ctx(), None, Some(("cr.example/bench:v9", 420, ""))).unwrap();
+    let v = p.spec.unwrap().volumes.unwrap().into_iter().find(|v| v.name == "user-key").unwrap();
+    // The bench's own `apiKeyHelper` is what reads `provider-token`, so unlike an ordinary
+    // workspace (`a_workspace_pods_user_key_mount_excludes_provider_token`) it keeps every key.
+    assert!(v.secret.unwrap().items.is_none());
+}
+
+#[test]
 fn bench_tool_secret_carries_token_and_exp_only() {
     let s = crate::k8s::bench_tool_secret("wt-alice-acme", "tok", 42);
     assert_eq!(s.metadata.name.as_deref(), Some(crate::k8s::BENCH_TOOL_SECRET));

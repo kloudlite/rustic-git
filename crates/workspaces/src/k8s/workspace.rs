@@ -231,7 +231,11 @@ pub(super) fn ws_ssh_volume(id: &str) -> Volume {
 }
 
 
-pub(super) fn user_key_volume(required: bool) -> Volume {
+/// `bench: false` scopes the mount to an explicit `items:` list that leaves out
+/// `provider-token` — code the agent runs in an ordinary workspace (`exec`) must never read the
+/// owner's provider credential (final review I4). The bench keeps the whole Secret: its own
+/// `apiKeyHelper` is what reads `provider-token` in the first place.
+pub(super) fn user_key_volume(required: bool, bench: bool) -> Volume {
     Volume {
         name: "user-key".to_string(),
         secret: Some(SecretVolumeSource {
@@ -249,7 +253,12 @@ pub(super) fn user_key_volume(required: bool) -> Volume {
             // clones with this key, and an absent one would start a pod that clones nothing and
             // then reports Ready.
             optional: Some(!required),
-            ..Default::default()
+            items: (!bench).then(|| {
+                ["id_ed25519", "authorized_keys", "gitconfig", "registry-token", "workspace-token"]
+                    .into_iter()
+                    .map(|k| KeyToPath { key: k.into(), path: k.into(), mode: None })
+                    .collect()
+            }),
         }),
         ..Default::default()
     }
@@ -654,7 +663,7 @@ pub fn workspace_pod(
                 // mounts pick the two subdirectories the pod may see.
                 host_dir("nix", NIX_ROOT.to_string()),
                 attach_volume(ctx.pool, ws_id),
-                user_key_volume(init.is_some()),
+                user_key_volume(init.is_some(), bench.is_some()),
             ];
             // Only the init container mounts this, so only a seeded workspace needs it at all.
             if init.is_some() {

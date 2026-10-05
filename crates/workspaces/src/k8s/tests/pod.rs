@@ -775,12 +775,13 @@ pub(crate) fn only_the_seed_key_is_visible_to_the_git_seed_container() {
     let items = seed_vol.secret.as_ref().unwrap().items.as_ref().expect("scoped by items");
     assert_eq!(items.iter().map(|i| i.key.as_str()).collect::<Vec<_>>(), vec!["id_ed25519"]);
 
-    // The main container's own mount is untouched: still the full Secret, no `items`.
+    // The main container's own mount is a different scope (every key but `provider-token`, see
+    // `a_workspace_pods_user_key_mount_excludes_provider_token`), not the unrestricted Secret.
     let main_mount = s.containers[0].volume_mounts.clone().unwrap();
     let main_vol_name = main_mount.iter().find(|m| m.mount_path == USER_KEY_PATH).unwrap().name.clone();
     assert_eq!(main_vol_name, "user-key");
     let main_vol = volumes.iter().find(|v| v.name == "user-key").unwrap();
-    assert!(main_vol.secret.as_ref().unwrap().items.is_none());
+    assert!(!main_vol.secret.as_ref().unwrap().items.as_ref().unwrap().iter().any(|i| i.key == "provider-token"));
 }
 
 
@@ -827,6 +828,17 @@ fn the_workspace_container_exposes_ttyd_and_no_shell_sidecar_exists() {
     assert!(ports.contains(&(crate::k8s::SHELL_PORT as i32)), "the workspace container must expose ttyd's port");
     let ttyd_port = ws.ports.as_ref().unwrap().iter().find(|p| p.container_port == crate::k8s::SHELL_PORT as i32).unwrap();
     assert_eq!(ttyd_port.name.as_deref(), Some("ttyd"));
+}
+
+#[test]
+pub(crate) fn a_workspace_pods_user_key_mount_excludes_provider_token() {
+    let p = workspace_pod(&ws_spec(), "ws-1", "ws-1", &ctx(), None, None).unwrap();
+    let v = p.spec.unwrap().volumes.unwrap().into_iter().find(|v| v.name == "user-key").unwrap();
+    let items = v.secret.unwrap().items.unwrap();
+    // Code the agent runs in a workspace (`exec`) must never read the owner's provider
+    // credential, which the bench alone needs (final review I4).
+    assert!(!items.iter().any(|i| i.key == "provider-token"));
+    assert!(items.iter().any(|i| i.key == "id_ed25519"));
 }
 
 #[test]
