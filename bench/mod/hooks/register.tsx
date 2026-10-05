@@ -8,7 +8,7 @@
 // vars go through `$.env.get`, file reads through `$.fs.read`.
 import { atom, read, update } from "claude-code";
 import type { Register, StateDollar } from "claude-code";
-import { callTool, listTools, toolArgsOf, toolsAt, workspaceContext, type At } from "../lib/platform.ts";
+import { callTool, isDisabledBuiltin, listTools, toolArgsOf, toolsAt, workspaceContext, type At } from "../lib/platform.ts";
 import { buildView, type EnvRow, type Row, type SessionsState, type V1Environment, type V1Workspace } from "../lib/view.ts";
 
 const TOOL_PREFIX = "mcp__kloudlite__";
@@ -198,6 +198,15 @@ export const register: Register = (on) => {
   on("tool.call", { tool: "Agent" }, async ($, e, next) => {
     if (!e.agentId && !(await $.env.get("KL_WORKSPACE"))) {
       return { deny: "Main session cannot spawn subagents. Send the task to a workspace session instead." };
+    }
+    return next(e);
+  });
+
+  // Backstop: `kl-sessions` already passes these as `disallowedTools`, but a plugin or a resumed
+  // session must never see them answered by the bench's own filesystem (spec §1, "Fails closed").
+  on("tool.call", async ($, e, next) => {
+    if (isDisabledBuiltin(e.tool)) {
+      return { deny: "This bench runs no local tools; use the workspace's tools (mcp__kloudlite__*) instead." };
     }
     return next(e);
   });

@@ -29,6 +29,11 @@ export const DISABLED = [
   "WebFetch",
 ];
 
+// Pure so `register.tsx`'s backstop hook and its `node --test` case agree on one list.
+export function isDisabledBuiltin(tool: string): boolean {
+  return DISABLED.includes(tool);
+}
+
 // `tool.call`'s event is `{ tool, tool_use_id, agentId?, ...toolArguments }` (no `e.input`): the
 // envelope fields (plus the reserved `consent`) sit alongside the tool's own arguments, so the
 // only way to get the arguments is to strip the envelope's own keys back off.

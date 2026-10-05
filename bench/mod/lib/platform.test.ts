@@ -1,8 +1,16 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { callTool, listTools, toolArgsOf, toolsAt } from "./platform.ts";
+import { callTool, isDisabledBuiltin, listTools, toolArgsOf, toolsAt } from "./platform.ts";
 
 const res = (status: number, body: unknown) => new Response(JSON.stringify(body), { status });
+
+test("the disabled-builtins list matches the kept list", () => {
+  assert.ok(isDisabledBuiltin("Bash"));
+  assert.ok(isDisabledBuiltin("Read"));
+  assert.ok(!isDisabledBuiltin("Agent"));
+  assert.ok(!isDisabledBuiltin("TodoWrite"));
+  assert.ok(!isDisabledBuiltin("WebSearch"));
+});
 
 test("a stopped workspace is a tool error naming it, not a hang", async () => {
   const f = async () => res(409, { error: "workspace api is Stopped; start it to run tools" });
