@@ -10,12 +10,17 @@ FROM node:24-bookworm-slim
 
 # ca-certificates: the agent CLI and `kl` both talk TLS. runit: the pid-1 supervisor (R2/R3) —
 # a crash in tmux/ttyd/sshd/sessions restarts in place, no second pod phase to fall back to. tmux:
-# the one session a person's ssh/ttyd logins and the agent CLI all share. ttyd: the browser
-# terminal, attaches to that same tmux session. openssh-server: `sshd`, same tmux session via
-# `ForceCommand` in bench/sshd_config.
+# the one session a person's ssh/ttyd logins and the agent CLI all share. openssh-server: `sshd`,
+# same tmux session via `ForceCommand` in bench/sshd_config.
 RUN apt-get update && apt-get install -y --no-install-recommends \
-    ca-certificates runit tmux ttyd openssh-server \
+    ca-certificates runit tmux openssh-server \
     && rm -rf /var/lib/apt/lists/*
+
+# ttyd: the browser terminal, attaches to that same tmux session. No Debian release packages it
+# (bookworm and trixie both have no candidate), so the upstream static build, pinned by digest.
+ADD --checksum=sha256:8a217c968aba172e0dbf3f34447218dc015bc4d5e59bf51db2f2cd12b7be4f55 \
+    https://github.com/tsl0922/ttyd/releases/download/1.7.7/ttyd.x86_64 /usr/local/bin/ttyd
+RUN chmod 0755 /usr/local/bin/ttyd
 
 # Pinned exact (plan R5): `npm view @anthropic-ai/claude-code version` on 2026-10-05.
 RUN npm install -g @anthropic-ai/claude-code@2.1.289
