@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Repin every image in deploy/ to one commit: `deploy/pin.sh <sha> [web-sha]`.
 #
-# THE CONTRACT. Ten images, two SHAs, one edit:
+# THE CONTRACT. Nine images, two SHAs, one edit:
 #   - kloudlite, kloudlite-agent, kloudlite-gateway, kloudlite-builder-gate, kloudlite-workspace,
 #     kloudlite-bench, kloudlite-intercept-proxy, kloudlite-slo, kloudlite-controller are nine
 #     targets of ONE Dockerfile (the bench's is deploy/bench/Dockerfile over the same context), built
@@ -45,7 +45,7 @@ digest_of() {
 }
 
 declare -A DIGEST
-for img in kloudlite kloudlite-agent kloudlite-gateway kloudlite-controller kloudlite-builder-gate kloudlite-workspace kloudlite-bench kloudlite-intercept-proxy kloudlite-slo kloudlite-kompress; do
+for img in kloudlite kloudlite-agent kloudlite-gateway kloudlite-controller kloudlite-builder-gate kloudlite-workspace kloudlite-bench kloudlite-intercept-proxy kloudlite-slo; do
   # Only an image that is actually pinned is demanded. The controller's manifest
   # (k3s/controller.yaml) lands after its Dockerfile stage does, and a SHA built before that stage
   # existed has no controller package at all — a hard failure here would block every unrelated
@@ -84,7 +84,6 @@ pin 'kloudlite-gateway' "$SHA" "${DIGEST[kloudlite-gateway]}" k3s/gateway.yaml
 # first pin succeeds.
 pin 'kloudlite-controller' "$SHA" "${DIGEST[kloudlite-controller]:-}" k3s/controller.yaml
 pin 'kloudlite-builder-gate' "$SHA" "${DIGEST[kloudlite-builder-gate]}" k3s/builder-gate.yaml
-pin 'kloudlite-kompress' "$SHA" "${DIGEST[kloudlite-kompress]}" k3s/kompress.yaml
 # The workspace image is not a workload of ours: the agent hands it to tenant pods
 # (WS_DEFAULT_IMAGE), so it lives in the DaemonSet's env, not an image: line.
 pin 'kloudlite-workspace' "$SHA" "${DIGEST[kloudlite-workspace]}" k3s/agent-daemonset.yaml
@@ -96,7 +95,6 @@ pin 'kloudlite-intercept-proxy' "$SHA" "${DIGEST[kloudlite-intercept-proxy]}" k3
 # it at all since a bench became a Workspace.
 pin 'kloudlite-bench' "$SHA" "${DIGEST[kloudlite-bench]}" k3s/agent-daemonset.yaml
 pin 'kloudlite-slo' "$SHA" "${DIGEST[kloudlite-slo]}" kloudlite.yaml
-pin 'kloudlite-kompress' "$SHA" "${DIGEST[kloudlite-kompress]}" k3s/kompress.yaml
 [ -z "$WEB" ] || pin 'kloudlite-web' "$WEB" "${DIGEST[kloudlite-web]}" kloudlite-web.yaml
 
 grep -rn --include='*.yaml' -E 'image: ghcr\.io/kloudlite/' . | sed 's/^\.\///'
