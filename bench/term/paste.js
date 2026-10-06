@@ -9,9 +9,11 @@
   font.rel = "stylesheet";
   font.href = "https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:ital,wght@0,400;0,600;1,400&display=swap";
   document.head.appendChild(font);
-  // Edge to edge: ttyd pads the terminal 5px; the TUI should own the whole window.
+  // Edge to edge: ttyd pads the terminal 5px; the TUI should own the whole window. No scrollbar:
+  // the TUI is full screen and scrolls itself; xterm's viewport bar only eats a column.
   const fill = document.createElement("style");
-  fill.textContent = "html,body,#terminal-container{width:100%;height:100%;margin:0;padding:0}.terminal{padding:0!important;height:100%!important}";
+  fill.textContent = "html,body,#terminal-container{width:100%;height:100%;margin:0;padding:0}.terminal{padding:0!important;height:100%!important}" +
+    ".xterm-viewport{scrollbar-width:none}.xterm-viewport::-webkit-scrollbar{display:none}";
   document.head.appendChild(fill);
   // ttyd creates window.term after this script runs, and fits the grid before the font and line
   // height apply (it measured 50 rows into a 42-row window), so wait for both, then refit.
