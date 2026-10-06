@@ -7,10 +7,10 @@
 //! the home, 2026-09-22), so it is snapshotted, replicated and pushed with the workspace.
 //!
 //! The image runs `runsvdir` as pid 1 (R2/R3 of the 2026-10-05 bench plan, same shape as the
-//! workspace image's own `prelude`), supervising four runit services under `/etc/kl/sv`: the agent
-//! CLI in a `tmux` session, `ttyd` attached to it, `sshd` (its host key persists at `~/.ssh-host`,
-//! logins land in the same tmux session via `ForceCommand`) and the `sessions` node service, a
-//! loopback-only HTTP server on `127.0.0.1:8917` that sshd (`BENCH_PORT`) and ttyd (`BENCH_TERM_PORT`) sit beside, not
+//! workspace image's own `prelude`), supervising four runit services under `/etc/kl/sv`: the
+//! graphcode TUI in a `tmux` session, `ttyd` attached to it, `sshd` (its host key persists at `~/.ssh-host`,
+//! logins land in the same tmux session via `ForceCommand`) and the `sessions` node service, an
+//! idle/readiness probe: a loopback-only HTTP server on `127.0.0.1:8917` that sshd (`BENCH_PORT`) and ttyd (`BENCH_TERM_PORT`) sit beside, not
 //! on. A crash in any one is restarted by runit in place — there is no second pod phase to fall
 //! back to.
 //!
@@ -38,7 +38,7 @@ pub const BENCH_SUBDIR: &str = ".bench";
 
 
 /// The `sessions` container of a bench workspace's pod: `runsvdir` as pid 1, supervising the
-/// agent CLI (tmux), ttyd, sshd and the node `sessions` service (see module docs).
+/// graphcode TUI (tmux), ttyd, sshd and the node `sessions` service (see module docs).
 ///
 /// `resources` is `model::bench_container_resources()` and NEVER `spec.resources`: that field
 /// sizes the `workspace` container the person works in, and a bench that shrank because somebody
@@ -63,17 +63,13 @@ pub fn bench_container(
         // they are in.
         var("KL_TEAM", crate::crd::space_slug(&spec.owner, &spec.team)),
         var("KL_BENCH", ws_id.to_string()),
-        // Same name the workspace container carries, so `kl` and the tool server agree on which
-        // workspace this is. Never `KL_WORKSPACE`: the mod reads that var to mean "I am a
-        // per-workspace session" (`bench/mod/hooks/register.tsx`), and the main agent CLI is not
-        // one — setting it here made the main session believe it was scoped to a workspace.
+        // Same name the workspace container carries, so `kl` and the tool server agree.
         var("KL_WORKSPACE_ID", ws_id.to_string()),
         var("KL_REGISTRY_HOST", registry_host.to_string()),
         var("KL_BENCH_IDLE_SECS", idle_secs.to_string()),
         // The PATH to the tool token, never the token: env shows up in `ps e`, crash dumps and
         // child processes, and a file the api refreshes in place stays current without a restart.
         var("KL_TOOL_TOKEN_FILE", format!("{BENCH_TOOL_PATH}/token")),
-        var("CLAUDE_CODE_PLUGIN_DIRS", "/opt/kl/mod".to_string()),
         var("KLOUDLITE_OTLP_URL", OTLP_URL.to_string()),
         EnvVar {
             name: "NODE_NAME".into(),

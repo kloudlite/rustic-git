@@ -1,4 +1,4 @@
-# sshd for a bench pod: every login lands in the same tmux session the agent CLI and ttyd share
+# sshd for a bench pod: every login lands in the same tmux session the graphcode TUI and ttyd share
 # (ForceCommand), authenticated against the owner's own key (AuthorizedKeysFile, projected by the
 # agent from OwnerKeys — see crates/workspaces/src/k8s/attach.rs). No password, no PAM: the only
 # credential is the key the gateway already fenced BENCH_PORT to.
@@ -8,7 +8,7 @@ AuthorizedKeysFile /etc/kloudlite/authorized_keys
 PasswordAuthentication no
 UsePAM no
 PidFile none
-ForceCommand tmux new -A -s kl claude --messaging-socket-path /tmp/kl/kl.sock
+ForceCommand tmux new -A -s kl bun /opt/kl/harness/apps/tui/src/cli.tsx
 # ForceCommand alone does not stop `ssh -N -L/-D`: a key holder would get a SOCKS pivot from the
 # bench pod's network position (final review I2). AllowUsers names the only account OwnerKeys ever
 # authenticates as.

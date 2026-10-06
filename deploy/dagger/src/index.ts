@@ -19,6 +19,8 @@ const WORKSPACE_NODE = "node:22-bookworm-slim@sha256:83f487e0a63425e5b4d146fb5e5
 const DOCKER_CLI = "docker:28-cli@sha256:625d9431a9f54c5a2bc90f24f0e1c3d55b1349fd857dd85035f98c2c9acbdd4d"
 const BUILDX_BIN = "docker/buildx-bin:0.20.1@sha256:ead27bfcde6308a757b4a5a4a931937363c1fa0091f7e2994b9114521853cf69"
 const BUN_IMAGE = "oven/bun:1.3.14@sha256:e10577f0db68676a7024391c6e5cb4b879ebd17188ab750cf10024a6d700e5c4"
+// graphcode TUI (kloudlite/harness) pinned by commit; bump = edit here and in deploy/bench/Dockerfile.
+const HARNESS_REV = "2509c2fff523a84928b2f9cdbbdf3da89320bf77"
 const NODE_IMAGE = "node:22-bookworm-slim@sha256:d649c27dae7ba0137b3cef5dd75baa422c08dc3d9e3fc0c23dfb172dc3cc6436"
 
 @object()
@@ -284,18 +286,16 @@ export class Kloudlite {
       .withEnvVariable("DO_NOT_TRACK", "1")
   }
 
-  // deploy/bench/Dockerfile: the agent CLI (@anthropic-ai/claude-code), tmux, ttyd and sshd,
-  // supervised by runit, plus the `sessions` node service and the `kloudlite` mod it loads as a
-  // plugin. npm's cache is a named volume so a lockfile-unchanged rebuild never re-downloads.
+  // deploy/bench/Dockerfile: the graphcode TUI (run under bun), tmux, ttyd and sshd, supervised by
+  // runit, plus the `sessions` node service (idle/readiness probe only). The TUI's deps install in
+  // their own stage so a rebuild at the same HARNESS_REV is a cache hit.
   private imageBench(source: Directory, built: Container): Container {
-    const deps = dag
+    const harness = dag
       .container()
-      .from("node:24-bookworm-slim")
-      .withMountedCache("/root/.npm", dag.cacheVolume("kloudlite-npm"))
-      .withWorkdir("/opt/kl/sessions")
-      .withFile("package.json", source.file("bench/sessions/package.json"))
-      .withFile("package-lock.json", source.file("bench/sessions/package-lock.json"))
-      .withExec(["npm", "ci", "--omit=dev"])
+      .from(BUN_IMAGE)
+      .withDirectory("/opt/kl/harness", dag.git("https://github.com/kloudlite/harness.git").commit(HARNESS_REV).tree())
+      .withWorkdir("/opt/kl/harness")
+      .withExec(["bun", "install", "--frozen-lockfile"])
     return dag
       .container()
       .from("node:24-bookworm-slim")
@@ -307,26 +307,17 @@ export class Kloudlite {
         "curl -fsSL -o /usr/local/bin/ttyd https://github.com/tsl0922/ttyd/releases/download/1.7.7/ttyd.x86_64 " +
         '&& echo "8a217c968aba172e0dbf3f34447218dc015bc4d5e59bf51db2f2cd12b7be4f55  /usr/local/bin/ttyd" | sha256sum -c - ' +
         "&& chmod 0755 /usr/local/bin/ttyd"])
-      // Pinned exact (plan R5): `npm view @anthropic-ai/claude-code version` on 2026-10-06.
-      .withExec(["npm", "install", "-g", "@anthropic-ai/claude-code@2.1.291"])
+      .withFile("/usr/local/bin/bun", dag.container().from(BUN_IMAGE).file("/usr/local/bin/bun"), { permissions: 0o755 })
+      .withDirectory("/opt/kl/harness", harness.directory("/opt/kl/harness"))
       .withFile("/usr/local/bin/kl", built.file("/out/musl/kl"), { permissions: 0o755 })
-      .withFile("/opt/kl/sessions/package.json", source.file("bench/sessions/package.json"))
-      .withFile("/opt/kl/sessions/package-lock.json", source.file("bench/sessions/package-lock.json"))
-      .withDirectory("/opt/kl/sessions/node_modules", deps.directory("/opt/kl/sessions/node_modules"))
       .withDirectory("/opt/kl/sessions", source.directory("bench/sessions"))
       .withDirectory("/opt/kl/term", source.directory("bench/term"))
       .withExec(["install", "-m", "0755", "/opt/kl/term/xclip", "/usr/local/bin/xclip"])
-      .withDirectory("/opt/kl/mod", source.directory("bench/mod"))
       .withDirectory("/etc/kl/sv", source.directory("bench/sv"), { owner: "1000:1000" })
       .withExec(["chmod", "0755", "/etc/kl/sv/sessions/run", "/etc/kl/sv/sshd/run", "/etc/kl/sv/tmux/run", "/etc/kl/sv/ttyd/run", "/etc/kl/sv/term/run"])
       .withFile("/etc/kl/sshd_config", source.file("bench/sshd_config"))
       .withFile("/etc/kl/tmux.conf", source.file("bench/tmux.conf"))
-      .withExec(["mkdir", "-p", "/etc/claude-code"])
-      .withFile("/etc/claude-code/managed-settings.json", source.file("bench/settings.json"))
-      .withEnvVariable("CLAUDE_CODE_PLUGIN_DIRS", "/opt/kl/mod")
-      // Same as deploy/bench/Dockerfile: fullscreen TUI, no self-update of the pinned CLI, private TMPDIR.
-      .withEnvVariable("CLAUDE_CODE_NO_FLICKER", "1")
-      .withEnvVariable("DISABLE_AUTOUPDATER", "1")
+      // Private TMPDIR, same as deploy/bench/Dockerfile.
       .withEnvVariable("TMPDIR", "/tmp/kl")
       .withExec(["sh", "-c",
         "usermod -l kl -d /home/kl node && groupmod -n kl node " +

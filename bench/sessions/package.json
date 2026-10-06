@@ -3,11 +3,6 @@
   "version": "1.0.0",
   "private": true,
   "type": "module",
-  "description": "One warm Agent SDK session per workspace, serving the bench pod's /send /state /idle contract.",
-  "scripts": {
-    "test": "node --test"
-  },
-  "dependencies": {
-    "@anthropic-ai/claude-agent-sdk": "0.3.291"
-  }
+  "description": "Idle/readiness probe for the bench pod (/idle, --ping).",
+  "dependencies": {}
 }

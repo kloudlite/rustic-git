@@ -39,7 +39,7 @@ pub const DEFAULT_BENCH_IMAGE: &str = "ghcr.io/kloudlite/kloudlite-bench:latest"
 /// `quota` charges it — one definition, or the number that runs and the number that is billed
 /// drift apart.
 ///
-/// Sized for WHAT IT RUNS: the agent CLI, tmux, ttyd, sshd and the `sessions` service, one node
+/// Sized for WHAT IT RUNS: the graphcode TUI, tmux, ttyd, sshd and the `sessions` service, one node
 /// process each, supervised together in the bench container.
 /// It used to be the workspace slot's own default, so a bench pod REQUESTED 2 CPU for the
 /// workspace container and another 2 for this one — 4 of an 8-core node for one bench, which left
