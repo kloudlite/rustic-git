@@ -112,7 +112,12 @@ const server = http.createServer((req, res) => {
 server.on("upgrade", (req, sock, head) => {
   const up = net.connect(TTYD, () => {
     let raw = `${req.method} ${req.url} HTTP/1.1\r\n`;
-    for (let i = 0; i < req.rawHeaders.length; i += 2) raw += `${req.rawHeaders[i]}: ${req.rawHeaders[i + 1]}\r\n`;
+    for (let i = 0; i < req.rawHeaders.length; i += 2) {
+      // No permessage-deflate: browsers offer it, ttyd accepts it, and a compressed `K` frame no
+      // longer starts with `K`, so every image paste went to ttyd as an unknown command.
+      if (req.rawHeaders[i].toLowerCase() === "sec-websocket-extensions") continue;
+      raw += `${req.rawHeaders[i]}: ${req.rawHeaders[i + 1]}\r\n`;
+    }
     up.write(raw + "\r\n");
     let pending: Buffer | null = Buffer.alloc(0);
     const feed = (c: Buffer) => {
