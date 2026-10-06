@@ -8,7 +8,7 @@ AuthorizedKeysFile /etc/kloudlite/authorized_keys
 PasswordAuthentication no
 UsePAM no
 PidFile none
-ForceCommand tmux new -A -s kl claude
+ForceCommand tmux new -A -s kl claude --messaging-socket-path /tmp/kl/kl.sock
 # ForceCommand alone does not stop `ssh -N -L/-D`: a key holder would get a SOCKS pivot from the
 # bench pod's network position (final review I2). AllowUsers names the only account OwnerKeys ever
 # authenticates as.

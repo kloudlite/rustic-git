@@ -3,7 +3,9 @@
 # answer it before the pane starts.
 # TMPDIR (Dockerfile ENV) is a private dir under the shared /tmp emptyDir: /tmp itself is 0777 with
 # no sticky bit, and the CLI turns cross-session messaging off on a world-writable, non-sticky dir.
-# The CLI places its messaging socket by CLAUDE_CODE_TMPDIR, not TMPDIR, so both name this dir.
+# The CLI ignores TMPDIR for its messaging socket and refuses any default path under /tmp (it
+# checks every parent), so the pane's CLI is given `--messaging-socket-path` in this dir, the one
+# path it checks only the parent of. One fixed name: `new -A` keeps a single pane CLI.
 mkdir -p -m 0700 "$TMPDIR"
 [ -f ~/.claude.json ] || echo '{"hasCompletedOnboarding":true}' > ~/.claude.json
 # The tmux server, in the foreground so runsv supervises it. `-D` takes no command (tmux 3.3a

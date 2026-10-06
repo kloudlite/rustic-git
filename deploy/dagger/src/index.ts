@@ -328,7 +328,6 @@ export class Kloudlite {
       .withEnvVariable("CLAUDE_CODE_NO_FLICKER", "1")
       .withEnvVariable("DISABLE_AUTOUPDATER", "1")
       .withEnvVariable("TMPDIR", "/tmp/kl")
-      .withEnvVariable("CLAUDE_CODE_TMPDIR", "/tmp/kl")
       .withExec(["sh", "-c",
         "usermod -l kl -d /home/kl node && groupmod -n kl node " +
         "&& mkdir -p /home/kl && chown kl:kl /home/kl"])

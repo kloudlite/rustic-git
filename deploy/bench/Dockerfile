@@ -61,7 +61,7 @@ COPY bench/settings.json /etc/claude-code/managed-settings.json
 ENV CLAUDE_CODE_PLUGIN_DIRS=/opt/kl/mod
 # Fullscreen TUI by default. The CLI is pinned above and its npm prefix is read-only, so its own
 # updater only fails; an upgrade is a new image. TMPDIR: see bench/sv/tmux/run.
-ENV CLAUDE_CODE_NO_FLICKER=1 DISABLE_AUTOUPDATER=1 TMPDIR=/tmp/kl CLAUDE_CODE_TMPDIR=/tmp/kl
+ENV CLAUDE_CODE_NO_FLICKER=1 DISABLE_AUTOUPDATER=1 TMPDIR=/tmp/kl
 
 # node:24-bookworm-slim ships uid/gid 1000 as `node`; rename rather than useradd a second uid 1000
 # (plan R3). Home is the workspace volume (2026-09-22 ruling): /home/kl IS the mounted volume.
