@@ -101,7 +101,7 @@ spec:
         - name: builder-gate
           # `pin.sh` rewrites this to `:<sha>@sha256:<digest>` — the placeholder is here only so
           # the file parses and applies before the first pin.
-          image: ghcr.io/kloudlite/kloudlite-builder-gate:7513ae23f3cf45c2e9da6d82fe4813b7494a172c@sha256:8fcf96256c0431dd3a046a0bc8680407c83cca2b7aa2afbf9c43eacddbf29108
+          image: ghcr.io/kloudlite/kloudlite-builder-gate:f1d518af918d67c7d3ac2a8a8fe58e6ab6f57ef9@sha256:e3c13f1e8b226609b1551a46edd4ca501b18fb6f254be819573d5e4ae11f9354
           imagePullPolicy: IfNotPresent
           ports:
             - name: gate
