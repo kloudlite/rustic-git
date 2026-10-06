@@ -300,7 +300,7 @@ export class Kloudlite {
       .container()
       .from("node:24-bookworm-slim")
       .withExec(["sh", "-c",
-        "apt-get update && apt-get install -y --no-install-recommends ca-certificates runit tmux openssh-server " +
+        "apt-get update && apt-get install -y --no-install-recommends ca-certificates curl runit tmux openssh-server " +
         "&& rm -rf /var/lib/apt/lists/*"])
       // ttyd: no Debian release packages it, so the upstream static build, pinned by digest.
       .withExec(["sh", "-c",
