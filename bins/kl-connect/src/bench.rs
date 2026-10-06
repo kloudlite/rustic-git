@@ -38,7 +38,7 @@ pub async fn bench(team: Option<&str>, port: u16, start: bool, region: Option<&s
     std::process::exit(st.code().unwrap_or(1));
 }
 
-/// The ssh argv for the bench: `-t` because the remote's `ForceCommand` is a `tmux` session, not
+/// The ssh argv for the bench: `-t` because the remote's `ForceCommand` is the graphcode TUI, not
 /// a one-shot command, so ssh must allocate a pty for it.
 fn ssh_argv(port: u16, known_hosts: &std::path::Path) -> Vec<String> {
     vec![

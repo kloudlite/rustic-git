@@ -1,4 +1,4 @@
-# The bench image: the graphcode TUI (under bun), tmux, ttyd and sshd, all supervised by runit
+# The bench image: the graphcode TUI (under bun), ttyd and sshd, all supervised by runit
 # (pid 1 is `runsvdir`, see `bench/sv/*/run`), plus the `sessions` node service, the pod's
 # idle/readiness probe only. Built by
 # .github/workflows/image.yml, context ".", same as the root Dockerfile's stages, so it can reach
@@ -9,14 +9,13 @@
 FROM node:24-bookworm-slim
 
 # ca-certificates: the TUI and `kl` both talk TLS. runit: the pid-1 supervisor (R2/R3) —
-# a crash in tmux/ttyd/sshd/sessions restarts in place, no second pod phase to fall back to. tmux:
-# the one session a person's ssh/ttyd logins and the graphcode TUI all share. openssh-server: `sshd`,
-# same tmux session via `ForceCommand` in bench/sshd_config.
+# a crash in ttyd/sshd/sessions restarts in place, no second pod phase to fall back to.
+# openssh-server: `sshd`, each login runs the graphcode TUI via `ForceCommand` in bench/sshd_config.
 RUN apt-get update && apt-get install -y --no-install-recommends \
-    ca-certificates runit tmux openssh-server \
+    ca-certificates runit openssh-server \
     && rm -rf /var/lib/apt/lists/*
 
-# ttyd: the browser terminal, attaches to that same tmux session. No Debian release packages it
+# ttyd: the browser terminal, one graphcode TUI per connection. No Debian release packages it
 # (bookworm and trixie both have no candidate), so the upstream static build, pinned by digest.
 ADD --checksum=sha256:8a217c968aba172e0dbf3f34447218dc015bc4d5e59bf51db2f2cd12b7be4f55 \
     https://github.com/tsl0922/ttyd/releases/download/1.7.7/ttyd.x86_64 /usr/local/bin/ttyd
@@ -50,9 +49,9 @@ RUN install -m 0755 /opt/kl/term/xclip /usr/local/bin/xclip
 COPY --chown=1000:1000 bench/sv /etc/kl/sv
 RUN chmod 0755 /etc/kl/sv/*/run
 
-COPY bench/sshd_config bench/tmux.conf /etc/kl/
+COPY bench/sshd_config /etc/kl/
 
-# TMPDIR: see bench/sv/tmux/run.
+# TMPDIR: a private dir under the shared /tmp emptyDir, made by bench/sv/sessions/run.
 ENV TMPDIR=/tmp/kl
 
 # node:24-bookworm-slim ships uid/gid 1000 as `node`; rename rather than useradd a second uid 1000

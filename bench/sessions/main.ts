@@ -2,20 +2,32 @@
 // bench-pod-local, never exposed off the box. `--ping` is the agent's readiness probe contract
 // (bins/agent/.../bench.rs:122): "is this bench quiesced enough to snapshot/stop", answered from
 // the same idle tracking `/idle` exposes so the probe and the UI cannot drift apart. Idle = no
-// tmux client attached.
+// graphcode TUI running: ttyd and sshd each start one per login and end it when the login ends.
 import http from "node:http";
-import { execFileSync } from "node:child_process";
+import fs from "node:fs";
 
 const PORT = 8917;
 const IDLE_SECS = Number(process.env.KL_BENCH_IDLE_SECS ?? 300);
 
+const TUI = "/opt/kl/harness/apps/tui/src/cli.tsx";
+
 function clients(): number {
+  let n = 0;
+  let pids: string[];
   try {
-    const out = execFileSync("tmux", ["list-clients", "-t", "kl"], { encoding: "utf8" });
-    return out.split("\n").filter((l) => l.length).length;
+    pids = fs.readdirSync("/proc");
   } catch {
-    return 0;
+    return 0; // no procfs (a laptop run): nothing to count
   }
+  for (const pid of pids) {
+    if (!/^\d+$/.test(pid)) continue;
+    try {
+      if (fs.readFileSync(`/proc/${pid}/cmdline`, "utf8").includes(TUI)) n++;
+    } catch {
+      // exited between readdir and read
+    }
+  }
+  return n;
 }
 
 // Sampled every 5s rather than on every request: cheap, and `idleSince` only needs to be accurate

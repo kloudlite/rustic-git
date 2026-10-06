@@ -286,7 +286,7 @@ export class Kloudlite {
       .withEnvVariable("DO_NOT_TRACK", "1")
   }
 
-  // deploy/bench/Dockerfile: the graphcode TUI (run under bun), tmux, ttyd and sshd, supervised by
+  // deploy/bench/Dockerfile: the graphcode TUI (run under bun), ttyd and sshd, supervised by
   // runit, plus the `sessions` node service (idle/readiness probe only). The TUI's deps install in
   // their own stage so a rebuild at the same HARNESS_REV is a cache hit.
   private imageBench(source: Directory, built: Container): Container {
@@ -300,7 +300,7 @@ export class Kloudlite {
       .container()
       .from("node:24-bookworm-slim")
       .withExec(["sh", "-c",
-        "apt-get update && apt-get install -y --no-install-recommends ca-certificates curl runit tmux openssh-server " +
+        "apt-get update && apt-get install -y --no-install-recommends ca-certificates curl runit openssh-server " +
         "&& rm -rf /var/lib/apt/lists/*"])
       // ttyd: no Debian release packages it, so the upstream static build, pinned by digest.
       .withExec(["sh", "-c",
@@ -314,9 +314,8 @@ export class Kloudlite {
       .withDirectory("/opt/kl/term", source.directory("bench/term"))
       .withExec(["install", "-m", "0755", "/opt/kl/term/xclip", "/usr/local/bin/xclip"])
       .withDirectory("/etc/kl/sv", source.directory("bench/sv"), { owner: "1000:1000" })
-      .withExec(["chmod", "0755", "/etc/kl/sv/sessions/run", "/etc/kl/sv/sshd/run", "/etc/kl/sv/tmux/run", "/etc/kl/sv/ttyd/run", "/etc/kl/sv/term/run"])
+      .withExec(["chmod", "0755", "/etc/kl/sv/sessions/run", "/etc/kl/sv/sshd/run", "/etc/kl/sv/ttyd/run", "/etc/kl/sv/term/run"])
       .withFile("/etc/kl/sshd_config", source.file("bench/sshd_config"))
-      .withFile("/etc/kl/tmux.conf", source.file("bench/tmux.conf"))
       // Private TMPDIR, same as deploy/bench/Dockerfile.
       .withEnvVariable("TMPDIR", "/tmp/kl")
       .withExec(["sh", "-c",

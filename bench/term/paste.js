@@ -3,6 +3,26 @@
 // Ctrl+V keystroke (ttyd INPUT `0` + 0x16), which makes the agent CLI read it through `xclip`.
 // A paste with no image is left to xterm untouched.
 (() => {
+  // IBM Plex Mono for the terminal (ttyd's `-t fontFamily`, bench/sv/ttyd/run). xterm measures the
+  // cell size once, before a webfont arrives, so re-set the family once it has loaded: that makes
+  // xterm re-measure, and the resize event makes ttyd refit the grid.
+  const font = document.createElement("link");
+  font.rel = "stylesheet";
+  font.href = "https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:ital,wght@0,400;0,600;1,400&display=swap";
+  document.head.appendChild(font);
+  // Edge to edge: ttyd pads the terminal 5px; the TUI should own the whole window.
+  const fill = document.createElement("style");
+  fill.textContent = "html,body,#terminal-container{width:100%;height:100%;margin:0;padding:0}.terminal{padding:0!important;height:100%!important}";
+  document.head.appendChild(fill);
+  document.fonts.load('16px "IBM Plex Mono"').then(() => {
+    const term = window.term;
+    if (!term) return;
+    // Two different values: setting the same family again is a no-op and measures nothing.
+    term.options.fontFamily = "monospace";
+    term.options.fontFamily = '"IBM Plex Mono", monospace';
+    window.dispatchEvent(new Event("resize"));
+  });
+
   const Native = window.WebSocket;
   let sock = null;
   window.WebSocket = function (url, protocols) {

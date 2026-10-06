@@ -547,7 +547,7 @@ pub async fn weekly(c: &mut Ctx) {
 // `ws.terminal.persists` is RETIRED (spec §2.3, 2026-09-17): the tool server has no PTY any more
 // and a terminal is a ttyd socket inside the workspace container itself (owner ruling 2026-09-25:
 // no shell sidecar), so nothing survives a restart by design — "a dropped connection is a new
-// shell". The bench's own terminal is now `kl-connect bench`/ttyd onto the tmux session, covered
+// shell". The bench's own terminal is now `kl-connect bench`/ttyd onto the graphcode TUI, covered
 // by `bench.tunnel`.
 
 #[cfg(test)]

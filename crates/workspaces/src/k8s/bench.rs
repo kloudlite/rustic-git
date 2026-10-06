@@ -8,8 +8,8 @@
 //!
 //! The image runs `runsvdir` as pid 1 (R2/R3 of the 2026-10-05 bench plan, same shape as the
 //! workspace image's own `prelude`), supervising four runit services under `/etc/kl/sv`: the
-//! graphcode TUI in a `tmux` session, `ttyd` attached to it, `sshd` (its host key persists at `~/.ssh-host`,
-//! logins land in the same tmux session via `ForceCommand`) and the `sessions` node service, an
+//! `ttyd` behind the `term` front door, each browser connection its own graphcode TUI, `sshd` (its
+//! host key persists at `~/.ssh-host`, each login its own TUI via `ForceCommand`) and the `sessions` node service, an
 //! idle/readiness probe: a loopback-only HTTP server on `127.0.0.1:8917` that sshd (`BENCH_PORT`) and ttyd (`BENCH_TERM_PORT`) sit beside, not
 //! on. A crash in any one is restarted by runit in place — there is no second pod phase to fall
 //! back to.
@@ -38,7 +38,7 @@ pub const BENCH_SUBDIR: &str = ".bench";
 
 
 /// The `sessions` container of a bench workspace's pod: `runsvdir` as pid 1, supervising the
-/// graphcode TUI (tmux), ttyd, sshd and the node `sessions` service (see module docs).
+/// graphcode TUI (one per login), ttyd, sshd and the node `sessions` service (see module docs).
 ///
 /// `resources` is `model::bench_container_resources()` and NEVER `spec.resources`: that field
 /// sizes the `workspace` container the person works in, and a bench that shrank because somebody
