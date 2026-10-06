@@ -9,7 +9,7 @@ import fs from "node:fs";
 const PORT = 8917;
 const IDLE_SECS = Number(process.env.KL_BENCH_IDLE_SECS ?? 300);
 
-const TUI = "/opt/kl/harness/apps/tui/src/cli.tsx";
+const TUI = "/opt/kl/harness/apps/tui";
 
 function clients(): number {
   let n = 0;
@@ -22,7 +22,10 @@ function clients(): number {
   for (const pid of pids) {
     if (!/^\d+$/.test(pid)) continue;
     try {
-      if (fs.readFileSync(`/proc/${pid}/cmdline`, "utf8").includes(TUI)) n++;
+      // The `bun run --cwd TUI dev` each login starts; argv[0] check skips ttyd, whose own argv
+      // carries the same command line.
+      const argv = fs.readFileSync(`/proc/${pid}/cmdline`, "utf8").split("\0");
+      if (argv[0].endsWith("bun") && argv.includes(TUI)) n++;
     } catch {
       // exited between readdir and read
     }

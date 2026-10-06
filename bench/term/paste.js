@@ -4,8 +4,7 @@
 // A paste with no image is left to xterm untouched.
 (() => {
   // IBM Plex Mono for the terminal (ttyd's `-t fontFamily`, bench/sv/ttyd/run). xterm measures the
-  // cell size once, before a webfont arrives, so re-set the family once it has loaded: that makes
-  // xterm re-measure, and the resize event makes ttyd refit the grid.
+  // cell size once, before a webfont arrives, so the refit below waits for it.
   const font = document.createElement("link");
   font.rel = "stylesheet";
   font.href = "https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:ital,wght@0,400;0,600;1,400&display=swap";
@@ -14,9 +13,14 @@
   const fill = document.createElement("style");
   fill.textContent = "html,body,#terminal-container{width:100%;height:100%;margin:0;padding:0}.terminal{padding:0!important;height:100%!important}";
   document.head.appendChild(fill);
-  document.fonts.load('16px "IBM Plex Mono"').then(() => {
-    const term = window.term;
-    if (!term) return;
+  // ttyd creates window.term after this script runs, and fits the grid before the font and line
+  // height apply (it measured 50 rows into a 42-row window), so wait for both, then refit.
+  const ready = new Promise((resolve) => {
+    const poll = () => (window.term ? resolve(window.term) : setTimeout(poll, 50));
+    poll();
+  });
+  Promise.all([ready, document.fonts.load('16px "IBM Plex Mono"')]).then(([term]) => {
+    term.options.fontSize = 16; // same as ttyd's `-t fontSize`, in case that one never applied
     // Two different values: setting the same family again is a no-op and measures nothing.
     term.options.fontFamily = "monospace";
     term.options.fontFamily = '"IBM Plex Mono", monospace';

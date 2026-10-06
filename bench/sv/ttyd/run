@@ -3,4 +3,5 @@
 # only client. No tmux: every browser connection starts its own graphcode TUI, ended when it closes.
 # The font is IBM Plex Mono, loaded by the page bench/term injects (paste.js); line height 1.2
 # matches the team's WezTerm config.
-exec ttyd -W -i 127.0.0.1 -p 7682 -t 'fontFamily="IBM Plex Mono", monospace' -t lineHeight=1.2 bun /opt/kl/harness/apps/tui/src/cli.tsx
+exec ttyd -W -i 127.0.0.1 -p 7682 -t 'fontFamily="IBM Plex Mono", monospace' -t lineHeight=1.2 -t fontSize=16 \
+  bun run --cwd /opt/kl/harness/apps/tui dev
