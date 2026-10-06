@@ -1,5 +1,5 @@
 // Injected first into ttyd's page by bench/term/main.ts. Remembers ttyd's websocket, and turns a
-// paste holding an image into: one `K`+bytes frame (main.ts saves it as the clipboard), then a
+// paste (or a macOS Ctrl+V) holding an image into: one `K`+bytes frame (main.ts saves it as the clipboard), then a
 // Ctrl+V keystroke (ttyd INPUT `0` + 0x16), which makes the agent CLI read it through `xclip`.
 // A paste with no image is left to xterm untouched.
 (() => {
@@ -41,6 +41,20 @@
 
   const MAX = 15 << 20; // under main.ts's 16 MiB inspection limit
 
+  const sendImage = (bytes) => {
+    if (bytes.length > MAX) {
+      console.warn(`image paste skipped: ${bytes.length} bytes is over ${MAX}`);
+      return false;
+    }
+    const frame = new Uint8Array(bytes.length + 1);
+    frame[0] = 0x4b; // 'K'
+    frame.set(bytes, 1);
+    sock.send(frame);
+    return true;
+  };
+  const ctrlV = () => sock.send(new Uint8Array([0x30, 0x16])); // '0' INPUT, Ctrl+V
+
+  // Cmd+V (and Ctrl+V off macOS): the browser fires a paste event carrying the clipboard.
   window.addEventListener(
     "paste",
     async (e) => {
@@ -48,16 +62,32 @@
       if (!item || !sock || sock.readyState !== 1) return;
       e.preventDefault();
       e.stopImmediatePropagation();
-      const bytes = new Uint8Array(await item.getAsFile().arrayBuffer());
-      if (bytes.length > MAX) {
-        console.warn(`image paste skipped: ${bytes.length} bytes is over ${MAX}`);
-        return;
+      if (sendImage(new Uint8Array(await item.getAsFile().arrayBuffer()))) ctrlV();
+    },
+    true,
+  );
+
+  // Ctrl+V on macOS is no paste key: no paste event, xterm just sends 0x16 and the TUI finds an
+  // empty clipboard. So take the keystroke, read the clipboard ourselves (async Clipboard API;
+  // 127.0.0.1 and the gateway's https are secure contexts), upload any image, then send the 0x16.
+  window.addEventListener(
+    "keydown",
+    async (e) => {
+      if (!e.ctrlKey || e.metaKey || e.altKey || e.shiftKey || e.key.toLowerCase() !== "v") return;
+      if (!sock || sock.readyState !== 1 || !navigator.clipboard?.read) return;
+      e.preventDefault();
+      e.stopImmediatePropagation();
+      try {
+        for (const item of await navigator.clipboard.read()) {
+          const type = item.types.find((t) => t.startsWith("image/"));
+          if (!type) continue;
+          sendImage(new Uint8Array(await (await item.getType(type)).arrayBuffer()));
+          break;
+        }
+      } catch (err) {
+        console.warn("clipboard read refused", err); // denied permission: still a plain Ctrl+V
       }
-      const frame = new Uint8Array(bytes.length + 1);
-      frame[0] = 0x4b; // 'K'
-      frame.set(bytes, 1);
-      sock.send(frame);
-      sock.send(new Uint8Array([0x30, 0x16])); // '0' INPUT, Ctrl+V
+      ctrlV();
     },
     true,
   );
