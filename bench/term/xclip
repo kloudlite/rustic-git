@@ -1,0 +1,21 @@
+#!/bin/sh
+# Stand-in for xclip: the bench has no X clipboard; the "clipboard" is the last image pasted in the
+# browser terminal, saved by bench/term/main.ts. Answers only what the agent CLI asks:
+#   -t TARGETS -o     -> "image/png" while a fresh image is there
+#   -t image/png -o   -> its bytes
+# Anything else (text, bmp, writes) finds nothing and exits 1, as xclip does on an empty clipboard.
+# Fresh = written in the last 60 s, so an old screenshot never rides along on a later Ctrl+V.
+CLIP=/tmp/kl-clip/latest
+target=
+while [ $# -gt 0 ]; do
+  case "$1" in
+    -t) target=$2; shift ;;
+  esac
+  shift
+done
+[ -f "$CLIP" ] && [ -n "$(find "$CLIP" -newermt '-60 seconds' 2>/dev/null)" ] || exit 1
+case "$target" in
+  TARGETS) echo image/png ;;
+  image/png) cat "$CLIP" ;;
+  *) exit 1 ;;
+esac

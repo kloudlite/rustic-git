@@ -1,0 +1,4 @@
+#!/bin/sh
+# The browser terminal's front door on 7681, in front of ttyd (bench/term/main.ts). -i 0.0.0.0
+# equivalent: the gateway NetworkPolicy is the fence (k8s::allow_gateway_bench).
+exec node /opt/kl/term/main.ts

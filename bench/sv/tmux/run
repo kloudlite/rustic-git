@@ -1,6 +1,9 @@
 #!/bin/sh
 # Skip the agent CLI's first-run theme picker: the home volume is new, and nobody is attached to
 # answer it before the pane starts.
+# TMPDIR (Dockerfile ENV) is a private dir under the shared /tmp emptyDir: /tmp itself is 0777 with
+# no sticky bit, and the CLI turns cross-session messaging off on a world-writable, non-sticky dir.
+mkdir -p -m 0700 "$TMPDIR"
 [ -f ~/.claude.json ] || echo '{"hasCompletedOnboarding":true}' > ~/.claude.json
 # The tmux server, in the foreground so runsv supervises it. `-D` takes no command (tmux 3.3a
 # rejects `-D new …`), so tmux.conf creates the `kl` session running the agent CLI; if the CLI

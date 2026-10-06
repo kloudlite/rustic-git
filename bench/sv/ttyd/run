@@ -1,5 +1,5 @@
 #!/bin/sh
-# -W: writable (keys reach the shared tmux session). -i 0.0.0.0: the pod's own interface only,
-# the gateway NetworkPolicy is the fence (k8s::allow_gateway_bench). `new -A`, same as sshd's
-# ForceCommand: attach, or recreate the session if the agent CLI exited.
-exec ttyd -W -i 0.0.0.0 -p 7681 tmux new -A -s kl claude
+# -W: writable (keys reach the shared tmux session). Loopback only: bench/term/main.ts is the
+# front door on 7681 (image paste) and the only client. `new -A`, same as sshd's ForceCommand:
+# attach, or recreate the session if the agent CLI exited.
+exec ttyd -W -i 127.0.0.1 -p 7682 tmux new -A -s kl claude

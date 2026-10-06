@@ -22,8 +22,9 @@ ADD --checksum=sha256:8a217c968aba172e0dbf3f34447218dc015bc4d5e59bf51db2f2cd12b7
     https://github.com/tsl0922/ttyd/releases/download/1.7.7/ttyd.x86_64 /usr/local/bin/ttyd
 RUN chmod 0755 /usr/local/bin/ttyd
 
-# Pinned exact (plan R5): `npm view @anthropic-ai/claude-code version` on 2026-10-05.
-RUN npm install -g @anthropic-ai/claude-code@2.1.289
+# Pinned exact (plan R5): `npm view @anthropic-ai/claude-code version` on 2026-10-06. Keep the
+# Agent SDK in bench/sessions on the matching 0.3.x.
+RUN npm install -g @anthropic-ai/claude-code@2.1.291
 
 # The musl `kl` binary — statically linked, so it runs fine on this glibc base — built by the same
 # CI job that builds this image and downloaded as the kl-musl artifact. A bench builds/pushes like
@@ -35,6 +36,11 @@ RUN chmod 0755 /usr/local/bin/kl
 COPY bench/sessions/package.json bench/sessions/package-lock.json /opt/kl/sessions/
 RUN cd /opt/kl/sessions && npm ci --omit=dev
 COPY bench/sessions /opt/kl/sessions
+
+# The browser terminal's front door (image paste from the person's clipboard, see main.ts) and the
+# `xclip` stand-in the agent CLI reads that image through.
+COPY bench/term /opt/kl/term
+RUN install -m 0755 /opt/kl/term/xclip /usr/local/bin/xclip
 
 # The `kloudlite` mod: a Claude Code plugin read via CLAUDE_CODE_PLUGIN_DIRS below.
 COPY bench/mod /opt/kl/mod
@@ -53,6 +59,9 @@ RUN mkdir -p /etc/claude-code
 COPY bench/settings.json /etc/claude-code/managed-settings.json
 
 ENV CLAUDE_CODE_PLUGIN_DIRS=/opt/kl/mod
+# Fullscreen TUI by default. The CLI is pinned above and its npm prefix is read-only, so its own
+# updater only fails; an upgrade is a new image. TMPDIR: see bench/sv/tmux/run.
+ENV CLAUDE_CODE_NO_FLICKER=1 DISABLE_AUTOUPDATER=1 TMPDIR=/tmp/kl
 
 # node:24-bookworm-slim ships uid/gid 1000 as `node`; rename rather than useradd a second uid 1000
 # (plan R3). Home is the workspace volume (2026-09-22 ruling): /home/kl IS the mounted volume.

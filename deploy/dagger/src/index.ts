@@ -307,21 +307,27 @@ export class Kloudlite {
         "curl -fsSL -o /usr/local/bin/ttyd https://github.com/tsl0922/ttyd/releases/download/1.7.7/ttyd.x86_64 " +
         '&& echo "8a217c968aba172e0dbf3f34447218dc015bc4d5e59bf51db2f2cd12b7be4f55  /usr/local/bin/ttyd" | sha256sum -c - ' +
         "&& chmod 0755 /usr/local/bin/ttyd"])
-      // Pinned exact (plan R5): `npm view @anthropic-ai/claude-code version` on 2026-10-05.
-      .withExec(["npm", "install", "-g", "@anthropic-ai/claude-code@2.1.289"])
+      // Pinned exact (plan R5): `npm view @anthropic-ai/claude-code version` on 2026-10-06.
+      .withExec(["npm", "install", "-g", "@anthropic-ai/claude-code@2.1.291"])
       .withFile("/usr/local/bin/kl", built.file("/out/musl/kl"), { permissions: 0o755 })
       .withFile("/opt/kl/sessions/package.json", source.file("bench/sessions/package.json"))
       .withFile("/opt/kl/sessions/package-lock.json", source.file("bench/sessions/package-lock.json"))
       .withDirectory("/opt/kl/sessions/node_modules", deps.directory("/opt/kl/sessions/node_modules"))
       .withDirectory("/opt/kl/sessions", source.directory("bench/sessions"))
+      .withDirectory("/opt/kl/term", source.directory("bench/term"))
+      .withExec(["install", "-m", "0755", "/opt/kl/term/xclip", "/usr/local/bin/xclip"])
       .withDirectory("/opt/kl/mod", source.directory("bench/mod"))
       .withDirectory("/etc/kl/sv", source.directory("bench/sv"), { owner: "1000:1000" })
-      .withExec(["chmod", "0755", "/etc/kl/sv/sessions/run", "/etc/kl/sv/sshd/run", "/etc/kl/sv/tmux/run", "/etc/kl/sv/ttyd/run"])
+      .withExec(["chmod", "0755", "/etc/kl/sv/sessions/run", "/etc/kl/sv/sshd/run", "/etc/kl/sv/tmux/run", "/etc/kl/sv/ttyd/run", "/etc/kl/sv/term/run"])
       .withFile("/etc/kl/sshd_config", source.file("bench/sshd_config"))
       .withFile("/etc/kl/tmux.conf", source.file("bench/tmux.conf"))
       .withExec(["mkdir", "-p", "/etc/claude-code"])
       .withFile("/etc/claude-code/managed-settings.json", source.file("bench/settings.json"))
       .withEnvVariable("CLAUDE_CODE_PLUGIN_DIRS", "/opt/kl/mod")
+      // Same as deploy/bench/Dockerfile: fullscreen TUI, no self-update of the pinned CLI, private TMPDIR.
+      .withEnvVariable("CLAUDE_CODE_NO_FLICKER", "1")
+      .withEnvVariable("DISABLE_AUTOUPDATER", "1")
+      .withEnvVariable("TMPDIR", "/tmp/kl")
       .withExec(["sh", "-c",
         "usermod -l kl -d /home/kl node && groupmod -n kl node " +
         "&& mkdir -p /home/kl && chown kl:kl /home/kl"])

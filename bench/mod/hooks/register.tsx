@@ -204,14 +204,12 @@ export const register: Register = (on) => {
 
   // Backstop: `kl-sessions` already passes these as `disallowedTools`, but a plugin or a resumed
   // session must never see them answered by the bench's own filesystem (spec §1, "Fails closed").
+  // One handler with the workspace forwarder below: the loader refuses a second matcher-less
+  // `tool.call`, and that refusal dropped this whole module (no deny, no forwarding).
   on("tool.call", async ($, e, next) => {
     if (isDisabledBuiltin(e.tool)) {
       return { deny: "This bench runs no local tools; use the workspace's tools (mcp__kloudlite__*) instead." };
     }
-    return next(e);
-  });
-
-  on("tool.call", async ($, e, next) => {
     const ws = await $.env.get("KL_WORKSPACE");
     if (!ws || !e.tool.startsWith(TOOL_PREFIX)) return next(e);
     const name = e.tool.slice(TOOL_PREFIX.length);
