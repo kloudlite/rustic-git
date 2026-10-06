@@ -8,7 +8,8 @@ AuthorizedKeysFile /etc/kloudlite/authorized_keys
 PasswordAuthentication no
 UsePAM no
 PidFile none
-ForceCommand bun run --cwd /opt/kl/harness/apps/tui dev
+# COLORTERM: ssh does not forward it, and without it opentui drops to 256 colours (bench/sv/ttyd/run).
+ForceCommand env COLORTERM=truecolor bun run --cwd /opt/kl/harness/apps/tui dev
 # ForceCommand alone does not stop `ssh -N -L/-D`: a key holder would get a SOCKS pivot from the
 # bench pod's network position (final review I2). AllowUsers names the only account OwnerKeys ever
 # authenticates as.
