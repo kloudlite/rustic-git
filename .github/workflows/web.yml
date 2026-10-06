@@ -1,8 +1,6 @@
 name: web
 on:
-  push:
-    branches: [master]
-    paths: ["web/**", ".github/workflows/web.yml"]
+  # Images are built and pushed by Dagger (deploy/dev/dagger-ship.sh), not on push to master.
   pull_request:
     paths: ["web/**", ".github/workflows/web.yml"]
   workflow_dispatch:

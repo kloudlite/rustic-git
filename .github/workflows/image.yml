@@ -1,7 +1,6 @@
 name: image
 on:
-  push:
-    branches: [master]
+  # Images are built and pushed by Dagger (deploy/dev/dagger-ship.sh), not on push to master.
   # PRs get the test job only: a red commit is cheapest to catch before it is on master, and a
   # PR has no business producing a package. `build` and `image` are skipped on this event.
   pull_request:
