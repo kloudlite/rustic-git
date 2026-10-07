@@ -34,6 +34,10 @@ type MenuContext = {
 export const MENU_MAX = 8;
 
 /** Menu for the current input: command list, or the typed command's options. */
+function loginHint(type: string, prefix: string): string {
+  return prefix + (type === "oauth" ? "oauth" : type === "claude_code" ? "claude code" : "api key");
+}
+
 export function menuItems(input: string, ctx: MenuContext): MenuItem[] {
   if (!input.startsWith("/")) return [];
 
@@ -63,7 +67,7 @@ export function menuItems(input: string, ctx: MenuContext): MenuItem[] {
         .map((l) => ({
           insert: `/login ${l.provider} ${l.type}`,
           label: `${l.provider} · ${l.label}`,
-          hint: l.type === "oauth" ? "connect · oauth" : "connect · api key",
+          hint: loginHint(l.type, "connect · "),
         }));
     return ctx.models
       .filter((m) => filter(`${m.provider}/${m.id}`))
@@ -85,7 +89,7 @@ export function menuItems(input: string, ctx: MenuContext): MenuItem[] {
       .map((l) => ({
         insert: `/login ${l.provider} ${l.type}`,
         label: `${l.provider} · ${l.label}`,
-        hint: l.type === "oauth" ? "oauth" : "api key",
+        hint: loginHint(l.type, ""),
       }));
   if (cmd === "/session") {
     const rest = input.slice(space + 1);

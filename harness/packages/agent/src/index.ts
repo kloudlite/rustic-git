@@ -12,6 +12,9 @@ import {
 } from "@earendil-works/pi-coding-agent";
 import type { Api, AuthInteraction, AuthType, Credential, Model } from "@earendil-works/pi-ai";
 import type { Registry } from "@kloudlite-tui/tools";
+import { claudeSignedIn, createClaudeSession, type ClaudeSession } from "./claude.ts";
+
+export { claudeSignedIn, type ClaudeSession };
 
 export type {
   AgentSession,
@@ -127,20 +130,26 @@ async function envKeysFor(provider: {
 /** Auth status for every provider (env keys, stored credentials, ambient). */
 export async function providerAuth(): Promise<ProviderAuth[]> {
   return Promise.all(
-    models.getProviders().map(async (p) => ({
-      provider: p.id,
-      ok: await models
-        .checkAuth(p.id)
-        .then((c) => c !== undefined)
-        .catch(() => false),
-      envKeys: await envKeysFor(p as never),
-    })),
+    models.getProviders().map(async (p) =>
+      // Claude is served by Claude Code's own login, never by pi's credentials
+      p.id === "anthropic"
+        ? { provider: p.id, ok: await claudeSignedIn(), envKeys: [] }
+        : {
+            provider: p.id,
+            ok: await models
+              .checkAuth(p.id)
+              .then((c) => c !== undefined)
+              .catch(() => false),
+            envKeys: await envKeysFor(p as never),
+          },
+    ),
   );
 }
 
 type LoginOption = {
   provider: string;
-  type: AuthType;
+  /** "claude_code": sign-in happens in Claude Code (`kl-connect claude login`), not through pi. */
+  type: AuthType | "claude_code";
   label: string;
 };
 
@@ -148,6 +157,11 @@ type LoginOption = {
 export function loginOptions(): LoginOption[] {
   const out: LoginOption[] = [];
   for (const p of models.getProviders()) {
+    // Claude only through the Agent SDK: no pi oauth, and no api key (that would route through pi)
+    if (p.id === "anthropic") {
+      out.push({ provider: p.id, type: "claude_code", label: "Claude Code" });
+      continue;
+    }
     if (p.auth.oauth)
       out.push({
         provider: p.id,
@@ -182,7 +196,7 @@ export function loginProvider(
  * an archive/ subdir so `continueRecent` starts from scratch, without deleting
  * anything.
  */
-type SessionMeta = { key: string; name?: string; description?: string; updated: number };
+type SessionMeta = { key: string; name?: string; description?: string; updated: number; claudeSessionId?: string };
 
 function sessionDir(key: string): string {
   return join(CONFIG_DIR, "sessions", key.replace(/[^\w.-]/g, "_"));
@@ -277,9 +291,23 @@ export async function createSession({
   autoCompact?: boolean;
   /** Let the model write a script that calls tools, instead of one call per turn. */
   codemode?: boolean;
-}): Promise<AgentSession> {
+}): Promise<AgentSession | ClaudeSession> {
   const cwd = process.cwd();
   const dir = sessionDir(key);
+  if (model.provider === "anthropic") {
+    writeMeta({ ...(readMeta(key) ?? { key }), key, updated: Date.now() });
+    // `registry` is not bridged: Claude Code runs its own built-in tools
+    return createClaudeSession({
+      key,
+      model,
+      fresh,
+      thinkingLevel,
+      store: {
+        get: () => readMeta(key)?.claudeSessionId,
+        set: (id) => writeMeta({ ...(readMeta(key) ?? { key, updated: Date.now() }), key, claudeSessionId: id }),
+      },
+    });
+  }
   // meta.json makes a session findable later: its key, its name, last use
   writeMeta({ ...(readMeta(key) ?? { key }), key, updated: Date.now() });
   // pi's codemode ships as an extension and is registered *inactive*, so both

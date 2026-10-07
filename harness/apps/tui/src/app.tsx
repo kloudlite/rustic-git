@@ -27,6 +27,8 @@ import {
   writeSettings,
   type AgentSession,
   type AgentSessionEvent,
+  type ClaudeSession,
+  type ModelRef,
   type ThinkingLevel,
 } from "@kloudlite-tui/agent";
 
@@ -50,7 +52,7 @@ const THINKING_HINT: Record<ThinkingLevel, string> = {
   xhigh: "~32k tokens",
   max: "maximum",
 };
-import { Login } from "./components/Login.tsx";
+import { Login, type LoginType } from "./components/Login.tsx";
 import { AskPanel, type Ask } from "./components/Ask.tsx";
 import { toolDiff } from "./diff.ts";
 import { readClipboardImage, type ClipImage } from "./clipboard.ts";
@@ -163,7 +165,7 @@ export function App({
     setHistIdx(null);
     setInput(`/${prefill}`);
   };
-  const [login, setLogin] = useState<{ provider: string; type: "oauth" | "api_key" } | null>(null);
+  const [login, setLogin] = useState<{ provider: string; type: LoginType } | null>(null);
   // provider id → auth status, re-resolved after a login
   const [auth, setAuth] = useState<Map<string, { ok: boolean; envKey?: string }>>(new Map());
   // seeded from pi's bundled catalog so the picker paints at once, then
@@ -202,7 +204,7 @@ export function App({
     };
   });
   // Live agent sessions, one per session key (created lazily on first prompt).
-  const agents = useRef(new Map<string, Promise<AgentSession>>());
+  const agents = useRef(new Map<string, Promise<AgentSession | ClaudeSession>>());
   // ↑/↓ recall position in the active session's history; null = live input
   const [histIdx, setHistIdx] = useState<number | null>(null);
   // interactive prompts (permissions, model questions), oldest first
@@ -657,10 +659,13 @@ export function App({
   }
 
   /** Get or lazily create the agent session behind a session key. */
-  function ensureAgent(key: string, opts?: { fresh?: boolean }): Promise<AgentSession> {
+  function ensureAgent(
+    key: string,
+    opts?: { fresh?: boolean; model?: ModelRef },
+  ): Promise<AgentSession | ClaudeSession> {
     let existing = agents.current.get(key);
     if (existing) return existing;
-    const model = resolveModel(getSession(sessions, key).model);
+    const model = resolveModel(opts?.model ?? getSession(sessions, key).model);
     if (!model) return Promise.reject(new Error("no model available"));
     const created = createSession({
       key,
@@ -852,7 +857,7 @@ type PermMode = "default" | "acceptEdits" | "plan" | "bypass";
 const PERM_MODES: PermMode[] = ["default", "acceptEdits", "plan", "bypass"];
 
   /** Chain a permission gate ahead of pi's installed beforeToolCall hook. */
-  function installPermissionGate(key: string, agent: AgentSession) {
+  function installPermissionGate(key: string, agent: AgentSession | ClaudeSession) {
     const inner = agent.agent.beforeToolCall;
     agent.agent.beforeToolCall = async (ctx: any, signal?: AbortSignal) => {
       const name = ctx.toolCall.name;
@@ -909,7 +914,7 @@ const PERM_MODES: PermMode[] = ["default", "acceptEdits", "plan", "bypass"];
   }
 
   /** Rebuild the transcript + prompt history from a restored session. */
-  function restoreTranscript(key: string, agent: AgentSession) {
+  function restoreTranscript(key: string, agent: AgentSession | ClaudeSession) {
     const messages = agent.messages;
     const markRestored = () =>
       setSessions((map) => patchSession(map, key, { restored: true }));
@@ -1177,14 +1182,33 @@ const PERM_MODES: PermMode[] = ["default", "acceptEdits", "plan", "bypass"];
         setSessions((map) => patchSession(map, activeKey, { model: { provider, id } }));
         writeSettings({ defaultModel: { provider, id } }); // persists across restarts
         const live = resolveModel({ provider, id });
-        if (live) agents.current.get(activeKey)?.then((a) => a.setModel(live)).catch(() => {});
+        const cur = agents.current.get(activeKey);
+        if (live && cur) {
+          // Claude and pi keep separate histories: a switch across the two
+          // starts the other family's session for this key, nothing carried
+          cur
+            .then((a) => {
+              const wasClaude = "isClaude" in a;
+              if (wasClaude === (live.provider === "anthropic")) {
+                void a.setModel(live as never);
+                return;
+              }
+              a.dispose();
+              agents.current.delete(activeKey);
+              void ensureAgent(activeKey, { model: { provider, id } }).catch(() => {});
+            })
+            .catch(() => {});
+        }
       }
       return;
     }
     if (trimmed.startsWith("/login ")) {
       const [provider, type] = trimmed.slice(7).trim().split(/\s+/);
       if (provider)
-        setLogin({ provider, type: type === "api_key" ? "api_key" : "oauth" });
+        setLogin({
+          provider,
+          type: type === "api_key" || type === "claude_code" ? type : "oauth",
+        });
       return;
     }
     if (trimmed.startsWith("/settings ")) {

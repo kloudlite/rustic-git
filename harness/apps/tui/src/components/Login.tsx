@@ -3,7 +3,7 @@ import { spawn } from "node:child_process";
 import { useKeyboard } from "@opentui/react";
 import { TextAttributes } from "@opentui/core";
 import type { AuthEvent, AuthPrompt } from "@kloudlite-tui/agent";
-import { loginProvider } from "@kloudlite-tui/agent";
+import { claudeSignedIn, loginProvider } from "@kloudlite-tui/agent";
 import { theme } from "../theme.ts";
 import { Input } from "./Input.tsx";
 
@@ -17,13 +17,58 @@ type Pending = {
  * Drives a pi-ai login flow: renders notify events (auth URLs, device codes,
  * progress) and answers prompts (text/secret/select/manual_code). Esc cancels.
  */
-export function Login({
+export function Login(props: {
+  provider: string;
+  type: LoginType;
+  onDone: (ok: boolean) => void;
+}) {
+  return props.type === "claude_code" ? <ClaudeLogin {...props} /> : <PiLogin {...props} />;
+}
+
+export type LoginType = "oauth" | "api_key" | "claude_code";
+
+/**
+ * Claude signs in through Claude Code, not through pi: the sign-in runs over
+ * ssh from the laptop (`kl-connect claude login`), so this screen only waits
+ * for it to land (`claude auth status`, polled) and offers Esc.
+ */
+function ClaudeLogin({ provider, onDone }: { provider: string; onDone: (ok: boolean) => void }) {
+  useEffect(() => {
+    let live = true;
+    const poll = setInterval(() => {
+      claudeSignedIn(true)
+        .then((ok) => live && ok && onDone(true))
+        .catch(() => {});
+    }, 3000);
+    return () => {
+      live = false;
+      clearInterval(poll);
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+  useKeyboard((key) => {
+    if (key.name === "escape") onDone(false);
+  });
+  return (
+    <box flexDirection="column" flexGrow={1} paddingLeft={1} paddingRight={1} paddingTop={1} gap={1}>
+      <text fg={theme.fg}>
+        <b>Login</b> · <span fg={theme.accent}>{provider}</span>{" "}
+        <span fg={theme.muted}>Claude Code</span>
+      </text>
+      <text fg={theme.fg}>Claude signs in through Claude Code, not here.</text>
+      <text fg={theme.accent}>On your laptop run: kl-connect claude login</text>
+      <text fg={theme.muted}>It opens a browser sign-in for this bench. Esc to go back.</text>
+    </box>
+  );
+}
+
+function PiLogin({
   provider,
   type,
   onDone,
 }: {
   provider: string;
-  type: "oauth" | "api_key";
+  type: LoginType;
   onDone: (ok: boolean) => void;
 }) {
   const [events, setEvents] = useState<AuthEvent[]>([]);
@@ -33,7 +78,7 @@ export function Login({
   const abort = useRef(new AbortController());
 
   useEffect(() => {
-    loginProvider(provider, type, {
+    loginProvider(provider, type as "oauth" | "api_key", {
       signal: abort.current.signal,
       notify: (event) => {
         setEvents((prev) => [...prev, event]);
