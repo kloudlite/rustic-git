@@ -8,18 +8,10 @@
     "packages/*"
   ],
   "scripts": {
-    "dev": "turbo dev",
-    "check": "turbo check",
-    "serve": "bun run --cwd apps/tui serve"
+    "dev": "bun run --cwd apps/tui dev",
+    "check": "bun --filter '*' check"
   },
   "devDependencies": {
-    "@types/ssh2": "^1.15.5",
-    "turbo": "^2.3.0",
     "typescript": "^5.7.0"
-  },
-  "dependencies": {
-    "@earendil-works/pi-ai": "1.0.4",
-    "@earendil-works/pi-coding-agent": "1.0.4",
-    "ssh2": "^1.17.0"
   }
 }

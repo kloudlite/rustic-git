@@ -33,17 +33,8 @@ export type QueuedMessage = { text: string; kind: "steer" | "followUp" };
 
 const emptySession: Session = { entries: [], busy: false, tokens: 0, history: [], model: DEFAULT_MODEL, queued: [] };
 
-/**
- * Where a context's sessions live: the working session's main sessions, or one
- * workspace's. `sessionKey` hangs a session id off it — "main" is the default,
- * always-there session, other ids are the named ones.
- */
-export function sessionBase(workspaceId?: string): string {
-  return workspaceId ?? "main";
-}
-
 export function sessionKey(workspaceId?: string, id = "main"): string {
-  const base = sessionBase(workspaceId);
+  const base = workspaceId ?? "main";
   return id === "main" ? base : `${base}:${id}`;
 }
 

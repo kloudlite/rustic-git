@@ -54,14 +54,10 @@ import { Login } from "./components/Login.tsx";
 import { AskPanel, type Ask } from "./components/Ask.tsx";
 import { toolDiff } from "./diff.ts";
 import { readClipboardImage, type ClipImage } from "./clipboard.ts";
-import { statSync } from "node:fs";
-import { homedir } from "node:os";
-import { isAbsolute, join, resolve as resolvePath } from "node:path";
 import {
   getSession,
   patchSession,
-  sessionBase,
-  sessionIdOf,
+    sessionIdOf,
   sessionKey,
   type QueuedMessage,
   type SessionMap,
@@ -220,14 +216,14 @@ export function App({
   modeRef.current = permMode;
 
   const environment = envs[env]!;
-  const mainBase = sessionBase();
+  const mainBase = "main";
   const mainSession = sessionId[mainBase] ?? "main";
   // working session › main session › workspaces: only this session's workspaces
   const workspaces = allWorkspaces.filter((w) => (w.session ?? "main") === mainSession);
   const mainKey = sessionKey(undefined, mainSession);
   // sessions belong to the context you are in: the environment's, or this
   // workspace's own
-  const activeBase = sessionBase(focus === 0 ? undefined : workspaces[focus - 1]!.id);
+  const activeBase = focus === 0 ? "main" : workspaces[focus - 1]!.id;
   const activeKey = sessionKey(
     focus === 0 ? undefined : workspaces[focus - 1]!.id,
     sessionId[activeBase] ?? "main",
@@ -1018,31 +1014,6 @@ const PERM_MODES: PermMode[] = ["default", "acceptEdits", "plan", "bypass"];
     append(mainKey, { kind: "info", text: `connected to ${envLabel(envs[target]!)}` });
   }
 
-  function interceptService(name: string) {
-    const ws = workspaces[focus - 1]!;
-    if (!environment.services.some((s) => s.name === name)) return;
-    setEnvs((prev) =>
-      prev.map((e, i) =>
-        i === env
-          ? { ...e, services: e.services.map((s) => (s.name === name ? { ...s, interceptedBy: ws.name } : s)) }
-          : e,
-      ),
-    );
-    append(activeKey, { kind: "info", text: `intercepting ${name}.${environment.name} → ${ws.name}` });
-  }
-
-  function releaseInterception() {
-    const ws = workspaces[focus - 1]!;
-    setEnvs((prev) =>
-      prev.map((e, i) =>
-        i === env
-          ? { ...e, services: e.services.map((s) => (s.interceptedBy === ws.name ? { ...s, interceptedBy: undefined } : s)) }
-          : e,
-      ),
-    );
-    append(activeKey, { kind: "info", text: `released interceptions held by ${ws.name}` });
-  }
-
   function newWorkspace(name: string) {
     const ws = {
       id: freshId(),
@@ -1053,21 +1024,6 @@ const PERM_MODES: PermMode[] = ["default", "acceptEdits", "plan", "bypass"];
       ports: [],
       repo: `kloudlite/${name}`,
       branch: "main",
-    };
-    setWorkspaces((prev) => [...prev, ws]);
-    setFocus(workspaces.length + 1);
-  }
-
-  /** Clone as an ephemeral workspace hanging off this one (never deeper). */
-  function cloneWorkspace() {
-    const src = workspaces[focus - 1]!;
-    const ws = {
-      ...src,
-      id: freshId(),
-      name: `${src.name}-copy`,
-      owner: CURRENT_USER,
-      session: mainSession,
-      parent: parentFor(workspaces, src),
     };
     setWorkspaces((prev) => [...prev, ws]);
     setFocus(workspaces.length + 1);
@@ -1096,7 +1052,7 @@ const PERM_MODES: PermMode[] = ["default", "acceptEdits", "plan", "bypass"];
       if (i === -1) return `error: no workspace named ${workspace}`;
       if (!environment.services.some((sv) => sv.name === service))
         return `error: ${environment.name} has no service named ${service}`;
-      // interceptService reads the focused workspace, so focus it first
+      // the intercept is held by the focused workspace, so focus it first
       setFocus(i + 1);
       const ws = workspaces[i]!;
       setEnvs((prev) =>

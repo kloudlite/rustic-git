@@ -85,11 +85,6 @@ export type Environment = {
 /** The signed-in user (mock until kloudlite auth is wired). */
 export const CURRENT_USER = "karthik";
 
-/** 0 for a workspace, 1 for an ephemeral one. The tree goes no deeper. */
-export function depthOf(workspaces: Workspace[], w: Workspace): number {
-  return w.parent && workspaces.some((p) => p.id === w.parent) ? 1 : 0;
-}
-
 /**
  * The workspace an ephemeral one should hang off: a workspace parents itself,
  * an ephemeral hands its own parent over, so nothing nests deeper than one.
@@ -102,26 +97,6 @@ export function parentFor(workspaces: Workspace[], w: Workspace): string {
 export function wsPath(workspaces: Workspace[], w: Workspace): string[] {
   const parent = w.parent ? workspaces.find((p) => p.id === w.parent) : undefined;
   return parent ? [parent.name, w.name] : [w.name];
-}
-
-/**
- * Tree guide prefix per row ("├─ ", "│  └─ ", …), computed from the flat list.
- * A row is last at its level when no later row shares its parent.
- */
-export function treePrefixes(workspaces: Workspace[]): string[] {
-  const depth = workspaces.map((w) => depthOf(workspaces, w));
-  const last = workspaces.map((w, i) =>
-    !workspaces.some((o, j) => j > i && o.parent === w.parent),
-  );
-  // per level: does an ancestor still have siblings below it (draw │)
-  const open: boolean[] = [];
-  return workspaces.map((_, i) => {
-    const d = depth[i]!;
-    const guides = open.slice(0, d).map((more) => (more ? "│  " : "   "));
-    open[d] = !last[i];
-    open.length = d + 1;
-    return `${guides.join("")}${last[i] ? "└─ " : "├─ "}`;
-  });
 }
 
 /** Display label: own environments by name, others as owner/name. */

@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { useKeyboard } from "@opentui/react";
-import { TextAttributes, type ScrollBoxRenderable } from "@opentui/core";
+import { type ScrollBoxRenderable } from "@opentui/core";
 import { theme } from "../theme.ts";
 import { SplitBorder } from "../ui/border.ts";
 import type { Process, ProcessStatus } from "../workspaces.ts";

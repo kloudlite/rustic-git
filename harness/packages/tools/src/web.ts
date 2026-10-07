@@ -1,8 +1,9 @@
 import type { ToolDef } from "./index.ts";
 
 /** Guard every outbound call: a hung host must not hang the turn. */
-async function get(url: string, headers: Record<string, string> = {}): Promise<Response> {
+async function get(url: string, headers: Record<string, string> = {}, body?: unknown): Promise<Response> {
   const res = await fetch(url, {
+    ...(body === undefined ? {} : { method: "POST", body: JSON.stringify(body) }),
     headers: { "user-agent": "kloudlite-tui", ...headers },
     redirect: "follow",
     signal: AbortSignal.timeout(20_000),
@@ -132,16 +133,8 @@ export const webSearch = {
     const p = SEARCH[provider.name]!;
     const n = Math.min(Math.max(count, 1), 10);
     try {
-      const res =
-        provider.name === "tavily"
-          ? await fetch(p.url(query, n), {
-              method: "POST",
-              headers: p.headers(provider.key),
-              body: JSON.stringify({ query, max_results: n }),
-              signal: AbortSignal.timeout(20_000),
-            })
-          : await get(p.url(query, n), p.headers(provider.key));
-      if (!res.ok) return `error: ${provider.name} search returned ${res.status} ${res.statusText}`;
+      const body = provider.name === "tavily" ? { query, max_results: n } : undefined;
+      const res = await get(p.url(query, n), p.headers(provider.key), body);
       const hits = p.parse(await res.json()).slice(0, n);
       if (hits.length === 0) return `No results for "${query}".`;
       return hits.map((h) => `${h.title}\n${h.url}\n${h.text}`).join("\n\n");
