@@ -34,7 +34,10 @@
 # outside them).
 !deploy/bench/
 !bench/
+# harness/ is the graphcode TUI the bench runs under bun.
+!harness/
 # A local `npm ci` leaves these; the Dockerfile runs its own `npm ci` and COPYs the result, so a
 # laptop's node_modules admitted here would land on top of it and ship whatever happens to be
 # installed locally (final review M5).
 bench/**/node_modules
+harness/**/node_modules

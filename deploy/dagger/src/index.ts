@@ -19,8 +19,6 @@ const WORKSPACE_NODE = "node:22-bookworm-slim@sha256:83f487e0a63425e5b4d146fb5e5
 const DOCKER_CLI = "docker:28-cli@sha256:625d9431a9f54c5a2bc90f24f0e1c3d55b1349fd857dd85035f98c2c9acbdd4d"
 const BUILDX_BIN = "docker/buildx-bin:0.20.1@sha256:ead27bfcde6308a757b4a5a4a931937363c1fa0091f7e2994b9114521853cf69"
 const BUN_IMAGE = "oven/bun:1.3.14@sha256:e10577f0db68676a7024391c6e5cb4b879ebd17188ab750cf10024a6d700e5c4"
-// graphcode TUI (kloudlite/harness) pinned by commit; bump = edit here and in deploy/bench/Dockerfile.
-const HARNESS_REV = "8d8c8c62439da8fee44b03ed39dee900b1875aa0"
 const NODE_IMAGE = "node:22-bookworm-slim@sha256:d649c27dae7ba0137b3cef5dd75baa422c08dc3d9e3fc0c23dfb172dc3cc6436"
 
 @object()
@@ -288,12 +286,12 @@ export class Kloudlite {
 
   // deploy/bench/Dockerfile: the graphcode TUI (run under bun), ttyd and sshd, supervised by
   // runit, plus the `sessions` node service (idle/readiness probe only). The TUI's deps install in
-  // their own stage so a rebuild at the same HARNESS_REV is a cache hit.
+  // their own stage so a rebuild with harness/ unchanged is a cache hit.
   private imageBench(source: Directory, built: Container): Container {
     const harness = dag
       .container()
       .from(BUN_IMAGE)
-      .withDirectory("/opt/kl/harness", dag.git("https://github.com/kloudlite/harness.git").commit(HARNESS_REV).tree())
+      .withDirectory("/opt/kl/harness", source.directory("harness"))
       .withWorkdir("/opt/kl/harness")
       .withExec(["bun", "install", "--frozen-lockfile"])
     return dag

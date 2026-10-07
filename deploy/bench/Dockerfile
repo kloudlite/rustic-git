@@ -21,10 +21,10 @@ ADD --checksum=sha256:8a217c968aba172e0dbf3f34447218dc015bc4d5e59bf51db2f2cd12b7
     https://github.com/tsl0922/ttyd/releases/download/1.7.7/ttyd.x86_64 /usr/local/bin/ttyd
 RUN chmod 0755 /usr/local/bin/ttyd
 
-# bun runs the graphcode TUI (kloudlite/harness, pinned by commit; bump here and in
-# deploy/dagger/src/index.ts HARNESS_REV). Deps install in the image: @opentui/core is native.
+# bun runs the graphcode TUI from harness/ in this repo. Deps install in the image:
+# @opentui/core is native.
 COPY --from=oven/bun:1.3.14@sha256:e10577f0db68676a7024391c6e5cb4b879ebd17188ab750cf10024a6d700e5c4 /usr/local/bin/bun /usr/local/bin/bun
-ADD https://github.com/kloudlite/harness.git#8d8c8c62439da8fee44b03ed39dee900b1875aa0 /opt/kl/harness
+COPY harness /opt/kl/harness
 RUN cd /opt/kl/harness && bun install --frozen-lockfile
 
 # The musl `kl` binary — statically linked, so it runs fine on this glibc base — built by the same
