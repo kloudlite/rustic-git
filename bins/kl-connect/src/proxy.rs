@@ -52,9 +52,8 @@ pub(crate) fn gateway_url(gateway: &str) -> String {
     format!("{}{path}", origin.trim_end_matches('/'))
 }
 
-/// Opens the tunnel and authenticates it. Split from `pump_io` so `bench.rs` can dial a fresh
-/// tunnel per local connection without pumping stdio — a bench's callers are TCP sockets, not
-/// this process's own stdin/stdout.
+/// Opens the tunnel and authenticates it. Split from `pump_io` so `bench.rs` can wait for a
+/// sleeping bench and mint its own session before dialling.
 pub(crate) async fn connect(
     url: &str,
     token: &str,
@@ -78,8 +77,8 @@ pub(crate) async fn connect(
     Ok(ws)
 }
 
-/// Pumps binary frames between an open tunnel and any reader/writer pair — stdio for `ws proxy`,
-/// a local TCP socket's halves for `bench`. Behaviour unchanged from the old `pump`: writes are
+/// Pumps binary frames between an open tunnel and any reader/writer pair — stdio for `ws proxy`
+/// and `bench-proxy`, an in-memory pipe in `bench.rs`'s tests. Behaviour unchanged from the old `pump`: writes are
 /// flushed per frame (a request/response handshake on the other end), and a `Close` frame ends
 /// the pump cleanly while any other error is reported.
 pub(crate) async fn pump_io<

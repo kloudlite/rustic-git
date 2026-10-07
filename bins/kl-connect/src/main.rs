@@ -1,4 +1,5 @@
-//! `kl-connect` — the kloudlite laptop CLI: log in once, then ssh into a workspace through the region gateway.
+//! `kl-connect` — the kloudlite laptop CLI: log in once, then ssh into a bench (`kl-connect [team]`)
+//! or a workspace through the region gateway.
 //!
 //! Hidden env vars, for tests and the e2e script only:
 //!   KL_CONFIG_DIR       where config.json and known_hosts live (default ~/.config/kl-connect)
@@ -19,14 +20,24 @@ use clap::{Parser, Subcommand};
 #[command(
     name = "kl-connect",
     version,
-    about = "kloudlite connect CLI: log in, list workspaces, ssh into one",
+    about = "kloudlite connect CLI: `kl-connect` opens your bench, `kl-connect <team>` the team's",
+    // A team named like a subcommand (`login`, `ws`, ...) is read as the subcommand.
+    args_conflicts_with_subcommands = true,
     after_help = "Hidden, for tests and e2e only:\n  \
         KL_CONFIG_DIR        where config.json and known_hosts live (default ~/.config/kl-connect)\n  \
         KL_GATEWAY_OVERRIDE  replaces the origin of the api-supplied gateway URL"
 )]
 struct Cli {
     #[command(subcommand)]
-    cmd: Cmd,
+    cmd: Option<Cmd>,
+    /// The team whose bench to open; your own bench when absent
+    team: Option<String>,
+    /// Start the bench first (creating it if it does not exist)
+    #[arg(long)]
+    start: bool,
+    /// Only used for an unbound personal bench's first `--start` (a team's region is the team's).
+    #[arg(long)]
+    region: Option<String>,
 }
 
 #[derive(Subcommand)]
@@ -48,19 +59,9 @@ enum Cmd {
         #[command(subcommand)]
         cmd: BuilderCmd,
     },
-    /// Open a bench on a local port, waking it on connect
-    Bench {
-        #[arg(long)]
-        team: Option<String>,
-        #[arg(long, default_value_t = 0)]
-        port: u16,
-        #[arg(long)]
-        start: bool,
-        /// Only used for an unbound personal bench's first `--start` (a team's region is the
-        /// team's).
-        #[arg(long)]
-        region: Option<String>,
-    },
+    /// ssh's ProxyCommand for `kl-connect [team]`: pump stdio to the bench's gateway tunnel
+    #[command(hide = true)]
+    BenchProxy { team: Option<String> },
 }
 
 #[derive(Subcommand)]
@@ -105,6 +106,17 @@ async fn main() {
     let _ = rustls::crypto::ring::default_provider().install_default();
     let cli = Cli::parse();
     let r = match &cli.cmd {
+        None => bench::bench(cli.team.as_deref(), cli.start, cli.region.as_deref()).await,
+        Some(cmd) => run(cmd).await,
+    };
+    if let Err(e) = r {
+        eprintln!("kl-connect: {e}");
+        std::process::exit(1);
+    }
+}
+
+async fn run(cmd: &Cmd) -> Result<(), String> {
+    match cmd {
         Cmd::Login { api } => login::login(api.clone()).await,
         Cmd::Logout => login::logout().await,
         Cmd::Ws { cmd } => match cmd {
@@ -117,12 +129,6 @@ async fn main() {
         Cmd::Builder { cmd } => match cmd {
             BuilderCmd::Status { team } => builder::status(team.as_deref()).await,
         },
-        Cmd::Bench { team, port, start, region } => {
-            bench::bench(team.as_deref(), *port, *start, region.as_deref()).await
-        }
-    };
-    if let Err(e) = r {
-        eprintln!("kl-connect: {e}");
-        std::process::exit(1);
+        Cmd::BenchProxy { team } => bench::proxy(team.as_deref()).await,
     }
 }

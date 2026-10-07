@@ -5,8 +5,9 @@
 //! the probe owner's bench is long-lived and is left Running with no client, so it sleeps between
 //! runs and costs nothing. Its region is bound once by hand.
 //!
-//! The tunnel is the real one — `kl-connect bench` as a child on a local port, handed a config
-//! file under the run's tmp — so the probe walks exactly what a laptop walks.
+//! The tunnel is the real one — `kl-connect bench-proxy`, ssh's ProxyCommand for `kl-connect`, as a
+//! child on stdio, handed a config file under the run's tmp — so the probe walks exactly what a
+//! laptop's ssh walks.
 //!
 //! Everything that used to speak to the retired harness-bench HTTP server now runs INSIDE the pod
 //! by kube-exec (design 2026-10-05): `node`'s global `fetch` against `kl-sessions`
@@ -27,8 +28,7 @@ use k8s_openapi::api::core::v1::Pod;
 use kloudlite_workspaces::crd::{self, ClusterSettings};
 use kube::api::Api;
 use serde_json::{json, Value};
-use tokio::io::{AsyncBufReadExt, AsyncReadExt, BufReader};
-use tokio::net::TcpStream;
+use tokio::io::AsyncReadExt;
 use tokio::process::{Child, Command};
 
 use super::{api, call, get, post, raw};
@@ -48,7 +48,7 @@ const WAKE_CEILING: Duration = Duration::from_secs(540);
 const IDLE_GRACE: Duration = Duration::from_secs(60);
 /// How long `status.idleSince` gets to land after the pod is gone: one reconcile pass writes both.
 const IDLE_STAMP: Duration = Duration::from_secs(30);
-/// A start's wait, from `kl-connect bench`'s own `BENCH_START_WAIT`.
+/// A start's wait, from `kl-connect`'s own `BENCH_START_WAIT`.
 const START_WAIT: Duration = Duration::from_secs(90);
 /// `shell.up`: target 15 s.
 const SHELL_CEILING: Duration = Duration::from_secs(20);
@@ -123,30 +123,23 @@ pub(crate) async fn wait_phase(c: &Ctx, want: &str, cap: Duration) -> Result<()>
     }
 }
 
-/// `kl-connect bench` on an ephemeral port; the child dies with the handle. Still needed by
-/// `bench.tunnel`'s raw SSH-banner check — the only thing left on this end of the tunnel now that
-/// it carries raw bytes to sshd and not an HTTP API.
-pub(crate) async fn forward(c: &Ctx) -> Result<(Child, u16)> {
+/// `kl-connect bench-proxy` with both pipes held (a closed stdin would end the pump); the child
+/// dies with the handle. Still needed by `bench.tunnel`'s raw SSH-banner check — the only thing
+/// left on this end of the tunnel now that it carries raw bytes to sshd and not an HTTP API.
+pub(crate) async fn forward(c: &Ctx) -> Result<Child> {
     let dir = c.tmp.join("kl-bench");
     std::fs::create_dir_all(&dir)?;
     let cfg = json!({"api": c.cfg.api_url, "token": c.probe_jwt, "expires_at": "2099-01-01T00:00:00Z", "username": c.cfg.probe_user});
     std::fs::write(dir.join("config.json"), cfg.to_string())?;
-    let mut child = Command::new(&c.programs.kl)
-        .args(["bench", "--port", "0"])
+    Command::new(&c.programs.kl)
+        .arg("bench-proxy")
         .env("KL_CONFIG_DIR", &dir)
-        .stdin(Stdio::null())
+        .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::null())
         .kill_on_drop(true)
         .spawn()
-        .context("could not start kl-connect bench")?;
-    let mut line = String::new();
-    let out = child.stdout.take().ok_or_else(|| anyhow!("no stdout"))?;
-    tokio::time::timeout(Duration::from_secs(10), BufReader::new(out).read_line(&mut line))
-        .await
-        .context("kl-connect bench printed no port")??;
-    let port = line.trim().rsplit(':').next().and_then(|p| p.parse().ok()).ok_or_else(|| anyhow!("no port in {line:?}"))?;
-    Ok((child, port))
+        .context("could not start kl-connect bench-proxy")
 }
 
 /// `wss://ws-{region}.khost.dev/tunnel/{id}` → `https://ws-{region}.khost.dev` (origin only, no
@@ -283,10 +276,11 @@ pub async fn fast(c: &mut Ctx) {
         async move {
             // The tunnel now carries raw bytes to sshd (`BENCH_PORT`), not an HTTP API: its own
             // protocol banner is the only thing to check from this end.
-            let (_child, port) = forward(c).await?;
-            let mut sock = TcpStream::connect(("127.0.0.1", port)).await.context("dialling the tunnel")?;
+            let mut child = forward(c).await?;
+            let mut out = child.stdout.take().ok_or_else(|| anyhow!("no stdout"))?;
             let mut buf = [0u8; 16];
-            let n = tokio::time::timeout(Duration::from_secs(10), sock.read(&mut buf)).await.context("reading the SSH banner")??;
+            // 100 s: the proxy waits up to its own 90 s for a waking bench before dialling.
+            let n = tokio::time::timeout(Duration::from_secs(100), out.read(&mut buf)).await.context("reading the SSH banner")??;
             if !buf[..n].starts_with(b"SSH-2.0-") {
                 bail!("the tunnel's first bytes were not an SSH banner: {:?}", String::from_utf8_lossy(&buf[..n]));
             }
@@ -547,7 +541,7 @@ pub async fn weekly(c: &mut Ctx) {
 // `ws.terminal.persists` is RETIRED (spec §2.3, 2026-09-17): the tool server has no PTY any more
 // and a terminal is a ttyd socket inside the workspace container itself (owner ruling 2026-09-25:
 // no shell sidecar), so nothing survives a restart by design — "a dropped connection is a new
-// shell". The bench's own terminal is now `kl-connect bench`/ttyd onto the graphcode TUI, covered
+// shell". The bench's own terminal is now `kl-connect`/ttyd onto the graphcode TUI, covered
 // by `bench.tunnel`.
 
 #[cfg(test)]
