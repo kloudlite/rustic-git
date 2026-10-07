@@ -318,8 +318,9 @@ export class Kloudlite {
       .withFile("/etc/kl/sshd_config", source.file("bench/sshd_config"))
       // Private TMPDIR, same as deploy/bench/Dockerfile.
       .withEnvVariable("TMPDIR", "/tmp/kl")
+      // `groupdel tty`: see deploy/bench/Dockerfile (sshd as kl cannot chown a pty to `tty`).
       .withExec(["sh", "-c",
-        "usermod -l kl -d /home/kl node && groupmod -n kl node " +
+        "usermod -l kl -d /home/kl node && groupmod -n kl node && groupdel tty " +
         "&& mkdir -p /home/kl && chown kl:kl /home/kl"])
       .withUser("1000:1000")
       .withWorkdir("/home/kl")

@@ -56,7 +56,10 @@ ENV TMPDIR=/tmp/kl
 
 # node:24-bookworm-slim ships uid/gid 1000 as `node`; rename rather than useradd a second uid 1000
 # (plan R3). Home is the workspace volume (2026-09-22 ruling): /home/kl IS the mounted volume.
-RUN usermod -l kl -d /home/kl node && groupmod -n kl node \
+# No `tty` group: sshd runs as kl, and OpenSSH (sshpty.c pty_setowner) fatals when it cannot chown a
+# new pty to that group, dropping every `ssh -t` session right after auth. Without the group it
+# wants kl:kl 0600, which the pty already is.
+RUN usermod -l kl -d /home/kl node && groupmod -n kl node && groupdel tty \
     && mkdir -p /home/kl && chown kl:kl /home/kl
 
 USER 1000:1000
