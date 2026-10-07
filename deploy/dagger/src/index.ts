@@ -307,6 +307,11 @@ export class Kloudlite {
         "&& chmod 0755 /usr/local/bin/ttyd"])
       .withFile("/usr/local/bin/bun", dag.container().from(BUN_IMAGE).file("/usr/local/bin/bun"), { permissions: 0o755 })
       .withDirectory("/opt/kl/harness", harness.directory("/opt/kl/harness"))
+      // `claude` on PATH for `claude auth login` over ssh (bench/term/login-shell), same as
+      // deploy/bench/Dockerfile: the SDK's bundled binary, and the build fails if it moved.
+      .withExec(["sh", "-c",
+        "f=$(find /opt/kl/harness/node_modules -path '*claude-agent-sdk-linux-x64/claude' -type f | head -n1) " +
+        '&& ln -s "$f" /usr/local/bin/claude && test -x /usr/local/bin/claude'])
       .withFile("/usr/local/bin/kl", built.file("/out/musl/kl"), { permissions: 0o755 })
       .withDirectory("/opt/kl/sessions", source.directory("bench/sessions"))
       .withDirectory("/opt/kl/term", source.directory("bench/term"))
