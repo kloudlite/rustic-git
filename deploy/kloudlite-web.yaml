@@ -54,7 +54,7 @@ spec:
                 topologyKey: kubernetes.io/hostname
       containers:
         - name: web
-          image: ghcr.io/kloudlite/kloudlite-web:d0d63d8c7be900965f7dc7081e8e494a68508dbd@sha256:069b1114e37cc6533f19821d3466a2c92e205f6dda098adc8e3dad50293a164c
+          image: ghcr.io/kloudlite/kloudlite-web:84e02ee61a9d6f42fb515180d97568d0b37d6038@sha256:bf3e7a6004c5b181f1191cf987de1cb8bf5f3c626f39a766a562884c0e14a853
           ports:
             - { name: http, containerPort: 3000 }
           env:
