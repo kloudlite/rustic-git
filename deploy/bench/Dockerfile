@@ -24,7 +24,7 @@ RUN chmod 0755 /usr/local/bin/ttyd
 # bun runs the graphcode TUI (kloudlite/harness, pinned by commit; bump here and in
 # deploy/dagger/src/index.ts HARNESS_REV). Deps install in the image: @opentui/core is native.
 COPY --from=oven/bun:1.3.14@sha256:e10577f0db68676a7024391c6e5cb4b879ebd17188ab750cf10024a6d700e5c4 /usr/local/bin/bun /usr/local/bin/bun
-ADD https://github.com/kloudlite/harness.git#f2f4823cce3bd19b30aedf885fad25e90e0962a3 /opt/kl/harness
+ADD https://github.com/kloudlite/harness.git#ae1e9386e21c0e213a4aaf566e7396928170a12a /opt/kl/harness
 RUN cd /opt/kl/harness && bun install --frozen-lockfile
 
 # The musl `kl` binary — statically linked, so it runs fine on this glibc base — built by the same
