@@ -1,0 +1,16 @@
+{
+  "name": "@kloudlite-tui/tools",
+  "version": "0.0.0",
+  "devDependencies": {
+    "@types/bun": "^1.1.0",
+    "typescript": "^5.7.0"
+  },
+  "exports": {
+  ".": "./src/index.ts"
+},
+"private": true,
+"scripts": {
+"check": "tsc --noEmit"
+},
+"type": "module"
+}

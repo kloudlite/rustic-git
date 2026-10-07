@@ -1,0 +1,26 @@
+{
+  "name": "@kloudlite-tui/tui",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "bin": {
+    "kloudlite": "src/cli.tsx"
+  },
+  "scripts": {
+    "dev": "bun run src/cli.tsx",
+    "check": "tsc --noEmit",
+    "serve": "bun run src/server.tsx"
+  },
+  "dependencies": {
+    "@kloudlite-tui/agent": "workspace:*",
+    "@kloudlite-tui/tools": "workspace:*",
+    "@opentui/core": "^0.5.1",
+    "@opentui/react": "^0.5.1",
+    "react": "^19.0.0"
+  },
+  "devDependencies": {
+    "@types/bun": "^1.1.0",
+    "@types/react": "^19.0.0",
+    "typescript": "^5.7.0"
+  }
+}
