@@ -16,6 +16,7 @@ pub const BENCH_START_WAIT: Duration = Duration::from_secs(90);
 /// caller's own handle — a team's region is the team's, not this laptop's flag.
 pub async fn bench(team: Option<&str>, port: u16, start: bool, region: Option<&str>) -> Result<(), String> {
     let cfg = crate::config::load()?;
+    let cfg_username = cfg.username.clone();
     if start {
         let personal = team.is_none_or(|t| t == cfg.username);
         api::create_bench(&cfg, team, region.filter(|_| personal))
@@ -30,7 +31,8 @@ pub async fn bench(team: Option<&str>, port: u16, start: bool, region: Option<&s
 
     let known_hosts = crate::config::dir().join("bench_known_hosts");
     let mut cmd = std::process::Command::new("ssh");
-    cmd.args(ssh_argv(bound_port, &known_hosts));
+    let owner = team.unwrap_or(&cfg_username);
+    cmd.args(ssh_argv(bound_port, &known_hosts, owner));
     // spawn and wait, not exec (unlike `ws.rs`'s `ssh_with`): ssh dials the listener this process
     // serves, so exec would kill the tunnel before ssh's first byte. ssh still owns the terminal:
     // it inherits stdio, and with `-t` the tty is raw, so ^C reaches the remote, not us.
@@ -39,8 +41,12 @@ pub async fn bench(team: Option<&str>, port: u16, start: bool, region: Option<&s
 }
 
 /// The ssh argv for the bench: `-t` because the remote's `ForceCommand` is the graphcode TUI, not
-/// a one-shot command, so ssh must allocate a pty for it.
-fn ssh_argv(port: u16, known_hosts: &std::path::Path) -> Vec<String> {
+/// a one-shot command, so ssh must allocate a pty for it. `HostKeyAlias`: the local port is new on
+/// every run, so keyed by `[127.0.0.1]:port` every run was a first contact (a "Permanently added"
+/// line each time, and the key never actually compared); keyed by the bench's owner it is pinned
+/// once and checked after. `LogLevel=ERROR` drops that one first-contact line; a changed key is
+/// still an error and still shown.
+fn ssh_argv(port: u16, known_hosts: &std::path::Path, owner: &str) -> Vec<String> {
     vec![
         "-p".to_string(),
         port.to_string(),
@@ -48,6 +54,10 @@ fn ssh_argv(port: u16, known_hosts: &std::path::Path) -> Vec<String> {
         "StrictHostKeyChecking=accept-new".to_string(),
         "-o".to_string(),
         format!("UserKnownHostsFile={}", known_hosts.display()),
+        "-o".to_string(),
+        format!("HostKeyAlias=kl-bench-{owner}"),
+        "-o".to_string(),
+        "LogLevel=ERROR".to_string(),
         "-t".to_string(),
         "kl@127.0.0.1".to_string(),
     ]
@@ -153,7 +163,7 @@ mod tests {
     fn ssh_argv_matches_the_bench_ssh_invocation() {
         let kh = std::path::Path::new("/home/k/.config/kl-connect/bench_known_hosts");
         assert_eq!(
-            ssh_argv(2222, kh),
+            ssh_argv(2222, kh, "k"),
             vec![
                 "-p".to_string(),
                 "2222".to_string(),
@@ -161,6 +171,10 @@ mod tests {
                 "StrictHostKeyChecking=accept-new".to_string(),
                 "-o".to_string(),
                 "UserKnownHostsFile=/home/k/.config/kl-connect/bench_known_hosts".to_string(),
+                "-o".to_string(),
+                "HostKeyAlias=kl-bench-k".to_string(),
+                "-o".to_string(),
+                "LogLevel=ERROR".to_string(),
                 "-t".to_string(),
                 "kl@127.0.0.1".to_string(),
             ]
