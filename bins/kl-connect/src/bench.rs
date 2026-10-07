@@ -119,27 +119,107 @@ where
     R: AsyncRead + Unpin + Send + 'static,
     W: AsyncWrite + Unpin,
 {
-    let deadline = tokio::time::Instant::now() + BENCH_START_WAIT;
-    let mut last_state: Option<String> = None;
+    let started = tokio::time::Instant::now();
+    let deadline = started + BENCH_START_WAIT;
+    let mut wait = Progress::new(team);
     let session = loop {
         match api::bench_session(cfg, team).await {
             Ok(SessionAnswer::Ready(s)) => break s,
             Ok(SessionAnswer::Waking(state)) => {
-                if last_state.as_deref() != Some(state.as_str()) {
-                    eprintln!("bench is {state}; waiting");
-                    last_state = Some(state);
-                }
                 if tokio::time::Instant::now() >= deadline {
+                    wait.clear();
                     return Err("bench did not start within 90 s".to_string());
                 }
-                tokio::time::sleep(Duration::from_secs(1)).await;
+                wait.state(&state);
+                // Re-ask every 1 s, redrawing the spinner meanwhile.
+                for _ in 0..10 {
+                    wait.tick(started.elapsed());
+                    tokio::time::sleep(Duration::from_millis(100)).await;
+                }
             }
-            Err(e) => return Err(e.to_string()),
+            Err(e) => {
+                wait.clear();
+                return Err(e.to_string());
+            }
         }
     };
+    wait.done(started.elapsed());
     let url = crate::proxy::gateway_url(&session.gateway);
     let ws = crate::proxy::connect(&url, &session.token).await?;
     crate::proxy::pump_io(ws, r, w).await
+}
+
+/// The wait on stderr, which ssh hands straight to the terminal (it is not in raw mode until the
+/// session starts). On a terminal: one spinner line redrawn in place, the phase in plain words and
+/// the time so far, replaced by a ready line. Piped: one line per phase change, as before.
+struct Progress {
+    tty: bool,
+    whose: String,
+    label: Option<String>,
+    frame: usize,
+    waited: bool,
+}
+
+impl Progress {
+    fn new(team: Option<&str>) -> Self {
+        use std::io::IsTerminal;
+        Progress {
+            tty: std::io::stderr().is_terminal(),
+            whose: team.map_or("your bench".to_string(), |t| format!("{t}'s bench")),
+            label: None,
+            frame: 0,
+            waited: false,
+        }
+    }
+
+    fn state(&mut self, state: &str) {
+        let label = phase_label(state, &self.whose);
+        if self.label.as_deref() != Some(label.as_str()) {
+            if !self.tty {
+                eprintln!("{label}");
+            }
+            self.label = Some(label);
+        }
+        self.waited = true;
+    }
+
+    fn tick(&mut self, elapsed: Duration) {
+        const FRAMES: [&str; 10] = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
+        let (true, Some(label)) = (self.tty, &self.label) else { return };
+        self.frame = (self.frame + 1) % FRAMES.len();
+        eprint!("\r\x1b[2K{} {label}… {}s", FRAMES[self.frame], elapsed.as_secs());
+    }
+
+    fn clear(&self) {
+        if self.tty && self.waited {
+            eprint!("\r\x1b[2K");
+        }
+    }
+
+    /// Only after a wait: an awake bench connects with no line at all.
+    fn done(&self, elapsed: Duration) {
+        if self.waited {
+            self.clear();
+            eprintln!("✓ {} is ready ({}s)", capitalise(&self.whose), elapsed.as_secs());
+        }
+    }
+}
+
+/// The api's phase (`crd::Phase::as_str`, or `waking`) as a person would say it.
+fn phase_label(state: &str, whose: &str) -> String {
+    match state {
+        "waking" | "idle" => format!("Waking {whose}"),
+        "pending" => format!("Finding a node for {whose}"),
+        "creating" => format!("Creating {whose}"),
+        "starting" => format!("Starting {whose}"),
+        "unavailable" => format!("The node holding {whose} is unreachable; waiting"),
+        other => format!("{} is {other}; waiting", capitalise(whose)),
+    }
+}
+
+fn capitalise(s: &str) -> String {
+    let mut c = s.chars();
+    c.next().map_or(String::new(), |f| f.to_uppercase().chain(c).collect())
 }
 
 #[cfg(test)]
@@ -153,6 +233,13 @@ mod tests {
     use std::sync::atomic::{AtomicUsize, Ordering};
     use std::sync::Arc;
     use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
+
+    #[test]
+    fn phases_read_as_plain_words() {
+        assert_eq!(phase_label("waking", "your bench"), "Waking your bench");
+        assert_eq!(phase_label("creating", "acme's bench"), "Creating acme's bench");
+        assert_eq!(phase_label("error", "your bench"), "Your bench is error; waiting");
+    }
 
     // Shared with config.rs's tests: KL_CONFIG_DIR etc. are process-global.
     use crate::config::ENV_LOCK;
