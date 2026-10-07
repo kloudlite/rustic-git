@@ -38,11 +38,17 @@ export function Login({
       notify: (event) => {
         setEvents((prev) => [...prev, event]);
         if (event.type === "auth_url") {
-          // best effort: open the browser (macOS/Linux)
-          spawn(process.platform === "darwin" ? "open" : "xdg-open", [event.url], {
-            stdio: "ignore",
-            detached: true,
-          }).unref();
+          // best effort: open the browser (macOS/Linux). A headless box (the
+          // bench) has no xdg-open: Bun throws on spawn, node emits "error";
+          // either way the URL on screen is the way in.
+          try {
+            spawn(process.platform === "darwin" ? "open" : "xdg-open", [event.url], {
+              stdio: "ignore",
+              detached: true,
+            })
+              .on("error", () => {})
+              .unref();
+          } catch {}
         }
       },
       prompt: (prompt) =>
