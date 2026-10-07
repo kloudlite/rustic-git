@@ -8,6 +8,7 @@
 mod api;
 mod bench;
 mod builder;
+mod clip;
 mod config;
 mod login;
 mod proxy;

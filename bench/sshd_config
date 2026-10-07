@@ -11,8 +11,16 @@ PidFile none
 # COLORTERM: ssh does not forward it, and without it opentui drops to 256 colours (bench/sv/ttyd/run).
 ForceCommand env COLORTERM=truecolor bun run --silent --cwd /opt/kl/harness/apps/tui dev
 # ForceCommand alone does not stop `ssh -N -L/-D`: a key holder would get a SOCKS pivot from the
-# bench pod's network position (final review I2). AllowUsers names the only account OwnerKeys ever
-# authenticates as.
-DisableForwarding yes
+# bench pod's network position (final review I2), so TCP, agent and X11 forwarding stay off. The one
+# forward allowed is `-R` of a unix socket: a socket on the bench pointing back at the caller's own
+# laptop (kl-connect's clipboard, bins/kl-connect/src/clip.rs), created owner-only (default
+# StreamLocalBindMask 0177). It reaches nothing the key holder could not already reach. KL_CLIP
+# names that socket for the xclip shim (bench/term/xclip). AllowUsers names the only account
+# OwnerKeys ever authenticates as.
+AllowTcpForwarding no
+AllowAgentForwarding no
+X11Forwarding no
+AllowStreamLocalForwarding remote
+AcceptEnv KL_CLIP
 PermitTunnel no
 AllowUsers kl

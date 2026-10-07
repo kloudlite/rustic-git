@@ -30,20 +30,20 @@ pub async fn bench(team: Option<&str>, start: bool, region: Option<&str>) -> Res
     let me = std::env::current_exe().map_err(|e| e.to_string())?;
     let known_hosts = crate::config::dir().join("bench_known_hosts");
     let owner = team.unwrap_or(&cfg.username);
-    let mut cmd = std::process::Command::new("ssh");
-    cmd.args(ssh_argv(&me, &known_hosts, owner, team));
-    // exec, not spawn, as `ws.rs`: the proxy child carries the tunnel, so nothing is left for
-    // this process to do, and ssh owns the terminal.
-    #[cfg(unix)]
-    {
-        use std::os::unix::process::CommandExt;
-        Err(format!("running ssh: {}", cmd.exec()))
-    }
-    #[cfg(not(unix))]
-    {
-        let st = cmd.status().map_err(|e| e.to_string())?;
-        std::process::exit(st.code().unwrap_or(1));
-    }
+    // Ctrl+V on the bench reads THIS laptop's clipboard (clip.rs): a local socket, forwarded by
+    // ssh. Spawned, not exec'd as before, because this process now serves that socket while ssh
+    // runs. pid-named and short: macOS caps a socket path at 104 bytes.
+    let local = crate::config::dir().join(format!("clip-{}.sock", std::process::id()));
+    let listener = crate::clip::listen(&local).map_err(|e| format!("clipboard socket {}: {e}", local.display()))?;
+    let clip = tokio::spawn(crate::clip::serve(listener));
+    let st = tokio::process::Command::new("ssh")
+        .args(ssh_argv(&me, &known_hosts, owner, team, &crate::clip::remote_path(), &local))
+        .status()
+        .await;
+    clip.abort();
+    let _ = std::fs::remove_file(&local);
+    let st = st.map_err(|e| format!("running ssh: {e}"))?;
+    std::process::exit(st.code().unwrap_or(1));
 }
 
 /// The ssh argv for the bench: `-t` because the remote's `ForceCommand` is the graphcode TUI, not
@@ -51,7 +51,17 @@ pub async fn bench(team: Option<&str>, start: bool, region: Option<&str>) -> Res
 /// owner (the name ssh dials is never resolved: the ProxyCommand carries the bytes).
 /// `LogLevel=ERROR` drops the one first-contact "Permanently added" line; a changed key is still
 /// an error and still shown. The exe path is double-quoted, as in `ws.rs`: it can hold spaces.
-fn ssh_argv(me: &std::path::Path, known_hosts: &std::path::Path, owner: &str, team: Option<&str>) -> Vec<String> {
+/// `-R` forwards the bench-side `remote` socket to the clipboard server at `local`, and `SetEnv`
+/// tells the bench's xclip shim where it is (sshd `AcceptEnv KL_CLIP`). A refused forward is not
+/// fatal (ssh's default `ExitOnForwardFailure no`): the session runs, pastes find no image.
+fn ssh_argv(
+    me: &std::path::Path,
+    known_hosts: &std::path::Path,
+    owner: &str,
+    team: Option<&str>,
+    remote: &std::path::Path,
+    local: &std::path::Path,
+) -> Vec<String> {
     let proxy = match team {
         Some(t) => format!("ProxyCommand=\"{}\" bench-proxy {t}", me.display()),
         None => format!("ProxyCommand=\"{}\" bench-proxy", me.display()),
@@ -67,6 +77,10 @@ fn ssh_argv(me: &std::path::Path, known_hosts: &std::path::Path, owner: &str, te
         "LogLevel=ERROR".to_string(),
         "-o".to_string(),
         proxy,
+        "-R".to_string(),
+        format!("{}:{}", remote.display(), local.display()),
+        "-o".to_string(),
+        format!("SetEnv=KL_CLIP={}", remote.display()),
         "-t".to_string(),
         format!("kl@bench-{owner}"),
     ]
@@ -168,6 +182,8 @@ mod tests {
     fn ssh_argv_matches_the_bench_ssh_invocation() {
         let me = std::path::Path::new("/opt/kl connect/kl-connect");
         let kh = std::path::Path::new("/home/k/.config/kl-connect/bench_known_hosts");
+        let remote = std::path::Path::new("/tmp/kl-clip-1.sock");
+        let local = std::path::Path::new("/home/k/.config/kl-connect/clip-1.sock");
         let tail = |owner: &str, proxy: &str| {
             vec![
                 "-o".to_string(),
@@ -180,16 +196,20 @@ mod tests {
                 "LogLevel=ERROR".to_string(),
                 "-o".to_string(),
                 proxy.to_string(),
+                "-R".to_string(),
+                "/tmp/kl-clip-1.sock:/home/k/.config/kl-connect/clip-1.sock".to_string(),
+                "-o".to_string(),
+                "SetEnv=KL_CLIP=/tmp/kl-clip-1.sock".to_string(),
                 "-t".to_string(),
                 format!("kl@bench-{owner}"),
             ]
         };
         assert_eq!(
-            ssh_argv(me, kh, "k", None),
+            ssh_argv(me, kh, "k", None, remote, local),
             tail("k", "ProxyCommand=\"/opt/kl connect/kl-connect\" bench-proxy")
         );
         assert_eq!(
-            ssh_argv(me, kh, "acme", Some("acme")),
+            ssh_argv(me, kh, "acme", Some("acme"), remote, local),
             tail("acme", "ProxyCommand=\"/opt/kl connect/kl-connect\" bench-proxy acme")
         );
     }
