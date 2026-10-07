@@ -180,3 +180,21 @@ test("thinking levels map to effort", () => {
     "low", "low", "low", "medium", "high", "max", "max",
   ]);
 });
+
+test("each turn appends one timing line", async () => {
+  const path = `${require("node:os").tmpdir()}/kl-timing-${process.pid}.log`;
+  const f = fake((n, push) => text(n === 1 ? "hi" : "bye").forEach(push));
+  const { s } = run(f, { timingLog: path });
+  await s.prompt("one");
+  await tick();
+  await s.prompt("two");
+  await tick();
+  const lines = (await Bun.file(path).text()).trim().split("\n").map((l) => JSON.parse(l));
+  require("node:fs").rmSync(path);
+  expect(lines.length).toBe(2);
+  expect(lines[0].model).toBe("claude-haiku-4-5");
+  expect(lines[0].first_thinking_ms).toBeNumber();
+  expect(lines[0].first_text_ms).toBeNumber();
+  expect(lines[0].first_tool_ms).toBeNull();
+  expect(lines[0].ok).toBe(true);
+});

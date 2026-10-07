@@ -32,6 +32,9 @@
  */
 import { execFile } from "node:child_process";
 import { createRequire } from "node:module";
+import { appendFile, mkdir } from "node:fs/promises";
+import { homedir } from "node:os";
+import { dirname, join } from "node:path";
 import { query as sdkQuery, type Options, type SDKUserMessage } from "@anthropic-ai/claude-agent-sdk";
 
 export const AUTH_MESSAGE = "Not signed in to Claude. On your laptop run: kl-connect claude login";
@@ -129,7 +132,31 @@ export type ClaudeOptions = {
   cwd?: string;
   /** Injected in tests so they need no binary and no network. */
   query?: QueryFn;
+  /** One line per turn; default under ~/.cache (ignored on the bench), none with an injected query. */
+  timingLog?: string;
 };
+
+export const TIMING_LOG = join(homedir(), ".cache", "kl-harness", "claude-timing.log");
+
+type Timing = { t0: number; model: string; effort?: string; thinking?: number; text?: number; tool?: number };
+
+/** Best effort: a lost line costs nothing, a thrown one would end the turn. */
+function logTiming(path: string, t: Timing, result: any) {
+  const line = JSON.stringify({
+    ts: new Date(t.t0).toISOString(),
+    model: t.model,
+    effort: t.effort ?? null,
+    first_thinking_ms: t.thinking ?? null,
+    first_text_ms: t.text ?? null,
+    first_tool_ms: t.tool ?? null,
+    result_ms: Date.now() - t.t0,
+    api_ms: result?.duration_api_ms ?? null,
+    ok: result?.subtype === "success" && !result?.is_error,
+  });
+  void mkdir(dirname(path), { recursive: true })
+    .then(() => appendFile(path, line + "\n"))
+    .catch(() => {});
+}
 
 /** An async iterable we push into and only close on dispose. */
 class Pushable<T> implements AsyncIterable<T> {
@@ -197,6 +224,10 @@ export function createClaudeSession(opts: ClaudeOptions) {
   let aborting = false;
   let sawState = false;
   let rateLimited: any;
+  // the TUI is fullscreen, so timing goes to a file, never stderr
+  const timingLog = opts.timingLog ?? (opts.query ? undefined : TIMING_LOG);
+  let timing: Timing | undefined;
+  const since = () => (timing ? Date.now() - timing.t0 : undefined);
   const followUps: { text: string; images?: Image[] }[] = [];
   const steering: string[] = [];
 
@@ -275,6 +306,7 @@ export function createClaudeSession(opts: ClaudeOptions) {
           cur.msg.content.push(part);
           cur.parts.set(ev.index, part);
         } else if (b?.type === "tool_use") {
+          if (timing) timing.tool ??= since();
           cur.parts.set(ev.index, { tool: true, id: b.id, name: b.name, json: "" });
         }
         break;
@@ -283,8 +315,13 @@ export function createClaudeSession(opts: ClaudeOptions) {
         const part = cur?.parts.get(ev.index);
         if (!cur || !part) break;
         const d = ev.delta;
-        if (d?.type === "text_delta") part.text += d.text;
-        else if (d?.type === "thinking_delta") part.thinking += d.thinking;
+        if (d?.type === "text_delta") {
+          part.text += d.text;
+          if (timing) timing.text ??= since();
+        } else if (d?.type === "thinking_delta") {
+          part.thinking += d.thinking;
+          if (timing) timing.thinking ??= since();
+        }
         else if (d?.type === "input_json_delta") {
           part.json += d.partial_json;
           break;
@@ -368,6 +405,8 @@ export function createClaudeSession(opts: ClaudeOptions) {
       }
     }
     rateLimited = undefined;
+    if (timing && timingLog) logTiming(timingLog, timing, m);
+    timing = undefined;
     // idle is the authoritative end of turn where the CLI reports it; a result
     // may also cover several merged steers, so only fall back to it otherwise
     if (!sawState) finish();
@@ -450,6 +489,7 @@ export function createClaudeSession(opts: ClaudeOptions) {
         ]
       : text;
     if (!running) {
+      timing = { t0: Date.now(), model, effort };
       running = true;
       emit({ type: "agent_start" });
     }
