@@ -42,8 +42,27 @@ pub async fn bench(team: Option<&str>, start: bool, region: Option<&str>) -> Res
         .await;
     clip.abort();
     let _ = std::fs::remove_file(&local);
+    restore_terminal();
     let st = st.map_err(|e| format!("running ssh: {e}"))?;
     std::process::exit(st.code().unwrap_or(1));
+}
+
+/// Undo the modes the bench TUI switches on. A dropped connection kills it before its own cleanup
+/// runs, and ssh restores only the tty's line discipline, so the laptop shell was left in the
+/// alternate screen with modifyOtherKeys on (Ctrl+L arriving as `[27;5;108~`). Each sequence is a
+/// no-op when its mode is already off, so this runs after every session, clean or not.
+fn restore_terminal() {
+    use std::io::{IsTerminal, Write};
+    let mut out = std::io::stdout();
+    if !out.is_terminal() {
+        return;
+    }
+    // modifyOtherKeys off, kitty keyboard stack popped, mouse/focus/bracketed paste off, main
+    // screen, cursor shown, colours reset.
+    let _ = out.write_all(
+        b"\x1b[>4;0m\x1b[<u\x1b[?1000l\x1b[?1002l\x1b[?1003l\x1b[?1006l\x1b[?1004l\x1b[?2004l\x1b[?1049l\x1b[?25h\x1b[0m",
+    );
+    let _ = out.flush();
 }
 
 /// The ssh argv for the bench: `-t` because the remote's `ForceCommand` is the graphcode TUI, not
