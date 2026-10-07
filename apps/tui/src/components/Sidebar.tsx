@@ -1,13 +1,11 @@
 import { TextAttributes } from "@opentui/core";
 import { theme } from "../theme.ts";
+import { clip } from "../ui/text.ts";
 import { CURRENT_USER, type Service, type Workspace } from "../workspaces.ts";
 import { useWheelAccel } from "../wheel.ts";
 
 // resolved per render: the theme singleton mutates on /theme
 
-/** Clip to a width with an ellipsis — rows are one line, always. */
-const clip = (text: string, max: number) =>
-  max <= 1 ? "" : text.length > max ? `${text.slice(0, max - 1)}…` : text;
 
 /**
  * Section label: bold title-case, then a hairline across the rest of the row —

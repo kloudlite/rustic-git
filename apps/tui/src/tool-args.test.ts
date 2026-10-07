@@ -1,5 +1,5 @@
 import { test, expect } from "bun:test";
-import { Registry, defineTool } from "@kloudlite-tui/tools";
+import { Registry, type ToolDef } from "@kloudlite-tui/tools";
 import { adaptTools } from "@kloudlite-tui/agent";
 
 // pi's execute() takes params as its SECOND argument (the first is the tool
@@ -8,7 +8,7 @@ import { adaptTools } from "@kloudlite-tui/agent";
 // tool silently loses its parameters if it regresses.
 test("a custom tool receives its parameters, not its call id", async () => {
   let seen: unknown = "NEVER CALLED";
-  const echo = defineTool<{ word: string }>({
+  const echo = {
     name: "echo_probe",
     description: "Echo the word back.",
     inputSchema: { type: "object", properties: { word: { type: "string" } }, required: ["word"] },
@@ -16,7 +16,7 @@ test("a custom tool receives its parameters, not its call id", async () => {
       seen = args;
       return `echoed ${JSON.stringify(args)}`;
     },
-  });
+  } satisfies ToolDef<{ word: string }>;
   const [tool] = adaptTools(new Registry().add(echo));
   const out = await tool!.execute("call_abc123", { word: "banana" });
   expect(seen).toEqual({ word: "banana" });

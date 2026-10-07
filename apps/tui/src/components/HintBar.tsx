@@ -10,8 +10,8 @@ export function HintBar({
   active,
   inWorkspace,
   normal,
-  vim = true,
-  compact = false,
+  vim,
+  compact,
   onHint,
 }: {
   busy: boolean;
@@ -24,9 +24,9 @@ export function HintBar({
   inWorkspace: boolean;
   normal: boolean;
   /** vim keys on: esc leads to NORMAL mode. Off: ctrl+<letter> commands. */
-  vim?: boolean;
+  vim: boolean;
   /** Narrow terminal: show only the essential hints so the row can't wrap. */
-  compact?: boolean;
+  compact: boolean;
   /** Hints are clickable: the id matches the key they stand for. */
   onHint?: (id: "type" | "jump" | "files" | "commands" | "help" | "queue") => void;
 }) {

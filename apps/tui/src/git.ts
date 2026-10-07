@@ -2,7 +2,7 @@ import { readdirSync, readFileSync, statSync } from "node:fs";
 import { join, relative } from "node:path";
 import type { DiffLine, FileDiff } from "./diff.ts";
 
-export type ChangeStatus = "M" | "A" | "D";
+type ChangeStatus = "M" | "A" | "D";
 export type Change = { path: string; status: ChangeStatus; added: number; removed: number };
 
 export type TreeNode = {

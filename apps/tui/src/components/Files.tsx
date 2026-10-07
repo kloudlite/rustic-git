@@ -34,13 +34,11 @@ type Row =
  */
 export function Files({
   root,
-  workspace,
   refreshKey,
   onClose,
   onCycle,
 }: {
   root: string;
-  workspace: string;
   /** bump to re-scan (agent finished an edit/write) */
   refreshKey: number;
   onClose: () => void;

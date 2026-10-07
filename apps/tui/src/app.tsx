@@ -1503,7 +1503,6 @@ const PERM_MODES: PermMode[] = ["default", "acceptEdits", "plan", "bypass"];
           ) : filesView ? (
             <Files
               root={process.cwd()}
-              workspace={workspaces[focus - 1]!.name}
               refreshKey={filesRefresh}
               onClose={() => setView("agent")}
               onCycle={cycleView}

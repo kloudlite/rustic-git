@@ -17,7 +17,7 @@ export type {
   AgentSession,
   AgentSessionEvent,
 } from "@earendil-works/pi-coding-agent";
-export type { AuthInteraction, AuthPrompt, AuthEvent, Message } from "@earendil-works/pi-ai";
+export type { AuthPrompt, AuthEvent, Message } from "@earendil-works/pi-ai";
 
 const CONFIG_DIR =
   process.env.KLOUDLITE_CONFIG_DIR ?? join(homedir(), ".config", "kloudlite");
@@ -86,7 +86,7 @@ export function resolveModel(ref: ModelRef): Model<Api> | undefined {
   return models.getModel(ref.provider, ref.id);
 }
 
-export type ProviderAuth = {
+type ProviderAuth = {
   provider: string;
   /** Credentials resolve (env key, OAuth token, ambient) - a request can run. */
   ok: boolean;
@@ -138,7 +138,7 @@ export async function providerAuth(): Promise<ProviderAuth[]> {
   );
 }
 
-export type LoginOption = {
+type LoginOption = {
   provider: string;
   type: AuthType;
   label: string;
@@ -259,7 +259,6 @@ export function clearSessionHistory(key: string): void {
 
 export async function createSession({
   key,
-  cwd = process.cwd(),
   model,
   registry,
   fresh = false,
@@ -268,7 +267,6 @@ export async function createSession({
   codemode,
 }: {
   key: string;
-  cwd?: string;
   model: Model<Api>;
   registry?: Registry;
   /** Start a brand-new persisted session instead of continuing the last one (/clear). */
@@ -280,6 +278,7 @@ export async function createSession({
   /** Let the model write a script that calls tools, instead of one call per turn. */
   codemode?: boolean;
 }): Promise<AgentSession> {
+  const cwd = process.cwd();
   const dir = sessionDir(key);
   // meta.json makes a session findable later: its key, its name, last use
   writeMeta({ ...(readMeta(key) ?? { key }), key, updated: Date.now() });

@@ -1,4 +1,4 @@
-export type SlashCommand = {
+type SlashCommand = {
   name: string;
   description: string;
   /** Command takes an argument — typing "/cmd " opens its option list. */
@@ -18,15 +18,10 @@ export const commands: SlashCommand[] = [
   { name: "/exit", description: "Quit" },
 ];
 
-export function matchCommands(input: string): SlashCommand[] {
-  if (!input.startsWith("/")) return [];
-  return commands.filter((c) => c.name.startsWith(input));
-}
-
 /** One row in the slash menu: `insert` is submitted, `label`/`hint` rendered. */
 export type MenuItem = { insert: string; label: string; hint: string };
 
-export type MenuContext = {
+type MenuContext = {
   models: { provider: string; id: string; hint: string }[];
   themes: string[];
   logins: { provider: string; type: string; label: string }[];
@@ -44,11 +39,13 @@ export function menuItems(input: string, ctx: MenuContext): MenuItem[] {
 
   const space = input.indexOf(" ");
   if (space === -1) {
-    return matchCommands(input).map((c) => ({
-      insert: c.hasOptions ? `${c.name} ` : c.name,
-      label: c.name,
-      hint: c.description,
-    }));
+    return commands
+      .filter((c) => c.name.startsWith(input))
+      .map((c) => ({
+        insert: c.hasOptions ? `${c.name} ` : c.name,
+        label: c.name,
+        hint: c.description,
+      }));
   }
 
   const cmd = input.slice(0, space);

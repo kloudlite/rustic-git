@@ -11,10 +11,6 @@ export interface ToolDef<I = any> {
   run(input: I): Promise<string>;
 }
 
-export function defineTool<I>(def: ToolDef<I>): ToolDef<I> {
-  return def;
-}
-
 /** Tools registered for a session. Empty by default. */
 export class Registry {
   #tools = new Map<string, ToolDef<any>>();

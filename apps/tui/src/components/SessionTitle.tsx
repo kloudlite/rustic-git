@@ -1,9 +1,7 @@
 import { TextAttributes } from "@opentui/core";
 import { theme } from "../theme.ts";
+import { clip } from "../ui/text.ts";
 
-/** Clip to a width with an ellipsis — each line is one row, always. */
-const clip = (text: string, max: number) =>
-  max <= 1 ? "" : text.length > max ? `${text.slice(0, max - 1)}…` : text;
 
 /**
  * The bar above a chat session: its title, and under it the context the

@@ -1,5 +1,5 @@
 import { readFileSync } from "node:fs";
-import { isAbsolute, join } from "node:path";
+import { resolve } from "node:path";
 
 export type DiffLine = {
   /** Original-file line number ("" for pure additions past the hunk start). */
@@ -24,16 +24,12 @@ export type FileDiff = {
 
 const CONTEXT = 3;
 
-function resolve(path: string): string {
-  return isAbsolute(path) ? path : join(process.cwd(), path);
-}
-
 /**
  * Hunks for pi's edit tool ({path, edits:[{oldText,newText}]}): context lines
  * from the file around each replacement, removed/added lines numbered like a
  * unified diff. Returns null when the file or a match can't be found.
  */
-export function editDiff(args: {
+function editDiff(args: {
   path?: string;
   edits?: { oldText: string; newText: string }[];
 }): FileDiff | null {
@@ -85,7 +81,7 @@ export function editDiff(args: {
 }
 
 /** All-additions diff for pi's write tool ({path, content}). */
-export function writeDiff(args: { path?: string; content?: string }): FileDiff | null {
+function writeDiff(args: { path?: string; content?: string }): FileDiff | null {
   if (!args?.path || typeof args.content !== "string") return null;
   const newLines = args.content.split("\n");
   return {

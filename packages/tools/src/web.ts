@@ -1,4 +1,4 @@
-import { defineTool } from "./index.ts";
+import type { ToolDef } from "./index.ts";
 
 /** Guard every outbound call: a hung host must not hang the turn. */
 async function get(url: string, headers: Record<string, string> = {}): Promise<Response> {
@@ -39,7 +39,7 @@ function clip(text: string, max: number): string {
   return text.length <= max ? text : `${text.slice(0, max)}\n\n… truncated at ${max} characters`;
 }
 
-export const webFetch = defineTool<{ url: string; maxChars?: number }>({
+export const webFetch = {
   name: "web_fetch",
   description:
     "Fetch a URL and return its readable text. Use for documentation, changelogs, issues, or any page whose contents you need to read. JSON comes back verbatim; HTML is stripped to text. Not a search engine — you need the exact URL.",
@@ -67,7 +67,7 @@ export const webFetch = defineTool<{ url: string; maxChars?: number }>({
       return `error fetching ${url}: ${(e as Error).message}`;
     }
   },
-});
+} satisfies ToolDef<{ url: string; maxChars?: number }>;
 
 /**
  * Search providers, in the order we try them. Each is a key in auth.json or the
@@ -110,7 +110,7 @@ export function searchProvider(): { name: string; key: string } | undefined {
   return undefined;
 }
 
-export const webSearch = defineTool<{ query: string; count?: number }>({
+export const webSearch = {
   name: "web_search",
   description:
     "Search the web and return titles, URLs and snippets. Use when you need to find a page rather than read one you already have the URL for; follow up with web_fetch to read a result.",
@@ -149,4 +149,4 @@ export const webSearch = defineTool<{ query: string; count?: number }>({
       return `error searching for "${query}": ${(e as Error).message}`;
     }
   },
-});
+} satisfies ToolDef<{ query: string; count?: number }>;
