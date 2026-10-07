@@ -60,9 +60,23 @@ enum Cmd {
         #[command(subcommand)]
         cmd: BuilderCmd,
     },
+    /// Claude Code on the bench
+    Claude {
+        #[command(subcommand)]
+        cmd: ClaudeCmd,
+    },
     /// ssh's ProxyCommand for `kl-connect [team]`: pump stdio to the bench's gateway tunnel
     #[command(hide = true)]
     BenchProxy { team: Option<String> },
+}
+
+#[derive(Subcommand)]
+enum ClaudeCmd {
+    /// Sign this bench's Claude Code in to your Anthropic account
+    Login {
+        #[arg(long)]
+        team: Option<String>,
+    },
 }
 
 #[derive(Subcommand)]
@@ -130,6 +144,7 @@ async fn run(cmd: &Cmd) -> Result<(), String> {
         Cmd::Builder { cmd } => match cmd {
             BuilderCmd::Status { team } => builder::status(team.as_deref()).await,
         },
+        Cmd::Claude { cmd: ClaudeCmd::Login { team } } => bench::claude_login(team.as_deref()).await,
         Cmd::BenchProxy { team } => bench::proxy(team.as_deref()).await,
     }
 }

@@ -1,0 +1,8 @@
+#!/bin/sh
+# sshd's ForceCommand: an allow-list of what a key holder may run on the bench.
+# COLORTERM: ssh does not forward it, and without it opentui drops to 256 colours (bench/sv/ttyd/run).
+case "$SSH_ORIGINAL_COMMAND" in
+  claude-login) exec claude auth login ;;
+  "") exec env COLORTERM=truecolor bun run --silent --cwd /opt/kl/harness/apps/tui dev ;;
+  *) echo "kl bench: unknown command" >&2; exit 2 ;;
+esac

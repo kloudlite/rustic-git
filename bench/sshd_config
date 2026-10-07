@@ -8,8 +8,10 @@ AuthorizedKeysFile /etc/kloudlite/authorized_keys
 PasswordAuthentication no
 UsePAM no
 PidFile none
-# COLORTERM: ssh does not forward it, and without it opentui drops to 256 colours (bench/sv/ttyd/run).
-ForceCommand env COLORTERM=truecolor bun run --silent --cwd /opt/kl/harness/apps/tui dev
+# ForceCommand is an allow-list (bench/term/login-shell): the empty command runs the TUI,
+# `claude-login` runs `claude auth login`, anything else is refused. The COLORTERM note (ssh does
+# not forward it; without it opentui drops to 256 colours) lives in that script.
+ForceCommand /opt/kl/term/login-shell
 # ForceCommand alone does not stop `ssh -N -L/-D`: a key holder would get a SOCKS pivot from the
 # bench pod's network position (final review I2), so -L/-D, agent and X11 forwarding stay off. The
 # one forward allowed is `-R` of a unix socket: a socket on the bench pointing back at the caller's

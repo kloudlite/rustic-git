@@ -26,6 +26,11 @@ RUN chmod 0755 /usr/local/bin/ttyd
 COPY --from=oven/bun:1.3.14@sha256:e10577f0db68676a7024391c6e5cb4b879ebd17188ab750cf10024a6d700e5c4 /usr/local/bin/bun /usr/local/bin/bun
 COPY harness /opt/kl/harness
 RUN cd /opt/kl/harness && bun install --frozen-lockfile
+# Claude Code's own binary, bundled by the Agent SDK (glibc build; this base is bookworm). The
+# harness resolves it by package, and `claude auth login` over ssh (bench/term/login-shell) needs
+# it on PATH. Bun nests packages under .bun/, hence the find; the test fails the build loudly.
+RUN f=$(find /opt/kl/harness/node_modules -path '*claude-agent-sdk-linux-x64/claude' -type f | head -n1) \
+    && ln -s "$f" /usr/local/bin/claude && test -x /usr/local/bin/claude
 
 # The musl `kl` binary — statically linked, so it runs fine on this glibc base — built by the same
 # CI job that builds this image and downloaded as the kl-musl artifact. A bench builds/pushes like
@@ -41,7 +46,7 @@ COPY bench/sessions /opt/kl/sessions
 # The browser terminal's front door (image paste from the person's clipboard, see main.ts) and the
 # `xclip` stand-in the TUI reads that image through.
 COPY bench/term /opt/kl/term
-RUN install -m 0755 /opt/kl/term/xclip /usr/local/bin/xclip
+RUN install -m 0755 /opt/kl/term/xclip /usr/local/bin/xclip && chmod 0755 /opt/kl/term/login-shell
 
 # runit service directories: each `run` script is `exec`'d last, so runit supervises the real
 # process directly (no wrapper pid to lose signals through). Owned by kl: runsv runs as uid 1000
