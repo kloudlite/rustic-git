@@ -121,87 +121,85 @@ where
 {
     let started = tokio::time::Instant::now();
     let deadline = started + BENCH_START_WAIT;
-    let mut wait = Progress::new(team);
+    let wait = Progress::start(team);
     let session = loop {
         match api::bench_session(cfg, team).await {
             Ok(SessionAnswer::Ready(s)) => break s,
             Ok(SessionAnswer::Waking(state)) => {
                 if tokio::time::Instant::now() >= deadline {
-                    wait.clear();
+                    wait.stop(false).await;
                     return Err("bench did not start within 90 s".to_string());
                 }
                 wait.state(&state);
-                // Re-ask every 1 s, redrawing the spinner meanwhile.
-                for _ in 0..10 {
-                    wait.tick(started.elapsed());
-                    tokio::time::sleep(Duration::from_millis(100)).await;
-                }
+                tokio::time::sleep(Duration::from_secs(1)).await;
             }
             Err(e) => {
-                wait.clear();
+                wait.stop(false).await;
                 return Err(e.to_string());
             }
         }
     };
-    wait.done(started.elapsed());
+    wait.stop(true).await;
     let url = crate::proxy::gateway_url(&session.gateway);
     let ws = crate::proxy::connect(&url, &session.token).await?;
     crate::proxy::pump_io(ws, r, w).await
 }
 
 /// The wait on stderr, which ssh hands straight to the terminal (it is not in raw mode until the
-/// session starts). On a terminal: one spinner line redrawn in place, the phase in plain words and
-/// the time so far, replaced by a ready line. Piped: one line per phase change, as before.
+/// session starts). On a terminal: one spinner line redrawn in place every 100 ms by its own task,
+/// so it moves even while an api call is slow, naming the phase in plain words and the time so
+/// far. Piped: one line per phase change.
 struct Progress {
-    tty: bool,
+    label: tokio::sync::watch::Sender<String>,
+    ticker: Option<tokio::task::JoinHandle<()>>,
     whose: String,
-    label: Option<String>,
-    frame: usize,
-    waited: bool,
+    started: tokio::time::Instant,
+    waited: std::cell::Cell<bool>,
 }
 
 impl Progress {
-    fn new(team: Option<&str>) -> Self {
+    fn start(team: Option<&str>) -> Self {
         use std::io::IsTerminal;
-        Progress {
-            tty: std::io::stderr().is_terminal(),
-            whose: team.map_or("your bench".to_string(), |t| format!("{t}'s bench")),
-            label: None,
-            frame: 0,
-            waited: false,
-        }
+        let whose = team.map_or("your bench".to_string(), |t| format!("{t}'s bench"));
+        let (label, rx) = tokio::sync::watch::channel(format!("Connecting to {whose}"));
+        let started = tokio::time::Instant::now();
+        let ticker = std::io::stderr().is_terminal().then(|| tokio::spawn(spin(rx, started)));
+        Progress { label, ticker, whose, started, waited: std::cell::Cell::new(false) }
     }
 
-    fn state(&mut self, state: &str) {
+    fn state(&self, state: &str) {
         let label = phase_label(state, &self.whose);
-        if self.label.as_deref() != Some(label.as_str()) {
-            if !self.tty {
+        self.waited.set(true);
+        if *self.label.borrow() != label {
+            if self.ticker.is_none() {
                 eprintln!("{label}");
             }
-            self.label = Some(label);
+            self.label.send_replace(label);
         }
-        self.waited = true;
     }
 
-    fn tick(&mut self, elapsed: Duration) {
-        const FRAMES: [&str; 10] = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
-        let (true, Some(label)) = (self.tty, &self.label) else { return };
-        self.frame = (self.frame + 1) % FRAMES.len();
-        eprint!("\r\x1b[2K{} {label}… {}s", FRAMES[self.frame], elapsed.as_secs());
-    }
-
-    fn clear(&self) {
-        if self.tty && self.waited {
+    /// Clears the line; after a real wait that ended in a session, says so.
+    /// Waits out the aborted ticker first: on a multi-threaded runtime it could otherwise draw
+    /// once more after the clear and leave a stale spinner line above the session.
+    async fn stop(mut self, ready: bool) {
+        if let Some(t) = self.ticker.take() {
+            t.abort();
+            let _ = t.await;
             eprint!("\r\x1b[2K");
         }
-    }
-
-    /// Only after a wait: an awake bench connects with no line at all.
-    fn done(&self, elapsed: Duration) {
-        if self.waited {
-            self.clear();
-            eprintln!("✓ {} is ready ({}s)", capitalise(&self.whose), elapsed.as_secs());
+        if ready && self.waited.get() {
+            eprintln!("✓ {} is ready ({}s)", capitalise(&self.whose), self.started.elapsed().as_secs());
         }
+    }
+}
+
+async fn spin(label: tokio::sync::watch::Receiver<String>, started: tokio::time::Instant) {
+    const FRAMES: [&str; 10] = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
+    // Silent for the first 300 ms: an awake bench connects before anything is drawn.
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    for f in FRAMES.iter().cycle() {
+        eprint!("\r\x1b[2K{f} {}… {}s", *label.borrow(), started.elapsed().as_secs());
+        tokio::time::sleep(Duration::from_millis(100)).await;
     }
 }
 
