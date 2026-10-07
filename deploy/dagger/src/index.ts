@@ -20,7 +20,7 @@ const DOCKER_CLI = "docker:28-cli@sha256:625d9431a9f54c5a2bc90f24f0e1c3d55b1349f
 const BUILDX_BIN = "docker/buildx-bin:0.20.1@sha256:ead27bfcde6308a757b4a5a4a931937363c1fa0091f7e2994b9114521853cf69"
 const BUN_IMAGE = "oven/bun:1.3.14@sha256:e10577f0db68676a7024391c6e5cb4b879ebd17188ab750cf10024a6d700e5c4"
 // graphcode TUI (kloudlite/harness) pinned by commit; bump = edit here and in deploy/bench/Dockerfile.
-const HARNESS_REV = "c71c2cd7f115e2fb62782ff47714590dd5fb01fb"
+const HARNESS_REV = "f2f4823cce3bd19b30aedf885fad25e90e0962a3"
 const NODE_IMAGE = "node:22-bookworm-slim@sha256:d649c27dae7ba0137b3cef5dd75baa422c08dc3d9e3fc0c23dfb172dc3cc6436"
 
 @object()
