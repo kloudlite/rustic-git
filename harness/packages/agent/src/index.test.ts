@@ -61,6 +61,8 @@ test("display pushes fold into the codemode result in order, and clear after", a
   expect(h.tools.codemode.prepareLoadout({}).descriptions.codemode).toStartWith("Rules:");
   const r = await h.tools.codemode.execute("x", {}, undefined, (u: any) => updates.push(u));
   expect(r.details.display).toEqual(["a", "b\nc"]);
+  // the model reads only the codemode result, so the shown markdown must be in its content
+  expect(r.content.at(-1).text).toEndWith("a\n\nb\nc");
   expect(updates[0].details.display).toEqual(["a"]);
   h = harness(async () => ({ content: [], details: {} }));
   await h.run();

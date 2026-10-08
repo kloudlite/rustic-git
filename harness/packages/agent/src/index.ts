@@ -194,7 +194,12 @@ export function withCodemodeExtras(factory: ReturnType<typeof createCodemodeExte
                     try {
                       const result = await tool.execute(id, params, signal, onUpdate && ((u: any) => onUpdate(live(u))), ...rest);
                       const shown = displays.get(id);
-                      return shown?.length ? { ...result, details: { ...result.details, display: shown } } : result;
+                      if (!shown?.length) return result;
+                      // the model sees only the script's return value, never its inner calls' results
+                      // (live 2026-10-08: "none of the titles are in my context"), so the shown markdown
+                      // rides on the codemode result itself: read once as input, never retyped as output
+                      const kept = { type: "text" as const, text: `Shown to the user above; do not repeat it. Kept for follow-ups:\n\n${shown.join("\n\n")}` };
+                      return { ...result, content: [...(result.content ?? []), kept], details: { ...result.details, display: shown } };
                     } finally {
                       displays.delete(id);
                     }
