@@ -39,6 +39,13 @@ test("codemode sessions advertise the codemode skill, from the plugin Claude ses
   s.dispose();
 });
 
+test("systemAppends: kloudlite always, codemode only when on", async () => {
+  const { systemAppends } = await import("./index.ts");
+  expect(systemAppends(false)).toHaveLength(1);
+  expect(systemAppends(false)[0]).toContain("name: kloudlite");
+  expect(systemAppends(true)).toHaveLength(2);
+});
+
 function harness(execute: (id: string, params: any, signal: any, onUpdate: any) => Promise<any>) {
   const tools: Record<string, any> = {};
   const pi = { registerTool: (t: any) => (tools[t.name] = t) };

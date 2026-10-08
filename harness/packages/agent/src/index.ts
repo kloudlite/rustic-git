@@ -12,7 +12,7 @@ import {
 } from "@earendil-works/pi-coding-agent";
 import type { Api, AuthInteraction, AuthType, Credential, Model } from "@earendil-works/pi-ai";
 import type { Registry } from "@kloudlite-tui/tools";
-import { CODEMODE_SKILL, claudeSignedIn, createClaudeSession, type ClaudeSession } from "./claude.ts";
+import { CODEMODE_SKILL, KLOUDLITE_SKILL, claudeSignedIn, createClaudeSession, type ClaudeSession } from "./claude.ts";
 
 export { claudeSignedIn, type ClaudeSession };
 
@@ -371,6 +371,11 @@ export function dropSessions(ws: string): void {
     if (d === own || d.startsWith(`${own}_`)) rmSync(join(CONFIG_DIR, "sessions", d), { recursive: true, force: true });
 }
 
+/** Skill texts inlined into every pi session's system prompt; codemode's only while it is a tool. */
+export function systemAppends(codemode?: boolean): string[] {
+  return [KLOUDLITE_SKILL, ...(codemode ? [CODEMODE_SKILL] : [])].map((d) => readFileSync(join(d, "SKILL.md"), "utf8"));
+}
+
 export async function createSession({
   key,
   model,
@@ -403,26 +408,25 @@ export async function createSession({
   // allowlist, so the session is built with its defaults and `codemode` is
   // added to whatever `getActiveToolNames()` reports — hardcoding the four
   // built-ins silently cost `grep`, `find` and `ls`.
-  let resourceLoader: DefaultResourceLoader | undefined;
-  if (codemode) {
-    resourceLoader = new DefaultResourceLoader({
-      cwd,
-      agentDir: getAgentDir(),
-      // `mode: "only"` is what actually makes the model use it. Under pi's
-      // default `"on"` the built-ins stay directly declared and codemode's own
-      // description lists only the tools that have no direct exposure — so the
-      // model keeps reaching for `bash` and codemode never fires. `"only"`
-      // drops the direct declarations, leaving scripts as the way to call them.
-      extensionFactories: [{ name: "codemode", factory: withCodemodeExtras(createCodemodeExtension({ mode: "only" })) }],
-      // the same skill Claude sessions get through the plugin (claude.ts). Inlined: pi lists
-      // skills only while a read tool is active, and noTools "builtin" drops it.
-      appendSystemPrompt: [readFileSync(join(CODEMODE_SKILL, "SKILL.md"), "utf8")],
-    });
-    await resourceLoader.reload();
-  }
+  // Always built: every session gets the Kloudlite skill inlined (pi lists skills only while a
+  // read tool is active, and noTools "builtin" drops it). Without a loader pi builds
+  // DefaultResourceLoader({cwd, agentDir, settingsManager}) with the same defaults used here.
+  const resourceLoader = new DefaultResourceLoader({
+    cwd,
+    agentDir: getAgentDir(),
+    // `mode: "only"` is what actually makes the model use codemode. Under pi's
+    // default `"on"` the built-ins stay directly declared and codemode's own
+    // description lists only the tools that have no direct exposure, so the
+    // model keeps reaching for `bash` and codemode never fires. `"only"`
+    // drops the direct declarations, leaving scripts as the way to call them.
+    ...(codemode ? { extensionFactories: [{ name: "codemode", factory: withCodemodeExtras(createCodemodeExtension({ mode: "only" })) }] } : {}),
+    // the same skills Claude sessions get through the plugin (claude.ts)
+    appendSystemPrompt: systemAppends(codemode),
+  });
+  await resourceLoader.reload();
   const { session } = await createAgentSession({
     cwd,
-    ...(resourceLoader ? { resourceLoader } : {}),
+    resourceLoader,
     modelRuntime: runtime,
     model,
     ...(thinkingLevel ? { thinkingLevel } : {}),

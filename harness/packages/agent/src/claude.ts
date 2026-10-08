@@ -40,10 +40,11 @@ import { query as sdkQuery, type Options, type SDKUserMessage } from "@anthropic
 import { TOOL_PREFIX, toClaudeEntries } from "./claude-history.ts";
 import { createToolServer, declaredTools } from "./claude-tools.ts";
 
-// Claude sessions run Claude Code's loop, which never sees pi's skills; the codemode skill
-// reaches it as a local plugin (`kl:codemode`), loaded only while codemode is a tool.
+// Claude sessions run Claude Code's loop, which never sees pi's skills; ours reach it as a local
+// plugin: `kl:kloudlite` (platform context) in every session, `kl:codemode` only while codemode is a tool.
 const KL_PLUGIN = fileURLToPath(new URL("../claude-plugin", import.meta.url));
 export const CODEMODE_SKILL = join(KL_PLUGIN, "skills", "codemode");
+export const KLOUDLITE_SKILL = join(KL_PLUGIN, "skills", "kloudlite");
 
 export const AUTH_MESSAGE = "Not signed in to Claude. On your laptop run: kl-connect claude login";
 
@@ -617,8 +618,10 @@ export function createClaudeSession(opts: ClaudeOptions) {
       permissionMode: "bypassPermissions",
       allowDangerouslySkipPermissions: true,
       // `tools: []` removes the built-in Skill tool and `skills` alone does not bring it back
-      // (probed against the SDK 2026-10-08: "Skill is disabled for this session"); naming it does
-      tools: codemode ? ["Skill"] : [],
+      // (probed against the SDK 2026-10-08: "Skill is disabled for this session"); naming it does.
+      // Always on: every session needs the Kloudlite skill (the prompt below stays the untouched
+      // preset for billing, so a skill is the only channel for platform context)
+      tools: ["Skill"],
       // ponytail: one day per call so a long `bash` is never cut off by
       // Claude Code's MCP timeout; our abort is the real bound
       mcpServers: { kl: { type: "sdk", name: "kl", instance: toolServer() as any, timeout: 86_400_000 } as any },
@@ -627,7 +630,8 @@ export function createClaudeSession(opts: ClaudeOptions) {
       systemPrompt: { type: "preset", preset: "claude_code" },
       // the workspace's CLAUDE.md and .claude/, loaded by Claude Code itself
       settingSources: ["project"],
-      ...(codemode ? { plugins: [{ type: "local" as const, path: KL_PLUGIN }], skills: ["kl:codemode"] } : {}),
+      plugins: [{ type: "local" as const, path: KL_PLUGIN }],
+      skills: codemode ? ["kl:kloudlite", "kl:codemode"] : ["kl:kloudlite"],
       cwd,
       model,
       extraArgs: { "thinking-display": "summarized" },

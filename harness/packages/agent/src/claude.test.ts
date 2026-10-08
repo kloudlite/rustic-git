@@ -82,7 +82,7 @@ function run(f: ReturnType<typeof fake>, extra: object = {}) {
 }
 const tick = () => new Promise((r) => setTimeout(r, 20));
 
-test("codemode sessions load the kl plugin and enable its skill; others do not", async () => {
+test("every session loads the kl plugin with the kloudlite skill; codemode adds its own", async () => {
   for (const withCodemode of [true, false]) {
     const f = fake((_n, push) => text("x").forEach(push));
     const p = piHost();
@@ -91,14 +91,9 @@ test("codemode sessions load the kl plugin and enable its skill; others do not",
     await s.prompt("a");
     await tick();
     const o = f.calls[0].options;
-    expect(o.tools).toEqual(withCodemode ? ["Skill"] : []);
-    if (withCodemode) {
-      expect(o.skills).toEqual(["kl:codemode"]);
-      expect(o.plugins).toHaveLength(1);
-    } else {
-      expect(o.skills).toBeUndefined();
-      expect(o.plugins).toBeUndefined();
-    }
+    expect(o.tools).toEqual(["Skill"]);
+    expect(o.skills).toEqual(withCodemode ? ["kl:kloudlite", "kl:codemode"] : ["kl:kloudlite"]);
+    expect(o.plugins).toHaveLength(1);
     s.dispose();
   }
 });
@@ -130,7 +125,7 @@ test("options: no built-in tools, our MCP server, pi's prompt, history through s
   await s.prompt("a");
   await tick();
   const o = f.calls[0].options;
-  expect(o.tools).toEqual([]);
+  expect(o.tools).toEqual(["Skill"]);
   expect(o.mcpServers.kl).toMatchObject({ type: "sdk", name: "kl" });
   expect(o.mcpServers.kl.timeout).toBe(86_400_000);
   expect(o.systemPrompt).toEqual({ type: "preset", preset: "claude_code" });
