@@ -59,3 +59,39 @@ export function readClipboardImage(): ClipImage | null {
   }
   return null;
 }
+
+/**
+ * Put text on the clipboard. Order matters: kl-tui runs on the laptop, where
+ * Terminal.app has no OSC 52, so pbcopy goes first; the fallback TUI runs on
+ * the bench (no pbcopy) inside ssh/ttyd, where OSC 52 travels back to the
+ * user's terminal; xclip is the last resort.
+ */
+export function copyText(
+  text: string,
+  osc52: (t: string) => boolean,
+  run: typeof execFileSync = execFileSync,
+): boolean {
+  const opts = { input: text, stdio: ["pipe", "ignore", "ignore"] as ["pipe", "ignore", "ignore"], env: process.env };
+  if (process.platform === "darwin") {
+    try {
+      run("pbcopy", [], opts);
+      return true;
+    } catch {}
+  }
+  try {
+    if (osc52(text)) return true;
+  } catch {}
+  try {
+    run("xclip", ["-selection", "clipboard", "-i"], opts);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+let copier = copyText;
+/** Tests only: keep drag-select tests off the real clipboard. */
+export function setCopier(fn: typeof copyText | null) {
+  copier = fn ?? copyText;
+}
+export const copySelection: typeof copyText = (...a) => copier(...a);

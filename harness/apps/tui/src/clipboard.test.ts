@@ -1,6 +1,6 @@
 import { expect, test } from "bun:test";
 import { execFileSync } from "node:child_process";
-import { readClipboardImage } from "./clipboard.ts";
+import { copyText, readClipboardImage } from "./clipboard.ts";
 
 // a 2x2 PNG, enough to put real image bytes on the clipboard
 const PNG =
@@ -25,4 +25,22 @@ test.if(macos)("reads a PNG off the macOS clipboard, and nothing off a text one"
 
 test("a clipboard with no image tool available is a no-op, never a throw", () => {
   expect(() => readClipboardImage()).not.toThrow();
+});
+
+test("copyText falls back to osc52 when pbcopy and xclip are unavailable", () => {
+  const boom = (() => {
+    throw new Error("no tool");
+  }) as unknown as typeof execFileSync;
+  expect(copyText("x", () => true, boom)).toBe(true);
+  expect(copyText("x", () => false, boom)).toBe(false);
+});
+
+test.if(macos)("copyText uses pbcopy first and skips osc52", () => {
+  const calls: string[] = [];
+  const ok = ((cmd: string) => {
+    calls.push(cmd);
+    return Buffer.alloc(0);
+  }) as unknown as typeof execFileSync;
+  expect(copyText("x", () => { throw new Error("osc52 called"); }, ok)).toBe(true);
+  expect(calls).toEqual(["pbcopy"]);
 });

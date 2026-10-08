@@ -245,7 +245,7 @@ export function Processes({
                 ) : (
                   lines.map((l, i) => (
                     <box key={i} flexDirection="row" height={1} overflow="hidden" flexShrink={0}>
-                      <text fg={theme.muted}>{String(i + 1).padStart(4)}  </text>
+                      <text selectable={false} fg={theme.muted}>{String(i + 1).padStart(4)}  </text>
                       <text fg={l.err ? theme.error : theme.fg}>{l.text}</text>
                     </box>
                   ))

@@ -1,6 +1,7 @@
 import { expect, test } from "bun:test";
 import { testRender } from "@opentui/react/test-utils";
 import type { ToolDef } from "@kloudlite-tui/tools";
+import { setCopier } from "./clipboard.ts";
 import { backend, boot, hello } from "./hello.ts";
 
 // App reads its settings from hello() once at mount, so tests seed them by re-booting.
@@ -648,4 +649,31 @@ test("sidebar: a space without environments renders no Environment block", async
   const f = await sidebarWith({ available: true, user: "me", workspaces: [{ id: "w1", name: "solo", owner: "me", state: "ready" }], environments: [] });
   expect(f).toContain("solo");
   expect(f).not.toContain("Environment");
+});
+
+test("dragging over log lines selects the log text (not the gutter) and copies it", async () => {
+  const copies: string[] = [];
+  setCopier((text) => (copies.push(text), true));
+  const t = await processesView();
+  let lines: string[] = [];
+  let row = -1;
+  for (let i = 0; i < 10 && row < 0; i++) {
+    // the log loads a beat after the view opens
+    lines = (await t.frame()).split("\n");
+    row = lines.findIndex((l) => l.includes("listening on :8080"));
+  }
+  const row2 = row + 1;
+  const col = lines[row]!.indexOf("listening");
+  await t.mockMouse.drag(col, row, col + 20, row2);
+  const f = await t.frame();
+  const sel = t.renderer.getSelection()?.getSelectedText() ?? "";
+  expect(sel).toBe("listening on :8080\nroute  GET  /healthz"); // no line numbers
+  expect(copies).toEqual([sel]);
+  const cell = t.captureSpans().lines[row]!.spans.find((sp) => sp.text.includes("listening"))!;
+  // no selectionBg passed: the native default must still paint the highlight
+  const rest = t.captureSpans().lines[row2 + 3]!.spans[0]!;
+  expect(Array.from(cell.bg.buffer)).not.toEqual(Array.from(rest.bg.buffer));
+  expect(f).toContain("copied 2 lines");
+  setCopier(null);
+  t.done();
 });

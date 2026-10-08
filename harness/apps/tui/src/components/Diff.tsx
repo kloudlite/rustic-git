@@ -35,10 +35,10 @@ export function DiffView({ diff, maxLines = MAX_LINES }: { diff: FileDiff; maxLi
         return (
           <box key={i} flexDirection="row" backgroundColor={bg}>
             <box width={6} flexShrink={0}>
-              <text fg={gutter}>{String(line.no).padStart(4)}</text>
+              <text selectable={false} fg={gutter}>{String(line.no).padStart(4)}</text>
             </box>
             <box width={2} flexShrink={0}>
-              <text fg={fg}>{line.sign === " " ? "" : line.sign}</text>
+              <text selectable={false} fg={fg}>{line.sign === " " ? "" : line.sign}</text>
             </box>
             <text fg={fg}>{line.text || " "}</text>
           </box>

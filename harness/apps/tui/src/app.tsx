@@ -50,7 +50,7 @@ const THINKING_HINT: Record<ThinkingLevel, string> = {
 };
 import { Login, type LoginType } from "./components/Login.tsx";
 import { AskPanel, type Ask } from "./components/Ask.tsx";
-import { readClipboardImage, type ClipImage } from "./clipboard.ts";
+import { copySelection, readClipboardImage, type ClipImage } from "./clipboard.ts";
 import {
   getSession,
   patchSession,
@@ -107,6 +107,25 @@ export function App({
 }) {
   const tuiTools = useRef<ToolDef[]>(sink ?? []).current;
   const renderer = useRenderer();
+  const [copied, setCopied] = useState<{ ok: boolean; text: string } | null>(null);
+  useEffect(() => {
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    // opentui emits "selection" on mouse-up after a drag over any selectable <text>
+    const onSel = (sel: { getSelectedText(): string } | null) => {
+      const text = sel?.getSelectedText() ?? "";
+      if (!text.trim()) return;
+      const ok = copySelection(text, (t) => renderer.copyToClipboardOSC52(t));
+      const n = text.split("\n").length;
+      setCopied({ ok, text: ok ? `copied ${n} line${n === 1 ? "" : "s"}` : "copy failed — terminal has no clipboard access" });
+      clearTimeout(timer);
+      timer = setTimeout(() => setCopied(null), 1500);
+    };
+    renderer.on("selection", onSel);
+    return () => {
+      renderer.off("selection", onSel);
+      clearTimeout(timer);
+    };
+  }, [renderer]);
   const { width: columns, height: rows } = useTerminalDimensions();
   const [sessions, setSessions] = useState<SessionMap>({});
   const [input, setInput] = useState("");
@@ -1549,6 +1568,13 @@ const PERM_MODES: PermMode[] = ["default", "acceptEdits", "plan", "bypass"];
           </box>
         )}
       </box>
+      {copied && (
+        <box position="absolute" right={2} bottom={1}>
+          <text selectable={false} fg={theme.bg} bg={copied.ok ? theme.success : theme.error}>
+            {` ${copied.ok ? "✓" : "✕"} ${copied.text} `}
+          </text>
+        </box>
+      )}
     </box>
   );
 }
