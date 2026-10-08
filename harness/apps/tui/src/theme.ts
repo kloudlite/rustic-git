@@ -106,13 +106,13 @@ export const themes: Record<string, Palette> = {
 
 export const themeNames = Object.keys(themes);
 
-import { readSettings } from "@kloudlite-tui/agent";
+import { hello } from "./hello.ts";
 
 function initialName(): string {
   const env = process.env.KLOUDLITE_THEME ?? "";
   if (env in themes) return env;
   if (env === "light") return "kloudlite-light";
-  const saved = readSettings().theme;
+  const saved = hello().settings.theme;
   if (saved && saved in themes) return saved;
   return "kloudlite-dark";
 }
@@ -120,7 +120,7 @@ function initialName(): string {
 /**
  * Mutable singleton: components read `theme.x` at render time, so switching
  * only needs an in-place assign plus one React re-render (App bumps state).
- * ponytail: no persistence — theme resets to KLOUDLITE_THEME on restart.
+ * The choice persists through the backend's settings (`/theme` writes `theme`).
  */
 export const theme: Palette = { ...themes[initialName()]! };
 

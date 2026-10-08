@@ -7,14 +7,7 @@ import { DiffView } from "./Diff.tsx";
 import { SPECIAL } from "./Input.tsx";
 import type { FileDiff } from "../diff.ts";
 import { useWheelAccel } from "../wheel.ts";
-import {
-  changes as scanChanges,
-  fileDiff,
-  fullFile,
-  grep,
-  isGitRepo,
-  listDir,
-} from "@kloudlite-tui/backend/local";
+import { backend } from "../hello.ts";
 import { displayRoot, type Change, type Match, type TreeNode } from "../git.ts";
 
 /** One selectable row in the left pane. */
@@ -57,10 +50,13 @@ export function Files({
   const [matchIdx, setMatchIdx] = useState(0);
   const [flash, setFlash] = useState(false);
   const scrollRef = useRef<ScrollBoxRenderable>(null);
-  const git = useMemo(() => isGitRepo(root), [root]);
+  const [git, setGit] = useState(false);
+  useEffect(() => {
+    backend().fs.isGitRepo(root).then(setGit).catch(() => {});
+  }, [root]);
 
   const rescan = () => {
-    setChanges(scanChanges(root));
+    backend().fs.changes(root).then(setChanges).catch(() => setChanges([]));
     setDirCache({});
   };
   useEffect(rescan, [root]);
@@ -74,11 +70,14 @@ export function Files({
   }, [refreshKey]);
 
   const dir = (rel: string): TreeNode[] => {
-    if (dirCache[rel]) return dirCache[rel];
-    const nodes = listDir(root, rel);
-    // cache lazily; setState during render is avoided by deferring
-    queueMicrotask(() => setDirCache((c) => (c[rel] ? c : { ...c, [rel]: nodes })));
-    return nodes;
+    if (!(rel in dirCache)) {
+      dirCache[rel] = []; // mark in flight; never re-request while it loads
+      backend()
+        .fs.listDir(root, rel)
+        .then((nodes) => setDirCache((c) => ({ ...c, [rel]: nodes })))
+        .catch(() => {});
+    }
+    return dirCache[rel]!;
   };
 
   const changeStatus = (path: string) => changes.find((c) => c.path === path)?.status;
@@ -133,17 +132,37 @@ export function Files({
     () => changes.filter((c) => !filter || c.path.toLowerCase().includes(filter.toLowerCase())),
     [changes, filter],
   );
-  const diff: FileDiff | null = useMemo(() => {
-    if (!open?.status) return null;
-    return fileDiff(root, open.path, open.status);
+  const [diff, setDiff] = useState<FileDiff | null>(null);
+  useEffect(() => {
+    if (!open?.status) return setDiff(null);
+    let live = true;
+    backend()
+      .fs.fileDiff(root, open.path, open.status)
+      .then((d) => live && setDiff(d))
+      .catch(() => {});
+    return () => {
+      live = false;
+    };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [open, changes, refreshKey]);
+  const [full, setFull] = useState<FileDiff | null>(null);
+  useEffect(() => {
+    if (!open) return setFull(null);
+    let live = true;
+    backend()
+      .fs.fullFile(root, open.path, open.status)
+      .then((lines) => live && setFull({ path: open.path, lines, added: 0, removed: 0 }))
+      .catch(() => {});
+    return () => {
+      live = false;
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [open, refreshKey]);
   const body: FileDiff | null = useMemo(() => {
     if (!open) return null;
     if (view === "diff" && diff) return diff;
-    return { path: open.path, lines: fullFile(root, open.path, open.status), added: diff?.added ?? 0, removed: diff?.removed ?? 0 };
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [open, view, diff, refreshKey]);
+    return full && { ...full, added: diff?.added ?? 0, removed: diff?.removed ?? 0 };
+  }, [open, view, diff, full]);
   // hunk starts: rows where a change run begins (in full view, tinted runs)
   const hunks = useMemo(() => {
     if (!body) return [] as number[];
@@ -179,7 +198,12 @@ export function Files({
         setPrompt((p) => {
           if (p?.kind === "search") {
             const query = p.text.trim();
-            setSearch(query ? { query, matches: grep(root, query) } : null);
+            if (!query) setSearch(null);
+            else
+              backend()
+                .fs.grep(root, query)
+                .then((matches) => setSearch({ query, matches }))
+                .catch(() => setSearch({ query, matches: [] }));
             setMatchIdx(0);
           }
           return null;

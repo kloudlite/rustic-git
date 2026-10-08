@@ -13,13 +13,17 @@ afterAll(() => {
 });
 import { testRender } from "@opentui/react/test-utils";
 import { App } from "./app.tsx";
-import { Registry } from "@kloudlite-tui/tools";
-import { writeSettings } from "@kloudlite-tui/agent";
+import { backend, boot, hello } from "./hello.ts";
+
+// App reads its settings from hello() once at mount, so tests seed them by re-booting.
+function writeSettings(patch: Record<string, unknown>) {
+  boot(backend(), { ...hello(), settings: { ...hello().settings, ...patch } });
+}
 
 // a pasted image is a token in the value, so typing continues after it
 test("pasted images keep their place in the prompt", async () => {
   writeSettings({ vim: "off", sidebarWidth: 42 });
-  const t = await testRender(<App registry={new Registry()} />, {
+  const t = await testRender(<App />, {
     width: 160,
     height: 34,
     kittyKeyboard: true,
@@ -41,7 +45,7 @@ test("pasted images keep their place in the prompt", async () => {
 // the badge is one thing on screen, so backspace takes all of it
 test("backspace deletes a whole image token", async () => {
   writeSettings({ vim: "off", sidebarWidth: 42 });
-  const t = await testRender(<App registry={new Registry()} />, {
+  const t = await testRender(<App />, {
     width: 160,
     height: 34,
     kittyKeyboard: true,

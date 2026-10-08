@@ -19,14 +19,13 @@ test("every provider is dynamic, so the seed is never the whole story", () => {
   expect(dynamic.length).toBe(providers.length);
 });
 
-// refresh must return the catalog, not mutate the import-time snapshot:
-// `catalog` is a frozen const, which is why the picker needs the result
-test("refreshCatalog returns a list without mutating the seed", async () => {
+// refresh returns the live list and the exported `catalog` binding follows it
+test("refreshCatalog returns the live list and updates the binding", async () => {
   const seeded = catalog.length;
   const live = await refreshCatalog();
   expect(Array.isArray(live)).toBe(true);
   expect(live.length).toBeGreaterThanOrEqual(seeded);
-  expect(catalog.length).toBe(seeded);
+  expect(catalog).toBe(live);
 });
 
 // A cold start knows only pi's bundled seed, so validating a saved model
@@ -44,7 +43,7 @@ test("a saved default model survives a cold start", () => {
     [
       "bun",
       "-e",
-      'const m = await import("./src/models.ts"); console.log(m.DEFAULT_MODEL.provider + "/" + m.DEFAULT_MODEL.id);',
+      'const { LocalBackend } = await import("@kloudlite-tui/backend/local"); const { boot } = await import("./src/hello.ts"); const l = new LocalBackend(); boot(l, await l.hello()); const m = await import("./src/models.ts"); console.log(m.DEFAULT_MODEL.provider + "/" + m.DEFAULT_MODEL.id);',
     ],
     { cwd: import.meta.dir + "/..", env: { ...process.env, KLOUDLITE_CONFIG_DIR: dir } },
   );

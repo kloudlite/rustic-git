@@ -3,7 +3,7 @@ import { spawn } from "node:child_process";
 import { useKeyboard } from "@opentui/react";
 import { TextAttributes } from "@opentui/core";
 import type { AuthEvent, AuthPrompt } from "@kloudlite-tui/agent";
-import { claudeSignedIn, loginProvider } from "@kloudlite-tui/agent";
+import { backend } from "../hello.ts";
 import { theme } from "../theme.ts";
 import { Input } from "./Input.tsx";
 
@@ -36,7 +36,7 @@ function ClaudeLogin({ provider, onDone }: { provider: string; onDone: (ok: bool
   useEffect(() => {
     let live = true;
     const poll = setInterval(() => {
-      claudeSignedIn(true)
+      backend().auth.claudeSignedIn(true)
         .then((ok) => live && ok && onDone(true))
         .catch(() => {});
     }, 3000);
@@ -78,7 +78,7 @@ function PiLogin({
   const abort = useRef(new AbortController());
 
   useEffect(() => {
-    loginProvider(provider, type as "oauth" | "api_key", {
+    backend().auth.login(provider, type as "oauth" | "api_key", {
       signal: abort.current.signal,
       notify: (event) => {
         setEvents((prev) => [...prev, event]);

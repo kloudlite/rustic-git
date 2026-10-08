@@ -1,7 +1,12 @@
 import { expect, test } from "bun:test";
 import { testRender } from "@opentui/react/test-utils";
-import { Registry } from "@kloudlite-tui/tools";
-import { writeSettings } from "@kloudlite-tui/agent";
+import type { ToolDef } from "@kloudlite-tui/tools";
+import { backend, boot, hello } from "./hello.ts";
+
+// App reads its settings from hello() once at mount, so tests seed them by re-booting.
+function writeSettings(patch: Record<string, unknown>) {
+  boot(backend(), { ...hello(), settings: { ...hello().settings, ...patch } });
+}
 import { App } from "./app.tsx";
 
 const COLS = 200;
@@ -18,7 +23,7 @@ async function mount(opts?: { vim?: "on" | "off" }) {
   // width too: a resize test would otherwise leak its narrow sidebar into
   // every later mount through the shared temp config
   writeSettings({ vim: opts?.vim ?? "on", sidebarWidth: 42 });
-  const setup = await testRender(<App registry={new Registry()} />, {
+  const setup = await testRender(<App />, {
     width: COLS,
     height: ROWS,
     // kitty protocol on: shift+enter etc. arrive as CSI-u like modern terminals
@@ -207,13 +212,13 @@ test("selecting /login from the menu allows typing the sub-option filter", async
 });
 
 test("sidebar docks when wide, hides when narrow", async () => {
-  const wide = await testRender(<App registry={new Registry()} />, { width: 160, height: 32 });
+  const wide = await testRender(<App />, { width: 160, height: 32 });
   await tick();
   await wide.renderOnce();
   expect(wide.captureCharFrame()).toContain("api-gateway"); // sidebar docked
   wide.renderer.destroy();
 
-  const narrow = await testRender(<App registry={new Registry()} />, { width: 100, height: 32 });
+  const narrow = await testRender(<App />, { width: 100, height: 32 });
   await tick();
   await narrow.renderOnce();
   expect(narrow.captureCharFrame()).not.toContain("api-gateway");
@@ -414,21 +419,22 @@ test("the sidebar resizes with [ and ] and clamps at its limits", async () => {
 // that acts on the state of the render that defined it. Create through the tool
 // and look for the workspace in the frame.
 test("the env tools act on live state and reach the UI", async () => {
-  const registry = new Registry();
-  const t = await testRender(<App registry={registry} />, { width: 160, height: 40 });
+  const tools: ToolDef[] = [];
+  const t = await testRender(<App tools={tools} />, { width: 160, height: 40 });
+  const run = (name: string, input: unknown) => tools.find((t) => t.name === name)!.run(input);
   await new Promise((r) => setTimeout(r, 400));
 
-  expect(registry.names()).toContain("env_status");
-  expect(await registry.get("env_status").run({})).toContain("environment:");
+  expect(tools.map((t) => t.name)).toContain("env_status");
+  expect(await run("env_status", {})).toContain("environment:");
 
-  expect(await registry.get("workspace_create").run({ name: "probe-ws" })).toContain("created");
+  expect(await run("workspace_create", { name: "probe-ws" })).toContain("created");
   await new Promise((r) => setTimeout(r, 200));
   await t.renderOnce();
-  expect(await registry.get("env_status").run({})).toContain("probe-ws");
+  expect(await run("env_status", {})).toContain("probe-ws");
   expect(t.captureCharFrame()).toContain("probe-ws");
 
   // a name that does not exist has to come back with the names that do
-  const bad = await registry.get("env_connect").run({ name: "nope" });
+  const bad = await run("env_connect", { name: "nope" });
   expect(bad).toContain("error");
   expect(bad).toContain("production");
 }, 20000);

@@ -1,27 +1,31 @@
-import { afterAll, expect, test, mock } from "bun:test";
-import * as agent from "@kloudlite-tui/agent";
+import { afterAll, expect, test } from "bun:test";
+import { backend, boot, hello } from "./hello.ts";
 
-// mock.module is process-wide, so put the real export back afterwards
-const real = agent.loginProvider;
+// Login goes through backend().auth; re-boot with a fake and put the real one back afterwards.
+const realBackend = backend();
+const real = hello();
 const ctl = new AbortController();
-mock.module("@kloudlite-tui/agent", () => ({
-  ...agent,
-  loginProvider: (_p: string, _t: string, io: any) => {
-    io.notify({ type: "progress", message: "polling for approval" });
-    io.notify({
-      type: "info",
-      message: "Need an account?",
-      links: [{ url: "https://x.test/signup", label: "Sign up" }],
-    });
-    // the real flow keeps running when a raced prompt is cancelled
-    return io
-      .prompt({ type: "manual_code", message: "Paste the code", signal: ctl.signal })
-      .catch(() => new Promise(() => {}));
-  },
-}));
-afterAll(() => {
-  mock.module("@kloudlite-tui/agent", () => ({ ...agent, loginProvider: real }));
-});
+boot(
+  {
+    auth: {
+      claudeSignedIn: async () => false,
+      login: async (_p: string, _t: any, io: any) => {
+        io.notify({ type: "progress", message: "polling for approval" });
+        io.notify({
+          type: "info",
+          message: "Need an account?",
+          links: [{ url: "https://x.test/signup", label: "Sign up" }],
+        });
+        // the real flow keeps running when a raced prompt is cancelled
+        return io
+          .prompt({ type: "manual_code", message: "Paste the code", signal: ctl.signal })
+          .catch(() => new Promise(() => {}));
+      },
+    },
+  } as any,
+  real,
+);
+afterAll(() => boot(realBackend, real));
 
 const { testRender } = await import("@opentui/react/test-utils");
 const { Login } = await import("./components/Login.tsx");

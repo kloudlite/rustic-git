@@ -1,7 +1,7 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { RGBA } from "@opentui/core";
 import { useKeyboard, useRenderer, useTerminalDimensions } from "@opentui/react";
-import { Registry } from "@kloudlite-tui/tools";
+import type { ToolDef } from "@kloudlite-tui/tools";
 import { SessionTitle } from "./components/SessionTitle.tsx";
 import { Queue } from "./components/Queue.tsx";
 import { Transcript, type Entry } from "./components/Transcript.tsx";
@@ -14,23 +14,17 @@ import { Spinner } from "./components/Spinner.tsx";
 import { menuItems, placeholders } from "./slash.ts";
 import { CURRENT_USER, envLabel, MOCK_ENVIRONMENTS, MOCK_WORKSPACES, parentFor, wsPath } from "./workspaces.ts";
 import { setTheme, theme, themeNames } from "./theme.ts";
-import { catalog, loadProviderAuth, modelLabel, refreshCatalog } from "./models.ts";
-import {
-  clearSessionHistory,
-  createSession,
-  describeSession,
-  listSessions,
-  nameSession,
-  loginOptions,
-  readSettings,
-  resolveModel,
-  writeSettings,
-  type AgentSession,
-  type AgentSessionEvent,
-  type ClaudeSession,
-  type ModelRef,
-  type ThinkingLevel,
-} from "@kloudlite-tui/agent";
+import { catalog, findModel, loadProviderAuth, modelLabel, refreshCatalog } from "./models.ts";
+import type {
+  Decision,
+  ModelRef,
+  PermissionRequest,
+  SessionEvent,
+  SessionHandle,
+  SessionMeta,
+  ThinkingLevel,
+} from "@kloudlite-tui/backend";
+import { backend, hello } from "./hello.ts";
 
 /** pi's reasoning budgets, least to most; a model may support only a prefix. */
 const THINKING_LEVELS = [
@@ -54,7 +48,6 @@ const THINKING_HINT: Record<ThinkingLevel, string> = {
 };
 import { Login, type LoginType } from "./components/Login.tsx";
 import { AskPanel, type Ask } from "./components/Ask.tsx";
-import { toolDiff } from "@kloudlite-tui/backend/local";
 import { readClipboardImage, type ClipImage } from "./clipboard.ts";
 import {
   getSession,
@@ -100,13 +93,15 @@ const WIDE_COLUMNS = 120;
  * turn belongs to its session and keeps streaming while you look elsewhere.
  */
 export function App({
-  registry,
+  tools: sink,
   onExit,
 }: {
-  registry: Registry;
+  /** Receives the tools the TUI owns (question, env_*, workspace_*); tests read it. */
+  tools?: ToolDef[];
   /** Called on quit; defaults to killing the process (single-user CLI). */
   onExit?: () => void;
 }) {
+  const tuiTools = useRef<ToolDef[]>(sink ?? []).current;
   const renderer = useRenderer();
   const { width: columns, height: rows } = useTerminalDimensions();
   const [sessions, setSessions] = useState<SessionMap>({});
@@ -125,7 +120,7 @@ export function App({
     if (!img) return null;
     // a text-only model drops attachments without a word — say so here, while
     // the user can still switch models instead of after the answer comes back
-    const model = resolveModel(getSession(sessions, activeKey).model);
+    const model = findModel(getSession(sessions, activeKey).model);
     if (model && !model.input.includes("image")) {
       append(activeKey, {
         kind: "error",
@@ -143,7 +138,7 @@ export function App({
   // vim keys are a setting; without them the prompt is always live and the
   // letter commands move to ctrl+<letter> (what the splash already advertises)
   const [keyMode, setKeyMode] = useState<"normal" | "insert">(
-    () => (readSettings().vim ?? "off") === "on" ? "normal" : "insert",
+    () => (hello().settings.vim ?? "off") === "on" ? "normal" : "insert",
   );
   const [hint, setHint] = useState(0);
   // 0 = main context (orchestrator); 1..N = inside workspaces[focus - 1]
@@ -177,11 +172,11 @@ export function App({
   const [sessionId, setSessionId] = useState<Record<string, string>>({});
 
   const [sessionNames, setSessionNames] = useState<Record<string, string>>(() =>
-    Object.fromEntries(listSessions().flatMap((m) => (m.name ? [[m.key, m.name]] : []))),
+    Object.fromEntries(hello().sessions.flatMap((m) => (m.name ? [[m.key, m.name]] : []))),
   );
   const [sessionDescs, setSessionDescs] = useState<Record<string, string>>(() =>
     Object.fromEntries(
-      listSessions().flatMap((m) => (m.description ? [[m.key, m.description]] : [])),
+      hello().sessions.flatMap((m) => (m.description ? [[m.key, m.description]] : [])),
     ),
   );
   // index into the active session's queue while editing it, else null
@@ -192,7 +187,7 @@ export function App({
   const [, setThemeTick] = useState(0);
   // persisted UI preferences (sidebar/thinking visibility, vim keys)
   const [prefs, setPrefs] = useState(() => {
-    const s = readSettings();
+    const s = hello().settings;
     return {
       sidebar: s.sidebar ?? "show",
       thinking: s.thinking ?? "show",
@@ -204,7 +199,7 @@ export function App({
     };
   });
   // Live agent sessions, one per session key (created lazily on first prompt).
-  const agents = useRef(new Map<string, Promise<AgentSession | ClaudeSession>>());
+  const agents = useRef(new Map<string, Promise<SessionHandle>>());
   // ↑/↓ recall position in the active session's history; null = live input
   const [histIdx, setHistIdx] = useState<number | null>(null);
   // interactive prompts (permissions, model questions), oldest first
@@ -226,6 +221,10 @@ export function App({
   // sessions belong to the context you are in: the environment's, or this
   // workspace's own
   const activeBase = focus === 0 ? "main" : workspaces[focus - 1]!.id;
+  const [baseSessions, setBaseSessions] = useState<SessionMeta[]>([]);
+  useEffect(() => {
+    backend().sessions.list(activeBase).then(setBaseSessions).catch(() => {});
+  }, [activeBase, sessionNames, sessionDescs]);
   const activeKey = sessionKey(
     focus === 0 ? undefined : workspaces[focus - 1]!.id,
     sessionId[activeBase] ?? "main",
@@ -478,7 +477,7 @@ export function App({
     agents.current
       .get(key)
       ?.then(async (agent) => {
-        agent.clearQueue();
+        await agent.clearQueue();
         for (const m of next) {
           if (m.kind === "steer") await agent.steer(m.text);
           else await agent.followUp(m.text);
@@ -531,7 +530,7 @@ export function App({
       }),
     );
 
-  function handleAgentEvent(key: string, event: AgentSessionEvent) {
+  function handleAgentEvent(key: string, event: SessionEvent) {
     switch (event.type) {
       case "agent_start":
         setSessions((map) => patchSession(map, key, { busy: true }));
@@ -583,7 +582,7 @@ export function App({
           name: event.toolName,
           summary: toolSummary(event.toolName, event.args),
           status: "running",
-          diff: toolDiff(event.toolName, event.args) ?? undefined,
+          diff: event.diff,
         }));
         break;
       case "tool_execution_update": {
@@ -658,29 +657,25 @@ export function App({
     }
   }
 
-  /** Get or lazily create the agent session behind a session key. */
-  function ensureAgent(
-    key: string,
-    opts?: { fresh?: boolean; model?: ModelRef },
-  ): Promise<AgentSession | ClaudeSession> {
-    let existing = agents.current.get(key);
+  /** Get or lazily open the backend session behind a session key. */
+  function ensureAgent(key: string, opts?: { fresh?: boolean; model?: ModelRef }): Promise<SessionHandle> {
+    const existing = agents.current.get(key);
     if (existing) return existing;
-    const model = resolveModel(opts?.model ?? getSession(sessions, key).model);
-    if (!model) return Promise.reject(new Error("no model available"));
-    const created = createSession({
-      key,
-      model,
-      registry,
-      fresh: opts?.fresh,
-      thinkingLevel: prefs.thinkingLevel,
-      autoCompact: prefs.autoCompact === "on",
-      codemode: prefs.codemode === "on",
-    }).then((agent) => {
-      agent.subscribe((event) => handleAgentEvent(key, event));
-      installPermissionGate(key, agent);
-      if (!opts?.fresh) restoreTranscript(key, agent);
-      return agent;
-    });
+    const created = backend()
+      .session(key, {
+        model: opts?.model ?? getSession(sessions, key).model,
+        fresh: opts?.fresh,
+        thinkingLevel: prefs.thinkingLevel,
+        autoCompact: prefs.autoCompact === "on",
+        codemode: prefs.codemode === "on",
+        tools: tuiTools,
+        permission: (req, signal) => gate(key, req, signal),
+      })
+      .then((agent) => {
+        agent.subscribe((event) => handleAgentEvent(key, event));
+        if (!opts?.fresh) restoreTranscript(key, agent);
+        return agent;
+      });
     agents.current.set(key, created);
     created.catch(() => {
       agents.current.delete(key);
@@ -723,7 +718,7 @@ export function App({
   const registered = useRef(false);
   if (!registered.current) {
     registered.current = true;
-    registry.add({
+    tuiTools.push({
       name: "question",
       description:
         "Ask the user a question and wait for their answer. Use when you need a decision or clarification. Provide 2-5 short answer options.",
@@ -759,7 +754,7 @@ export function App({
       required: string[],
       run: (a: any) => string,
     ) =>
-      registry.add({
+      tuiTools.push({
         name,
         description,
         inputSchema: { type: "object", properties, required },
@@ -856,65 +851,56 @@ export function App({
 type PermMode = "default" | "acceptEdits" | "plan" | "bypass";
 const PERM_MODES: PermMode[] = ["default", "acceptEdits", "plan", "bypass"];
 
-  /** Chain a permission gate ahead of pi's installed beforeToolCall hook. */
-  function installPermissionGate(key: string, agent: AgentSession | ClaudeSession) {
-    const inner = agent.agent.beforeToolCall;
-    agent.agent.beforeToolCall = async (ctx: any, signal?: AbortSignal) => {
-      const name = ctx.toolCall.name;
-      const granted = alwaysAllow.current.get(key) ?? new Set<string>();
-      // the hook is installed once per session but the mode changes under it,
-      // so the mode is read from a ref at call time, never captured here
-      const mode = modeRef.current;
-
-      // plan mode answers rather than asks: a refusal the model can read and
-      // work around beats a permission card the user has to reject every turn
-      if (mode === "plan" && GATED.has(name))
-        return {
-          block: true,
-          reason: `Plan mode: ${name} is not available. Research and explain what you would do; the user will leave plan mode when they want it done.`,
-        };
-
-      const waved =
-        mode === "bypass" || (mode === "acceptEdits" && EDITS.has(name));
-      if (GATED.has(name) && !granted.has(name) && !waved) {
-        const diff = toolDiff(name, ctx.args) ?? undefined;
-        const choice = await pushAskRef.current({
-          title: "Permission required",
-          subtitle:
-            name === "bash"
-              ? "Shell command"
-              : name === "web_fetch"
-                ? "Fetch a URL"
-                : `${name === "write" ? "Write" : "Edit"} ${ctx.args?.path ?? "file"}`,
-          body:
-            name === "bash"
-              ? `$ ${ctx.args?.command ?? ""}`
-              : name === "web_fetch"
-                ? String(ctx.args?.url ?? "")
-                : diff
-                  ? undefined
-                  : toolSummary(name, ctx.args),
-          diff,
-          options: [
-            { id: "once", label: "Allow once" },
-            { id: "always", label: "Allow always" },
-            { id: "reject", label: "Reject" },
-          ],
-          escapeId: "reject",
-        });
-        if (choice === "always") {
-          granted.add(name);
-          alwaysAllow.current.set(key, granted);
-        } else if (choice === "reject") {
-          return { block: true, reason: "The user rejected this tool call." };
-        }
-      }
-      return inner?.(ctx, signal);
-    };
+  /**
+   * The permission decision for one gated tool call. The backend calls this only for GATED
+   * tools; the mode is read from a ref at call time because it changes under a running session.
+   */
+  async function gate(key: string, { name, args, diff }: PermissionRequest, _signal: AbortSignal): Promise<Decision> {
+    const granted = alwaysAllow.current.get(key) ?? new Set<string>();
+    const mode = modeRef.current;
+    // plan mode answers rather than asks: a refusal the model can read and
+    // work around beats a permission card the user has to reject every turn
+    if (mode === "plan")
+      return {
+        block: true,
+        reason: `Plan mode: ${name} is not available. Research and explain what you would do; the user will leave plan mode when they want it done.`,
+      };
+    if (mode === "bypass" || (mode === "acceptEdits" && EDITS.has(name)) || granted.has(name)) return {};
+    const choice = await pushAskRef.current({
+      title: "Permission required",
+      subtitle:
+        name === "bash"
+          ? "Shell command"
+          : name === "web_fetch"
+            ? "Fetch a URL"
+            : `${name === "write" ? "Write" : "Edit"} ${args?.path ?? "file"}`,
+      body:
+        name === "bash"
+          ? `$ ${args?.command ?? ""}`
+          : name === "web_fetch"
+            ? String(args?.url ?? "")
+            : diff
+              ? undefined
+              : toolSummary(name, args),
+      diff,
+      options: [
+        { id: "once", label: "Allow once" },
+        { id: "always", label: "Allow always" },
+        { id: "reject", label: "Reject" },
+      ],
+      escapeId: "reject",
+    });
+    if (choice === "always") {
+      granted.add(name);
+      alwaysAllow.current.set(key, granted);
+    } else if (choice === "reject") {
+      return { block: true, reason: "The user rejected this tool call." };
+    }
+    return {};
   }
 
   /** Rebuild the transcript + prompt history from a restored session. */
-  function restoreTranscript(key: string, agent: AgentSession | ClaudeSession) {
+  function restoreTranscript(key: string, agent: SessionHandle) {
     const messages = agent.messages;
     const markRestored = () =>
       setSessions((map) => patchSession(map, key, { restored: true }));
@@ -968,7 +954,7 @@ const PERM_MODES: PermMode[] = ["default", "acceptEdits", "plan", "bypass"];
   function resizeSidebar(delta: number) {
     setPrefs((p) => {
       const sidebarWidth = clampSidebar(p.sidebarWidth + delta);
-      writeSettings({ sidebarWidth });
+      backend().settings.write({ sidebarWidth }).catch(() => {});
       return { ...p, sidebarWidth };
     });
   }
@@ -1124,11 +1110,14 @@ const PERM_MODES: PermMode[] = ["default", "acceptEdits", "plan", "bypass"];
       const key = activeKey;
       agents.current.get(key)?.then((a) => a.dispose()).catch(() => {});
       agents.current.delete(key);
-      clearSessionHistory(key); // archive persisted transcripts
       setSessions((map) =>
         patchSession(map, key, { entries: [], history: [], tokens: 0, queued: [], busy: false }),
       );
-      ensureAgent(key, { fresh: true }).catch(() => {});
+      // archive persisted transcripts, then open the fresh session behind them
+      backend()
+        .sessions.clear(key)
+        .then(() => ensureAgent(key, { fresh: true }))
+        .catch(() => {});
       return;
     }
     if (trimmed.startsWith("/session")) {
@@ -1137,12 +1126,12 @@ const PERM_MODES: PermMode[] = ["default", "acceptEdits", "plan", "bypass"];
       const arg = words.join(" ").trim();
       if (verb === "name" && arg) {
         // name the session in use, so it can be found in the list later
-        nameSession(activeKey, arg);
+        backend().sessions.name(activeKey, arg).catch((e) => append(activeKey, { kind: "error", text: String(e.message ?? e) }));
         setSessionNames((n) => ({ ...n, [activeKey]: arg }));
         return append(activeKey, { kind: "info", text: `session named "${arg}"` });
       }
       if ((verb === "desc" || verb === "describe") && arg) {
-        describeSession(activeKey, arg);
+        backend().sessions.describe(activeKey, arg).catch((e) => append(activeKey, { kind: "error", text: String(e.message ?? e) }));
         setSessionDescs((d) => ({ ...d, [activeKey]: arg }));
         return append(activeKey, { kind: "info", text: `session described "${arg}"` });
       }
@@ -1154,7 +1143,7 @@ const PERM_MODES: PermMode[] = ["default", "acceptEdits", "plan", "bypass"];
       return;
     }
     if (trimmed === "/tools") {
-      const names = registry.names();
+      const names = [...hello().tools, ...tuiTools.map((t) => t.name)];
       return append(activeKey, {
         kind: "agent",
         text: names.length ? names.join(", ") : "No tools registered.",
@@ -1169,7 +1158,7 @@ const PERM_MODES: PermMode[] = ["default", "acceptEdits", "plan", "bypass"];
     if (trimmed.startsWith("/theme ")) {
       const name = trimmed.slice(7).trim();
       setTheme(name);
-      writeSettings({ theme: name }); // persists across restarts
+      backend().settings.write({ theme: name }).catch(() => {}); // persists across restarts
       setThemeTick((t) => t + 1);
       return;
     }
@@ -1180,22 +1169,18 @@ const PERM_MODES: PermMode[] = ["default", "acceptEdits", "plan", "bypass"];
         const provider = ref.slice(0, slash);
         const id = ref.slice(slash + 1);
         setSessions((map) => patchSession(map, activeKey, { model: { provider, id } }));
-        writeSettings({ defaultModel: { provider, id } }); // persists across restarts
-        const live = resolveModel({ provider, id });
+        backend().settings.write({ defaultModel: { provider, id } }).catch(() => {}); // persists across restarts
         const cur = agents.current.get(activeKey);
-        if (live && cur) {
+        if (cur) {
           // Claude and pi share one transcript (pi's file): a switch across
           // the two rebuilds the session for this key from that file
           cur
-            .then((a) => {
-              const wasClaude = "isClaude" in a;
-              if (wasClaude === (live.provider === "anthropic")) {
-                void a.setModel(live as never);
-                return;
-              }
-              a.dispose();
-              agents.current.delete(activeKey);
-              void ensureAgent(activeKey, { model: { provider, id } }).catch(() => {});
+            .then(async (a) => {
+              if (a.isClaude !== (provider === "anthropic")) {
+                agents.current.delete(activeKey);
+                await a.dispose();
+                await ensureAgent(activeKey, { model: { provider, id } });
+              } else await a.setModel({ provider, id });
             })
             .catch(() => {});
         }
@@ -1215,7 +1200,7 @@ const PERM_MODES: PermMode[] = ["default", "acceptEdits", "plan", "bypass"];
       const [key, value] = trimmed.slice(10).trim().split(/\s+/);
       if ((key === "sidebar" || key === "thinking") && (value === "show" || value === "hide")) {
         setPrefs((p) => ({ ...p, [key]: value }));
-        writeSettings({ [key]: value });
+        backend().settings.write({ [key]: value }).catch(() => {});
         // narrow terminal: "show" also opens the overlay, "hide" closes it
         if (key === "sidebar") setSidebarOpen(value === "show");
       }
@@ -1226,14 +1211,14 @@ const PERM_MODES: PermMode[] = ["default", "acceptEdits", "plan", "bypass"];
       if (key === "thinkingLevel" && (THINKING_LEVELS as readonly string[]).includes(value ?? "")) {
         const level = value as ThinkingLevel;
         setPrefs((p) => ({ ...p, thinkingLevel: level }));
-        writeSettings({ thinkingLevel: level });
+        backend().settings.write({ thinkingLevel: level }).catch(() => {});
         // every live session, not just the visible one — a turn may be streaming elsewhere
         for (const agent of agents.current.values())
           agent.then((a) => a.setThinkingLevel(level)).catch(() => {});
       }
       if (key === "autoCompact" && (value === "on" || value === "off")) {
         setPrefs((p) => ({ ...p, autoCompact: value }));
-        writeSettings({ autoCompact: value });
+        backend().settings.write({ autoCompact: value }).catch(() => {});
         for (const agent of agents.current.values())
           agent.then((a) => a.setAutoCompactionEnabled(value === "on")).catch(() => {});
       }
@@ -1241,7 +1226,7 @@ const PERM_MODES: PermMode[] = ["default", "acceptEdits", "plan", "bypass"];
       // thinkingLevel and autoCompact this cannot be pushed into live sessions
       if (key === "codemode" && (value === "on" || value === "off")) {
         setPrefs((p) => ({ ...p, codemode: value }));
-        writeSettings({ codemode: value });
+        backend().settings.write({ codemode: value }).catch(() => {});
         append(key, {
           kind: "info",
           text: `codemode ${value} — applies to sessions started from now on`,
@@ -1249,7 +1234,7 @@ const PERM_MODES: PermMode[] = ["default", "acceptEdits", "plan", "bypass"];
       }
       if (key === "vim" && (value === "on" || value === "off")) {
         setPrefs((p) => ({ ...p, vim: value }));
-        writeSettings({ vim: value });
+        backend().settings.write({ vim: value }).catch(() => {});
         // leaving vim behind drops you in the prompt; entering it starts in NORMAL
         setKeyMode(value === "on" ? "normal" : "insert");
       }
@@ -1271,7 +1256,7 @@ const PERM_MODES: PermMode[] = ["default", "acceptEdits", "plan", "bypass"];
     // an unnamed session takes its title from the first thing asked of it
     if (!sessionNames[key]) {
       const title = trimmed.replace(/\s+/g, " ").slice(0, 40);
-      nameSession(key, title);
+      backend().sessions.name(key, title).catch((e) => append(key, { kind: "error", text: String(e.message ?? e) }));
       setSessionNames((n) => ({ ...n, [key]: title }));
     }
     const sent = images;
@@ -1332,10 +1317,10 @@ const PERM_MODES: PermMode[] = ["default", "acceptEdits", "plan", "bypass"];
         .sort((a, b) => a.provider.localeCompare(b.provider) || a.id.localeCompare(b.id))
         .map((m) => ({ provider: m.provider, id: m.id, hint: m.name })),
       themes: themeNames,
-      logins: loginOptions(),
+      logins: hello().logins,
       // this environment's main sessions, newest first
       // sessions of the context you are in (environment main, or this workspace)
-      sessions: listSessions(activeBase)
+      sessions: baseSessions
         .filter((m) => m.key === activeBase || m.key.startsWith(`${activeBase}:`))
         .map((m) => {
           const id = sessionIdOf(activeBase, m.key);
@@ -1389,7 +1374,7 @@ const PERM_MODES: PermMode[] = ["default", "acceptEdits", "plan", "bypass"];
         })),
       ],
     }),
-    [auth, models, prefs, envs, env, focus, environment, activeBase, sessionId, sessionNames],
+    [auth, models, prefs, envs, env, focus, environment, activeBase, sessionId, sessionNames, baseSessions],
   );
   const jumpMatches = useMemo(
     () =>
@@ -1482,7 +1467,7 @@ const PERM_MODES: PermMode[] = ["default", "acceptEdits", "plan", "bypass"];
             />
           ) : filesView ? (
             <Files
-              root={process.cwd()}
+              root={hello().cwd}
               refreshKey={filesRefresh}
               onClose={() => setView("agent")}
               onCycle={cycleView}
