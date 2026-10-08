@@ -196,7 +196,7 @@ export function loginProvider(
  * an archive/ subdir so `continueRecent` starts from scratch, without deleting
  * anything.
  */
-type SessionMeta = { key: string; name?: string; description?: string; updated: number; claudeSessionId?: string };
+type SessionMeta = { key: string; name?: string; description?: string; updated: number };
 
 function sessionDir(key: string): string {
   return join(CONFIG_DIR, "sessions", key.replace(/[^\w.-]/g, "_"));
