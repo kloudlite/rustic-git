@@ -32,6 +32,37 @@ export type LoginType = Parameters<typeof loginProvider>[1];
 /** pi's `AuthInteraction`: `{ signal?, prompt(p): Promise<string>, notify(e): void }`. */
 export type LoginUi = Parameters<typeof loginProvider>[2];
 export type CatalogModel = { provider: string; id: string; name: string; input: string[] };
+/** What the sidebar shows, read by the bench from the platform (./space). JSON-safe: it crosses ssh. */
+export type SpaceProcess = { id: string; cmd: string; state: string; exit_code?: number | null; failed?: boolean; logs: string[] };
+export type SpaceWorkspace = {
+  id: string;
+  name: string;
+  owner: string;
+  state: string;
+  repo?: string;
+  branch?: string;
+  attached_environment?: string;
+  parent?: string;
+  task?: string;
+  processes?: SpaceProcess[];
+  changes?: number;
+};
+export type SpaceEnvironment = {
+  id: string;
+  name: string;
+  owner: string;
+  state: string;
+  services: { name: string; ports: number[]; interceptedBy?: string }[];
+};
+export type SpaceView = {
+  available: boolean;
+  error?: string;
+  user: string;
+  workspaces: SpaceWorkspace[];
+  environments: SpaceEnvironment[];
+  /** The environment the space follows (`GET /v1/me/environments`). */
+  connected?: string;
+};
 export type ToolSpec = Pick<ToolDef, "name" | "description" | "inputSchema">;
 
 export type Hello = {
@@ -92,6 +123,8 @@ export interface Backend {
     clear(key: string): Promise<void>;
   };
   settings: { write(patch: Partial<Settings>): Promise<void> };
+  /** The space's real workspaces and environments; never throws, `available: false` says why. */
+  space(): Promise<SpaceView>;
   models: { refresh(): Promise<CatalogModel[]> };
   auth: {
     providers(): Promise<ProviderAuth[]>;

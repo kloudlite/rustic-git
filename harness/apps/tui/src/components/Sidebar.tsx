@@ -1,7 +1,7 @@
 import { TextAttributes } from "@opentui/core";
 import { theme } from "../theme.ts";
 import { clip } from "../ui/text.ts";
-import { CURRENT_USER, type Service, type Workspace } from "../workspaces.ts";
+import { type Service, type Workspace } from "../workspaces.ts";
 import { useWheelAccel } from "../wheel.ts";
 
 // resolved per render: the theme singleton mutates on /theme
@@ -67,6 +67,8 @@ export function Sidebar({
   services,
   envName,
   envOwner,
+  user,
+  unavailable,
   snapshot,
   running,
   focus,
@@ -75,8 +77,13 @@ export function Sidebar({
 }: {
   workspaces: Workspace[];
   services: Service[];
-  envName: string;
+  /** Undefined = the space has no environment: the block renders nothing. */
+  envName?: string;
   envOwner?: string;
+  /** The signed-in user: only their workspaces are focusable. */
+  user: string;
+  /** Why the platform could not be read; replaces the workspace list. */
+  unavailable?: string;
   /** The restore point the environment is on, if the agent switched to one. */
   snapshot?: string;
   /** Per-workspace: its session has a turn running */
@@ -113,11 +120,12 @@ export function Sidebar({
       <scrollbox flexGrow={1} flexBasis={0} flexShrink={1} paddingLeft={1} paddingRight={1} scrollbarOptions={{ visible: false }} scrollAcceleration={wheel}>
         <box flexDirection="column" flexShrink={0}>
           <Heading count={count} width={width - 2} flush>Workspaces</Heading>
-          {workspaces.length === 0 && (
+          {unavailable && <Row left={<span fg={theme.muted}>{clip(`platform not reachable: ${unavailable}`, inner - 2)}</span>} />}
+          {!unavailable && workspaces.length === 0 && (
             <Row left={<span fg={theme.muted}>none yet — a to create one</span>} />
           )}
           {workspaces.map((w, i) => {
-            const mine = w.owner === CURRENT_USER;
+            const mine = w.owner === user;
             const on = mine && focus === i + 1;
             const click = onFocus && mine ? () => onFocus(i + 1) : undefined;
 
@@ -189,7 +197,7 @@ export function Sidebar({
       </scrollbox>
 
       {/* pinned: the one environment, and the services it runs */}
-      <box flexDirection="column" flexShrink={0} paddingBottom={1}>
+      {envName !== undefined && <box flexDirection="column" flexShrink={0} paddingBottom={1}>
         <box flexDirection="column" paddingLeft={1} paddingRight={1}>
         <Heading width={width - 2} flush>Environment</Heading>
         <Row
@@ -236,7 +244,7 @@ export function Sidebar({
           </>
         ) : null}
         </box>
-      </box>
+      </box>}
     </box>
   );
 }

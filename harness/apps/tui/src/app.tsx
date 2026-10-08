@@ -12,7 +12,7 @@ import { Files } from "./components/Files.tsx";
 import { Processes } from "./components/Processes.tsx";
 import { Spinner } from "./components/Spinner.tsx";
 import { menuItems, placeholders } from "./slash.ts";
-import { CURRENT_USER, envLabel, MOCK_ENVIRONMENTS, MOCK_WORKSPACES, parentFor, wsPath } from "./workspaces.ts";
+import { fromSpace, wsPath } from "./workspaces.ts";
 import { setTheme, theme, themeNames } from "./theme.ts";
 import { catalog, findModel, loadProviderAuth, modelLabel, refreshCatalog } from "./models.ts";
 import type {
@@ -24,6 +24,7 @@ import type {
   SessionMeta,
   ThinkingLevel,
 } from "@kloudlite-tui/backend";
+import type { SpaceView } from "@kloudlite-tui/backend";
 import { backend, hello } from "./hello.ts";
 
 /** pi's reasoning budgets, least to most; a model may support only a prefix. */
@@ -143,11 +144,42 @@ export function App({
   const [hint, setHint] = useState(0);
   // 0 = main context (orchestrator); 1..N = inside workspaces[focus - 1]
   const [focus, setFocus] = useState(0);
-  const [env, setEnv] = useState(0);
-  const [envs, setEnvs] = useState(MOCK_ENVIRONMENTS);
-  // workspaces belong to the working session, not to an environment: connecting
-  // elsewhere carries this exact list over, and never pulls another session's in
-  const [allWorkspaces, setWorkspaces] = useState(MOCK_WORKSPACES);
+  // The space's real workspaces and environments, polled from the backend (see `refreshSpace`).
+  // Workspaces belong to the working session, not to an environment.
+  const [space, setSpace] = useState<SpaceView>();
+  const mapped = useMemo(() => (space ? fromSpace(space) : { workspaces: [], environments: [], envIndex: 0 }), [space]);
+  const user = space?.user ?? "";
+  const envs = mapped.environments;
+  const env = mapped.envIndex;
+  const workspaces = mapped.workspaces;
+  // Focus is an index into the list, so a refresh that reorders or drops rows has to move it with
+  // the workspace it was on (by id), or clamp when that one is gone.
+  const live = useRef({ focus, workspaces });
+  live.current = { focus, workspaces };
+  const inflight = useRef(false);
+  const refreshRef = useRef<() => Promise<void>>(async () => {});
+  refreshRef.current = async () => {
+    if (inflight.current) return; // pod reads can outlast the beat; never stack them
+    inflight.current = true;
+    let v: SpaceView;
+    try {
+      v = await backend().space();
+    } catch (e: any) {
+      v = { available: false, error: String(e?.message ?? e).slice(0, 200), user: "", workspaces: [], environments: [] };
+    } finally {
+      inflight.current = false;
+    }
+    const { focus: f, workspaces: old } = live.current;
+    const next = fromSpace(v).workspaces;
+    const at = f > 0 ? next.findIndex((w) => w.id === old[f - 1]?.id) : -1;
+    setSpace(v);
+    if (f > 0) setFocus(at >= 0 ? at + 1 : Math.min(f, next.length));
+  };
+  useEffect(() => {
+    void refreshRef.current();
+    const t = setInterval(() => void refreshRef.current(), 5000);
+    return () => clearInterval(t);
+  }, []);
   const [palette, setPalette] = useState(false);
   const [view, setView] = useState<ViewId>("agent");
   const [filesRefresh, setFilesRefresh] = useState(0);
@@ -212,11 +244,9 @@ export function App({
   const modeRef = useRef<PermMode>("default");
   modeRef.current = permMode;
 
-  const environment = envs[env]!;
+  const environment = envs[env]; // undefined until the space has an environment
   const mainBase = "main";
   const mainSession = sessionId[mainBase] ?? "main";
-  // working session › main session › workspaces: only this session's workspaces
-  const workspaces = allWorkspaces.filter((w) => (w.session ?? "main") === mainSession);
   const mainKey = sessionKey(undefined, mainSession);
   // sessions belong to the context you are in: the environment's, or this
   // workspace's own
@@ -322,7 +352,7 @@ export function App({
     // only your own workspaces can be entered; others are visible but attached
     // to their owner's session
     const own = workspaces
-      .map((w, i) => (w.owner === CURRENT_USER ? i + 1 : -1))
+      .map((w, i) => (w.owner === user ? i + 1 : -1))
       .filter((i) => i > 0);
     // cycle through the whole hierarchy: main, then your workspaces
     const ring = [0, ...own];
@@ -386,7 +416,7 @@ export function App({
       if (/^[0-9]$/.test(name)) {
         const d = Number(name);
         if (d === 0) setFocus(0);
-        else if (d <= n && workspaces[d - 1]!.owner === CURRENT_USER) setFocus(d);
+        else if (d <= n && workspaces[d - 1]!.owner === user) setFocus(d);
         return true;
       }
       if (seq === "[" || seq === "]") {
@@ -538,6 +568,7 @@ export function App({
         break;
       case "agent_end":
         setSessions((map) => patchSession(map, key, { busy: false }));
+        void refreshRef.current(); // a create / stop / intercept the turn made shows now, not at the next beat
         break;
       case "message_update":
       case "message_end": {
@@ -723,18 +754,6 @@ export function App({
   }
   const pushAskRef = useRef(pushAsk);
   pushAskRef.current = pushAsk;
-
-  // The env tools are defined once but have to act on the *current* state, so
-  // they go through a ref that every render refreshes. The UI stubs address
-  // things by position (focus - 1, an env index); a model only has names.
-  const envApi = useRef<{
-    connect: (name: string) => string;
-    intercept: (service: string, workspace: string) => string;
-    release: (workspace: string) => string;
-    create: (name: string) => string;
-    clone: (name: string) => string;
-    list: () => string;
-  }>(null as never);
 
   // The model can ask the user a question with options (opencode's question tool).
   const registered = useRef(false);
@@ -951,126 +970,6 @@ const PERM_MODES: PermMode[] = ["default", "acceptEdits", "plan", "bypass"];
     setInput(v);
   }
 
-  // ---- environment / workspace verbs (mock-state mutations) ----
-  // ponytail: no human surface reaches these any more — the agent drives the
-  // workspace lifecycle, so they are the shape the future agent tools call.
-  // Until those tools exist nothing invokes them; delete them if that changes.
-  const uid = useRef(100);
-  const freshId = () => `w${uid.current++}`;
-
-  /**
-   * Point this working session at another environment. The workspaces are the
-   * session's, so they simply come along; only the interceptions held in the
-   * environment being left have to be released.
-   */
-  function connectEnv(target: number) {
-    if (target === env || target < 0) return;
-    const names = new Set(workspaces.map((w) => w.name));
-    setEnvs((prev) =>
-      prev.map((e, i) =>
-        i === env
-          ? {
-              ...e,
-              services: e.services.map((s) =>
-                s.interceptedBy && names.has(s.interceptedBy) ? { ...s, interceptedBy: undefined } : s,
-              ),
-            }
-          : e,
-      ),
-    );
-    setEnv(target);
-    setFocus(0);
-    setView("agent");
-    append(mainKey, { kind: "info", text: `connected to ${envLabel(envs[target]!)}` });
-  }
-
-  function newWorkspace(name: string) {
-    const ws = {
-      id: freshId(),
-      name,
-      owner: CURRENT_USER,
-      session: mainSession,
-      status: "running" as const,
-      ports: [],
-      repo: `kloudlite/${name}`,
-      branch: "main",
-    };
-    setWorkspaces((prev) => [...prev, ws]);
-    setFocus(workspaces.length + 1);
-  }
-
-  /** Name-addressed wrappers over the UI's lifecycle functions, for the agent. */
-  envApi.current = {
-    list: () =>
-      [
-        `environment: ${envLabel(environment)}`,
-        `services: ${environment.services
-          .map((sv) => `${sv.name}${sv.interceptedBy ? ` (intercepted by ${sv.interceptedBy})` : ""}`)
-          .join(", ") || "none"}`,
-        `environments: ${envs.map(envLabel).join(", ")}`,
-        `workspaces: ${workspaces.map((w) => w.name).join(", ") || "none"}`,
-      ].join("\n"),
-    connect: (name) => {
-      const i = envs.findIndex((e) => envLabel(e) === name || e.name === name);
-      if (i === -1) return `error: no environment named ${name}. Have: ${envs.map(envLabel).join(", ")}`;
-      if (i === env) return `already connected to ${name}`;
-      connectEnv(i);
-      return `connected to ${envLabel(envs[i]!)}`;
-    },
-    intercept: (service, workspace) => {
-      const i = workspaces.findIndex((w) => w.name === workspace);
-      if (i === -1) return `error: no workspace named ${workspace}`;
-      if (!environment.services.some((sv) => sv.name === service))
-        return `error: ${environment.name} has no service named ${service}`;
-      // the intercept is held by the focused workspace, so focus it first
-      setFocus(i + 1);
-      const ws = workspaces[i]!;
-      setEnvs((prev) =>
-        prev.map((e, j) =>
-          j === env
-            ? { ...e, services: e.services.map((sv) => (sv.name === service ? { ...sv, interceptedBy: ws.name } : sv)) }
-            : e,
-        ),
-      );
-      return `intercepting ${service}.${environment.name} → ${ws.name}`;
-    },
-    release: (workspace) => {
-      const ws = workspaces.find((w) => w.name === workspace);
-      if (!ws) return `error: no workspace named ${workspace}`;
-      const held = environment.services.filter((sv) => sv.interceptedBy === ws.name).map((sv) => sv.name);
-      if (held.length === 0) return `${workspace} holds no interceptions`;
-      setEnvs((prev) =>
-        prev.map((e, j) =>
-          j === env
-            ? { ...e, services: e.services.map((sv) => (sv.interceptedBy === ws.name ? { ...sv, interceptedBy: undefined } : sv)) }
-            : e,
-        ),
-      );
-      return `released ${held.join(", ")}`;
-    },
-    create: (name) => {
-      if (workspaces.some((w) => w.name === name)) return `error: a workspace named ${name} already exists`;
-      newWorkspace(name);
-      return `created workspace ${name}`;
-    },
-    clone: (name) => {
-      const i = workspaces.findIndex((w) => w.name === name);
-      if (i === -1) return `error: no workspace named ${name}`;
-      setFocus(i + 1);
-      const src = workspaces[i]!;
-      const ws = {
-        ...src,
-        id: freshId(),
-        name: `${src.name}-copy`,
-        owner: CURRENT_USER,
-        session: mainSession,
-        parent: parentFor(workspaces, src),
-      };
-      setWorkspaces((prev) => [...prev, ws]);
-      return `cloned ${name} as ${ws.name}`;
-    },
-  };
-
   /** `steer` interrupts the running turn; otherwise a mid-turn prompt queues. */
   function submit(text: string, steer = false) {
     if (palette) {
@@ -1278,11 +1177,11 @@ const PERM_MODES: PermMode[] = ["default", "acceptEdits", "plan", "bypass"];
   const paletteItems: JumpItem[] = [
     ...workspaces
       .map((w, i) => ({ w, i }))
-      .filter(({ w }) => w.owner === CURRENT_USER)
+      .filter(({ w }) => w.owner === user)
       .map(({ w, i }) => ({
         label: w.name,
         hint: w.status === "cloning" ? (w.progress ?? w.status) : w.status,
-        group: `Workspaces · ${environment.name}`,
+        group: `Workspaces · ${environment?.name ?? "no environment"}`,
         run: () => setFocus(i + 1),
       })),
     {
@@ -1406,10 +1305,12 @@ const PERM_MODES: PermMode[] = ["default", "acceptEdits", "plan", "bypass"];
   const sidebarEl = (
     <Sidebar
       workspaces={workspaces}
-      services={environment.services}
-      envName={environment.name}
-      snapshot={environment.snapshot}
-      envOwner={environment.owner === CURRENT_USER ? undefined : environment.owner}
+      services={environment?.services ?? []}
+      envName={environment?.name}
+      snapshot={environment?.snapshot}
+      envOwner={environment && environment.owner !== user ? environment.owner : undefined}
+      user={user}
+      unavailable={space && !space.available ? space.error ?? "unknown error" : undefined}
       focus={focus}
       width={prefs.sidebarWidth}
       running={workspaces.map((w) => getSession(sessions, w.id).busy)}
@@ -1587,7 +1488,7 @@ const PERM_MODES: PermMode[] = ["default", "acceptEdits", "plan", "bypass"];
             busy={busy}
             tokens={session.tokens}
             queued={session.queued.length}
-            active={environment.name}
+            active={environment?.name ?? ""}
             inWorkspace={focus > 0}
             compact={!wide}
             onHint={(id) => {

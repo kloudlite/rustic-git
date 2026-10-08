@@ -72,9 +72,10 @@ function rig(o: { branch?: string; head?: string; pushes?: { code: number; stder
   const child = fake("did it");
   const opened: string[] = [];
   const forgot: string[] = [];
-  const deps = { live: new Map<string, SessionHandle>(), busy: new Set<string>(), open: async (k: string) => (opened.push(k), child), api, exec, sleep: async () => {}, forget: async (ws: string) => void forgot.push(ws) };
+  const recs: string[] = [];
+  const deps = { live: new Map<string, SessionHandle>(), busy: new Set<string>(), open: async (k: string) => (opened.push(k), child), api, exec, sleep: async () => {}, record: (r: any) => void recs.push(`rec ${r.id} ${r.parent} ${r.task}`), unrecord: (id: string) => void recs.push(`unrec ${id}`), forget: async (ws: string) => void forgot.push(ws) };
   const [, sub] = delegateTools("main", undefined, deps, caller);
-  return { calls, execs, child, opened, forgot, run: (task = "fix the bug\nmore") => sub!.run({ workspace: "P", task }) as Promise<string>, setHead: (h: string) => (head = h) };
+  return { calls, execs, child, opened, forgot, recs, run: (task = "fix the bug\nmore") => sub!.run({ workspace: "P", task }) as Promise<string>, setHead: (h: string) => (head = h) };
 }
 const deleted = (r: Rig) => r.calls.includes("DELETE /v1/workspaces/ws-c1");
 
@@ -161,4 +162,34 @@ test("a throw before the push deletes the clone", async () => {
   await expect(r.run()).rejects.toThrow("boom");
   expect(deleted(r)).toBe(true);
   expect(r.child.disposed).toBe(1);
+});
+
+test("the clone is listed under its parent with the task's first line, and unlisted once deleted", async () => {
+  const r = rig();
+  await r.run("fix the bug\nmore");
+  expect(r.recs).toEqual(["rec ws-c1 P fix the bug", "unrec ws-c1"]);
+});
+
+test("a task is cut to 72 characters in the clone list", async () => {
+  const r = rig();
+  await r.run("x".repeat(100));
+  expect(r.recs[0]).toBe(`rec ws-c1 P ${"x".repeat(72)}`);
+});
+
+test("a clone kept after a failed push stays listed", async () => {
+  const r = rig({ pushes: [{ code: 1, stderr: "denied" }] });
+  await r.run();
+  expect(r.recs).toEqual(["rec ws-c1 P fix the bug"]);
+});
+
+test("a clone that never became ready is unlisted with its delete", async () => {
+  const r = rig({ ready: false });
+  await r.run();
+  expect(r.recs).toEqual(["rec ws-c1 P fix the bug", "unrec ws-c1"]);
+});
+
+test("no clone, no record", async () => {
+  const r = rig({ branch: "HEAD" });
+  await r.run();
+  expect(r.recs).toEqual([]);
 });

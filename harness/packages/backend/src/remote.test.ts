@@ -33,7 +33,7 @@ function fake(): Backend & { seen: string[] } {
     },
     // a permission call that never answers until aborted
     _hang: (signal: AbortSignal) => opts.permission({ name: "bash", args: {} }, signal),
-    sessions: {}, fs: {}, settings: {}, models: {}, auth: {},
+    sessions: {}, fs: {}, settings: {}, models: {}, auth: {}, space: async () => ({ available: false, error: "x", user: "u", workspaces: [], environments: [] }),
   };
   return b;
 }

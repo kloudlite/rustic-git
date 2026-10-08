@@ -3,7 +3,7 @@
 //! The names are a FIXED list so the tools exist even while the pod is not Ready; the pod's own
 //! description/schema replace the permissive fallback when it answers at construction.
 import type { ToolDef } from "./index.ts";
-import { api } from "./platform.ts";
+import { api, apiJson } from "./platform.ts";
 
 export const POD_TOOLS = [
   "read", "write", "edit", "patch", "glob", "grep", "exec",
@@ -24,6 +24,19 @@ async function lookup(ws: string): Promise<Addr> {
   if (!a?.address) throw new NotReady("no address");
   return a;
 }
+
+/** A ready workspace's tool server, for reads that are not model tool calls (sidebar). One
+ * lookup per call: the address and token rotate, and a sidebar beat is 5 s apart. */
+async function podFetch<T>(ws: string, path: string, init: RequestInit, ms: number): Promise<T> {
+  const a = await apiJson<Addr>("GET", `/v1/workspaces/${encodeURIComponent(ws)}/tools`);
+  if (!a?.address) throw new Error("no address");
+  const res = await fetch(`http://${a.address}${path}`, { ...init, headers: { ...(init.headers as object), ...headers(a) }, signal: AbortSignal.timeout(ms) });
+  if (!res.ok) throw new Error(`error ${res.status}`); // body withheld: it may echo the token
+  return (await res.json()) as T;
+}
+export const podGet = <T>(ws: string, path: string, ms = 5000) => podFetch<T>(ws, path, {}, ms);
+export const podPost = <T>(ws: string, tool: string, args: unknown, ms = 5000) =>
+  podFetch<T>(ws, `/tools/${tool}`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(args ?? {}) }, ms);
 
 const headers = (a: Addr): Record<string, string> => (a.token ? { authorization: `Bearer ${a.token}` } : {});
 

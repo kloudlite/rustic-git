@@ -75,6 +75,7 @@ export class RemoteBackend implements Backend {
   sessions = this.#ops<Backend["sessions"]>("sessions", ["list", "name", "describe", "clear"]);
   fs = this.#ops<Backend["fs"]>("fs", ["isGitRepo", "changes", "fileDiff", "fullFile", "listDir", "grep"]);
   settings = { write: (patch: any) => this.peer.request<void>("settings.write", patch) };
+  space = () => this.peer.request<any>("space", null);
   models = { refresh: () => this.peer.request<any>("models.refresh", null) };
   auth = {
     providers: () => this.peer.request<any>("auth.providers", null),

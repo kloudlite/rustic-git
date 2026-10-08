@@ -45,6 +45,19 @@ export async function api(method: string, path: string, body?: unknown): Promise
   }
 }
 
+/** One call, parsed. For the TUI's own reads (sidebar): the same text a failed `api` shows, as an Error. */
+export async function apiJson<T>(method: string, path: string, body?: unknown): Promise<T> {
+  let r: Raw;
+  try {
+    r = await raw(method, path, body);
+  } catch (e: any) {
+    throw new Error(`error: ${e?.message ?? e}`);
+  }
+  if (r.unavailable) throw new Error(UNAVAILABLE);
+  if (r.status < 200 || r.status >= 300) throw new Error(`error ${r.status}: ${r.text}`);
+  return r.data as T;
+}
+
 const seg = encodeURIComponent;
 const qs = (p: Record<string, string | undefined>) => {
   const u = new URLSearchParams();

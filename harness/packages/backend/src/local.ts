@@ -23,6 +23,7 @@ import { delegateTools, type DelegateDeps } from "./delegate.ts";
 import { forgetSessions } from "./forget.ts";
 import * as git from "./git.ts";
 import { toolDiff } from "./diff.ts";
+import { space } from "./space.ts";
 import { PROTOCOL } from "./wire.ts";
 import type { Backend, CatalogModel, Hello, SessionHandle, SessionOpts } from "./index.ts";
 
@@ -183,6 +184,8 @@ export class LocalBackend implements Backend {
     describe: async (key: string, d: string) => describeSession(key, d),
     clear: async (key: string) => clearSessionHistory(key),
   };
+
+  space = space;
 
   settings = { write: async (patch: Parameters<typeof writeSettings>[0]) => writeSettings(patch) };
 

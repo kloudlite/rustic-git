@@ -313,7 +313,7 @@ test("processes view lists what the workspace runs, with its logs", async () => 
   t.mockInput.pressKey("f"); // processes
   const f = await t.frame();
   expect(f).toContain("2/3 running");
-  expect(f).toContain("server:8080");
+  expect(f).toContain("go run ./cmd/gateway"); // the platform names a process by its command, not "server:8080"
   expect(f).toContain("crashed (1)");
   expect(f).toContain("listening on :8080"); // selected process's log
 
@@ -339,9 +339,9 @@ test("sidebar: session header, workspaces with their ephemerals, environment wit
   expect(f).not.toContain("●"); // no dot indicators
   expect(f).toContain("Environment"); // the env heads its own block
   expect(f).toContain("production");
-  expect(f).toContain("current snapshot: pre-rate-limits"); // labelled, on its own line
+  expect(f).not.toContain("current snapshot"); // the platform names no restore point; the row only shows when one is known
   expect(f).toContain("→ api-gateway"); // interception, in the right-hand column
-  expect(f).toContain("http:8080"); // ports stay in their own column
+  expect(f).toContain("tcp:8080"); // ports stay in their own column; the platform has no protocol, so tcp
   t.done();
 });
 
@@ -593,4 +593,33 @@ test("a long codemode script's expander counts the script's hidden rows, not jus
   const f = await restored(codemodeSession(code, "ok", false));
   expect(f).not.toContain("+0 lines");
   expect(f).toContain("+5 lines");
+});
+
+// The sidebar is the platform's data, so it has to say so when the platform is
+// down, and an empty space must not crash the environment guards.
+async function sidebarWith(view: Record<string, unknown>) {
+  const real = backend();
+  boot(new Proxy(real, { get: (o: any, p) => (p === "space" ? async () => view : typeof o[p] === "function" ? o[p].bind(o) : o[p]) }) as any, hello());
+  const setup = await testRender(<App />, { width: COLS, height: ROWS, kittyKeyboard: true });
+  let f = "";
+  for (let i = 0; i < 10; i++) {
+    await tick();
+    await setup.renderOnce();
+    f = setup.captureCharFrame();
+  }
+  setup.renderer.destroy();
+  boot(real, hello());
+  return f;
+}
+
+test("sidebar: an unreachable platform shows the reason, not demo rows", async () => {
+  const f = await sidebarWith({ available: false, error: "unavailable: no KL_API_URL", user: "", workspaces: [], environments: [] });
+  expect(f).toContain("platform not reachable");
+  expect(f).not.toContain("api-gateway");
+});
+
+test("sidebar: a space without environments renders no Environment block", async () => {
+  const f = await sidebarWith({ available: true, user: "me", workspaces: [{ id: "w1", name: "solo", owner: "me", state: "ready" }], environments: [] });
+  expect(f).toContain("solo");
+  expect(f).not.toContain("Environment");
 });

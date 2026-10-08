@@ -371,6 +371,41 @@ export function dropSessions(ws: string): void {
     if (d === own || d.startsWith(`${own}_`)) rmSync(join(CONFIG_DIR, "sessions", d), { recursive: true, force: true });
 }
 
+/**
+ * Subagent clones the bench started and has not deleted: `{ id, parent, task }`. The platform
+ * lists a clone as an ordinary workspace with no parent or task, so the sidebar's tree comes from
+ * this file next to the sessions. Best effort throughout: a lost record only flattens the tree.
+ */
+export type CloneRec = { id: string; parent: string; task: string };
+const CLONES = join(CONFIG_DIR, "clones.json");
+
+export function readClones(): CloneRec[] {
+  try {
+    const v = JSON.parse(readFileSync(CLONES, "utf8"));
+    return Array.isArray(v) ? v.filter((r) => r && typeof r.id === "string" && typeof r.parent === "string") : [];
+  } catch {
+    return [];
+  }
+}
+
+function writeClones(list: CloneRec[]): void {
+  try {
+    mkdirSync(CONFIG_DIR, { recursive: true });
+    const tmp = `${CLONES}.${process.pid}.tmp`;
+    writeFileSync(tmp, JSON.stringify(list));
+    renameSync(tmp, CLONES);
+  } catch {}
+}
+
+export function recordClone(rec: CloneRec): void {
+  writeClones([...readClones().filter((r) => r.id !== rec.id), rec]);
+}
+
+export function forgetClone(id: string): void {
+  const all = readClones();
+  if (all.some((r) => r.id === id)) writeClones(all.filter((r) => r.id !== id));
+}
+
 export async function createSession({
   key,
   model,

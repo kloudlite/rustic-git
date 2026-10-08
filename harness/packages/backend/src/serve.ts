@@ -46,6 +46,7 @@ export function serve(backend: Backend, peer: Peer) {
     for (const [name, fn] of Object.entries(ops)) peer.handle(`${group}.${name}`, (args: unknown[]) => (fn as any)(...args));
 
   peer.handle("settings.write", (patch) => backend.settings.write(patch));
+  peer.handle("space", () => backend.space());
   peer.handle("models.refresh", () => backend.models.refresh());
   peer.handle("auth.providers", () => backend.auth.providers());
   peer.handle("auth.claudeSignedIn", (fresh) => backend.auth.claudeSignedIn(fresh));
