@@ -16,6 +16,7 @@ jobs:
         include:
           - target: x86_64-unknown-linux-gnu
             os: ubuntu-latest
+            tui: bun-linux-x64
           # cross, because a glibc arm64 binary needs a matching sysroot the ubuntu runner has not
           # got — the darwin pair build natively on macOS runners instead.
           - target: aarch64-unknown-linux-gnu
@@ -23,8 +24,10 @@ jobs:
             cross: true
           - target: x86_64-apple-darwin
             os: macos-latest
+            tui: bun-darwin-x64
           - target: aarch64-apple-darwin
             os: macos-latest
+            tui: bun-darwin-arm64
     runs-on: ${{ matrix.os }}
     timeout-minutes: 30
     steps:
@@ -44,12 +47,28 @@ jobs:
           name="kl-connect-${{ matrix.target }}"
           cp "target/${{ matrix.target }}/release/kl-connect" "$name"
           shasum -a 256 "$name" > "$name.sha256" 2>/dev/null || sha256sum "$name" > "$name.sha256"
+      # The laptop TUI (harness/apps/tui/src/remote.tsx): agent stays on the bench, so this
+      # binary is only the renderer. No aarch64-linux build: that target keeps the bench's TUI.
+      - if: matrix.tui
+        uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2.2.0
+        with:
+          bun-version: 1.3.14
+      - if: matrix.tui
+        name: kl-tui
+        run: |
+          set -eu
+          cd harness && bun install --frozen-lockfile && cd ..
+          name="kl-tui-${{ matrix.target }}"
+          bun build --compile --target=${{ matrix.tui }} harness/apps/tui/src/remote.tsx --outfile "$name"
+          shasum -a 256 "$name" > "$name.sha256" 2>/dev/null || sha256sum "$name" > "$name.sha256"
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: kl-connect-${{ matrix.target }}
           path: |
             kl-connect-${{ matrix.target }}
             kl-connect-${{ matrix.target }}.sha256
+            kl-tui-${{ matrix.target }}
+            kl-tui-${{ matrix.target }}.sha256
 
   release:
     needs: build
@@ -72,7 +91,9 @@ jobs:
       # repo, and the only origin signal `install.sh`'s same-origin checksum cannot give.
       - uses: actions/attest-build-provenance@977bb373ede98d70efdf65b84cb5f73e068dcc2a # v3
         with:
-          subject-path: dist/kl-connect-*
+          subject-path: |
+            dist/kl-connect-*
+            dist/kl-tui-*
       - uses: softprops/action-gh-release@72f2c25fcb47643c292f7107632f7a47c1df5cd8 # v2
         with:
           files: dist/*
