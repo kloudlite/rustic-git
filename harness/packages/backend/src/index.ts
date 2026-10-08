@@ -21,7 +21,7 @@ import type { Change, ChangeStatus, Match, TreeNode } from "./git.ts";
 export type { DiffLine, FileDiff } from "./diff.ts";
 export type { Change, ChangeStatus, Match, TreeNode } from "./git.ts";
 export type { ModelRef, ThinkingLevel, ToolDef };
-// export { PROTOCOL } from "./wire.ts";
+export { PROTOCOL } from "./wire.ts";
 // export { connect, RemoteBackend } from "./remote.ts";
 
 export type Settings = ReturnType<typeof readSettings>;
