@@ -16,6 +16,7 @@
       },
       "dependencies": {
         "@kloudlite-tui/agent": "workspace:*",
+        "@kloudlite-tui/backend": "workspace:*",
         "@kloudlite-tui/tools": "workspace:*",
         "@opentui/core": "^0.5.1",
         "@opentui/react": "^0.5.1",
@@ -37,6 +38,18 @@
         "@earendil-works/pi-coding-agent": "1.0.4",
         "@kloudlite-tui/tools": "workspace:*",
         "@modelcontextprotocol/sdk": "1.32.1",
+      },
+      "devDependencies": {
+        "@types/bun": "^1.1.0",
+        "typescript": "^5.7.0",
+      },
+    },
+    "packages/backend": {
+      "name": "@kloudlite-tui/backend",
+      "version": "0.0.0",
+      "dependencies": {
+        "@kloudlite-tui/agent": "workspace:*",
+        "@kloudlite-tui/tools": "workspace:*",
       },
       "devDependencies": {
         "@types/bun": "^1.1.0",
@@ -186,6 +199,8 @@
     "@hono/node-server": ["@hono/node-server@2.1.3", "", { "peerDependencies": { "hono": "^4" } }, "sha512-TA//nWMqPhbfdfneACk6t5a9eqbS9lABEPyKn0/xZTah3H3U2XaVg85rJFl0/Fyit0I552YDHgXGVSf3GwqbUw=="],
 
     "@kloudlite-tui/agent": ["@kloudlite-tui/agent@workspace:packages/agent"],
+
+    "@kloudlite-tui/backend": ["@kloudlite-tui/backend@workspace:packages/backend"],
 
     "@kloudlite-tui/tools": ["@kloudlite-tui/tools@workspace:packages/tools"],
 

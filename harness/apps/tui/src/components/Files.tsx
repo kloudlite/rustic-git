@@ -9,16 +9,13 @@ import type { FileDiff } from "../diff.ts";
 import { useWheelAccel } from "../wheel.ts";
 import {
   changes as scanChanges,
-  displayRoot,
   fileDiff,
   fullFile,
   grep,
   isGitRepo,
   listDir,
-  type Change,
-  type Match,
-  type TreeNode,
-} from "../git.ts";
+} from "@kloudlite-tui/backend/local";
+import { displayRoot, type Change, type Match, type TreeNode } from "../git.ts";
 
 /** One selectable row in the left pane. */
 type Row =

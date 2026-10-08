@@ -12,6 +12,7 @@
   },
   "dependencies": {
     "@kloudlite-tui/agent": "workspace:*",
+    "@kloudlite-tui/backend": "workspace:*",
     "@kloudlite-tui/tools": "workspace:*",
     "@opentui/core": "^0.5.1",
     "@opentui/react": "^0.5.1",

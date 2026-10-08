@@ -1,0 +1,21 @@
+{
+  "name": "@kloudlite-tui/backend",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "exports": {
+    ".": "./src/index.ts",
+    "./local": "./src/local.ts"
+  },
+  "scripts": {
+    "check": "tsc --noEmit"
+  },
+  "dependencies": {
+    "@kloudlite-tui/agent": "workspace:*",
+    "@kloudlite-tui/tools": "workspace:*"
+  },
+  "devDependencies": {
+    "@types/bun": "^1.1.0",
+    "typescript": "^5.7.0"
+  }
+}

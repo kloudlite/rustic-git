@@ -54,7 +54,7 @@ const THINKING_HINT: Record<ThinkingLevel, string> = {
 };
 import { Login, type LoginType } from "./components/Login.tsx";
 import { AskPanel, type Ask } from "./components/Ask.tsx";
-import { toolDiff } from "./diff.ts";
+import { toolDiff } from "@kloudlite-tui/backend/local";
 import { readClipboardImage, type ClipImage } from "./clipboard.ts";
 import {
   getSession,
