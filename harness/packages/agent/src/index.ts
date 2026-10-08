@@ -397,8 +397,9 @@ export async function createSession({
       // model keeps reaching for `bash` and codemode never fires. `"only"`
       // drops the direct declarations, leaving scripts as the way to call them.
       extensionFactories: [{ name: "codemode", factory: withCodemodeExtras(createCodemodeExtension({ mode: "only" })) }],
-      // the same skill Claude sessions get through the plugin (claude.ts)
-      additionalSkillPaths: [CODEMODE_SKILL],
+      // the same skill Claude sessions get through the plugin (claude.ts). Inlined: pi lists
+      // skills only while a read tool is active, and noTools "builtin" drops it.
+      appendSystemPrompt: [readFileSync(join(CODEMODE_SKILL, "SKILL.md"), "utf8")],
     });
     await resourceLoader.reload();
   }
@@ -412,6 +413,8 @@ export async function createSession({
     sessionManager: fresh
       ? SessionManager.create(cwd, dir)
       : SessionManager.continueRecent(cwd, dir),
+    // pi's read/bash/edit/write would run in the bench pod; real work goes through the pod tools
+    noTools: "builtin",
     customTools: registry ? (adaptTools(registry) as never) : undefined,
   });
   // add codemode to pi's defaults rather than replacing them

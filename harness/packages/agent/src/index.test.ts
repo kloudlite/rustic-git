@@ -12,7 +12,7 @@ test("codemode only: pi declares codemode, not bash (the Claude bridge relies on
   const names = declaredTools(s).map((t: any) => t.name);
   expect(names).toContain("codemode");
   expect(names).not.toContain("bash");
-  expect(s.agent.state.tools.map((t: any) => t.name)).toContain("bash"); // still callable from scripts
+  expect(s.agent.state.tools.map((t: any) => t.name)).not.toContain("bash"); // no built-ins at all (noTools)
   expect(s.systemPrompt).toContain("codemode");
   s.dispose();
 });
@@ -81,4 +81,17 @@ test("display: throw path clears, empty and over-cap are refused", async () => {
   const big = await h.tools.display.execute("y/3", { markdown: "q".repeat(200_001) });
   expect(big.content[0].text).toBe("display: limit reached, not shown");
   expect(lone.content[0].text).toContain("Shown to the user (1 lines)");
+});
+
+test("noTools builtin: no pi fs/shell tools active, custom tools kept", async () => {
+  process.env.KLOUDLITE_CONFIG_DIR = mkdtempSync(join(tmpdir(), "kl-cfg-"));
+  const { createSession, models } = await import("./index.ts");
+  const { Registry } = await import("@kloudlite-tui/tools");
+  const model = models.getModels().find((m: any) => m.provider !== "anthropic") as any;
+  const registry = new Registry().add({ name: "mine", description: "d", inputSchema: { type: "object" }, run: async () => "x" });
+  const s: any = await createSession({ key: `t-${process.pid}-nt`, model, registry, fresh: true });
+  const active: string[] = s.getActiveToolNames();
+  for (const n of ["bash", "read", "edit", "write", "grep", "find", "ls"]) expect(active).not.toContain(n);
+  expect(active).toContain("mine");
+  s.dispose();
 });
