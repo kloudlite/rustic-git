@@ -10,7 +10,6 @@
 //! The answer is the last assistant text seen before `agent_end`: Claude sessions emit
 //! `agent_end` with an empty message list, so the events are tracked instead.
 import { randomBytes } from "node:crypto";
-import { forgetClone, recordClone, type CloneRec } from "@kloudlite-tui/agent";
 import { api, podExec, type ExecResult, type ToolDef } from "@kloudlite-tui/tools";
 import type { SessionHandle, SessionOpts } from "./index.ts";
 import { forgetSessions } from "./forget.ts";
@@ -28,9 +27,6 @@ export type DelegateDeps = {
   sleep?: (ms: number) => Promise<void>;
   /** Drops a deleted workspace's bench sessions; tests pass a fake. */
   forget?: (ws: string) => Promise<void>;
-  /** The sidebar's clone list (parent and task the platform does not carry); tests pass fakes. */
-  record?: (rec: CloneRec) => void;
-  unrecord?: (id: string) => void;
 };
 
 const WS = "/home/kl/workspace";
@@ -84,7 +80,6 @@ async function runInClone(P: string, task: string, deps: DelegateDeps, opts: (e?
       await sleep(2000);
     }
   };
-  const unrecord = deps.unrecord ?? forgetClone;
   const forget = deps.forget ?? ((id: string) => forgetSessions(id, deps.live));
   // the subagent's own session history goes with its clone, once the platform took the delete
   const del = async (id: string) => {
@@ -93,7 +88,6 @@ async function runInClone(P: string, task: string, deps: DelegateDeps, opts: (e?
     const r = await call("DELETE", p(id)).catch(() => "error");
     if (!r.startsWith("error") && !r.startsWith("platform tools unavailable")) {
       await forget(id);
-      unrecord(id);
     }
   };
 
@@ -110,13 +104,11 @@ async function runInClone(P: string, task: string, deps: DelegateDeps, opts: (e?
   // one cut per source at a time: a second clone of the same parent 409s until the first's cut lands
   let made = "";
   const created = await until(async () => {
-    made = await call("POST", `${p(P)}/clone`, { name: `sub-${hex()}` });
+    made = await call("POST", `${p(P)}/clone`, { name: `sub-${hex()}`, task: task.split("\n")[0]!.slice(0, 72) });
     return made.startsWith("error 409:") && made.includes("already being cut") ? undefined : made;
   }, 60_000);
   if (created === null || created.startsWith("error") || created.startsWith("platform tools unavailable")) return created ?? made;
   const C = JSON.parse(created).id as string;
-  // right away, so the sidebar shows the clone under its parent while it is still starting
-  (deps.record ?? recordClone)({ id: C, parent: P, task: task.split("\n")[0]!.slice(0, 72) });
 
   let settled = false; // clone deleted, or deliberately kept
   let h: SessionHandle | undefined;

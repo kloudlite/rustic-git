@@ -2,7 +2,6 @@ import { afterEach, expect, test } from "bun:test";
 import { mkdtempSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { readClones, recordClone } from "@kloudlite-tui/agent";
 import { LocalBackend } from "./local.ts";
 
 const realFetch = globalThis.fetch;
@@ -21,12 +20,10 @@ test("without KL_API_URL the view is unavailable with a reason, never a throw", 
   expect(v).toMatchObject({ user: "me", workspaces: [], environments: [] });
 });
 
-test("lists the user's workspaces and the team's environments, joins clone records, survives a dead pod", async () => {
+test("lists the user's workspaces and the team's environments, reads clone parent and task from the doc, survives a dead pod", async () => {
   const dir = mkdtempSync(join(tmpdir(), "kl-space-"));
   writeFileSync(join(dir, "tok"), "SECRET-TOKEN\n");
   Object.assign(process.env, { KL_API_URL: "http://api", KL_TOOL_TOKEN_FILE: join(dir, "tok"), KL_OWNER: "me", KL_TEAM: "acme", KL_BENCH: "bench" });
-  recordClone({ id: "c1", parent: "w1", task: "probe" });
-  recordClone({ id: "gone", parent: "w1", task: "deleted elsewhere" });
   const urls: string[] = [];
   const json = (v: unknown, status = 200) => new Response(JSON.stringify(v), { status });
   globalThis.fetch = (async (u: any, init: any) => {
@@ -36,7 +33,7 @@ test("lists the user's workspaces and the team's environments, joins clone recor
     if (url === "http://api/v1/workspaces?team=acme")
       return json([
         { id: "w1", name: "api", owner: "me", state: "ready", repo: "o/r", branch: "main" },
-        { id: "c1", name: "sub", owner: "me", state: "ready" },
+        { id: "c1", name: "sub", owner: "me", state: "ready", clone_of: "w1", task: "probe" },
         { id: "w2", name: "theirs", owner: "other", state: "ready" },
         { id: "bench", name: "bench", owner: "me", state: "ready" },
         { id: "w3", name: "stopped", owner: "me", state: "stopped", attached_environment: "e1" },
@@ -73,8 +70,35 @@ test("lists the user's workspaces and the team's environments, joins clone recor
   expect(w1!.processes![1]!.logs).toEqual([]); // only running processes are read
   expect(v.environments[0]!.services).toEqual([{ name: "api", ports: [8080], interceptedBy: "w1" }, { name: "db", ports: [5432], interceptedBy: undefined }]);
   expect(JSON.stringify(v)).not.toContain("TOKEN");
-  expect(readClones().map((r) => r.id)).toEqual(["c1"]); // the deleted one is pruned
   expect(urls.some((u) => u.includes("w3/tools"))).toBe(false);
+});
+
+test("a running process is read from the cursor the last answer gave, not from 0", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "kl-space-"));
+  writeFileSync(join(dir, "tok"), "SECRET-TOKEN\n");
+  Object.assign(process.env, { KL_API_URL: "http://api", KL_TOOL_TOKEN_FILE: join(dir, "tok"), KL_OWNER: "me", KL_TEAM: "acme", KL_BENCH: "bench" });
+  const json = (v: unknown) => new Response(JSON.stringify(v));
+  const reads: any[] = [];
+  globalThis.fetch = (async (u: any, init: any) => {
+    const url = String(u);
+    if (url.startsWith("http://api/v1/workspaces?")) return json([{ id: "wc", name: "cur", owner: "me", state: "ready" }]);
+    if (url.startsWith("http://api/v1/environments")) return json([]);
+    if (url.endsWith("/v1/me/environments")) return json([]);
+    if (url.endsWith("/v1/workspaces/wc/tools")) return json({ address: "10.0.0.2:7788", token: "T" });
+    if (url.endsWith("/tools/process_list")) return json({ processes: [{ id: "px", cmd: "srv", state: "running", exit_code: null, failed: false }] });
+    if (url.endsWith("/tools/process_output")) {
+      const body = JSON.parse(init.body);
+      reads.push(body);
+      return reads.length === 1 ? json({ stdout: "a\nb\n", stderr: "e1\n", next: 4, next_err: 3 }) : json({ stdout: "c\n", stderr: "", next: 6, next_err: 3 });
+    }
+    return json({ error: "nope" });
+  }) as any;
+  const b = new LocalBackend();
+  const first = await b.space();
+  expect(first.workspaces[0]!.processes![0]!.logs).toEqual(["a", "b", "e1"]);
+  const second = await b.space();
+  expect(reads[1]).toMatchObject({ id: "px", since: 4, since_err: 3 });
+  expect(second.workspaces[0]!.processes![0]!.logs).toEqual(["a", "b", "e1", "c"]);
 });
 
 test("a failing list call is unavailable, with the API's text and no token", async () => {

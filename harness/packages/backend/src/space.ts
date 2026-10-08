@@ -1,12 +1,12 @@
 //! `Backend.space()`: the sidebar's data, read from the platform with the bench's own tool token.
 //! Workspaces are the CURRENT USER's (`KL_OWNER`; the API already scopes the list to the caller,
 //! the filter is belt and braces) in the space `KL_TEAM`; environments are every environment of
-//! that team whoever made them. A clone's parent and task come from the bench's clone file
-//! (`readClones`), because the platform lists a subagent clone as an ordinary workspace. Processes
+//! that team whoever made them. A clone's parent and task (`clone_of`, `task`) are on the
+//! platform's workspace doc, so every row comes from the API; nothing here is kept on the bench's
+//! disk apart from the log cursors below, which die with the process. Processes
 //! and the changed-file count come from each READY workspace's `kl ide serve` (crates/ide), best
 //! effort under a 5 s cap: a pod that does not answer leaves those fields out, never fails the view.
 //! Nothing here formats a token into a string; errors carry the API's text or ours.
-import { forgetClone, readClones } from "@kloudlite-tui/agent";
 import { apiJson, podGet, podPost } from "@kloudlite-tui/tools";
 import type { SpaceEnvironment, SpaceProcess, SpaceView, SpaceWorkspace } from "./index.ts";
 
@@ -16,15 +16,35 @@ const LOG_LINES = 20;
 const capped = <T>(p: Promise<T>): Promise<T | undefined> =>
   Promise.race([p.catch(() => undefined), new Promise<undefined>((r) => setTimeout(r, POD_CAP_MS))]);
 
+/** Per running process: where the last read stopped and the tail so far, so a beat reads only
+ * what is new instead of the whole 4 MiB ring. Keyed "ws/procId"; pruned when the process leaves
+ * the list. */
+const cursors = new Map<string, { next: number; next_err: number; lines: string[] }>();
+
 async function processes(ws: string): Promise<SpaceProcess[]> {
   const { processes } = await podPost<{ processes: Omit<SpaceProcess, "logs">[] }>(ws, "process_list", {}, POD_CAP_MS);
+  const live = new Set(processes.map((p) => `${ws}/${p.id}`));
+  for (const k of cursors.keys()) if (k.startsWith(`${ws}/`) && !live.has(k)) cursors.delete(k);
   return Promise.all(
     processes.map(async (p) => {
       let logs: string[] = [];
       if (p.state === "running") {
-        // from offset 0: the ring is 4 MiB at most and a running process has no cursor of ours to resume
-        const o = await capped(podPost<{ stdout?: string; stderr?: string }>(ws, "process_output", { id: p.id }, POD_CAP_MS));
-        logs = `${o?.stdout ?? ""}${o?.stderr ?? ""}`.split("\n").filter(Boolean).slice(-LOG_LINES);
+        const key = `${ws}/${p.id}`;
+        const c = cursors.get(key) ?? { next: 0, next_err: 0, lines: [] };
+        const o = await capped(
+          podPost<{ stdout?: string; stderr?: string; next?: number; next_err?: number }>(
+            ws, "process_output", { id: p.id, since: c.next, since_err: c.next_err }, POD_CAP_MS,
+          ),
+        );
+        if (o) {
+          // each stream split on its own: joined first, stdout's last partial line would fuse with stderr's first
+          const add = (t?: string) => (t ?? "").split("\n").filter(Boolean);
+          c.lines = [...c.lines, ...add(o.stdout), ...add(o.stderr)].slice(-LOG_LINES);
+          c.next = o.next ?? c.next;
+          c.next_err = o.next_err ?? c.next_err;
+          cursors.set(key, c);
+        }
+        logs = c.lines;
       }
       return { ...p, logs };
     }),
@@ -56,12 +76,6 @@ export async function space(): Promise<SpaceView> {
     return { available: false, error: String(e?.message ?? e).slice(0, 200), user, workspaces: [], environments: [] };
   }
 
-  const clones = readClones();
-  const listed = new Set(ws.map((w) => w.id));
-  // a clone that left the platform's list was deleted elsewhere
-  for (const r of clones) if (!listed.has(r.id)) forgetClone(r.id);
-  const rec = new Map(clones.map((r) => [r.id, r]));
-
   const workspaces: SpaceWorkspace[] = ws
     .filter((w) => w.id !== bench && (!user || w.owner === user))
     .map((w) => ({
@@ -72,8 +86,8 @@ export async function space(): Promise<SpaceView> {
       repo: w.repo ?? undefined,
       branch: w.branch ?? undefined,
       attached_environment: w.attached_environment ?? undefined,
-      parent: rec.get(w.id)?.parent,
-      task: rec.get(w.id)?.task,
+      parent: w.clone_of ?? undefined,
+      task: w.task ?? undefined,
     }));
   await Promise.all(workspaces.filter((w) => w.state === "ready").map(enrich));
 
