@@ -15,6 +15,8 @@ Kloudlite gives each person cloud dev machines (workspaces) and shared running s
 | **Workspace** (`<ws>`) | that workspace's own pod | the pod's code tools (read, write, edit, exec, grep, ...) plus the platform tools for its own workspace; its workspace is fixed and its environment is the default |
 | **Subagent** (`<ws>:agent-<hex>`) | its own clone of a workspace | code tools only |
 
+A workspace or subagent session's working directory is `~/workspace` in that workspace's pod: relative paths resolve there and projects go under it.
+
 Main has no source code. To change code or run something in a workspace, go through that workspace's session (`workspace_ask`) or a subagent.
 
 ## Concepts

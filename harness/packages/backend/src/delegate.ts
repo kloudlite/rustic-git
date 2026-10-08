@@ -32,7 +32,9 @@ export type DelegateDeps = {
   forget?: (ws: string) => Promise<void>;
 };
 
-const WS = "/home/kl/workspace";
+/** A workspace pod's source folder (crates/workspaces/src/k8s/mod.rs WORKSPACE_DIR). */
+export const WORKSPACE_DIR = "/home/kl/workspace";
+const WS = WORKSPACE_DIR;
 const sq = (s: string) => `'${s.replace(/'/g, `'\\''`)}'`;
 const hex = () => randomBytes(4).toString("hex");
 const tail = (s: string, n: number) => s.trim().split("\n").slice(-n).join("\n");

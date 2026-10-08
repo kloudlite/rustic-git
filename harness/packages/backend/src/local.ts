@@ -1,6 +1,7 @@
 //! The agent in-process behind the `Backend` interface: the pod's own TUI (cli.tsx) and the
 //! remote host (serve.ts) both use it. The permission gate lives here as a hook that asks
 //! `opts.permission`; the decision itself is the TUI's (modes, always-allow, the card).
+import { mkdirSync } from "node:fs";
 import { homedir } from "node:os";
 import {
   claudeSignedIn,
@@ -19,7 +20,7 @@ import {
   type ModelRef,
 } from "@kloudlite-tui/agent";
 import { Registry, platformTools, podTools, scratchRoot, scratchTools, webFetch, webSearch, type ToolDef } from "@kloudlite-tui/tools";
-import { delegateTools, type DelegateDeps } from "./delegate.ts";
+import { WORKSPACE_DIR, delegateTools, type DelegateDeps } from "./delegate.ts";
 import { forgetSessions } from "./forget.ts";
 import * as git from "./git.ts";
 import { toolDiff } from "./diff.ts";
@@ -103,6 +104,15 @@ export function installGate(agent: any, permission: SessionOpts["permission"]): 
     (parentId && (await ask(ctx, new AbortController().signal))) || nested(ctx, parentId);
 }
 
+/**
+ * Workspace and subagent sessions work in the pod's ~/workspace, so the model is told that path and
+ * resolves relative paths there; main keeps the bench's cwd. Every file tool is the pod's, so on the
+ * bench the folder only has to exist (Claude spawns its process in it; session() creates it).
+ */
+export function sessionCwd(k: { kind: string }): string | undefined {
+  return k.kind === "main" ? undefined : WORKSPACE_DIR;
+}
+
 export class LocalBackend implements Backend {
   /** Open sessions, for workspace_ask to reach a running one; `busy` = mid-turn. */
   #live = new Map<string, SessionHandle>();
@@ -130,6 +140,9 @@ export class LocalBackend implements Backend {
     const k = sessionKind(key);
     const deps = { live: this.#live, busy: this.#busy, open: (key: string, o: SessionOpts) => this.session(key, o) };
     const registry = await registryFor(k, deps, opts, key);
+    const cwd = sessionCwd(k);
+    // best effort: off the bench (a laptop running the backend) / is not writable, and only Claude spawns there
+    if (cwd) try { mkdirSync(cwd, { recursive: true }); } catch {}
     const agent: any = await createSession({
       key,
       model,
@@ -138,6 +151,7 @@ export class LocalBackend implements Backend {
       thinkingLevel: opts.thinkingLevel,
       autoCompact: opts.autoCompact,
       codemode: opts.codemode,
+      cwd,
     });
     installGate(agent, opts.permission);
     agent.subscribe((e: any) => {

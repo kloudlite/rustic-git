@@ -2,7 +2,7 @@ import { expect, test } from "bun:test";
 import { mkdtempSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { LocalBackend, GATED, EDITS, installGate, registryFor, sessionKind } from "./local.ts";
+import { LocalBackend, GATED, EDITS, installGate, registryFor, sessionCwd, sessionKind } from "./local.ts";
 import { toolDiff } from "./diff.ts";
 import { PROTOCOL } from "./wire.ts";
 
@@ -48,6 +48,12 @@ test("sessionKind", () => {
   expect(sessionKind("ws1")).toEqual({ kind: "workspace", ws: "ws1" });
   expect(sessionKind("ws1:x")).toEqual({ kind: "workspace", ws: "ws1" });
   expect(sessionKind("ws1:agent-ab12")).toEqual({ kind: "subagent", ws: "ws1" });
+});
+
+test("workspace and subagent sessions run in the pod's folder, main does not", () => {
+  expect(sessionCwd(sessionKind("ws1"))).toBe("/home/kl/workspace");
+  expect(sessionCwd(sessionKind("ws1:agent-ab12"))).toBe("/home/kl/workspace");
+  expect(sessionCwd(sessionKind("main"))).toBeUndefined();
 });
 
 test("registry per session kind", async () => {

@@ -385,6 +385,7 @@ export async function createSession({
   thinkingLevel,
   autoCompact,
   codemode,
+  cwd = process.cwd(),
 }: {
   key: string;
   model: Model<Api>;
@@ -397,8 +398,12 @@ export async function createSession({
   autoCompact?: boolean;
   /** Let the model write a script that calls tools, instead of one call per turn. */
   codemode?: boolean;
+  /** Working directory the model is told and Claude spawns in (default: this process's). */
+  cwd?: string;
 }): Promise<AgentSession | ClaudeSession> {
-  const cwd = process.cwd();
+  // pi finds a session to continue by the cwd in its header, and every session written so far has
+  // this process's cwd: keep it for the SessionManager so a changed `cwd` never orphans them.
+  const smCwd = process.cwd();
   const dir = sessionDir(key);
   // meta.json makes a session findable later: its key, its name, last use
   // (Claude models and pi's own models share this key and transcript)
@@ -432,8 +437,8 @@ export async function createSession({
     ...(thinkingLevel ? { thinkingLevel } : {}),
     // continue the most recent session in this key's dir (new file if none)
     sessionManager: fresh
-      ? SessionManager.create(cwd, dir)
-      : SessionManager.continueRecent(cwd, dir),
+      ? SessionManager.create(smCwd, dir)
+      : SessionManager.continueRecent(smCwd, dir),
     // pi's read/bash/edit/write would run in the bench pod; real work goes through the pod tools
     noTools: "builtin",
     customTools: registry ? (adaptTools(registry) as never) : undefined,
@@ -445,7 +450,7 @@ export async function createSession({
   // prompt and transcript (spec 2026-10-08-claude-tool-host). pi's own loop
   // never starts for them.
   if (model.provider === "anthropic") {
-    const claude = createClaudeSession({ key, model, thinkingLevel, pi: session as never });
+    const claude = createClaudeSession({ key, model, thinkingLevel, cwd, pi: session as never });
     if (autoCompact !== undefined) claude.setAutoCompactionEnabled(autoCompact);
     return claude;
   }
