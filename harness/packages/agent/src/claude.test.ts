@@ -114,7 +114,7 @@ test("options: no built-in tools, our MCP server, pi's prompt, history through s
   expect(o.mcpServers.kl.timeout).toBe(86_400_000);
   expect(o.systemPrompt).toEqual({ type: "preset", preset: "claude_code" });
   expect(o.permissionMode).toBe("bypassPermissions");
-  expect(o.settingSources).toEqual([]);
+  expect(o.settingSources).toEqual(["project"]);
   expect(o.includePartialMessages).toBe(true);
   expect(o.extraArgs["thinking-display"]).toBe("summarized");
   expect(typeof o.resume).toBe("string");

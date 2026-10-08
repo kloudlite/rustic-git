@@ -616,7 +616,8 @@ export function createClaudeSession(opts: ClaudeOptions) {
       // Claude Code's own prompt, untouched: with pi's prompt in its place (or
       // appended) the server bills the session as a third-party app
       systemPrompt: { type: "preset", preset: "claude_code" },
-      settingSources: [],
+      // the workspace's CLAUDE.md and .claude/, loaded by Claude Code itself
+      settingSources: ["project"],
       cwd,
       model,
       extraArgs: { "thinking-display": "summarized" },
