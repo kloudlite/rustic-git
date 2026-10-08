@@ -21,11 +21,10 @@
  * setAutoCompactionEnabled, messages, agent.beforeToolCall) and emits the same
  * `AgentSessionEvent` shapes, so the TUI renders it unchanged.
  *
- * Tools, prompt and transcript are pi's (spec 2026-10-08-claude-tool-host).
- * The pi AgentSession is built as for any model but its loop never runs:
- * its declared tools are served to the child over in-process MCP
- * (`claude-tools.ts`), `session.systemPrompt` is the system prompt, and
- * every finished message is recorded into pi's file and `agent.state`.
+ * Tools and transcript are pi's (spec 2026-10-08-claude-tool-host); the
+ * system prompt is Claude Code's preset. The pi AgentSession is built as for
+ * any model but its loop never runs: its declared tools are served to the
+ * child over in-process MCP (`claude-tools.ts`), and every finished message is recorded into pi's file and `agent.state`.
  * Each query start resumes Claude Code from pi's record
  * (`claude-history.ts` through `sessionStore`), so switching to or from a
  * pi model never loses a turn. Claude Code's built-in tools are off.
@@ -126,7 +125,6 @@ type QueryFn = (p: { prompt: AsyncIterable<SDKUserMessage>; options?: Options })
 
 export type PiHost = {
   agent: { state: { messages: any[]; tools: any[] }; beforeToolCall?: any; afterToolCall?: any };
-  systemPrompt: string;
   sessionManager: { appendMessage(m: any): unknown; buildSessionContext(): { messages: any[] } };
   subscribe(l: (e: any) => void): () => void;
   dispose?(): void;
@@ -615,7 +613,9 @@ export function createClaudeSession(opts: ClaudeOptions) {
       // ponytail: one day per call so a long `bash` is never cut off by
       // Claude Code's MCP timeout; our abort is the real bound
       mcpServers: { kl: { type: "sdk", name: "kl", instance: toolServer() as any, timeout: 86_400_000 } as any },
-      systemPrompt: piSession.systemPrompt,
+      // Claude Code's own prompt, untouched: with pi's prompt in its place (or
+      // appended) the server bills the session as a third-party app
+      systemPrompt: { type: "preset", preset: "claude_code" },
       settingSources: [],
       cwd,
       model,

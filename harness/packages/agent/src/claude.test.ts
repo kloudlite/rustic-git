@@ -63,7 +63,6 @@ function piHost(messages: any[] = []) {
   const tools: any[] = [];
   const host = {
     agent: { state: { messages: [...messages], tools } } as any,
-    systemPrompt: "PI PROMPT",
     sessionManager: {
       appendMessage: (m: any) => recorded.push(m),
       buildSessionContext: () => ({ messages: [...messages, ...recorded] }),
@@ -113,7 +112,7 @@ test("options: no built-in tools, our MCP server, pi's prompt, history through s
   expect(o.tools).toEqual([]);
   expect(o.mcpServers.kl).toMatchObject({ type: "sdk", name: "kl" });
   expect(o.mcpServers.kl.timeout).toBe(86_400_000);
-  expect(o.systemPrompt).toBe("PI PROMPT");
+  expect(o.systemPrompt).toEqual({ type: "preset", preset: "claude_code" });
   expect(o.permissionMode).toBe("bypassPermissions");
   expect(o.settingSources).toEqual([]);
   expect(o.includePartialMessages).toBe(true);
