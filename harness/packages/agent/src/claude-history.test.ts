@@ -12,7 +12,6 @@ test("text, signed thinking, tool call and tool result become chained entries", 
       {
         role: "assistant",
         content: [
-          { type: "thinking", thinking: "hm", thinkingSignature: "sig" },
           { type: "thinking", thinking: "from gpt" },
           { type: "text", text: "ok" },
           { type: "toolCall", id: "tu1", name: "bash", arguments: { command: "ls" } },
@@ -36,9 +35,8 @@ test("text, signed thinking, tool call and tool result become chained entries", 
   const a = e[1].message as any;
   expect(a).toMatchObject({ role: "assistant", type: "message", stop_reason: "tool_use", stop_sequence: null, usage: { input_tokens: 3, output_tokens: 4 } });
   expect(a.id).toStartWith("msg_");
-  // unsigned thinking (another provider's) is dropped; the signed block keeps its signature
+  // thinking from a non-Anthropic api is dropped
   expect(a.content).toEqual([
-    { type: "thinking", thinking: "hm", signature: "sig" },
     { type: "text", text: "ok" },
     { type: "tool_use", id: "tu1", name: "mcp__kl__bash", input: { command: "ls" } },
   ]);
@@ -76,4 +74,30 @@ test("a tool call left without a result gets an error result, so the API accepts
   );
   expect(e.map((x) => x.type)).toEqual(["user", "assistant", "user", "user"]);
   expect((e[2].message as any).content[0]).toMatchObject({ type: "tool_result", tool_use_id: "tu9", is_error: true });
+});
+
+test("anthropic thinking keeps its signature; a GPT reasoning-item signature is dropped", () => {
+  const mk = (api: string, sig: string) => ({
+    role: "assistant",
+    content: [{ type: "thinking", thinking: "hm", thinkingSignature: sig }, { type: "text", text: "ok" }],
+    api, provider: "x", model: "m", usage, stopReason: "stop", timestamp: 1,
+  });
+  const gpt = toClaudeEntries([mk("openai-responses", '{"type":"reasoning","id":"rs_1"}')], o);
+  expect((gpt[0].message as any).content).toEqual([{ type: "text", text: "ok" }]);
+  const ant = toClaudeEntries([mk("anthropic-messages", "sig")], o);
+  expect((ant[0].message as any).content[0]).toEqual({ type: "thinking", thinking: "hm", signature: "sig" });
+  expect((ant[0].message as any).model).toBe("claude-haiku-4-5");
+});
+
+test("a transcript ending on a tool call gets a closing error result", () => {
+  const e = toClaudeEntries(
+    [
+      { role: "user", content: "go", timestamp: 1 },
+      { role: "assistant", content: [{ type: "toolCall", id: "tu7", name: "bash", arguments: {} }], api: "x", provider: "anthropic", model: "m", usage, stopReason: "toolUse", timestamp: 2 },
+    ],
+    o,
+  );
+  const last = e[e.length - 1];
+  expect((last.message as any).content[0]).toMatchObject({ type: "tool_result", tool_use_id: "tu7", is_error: true });
+  expect(last.sourceToolAssistantUUID).toBe(e[1].uuid);
 });

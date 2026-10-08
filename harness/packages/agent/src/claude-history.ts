@@ -11,8 +11,9 @@
  * Claude Code's undocumented JSONL and `SessionStore` is `@alpha`: the SDK is
  * pinned exactly and the live smoke re-checks it on any bump.
  *
- * Dropped on purpose: thinking without an Anthropic signature (another
- * provider's, the API rejects it) and redacted thinking; pi's `system`
+ * Dropped on purpose: thinking from any non-Anthropic api, whatever its
+ * signature (pi-ai keeps an OpenAI reasoning item as JSON there, the API
+ * rejects it), and redacted thinking; pi's `system`
  * messages (Claude gets pi's prompt as its system prompt instead).
  */
 import { randomUUID } from "node:crypto";
@@ -84,10 +85,11 @@ export function toClaudeEntries(messages: any[], o: { sessionId: string; cwd: st
       push("user", { role: "user", content: userContent(m.content) }, m.timestamp, { promptId: randomUUID() });
     } else if (m.role === "assistant") {
       closeOpen();
+      const anthropic = m.api === "anthropic-messages";
       const content = (m.content ?? []).flatMap((b: any) =>
         b.type === "text"
           ? [{ type: "text", text: b.text }]
-          : b.type === "thinking" && b.thinkingSignature && !b.redacted
+          : b.type === "thinking" && anthropic && b.thinkingSignature && !b.redacted
             ? [{ type: "thinking", thinking: b.thinking, signature: b.thinkingSignature }]
             : b.type === "toolCall"
               ? [{ type: "tool_use", id: b.id, name: TOOL_PREFIX + b.name, input: b.arguments ?? {} }]
@@ -97,7 +99,7 @@ export function toClaudeEntries(messages: any[], o: { sessionId: string; cwd: st
       const uuid = push(
         "assistant",
         {
-          model: m.model ?? o.model,
+          model: o.model,
           id: `msg_${randomUUID().replaceAll("-", "")}`,
           type: "message",
           role: "assistant",
@@ -113,5 +115,6 @@ export function toClaudeEntries(messages: any[], o: { sessionId: string; cwd: st
       result(m.toolCallId, blocks(m.content), !!m.isError, m.timestamp);
     }
   }
+  closeOpen();
   return out;
 }
