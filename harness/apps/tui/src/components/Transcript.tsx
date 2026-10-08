@@ -312,7 +312,15 @@ function Row({
       return (
         // hovering a collapsible block tints it, the way a desktop list row
         // lights up under the pointer — subtle, one step off the background
-        <box flexDirection="column" paddingLeft={3} backgroundColor={hover ? theme.surface : undefined}>
+        // a long block keeps one row above and below at all times, so the tint
+        // has room around the text and hovering never shifts the layout
+        <box
+          flexDirection="column"
+          paddingLeft={3}
+          paddingTop={long ? 1 : 0}
+          paddingBottom={long ? 1 : 0}
+          backgroundColor={hover ? theme.surface : undefined}
+        >
           <Md text={body.text} streaming={streaming} />
           {long && <More hidden={body.hidden} open={open} onToggle={onOpen} hover={hover} />}
         </box>
