@@ -18,11 +18,17 @@ try {
   process.exit(e.code ?? 1);
 }
 boot(c.backend, c.hello);
+let lost = false;
 const done = () => {
   const tail = c.stderr();
   if (tail) process.stderr.write(tail);
+  // ssh writes nothing when its proxy dies, so a bare exit 1 would explain nothing
+  else if (lost) process.stderr.write("kl-tui: lost the bench connection\n");
 };
 process.on("exit", done);
 // The bench went away under us: leave rather than render a dead session.
-c.exited.then((code) => process.exit(code === 0 ? 0 : 1));
+c.exited.then((code) => {
+  lost = code !== 0;
+  process.exit(lost ? 1 : 0);
+});
 await start();
