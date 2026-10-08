@@ -8,6 +8,7 @@ function fake(reply: (n: number, push: (m: any) => void) => void) {
   const calls: any[] = [];
   const interrupts: number[] = [];
   const flags: any[] = [];
+  const thinks: any[] = [];
   const query = (p: any) => {
     calls.push(p);
     const out: any[] = [];
@@ -33,12 +34,15 @@ function fake(reply: (n: number, push: (m: any) => void) => void) {
         push({ type: "result", subtype: "error_during_execution", is_error: true });
       },
       setModel: async () => {},
+      setMaxThinkingTokens: async (...a: any[]) => {
+        thinks.push(a);
+      },
       applyFlagSettings: async (x: any) => {
         flags.push(x);
       },
     } as any;
   };
-  return { query: query as any, calls, interrupts, flags };
+  return { query: query as any, calls, interrupts, flags, thinks };
 }
 
 const text = (t: string, i = 0) => [
@@ -417,7 +421,107 @@ test("a steer still held at turn end becomes the next turn", async () => {
   await tick();
   await tick();
   expect(p.recorded.filter((m) => m.role === "user").map((m) => m.content.at(-1).text)).toEqual(["a", "b"]);
-  expect(events.filter((e) => e.type === "agent_end").length).toBe(2);
+  // pi keeps one run: the steer continues it, with one agent_start and one agent_end
+  expect(events.filter((e) => e.type === "agent_start").length).toBe(1);
+  expect(events.filter((e) => e.type === "agent_end").length).toBe(1);
+  expect(events.filter((e) => e.type === "agent_end")[0]).toBe(events.at(-1));
+  s.dispose();
+});
+
+const steerGate = (ids: string[]) => {
+  const f = fake((n, push) => (n === 1 ? toolTurn(ids, push) : text("after").forEach(push)));
+  const r = run(f);
+  const gates: Record<string, () => void> = {};
+  r.p.tools.push({
+    name: "bash",
+    description: "d",
+    parameters: { type: "object" },
+    execute: (id: string) => new Promise((res) => (gates[id] = () => res({ content: [{ type: "text", text: id }] }))),
+  });
+  let client: Promise<Awaited<ReturnType<typeof mcpOf>>> | undefined;
+  const call = async (id: string) => (await (client ??= mcpOf(f.calls[0].options))).callTool({ name: "bash", arguments: {}, _meta: { "claudecode/toolUseId": id } });
+  return { ...r, f, gates, call };
+};
+
+test("a steer waits for every parallel call's result, then follows them", async () => {
+  const { s, p, gates, call } = steerGate(["tu1", "tu2"]);
+  await s.prompt("go");
+  await tick();
+  const a = call("tu1");
+  const b = call("tu2");
+  await tick();
+  await s.steer("late");
+  gates.tu1();
+  await a;
+  await tick();
+  expect(p.recorded.map((m) => m.role)).toEqual(["user", "assistant", "toolResult"]);
+  gates.tu2();
+  await b;
+  await tick();
+  expect(p.recorded.slice(0, 5).map((m) => m.role)).toEqual(["user", "assistant", "toolResult", "toolResult", "user"]);
+  expect(p.recorded[4].content.at(-1).text).toBe("late");
+  s.dispose();
+});
+
+test("a steer waits for sequential calls of one message too", async () => {
+  const { s, p, gates, call } = steerGate(["tu1", "tu2"]);
+  await s.prompt("go");
+  await tick();
+  await s.steer("late");
+  const a = call("tu1");
+  await tick();
+  gates.tu1();
+  await a;
+  await tick();
+  expect(p.recorded.map((m) => m.role)).toEqual(["user", "assistant", "toolResult"]);
+  const b = call("tu2");
+  await tick();
+  gates.tu2();
+  await b;
+  await tick();
+  expect(p.recorded.slice(0, 5).map((m) => m.role)).toEqual(["user", "assistant", "toolResult", "toolResult", "user"]);
+  s.dispose();
+});
+
+test("an open retry is cancelled when the turn is aborted, and never carried over", async () => {
+  const f = fake((_n, push) => push({ type: "system", subtype: "api_retry", attempt: 2, max_retries: 3, retry_delay_ms: 1, error_status: 529, error: "overloaded" }));
+  const { s, events } = run(f);
+  await s.prompt("a");
+  await tick();
+  expect(events.find((e) => e.type === "auto_retry_start")).toMatchObject({ attempt: 2, errorMessage: "529 overloaded" });
+  await s.abort();
+  await tick();
+  expect(events.filter((e) => e.type === "auto_retry_end")).toEqual([{ type: "auto_retry_end", success: false, attempt: 2, finalError: "Retry cancelled" }]);
+  s.dispose();
+});
+
+test("thinking off and back on reach the live query", async () => {
+  const f = fake((_n, push) => text("x").forEach(push));
+  const { s } = run(f);
+  await s.prompt("a");
+  await tick();
+  s.setThinkingLevel("off");
+  expect(f.thinks.at(-1)).toEqual([0, undefined]);
+  s.setThinkingLevel("high");
+  expect(f.thinks.at(-1)).toEqual([null, "summarized"]);
+  expect(f.flags.at(-1)).toEqual({ effortLevel: "high" });
+  s.dispose();
+});
+
+test("a failed compaction ends with the error; one still open at turn end is closed", async () => {
+  const f = fake((n, push) => {
+    push({ type: "system", subtype: "status", status: "compacting" });
+    if (n === 1) push({ type: "system", subtype: "status", status: null, compact_result: "failed", compact_error: "boom" });
+    text("ok").forEach(push);
+  });
+  const { s, events } = run(f);
+  await s.prompt("a");
+  await tick();
+  const ends = () => events.filter((e) => e.type === "compaction_end");
+  expect(ends()[0]).toMatchObject({ reason: "threshold", aborted: false, errorMessage: "Auto-compaction failed: boom" });
+  await s.prompt("b");
+  await tick();
+  expect(ends()[1]).toMatchObject({ reason: "threshold", aborted: true });
   s.dispose();
 });
 
@@ -435,7 +539,7 @@ test("auto-compaction toggles live and compaction and retries become pi events",
   expect(events.find((e) => e.type === "compaction_end")).toMatchObject({
     reason: "threshold", aborted: false, willRetry: false, result: { tokensBefore: 9000, estimatedTokensAfter: 1200 },
   });
-  expect(events.find((e) => e.type === "auto_retry_start")).toMatchObject({ attempt: 1, maxAttempts: 3, delayMs: 500, errorMessage: "overloaded" });
+  expect(events.find((e) => e.type === "auto_retry_start")).toMatchObject({ attempt: 1, maxAttempts: 3, delayMs: 500, errorMessage: "529 overloaded" });
   expect(events.find((e) => e.type === "auto_retry_end")).toMatchObject({ success: true, attempt: 1 });
   s.setAutoCompactionEnabled(false);
   await tick();
