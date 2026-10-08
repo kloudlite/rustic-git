@@ -33,6 +33,17 @@ export type QueuedMessage = { text: string; kind: "steer" | "followUp" };
 
 const emptySession: Session = { entries: [], busy: false, tokens: 0, history: [], model: DEFAULT_MODEL, queued: [] };
 
+/** The workspace a session key belongs to: `main`, `ws-…`; `ws-…:agent-<hex>` belongs to `ws-…`. */
+export function baseOf(key: string): string {
+  return key.split(":")[0]!;
+}
+
+/** First pending ask for the workspace the user is looking at; asks keep arrival order. */
+export function askFor<T extends { key: string }>(asks: T[], activeKey: string): T | undefined {
+  const base = baseOf(activeKey);
+  return asks.find((a) => baseOf(a.key) === base);
+}
+
 export function sessionKey(workspaceId?: string, id = "main"): string {
   const base = workspaceId ?? "main";
   return id === "main" ? base : `${base}:${id}`;

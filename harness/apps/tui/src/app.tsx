@@ -55,6 +55,8 @@ import {
   patchSession,
     sessionIdOf,
   sessionKey,
+  askFor,
+  baseOf,
   type QueuedMessage,
   type SessionMap,
 } from "./sessions.ts";
@@ -260,6 +262,9 @@ export function App({
     sessionId[activeBase] ?? "main",
   );
   const session = getSession(sessions, activeKey);
+  // the card on screen: only an ask from this view's workspace, so another
+  // workspace's permission never blocks typing here
+  const shownAsk = askFor(asks, activeKey);
   const busy = session.busy;
 
   function exit(): void {
@@ -334,7 +339,7 @@ export function App({
   useKeyboard((key) => {
     if (key.ctrl && key.name === "c") return exit();
     // a full-column view owns the keyboard while it is up
-    if (login || asks.length > 0 || filesView || processesView) return;
+    if (login || shownAsk || filesView || processesView) return;
     if (palette && key.name === "escape") {
       setPalette(false);
       setInput("");
@@ -709,7 +714,8 @@ export function App({
           thinkingLevel: prefs.thinkingLevel,
           autoCompact: prefs.autoCompact === "on",
           codemode: opts?.codemode ?? prefs.codemode === "on",
-          tools: tuiTools,
+          // the question tool is registered once for every session; bind it to this key
+          tools: tuiTools.map((t) => (t.name === "question" ? { ...t, run: (i: any) => askQuestion(key, i) } : t)),
           permission: (req, signal) => gate(key, req, signal),
         }),
       )
@@ -740,20 +746,27 @@ export function App({
   /** Show an interactive prompt and resolve with the chosen option id. */
   function pushAsk(ask: Omit<Ask, "resolve">): Promise<string> {
     return new Promise((resolve) => {
-      setAsks((prev) => [
-        ...prev,
-        {
-          ...ask,
-          resolve: (id) => {
-            setAsks((current) => current.slice(1));
-            resolve(id);
-          },
+      const self: Ask = {
+        ...ask,
+        resolve: (id) => {
+          setAsks((current) => current.filter((a) => a !== self));
+          resolve(id);
         },
-      ]);
+      };
+      setAsks((prev) => [...prev, self]);
     });
   }
   const pushAskRef = useRef(pushAsk);
   pushAskRef.current = pushAsk;
+
+  async function askQuestion(key: string, { question, options }: { question: string; options: string[] }) {
+    const picked = await pushAskRef.current({
+      key,
+      title: question,
+      options: options.map((label, i) => ({ id: String(i), label })),
+    });
+    return options[Number(picked)] ?? picked;
+  }
 
   // The model can ask the user a question with options (opencode's question tool).
   const registered = useRef(false);
@@ -775,13 +788,7 @@ export function App({
         },
         required: ["question", "options"],
       },
-      run: async ({ question, options }: { question: string; options: string[] }) => {
-        const picked = await pushAskRef.current({
-          title: question,
-          options: options.map((label, i) => ({ id: String(i), label })),
-        });
-        return options[Number(picked)] ?? picked;
-      },
+      run: (i: { question: string; options: string[] }) => askQuestion(sessionKey(), i),
     });
   }
 
@@ -798,6 +805,7 @@ export function App({
   /** Help popup: the keyboard/command reference in a panel, not the transcript. */
   function openHelp() {
     pushAskRef.current({
+      key: activeKey,
       title: "Keyboard shortcuts",
       body: [
         "Navigation (NORMAL mode)",
@@ -836,8 +844,10 @@ const PERM_MODES: PermMode[] = ["default", "acceptEdits", "plan", "bypass"];
    * The permission decision for one gated tool call. The backend calls this only for GATED
    * tools; the mode is read from a ref at call time because it changes under a running session.
    */
-  async function gate(key: string, { name, args, diff }: PermissionRequest, _signal: AbortSignal): Promise<Decision> {
-    const granted = alwaysAllow.current.get(key) ?? new Set<string>();
+  async function gate(key: string, { name, args, diff, session }: PermissionRequest, _signal: AbortSignal): Promise<Decision> {
+    // a delegated session asks through its caller's gate; the grant and the card belong to it
+    const asker = session ?? key;
+    const granted = alwaysAllow.current.get(asker) ?? new Set<string>();
     const mode = modeRef.current;
     // plan mode answers rather than asks: a refusal the model can read and
     // work around beats a permission card the user has to reject every turn
@@ -848,6 +858,7 @@ const PERM_MODES: PermMode[] = ["default", "acceptEdits", "plan", "bypass"];
       };
     if (mode === "bypass" || (mode === "acceptEdits" && EDITS.has(name)) || granted.has(name)) return {};
     const choice = await pushAskRef.current({
+      key: asker,
       title: "Permission required",
       subtitle:
         name === "bash"
@@ -875,7 +886,7 @@ const PERM_MODES: PermMode[] = ["default", "acceptEdits", "plan", "bypass"];
     });
     if (choice === "always") {
       granted.add(name);
-      alwaysAllow.current.set(key, granted);
+      alwaysAllow.current.set(asker, granted);
     } else if (choice === "reject") {
       return { block: true, reason: "The user rejected this tool call." };
     }
@@ -1291,7 +1302,7 @@ const PERM_MODES: PermMode[] = ["default", "acceptEdits", "plan", "bypass"];
   const sidebarVisible = prefs.sidebar === "show" && (wide || sidebarOpen);
   // opencode: dimensions.width - sidebar - 4 (the column's paddingX)
   const contentWidth = columns - (sidebarVisible && wide ? prefs.sidebarWidth : 0) - 4;
-  const modalOpen = login !== null || asks.length > 0;
+  const modalOpen = login !== null || shownAsk !== undefined;
   // typing reaches the input only in INSERT (jump mode always types the filter)
   const inputLive = !modalOpen && (prefs.vim === "off" || keyMode === "insert" || palette || cmdMode);
 
@@ -1314,6 +1325,7 @@ const PERM_MODES: PermMode[] = ["default", "acceptEdits", "plan", "bypass"];
       focus={focus}
       width={prefs.sidebarWidth}
       running={workspaces.map((w) => getSession(sessions, w.id).busy)}
+      waiting={workspaces.map((w) => asks.some((a) => baseOf(a.key) === w.id))}
       onFocus={(f) => {
         setFocus(f);
       }}
@@ -1408,7 +1420,7 @@ const PERM_MODES: PermMode[] = ["default", "acceptEdits", "plan", "bypass"];
             width={contentWidth}
             onSelect={(i) => setQueuePick(i)}
           />
-          {busy && asks.length === 0 && (
+          {busy && !shownAsk && (
             <box paddingLeft={1} marginBottom={1} flexDirection="row">
               <text>
                 <Spinner fg={theme.accent} />{" "}
@@ -1427,8 +1439,8 @@ const PERM_MODES: PermMode[] = ["default", "acceptEdits", "plan", "bypass"];
               </text>
             </box>
           )}
-          {asks.length > 0 ? (
-            <AskPanel ask={asks[0]!} />
+          {shownAsk ? (
+            <AskPanel ask={shownAsk} />
           ) : (
           <>
             <Prompt

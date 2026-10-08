@@ -6,7 +6,8 @@
 //! key is in the clone's pod). A moved parent branch gets ONE rebase round through the same child
 //! session; a push that still fails keeps the clone so the commits are not lost. The clone is
 //! deleted on every other exit. Needs the bench/main token: a workspace token cannot clone.
-//! Delegated sessions use the CALLER's permission callback, so their cards land in the user's TUI.
+//! Delegated sessions use the CALLER's permission callback, but each request names the delegated
+//! session (`PermissionRequest.session`), so the TUI shows the card in that workspace's view.
 //! The answer is the last assistant text seen before `agent_end`: Claude sessions emit
 //! `agent_end` with an empty message list, so the events are tracked instead.
 import { randomBytes } from "node:crypto";
@@ -66,7 +67,7 @@ function answer(h: SessionHandle, send: () => Promise<void>): Promise<string> {
   });
 }
 
-async function runInClone(P: string, task: string, deps: DelegateDeps, opts: (e?: Partial<SessionOpts>) => SessionOpts): Promise<string> {
+async function runInClone(P: string, task: string, deps: DelegateDeps, opts: (key: string, e?: Partial<SessionOpts>) => SessionOpts): Promise<string> {
   const call = deps.api ?? api;
   const exec = deps.exec ?? podExec;
   const sleep = deps.sleep ?? ((ms: number) => new Promise<void>((r) => setTimeout(r, ms)));
@@ -131,7 +132,8 @@ async function runInClone(P: string, task: string, deps: DelegateDeps, opts: (e?
       return `error: clone ${C} of ${P} did not become ready in 180s; deleted`;
     }
 
-    h = await deps.open(`${C}:agent-${hex()}`, opts({ fresh: true }));
+    const sk = `${C}:agent-${hex()}`;
+    h = await deps.open(sk, opts(sk, { fresh: true }));
     const prompt = `${task}\n\nYou are in your own clone of the workspace; your code is in ${WS} on branch ${branch}. Commit your work there; do not push, the platform pushes it.`;
     const reply = await answer(h, () => h!.prompt(prompt));
 
@@ -174,7 +176,13 @@ async function runInClone(P: string, task: string, deps: DelegateDeps, opts: (e?
 
 export function delegateTools(kind: "main" | "workspace", ws: string | undefined, deps: DelegateDeps, caller: SessionOpts): ToolDef[] {
   // same model, same gate; nothing of the TUI's own tools goes along
-  const opts = (extra: Partial<SessionOpts> = {}): SessionOpts => ({ ...caller, tools: [], ...extra });
+  // the request carries the delegated session's key so the TUI files the card under that workspace
+  const opts = (key: string, extra: Partial<SessionOpts> = {}): SessionOpts => ({
+    ...caller,
+    tools: [],
+    permission: (req, s) => caller.permission({ ...req, session: req.session ?? key }, s),
+    ...extra,
+  });
 
   const subagent: ToolDef = {
     name: "subagent",
@@ -202,7 +210,7 @@ export function delegateTools(kind: "main" | "workspace", ws: string | undefined
       const key = input.workspace;
       const text = `[from main session] ${input.request}`;
       const existing = deps.live.get(key);
-      const h = existing ?? (await deps.open(key, opts()));
+      const h = existing ?? (await deps.open(key, opts(key)));
       try {
         return await answer(h, () => (existing && deps.busy.has(key) ? h.followUp(text) : h.prompt(text)));
       } finally {

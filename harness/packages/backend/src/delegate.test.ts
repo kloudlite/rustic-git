@@ -181,3 +181,14 @@ test("no clone, no clone request", async () => {
   await r.run();
   expect(r.bodies).toEqual([]);
 });
+
+test("a delegated session's permission request names the delegated session", async () => {
+  const seen: (string | undefined)[] = [];
+  const c = { ...caller, permission: async (r: any) => (seen.push(r.session), {}) } as unknown as SessionOpts;
+  let given!: SessionOpts;
+  const [ask] = delegateTools("main", undefined, { live: new Map(), busy: new Set(), open: async (_k, o) => ((given = o), fake()) }, c);
+  await ask!.run({ workspace: "ws-a", request: "x" });
+  await given.permission({ name: "bash", args: {} }, new AbortController().signal);
+  await given.permission({ name: "bash", args: {}, session: "ws-a:agent-1" }, new AbortController().signal);
+  expect(seen).toEqual(["ws-a", "ws-a:agent-1"]);
+});

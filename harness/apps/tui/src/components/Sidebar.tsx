@@ -71,6 +71,7 @@ export function Sidebar({
   unavailable,
   snapshot,
   running,
+  waiting,
   focus,
   width,
   onFocus,
@@ -88,6 +89,8 @@ export function Sidebar({
   snapshot?: string;
   /** Per-workspace: its session has a turn running */
   running: boolean[];
+  /** Per-workspace: a permission card or question is waiting for the user */
+  waiting: boolean[];
   /** 0 = the session, 1..N = workspace */
   focus: number;
   width: number;
@@ -135,7 +138,7 @@ export function Sidebar({
               // an ephemeral workspace: branch glyph, short name, and the
               // same one state word its parent gets — these are running agents,
               // so they must read as plainly as the workspace above them
-              const tag = running[i] ? "working" : "";
+              const tag = waiting[i] ? "needs you" : running[i] ? "working" : "";
               return (
                 <Row
                   key={w.id}
@@ -151,7 +154,7 @@ export function Sidebar({
                   }
                   right={
                     <span
-                      fg={running[i] ? theme.accent : theme.muted}
+                      fg={waiting[i] ? theme.warning : running[i] ? theme.accent : theme.muted}
                     >
                       {tag}
                     </span>
@@ -161,7 +164,9 @@ export function Sidebar({
             }
 
             // one word on the right, and only when it earns the space
-            const stateTag = running[i]
+            const stateTag = waiting[i]
+              ? "needs you"
+              : running[i]
               ? "working"
               : w.status === "cloning"
                 ? w.progress ?? "cloning"
@@ -185,7 +190,7 @@ export function Sidebar({
                 }
                 right={
                   <span
-                    fg={running[i] ? theme.accent : theme.muted}
+                    fg={waiting[i] ? theme.warning : running[i] ? theme.accent : theme.muted}
                   >
                     {stateTag}
                   </span>

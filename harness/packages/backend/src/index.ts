@@ -79,7 +79,13 @@ export type Hello = {
   tools: string[];
 };
 
-export type PermissionRequest = { name: string; args: any; diff?: FileDiff };
+export type PermissionRequest = {
+  name: string;
+  args: any;
+  diff?: FileDiff;
+  /** Key of the session that asks, when it is not the one the callback was opened for (delegated sessions). */
+  session?: string;
+};
 export type Decision = { block?: boolean; reason?: string };
 
 export type SessionOpts = {
