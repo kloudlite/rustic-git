@@ -149,7 +149,7 @@ function displayTool() {
     label: "Display",
     exposure: "codemode" as const,
     description:
-      "Show markdown to the user, rendered in full under this script's card. The model sees only that it was shown. Use for finished tables, lists and reports.",
+      "Show markdown to the user, rendered in full under this script's card. It also stays in the session for follow-ups; never retype it. Use for finished tables, lists and reports.",
     parameters: {
       type: "object",
       properties: { markdown: { type: "string", description: "Markdown to show." } },
@@ -161,10 +161,10 @@ function displayTool() {
       const root = toolCallId.split("/")[0]!;
       const shown = displays.get(root) ?? [];
       const total = shown.reduce((n, m) => n + m.length, 0);
-      const text =
-        total + markdown.length > DISPLAY_CAP
-          ? "display: limit reached, not shown"
-          : (shown.push(markdown), displays.set(root, shown), `Shown to the user (${markdown.split("\n").length} lines); do not repeat it. Kept here for follow-ups:\n\n${markdown}`);
+      if (total + markdown.length > DISPLAY_CAP)
+        return { content: [{ type: "text" as const, text: "display: limit reached, not shown" }], details: {} };
+      displays.set(root, [...shown, markdown]);
+      const text = `Shown to the user (${markdown.split("\n").length} lines); do not repeat it. Kept here for follow-ups:\n\n${markdown}`;
       return { content: [{ type: "text" as const, text }], details: {} };
     },
   };
