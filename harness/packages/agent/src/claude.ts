@@ -611,12 +611,14 @@ export function createClaudeSession(opts: ClaudeOptions) {
     // a fresh id per query; Claude Code reads pi's record for it once, before the child spawns
     const resumeId = randomUUID();
     const history = toClaudeEntries(piSession.sessionManager.buildSessionContext().messages, { sessionId: resumeId, cwd, model });
+    const codemode = declaredTools(piSession).some((t) => t.name === "codemode");
     const options: Options = {
       includePartialMessages: true,
       permissionMode: "bypassPermissions",
       allowDangerouslySkipPermissions: true,
-      // `tools: []` removes the built-in Skill tool; `skills` is the one switch that turns it back on
-      tools: [],
+      // `tools: []` removes the built-in Skill tool and `skills` alone does not bring it back
+      // (probed against the SDK 2026-10-08: "Skill is disabled for this session"); naming it does
+      tools: codemode ? ["Skill"] : [],
       // ponytail: one day per call so a long `bash` is never cut off by
       // Claude Code's MCP timeout; our abort is the real bound
       mcpServers: { kl: { type: "sdk", name: "kl", instance: toolServer() as any, timeout: 86_400_000 } as any },
@@ -625,7 +627,7 @@ export function createClaudeSession(opts: ClaudeOptions) {
       systemPrompt: { type: "preset", preset: "claude_code" },
       // the workspace's CLAUDE.md and .claude/, loaded by Claude Code itself
       settingSources: ["project"],
-      ...(declaredTools(piSession).some((t) => t.name === "codemode") ? { plugins: [{ type: "local" as const, path: KL_PLUGIN }], skills: ["kl:codemode"] } : {}),
+      ...(codemode ? { plugins: [{ type: "local" as const, path: KL_PLUGIN }], skills: ["kl:codemode"] } : {}),
       cwd,
       model,
       extraArgs: { "thinking-display": "summarized" },

@@ -91,7 +91,7 @@ test("codemode sessions load the kl plugin and enable its skill; others do not",
     await s.prompt("a");
     await tick();
     const o = f.calls[0].options;
-    expect(o.tools).toEqual([]);
+    expect(o.tools).toEqual(withCodemode ? ["Skill"] : []);
     if (withCodemode) {
       expect(o.skills).toEqual(["kl:codemode"]);
       expect(o.plugins).toHaveLength(1);
