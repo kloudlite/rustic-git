@@ -345,6 +345,8 @@ mod tests {
                     packages: vec![],
                     locks: vec![],
                     attached_environment: None,
+                    clone_of: None,
+                    task: None,
                     // What MAKES it a bench, and the first thing `back_up` checks.
                     bench: Some(crd::BenchOptions { model: "m".into(), wake_at: None }),
                     access,

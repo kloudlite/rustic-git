@@ -507,6 +507,8 @@ mod inputs_tests {
                 packages: packages.iter().map(|p| p.to_string()).collect(),
                 locks,
                 attached_environment: None,
+                clone_of: None,
+                task: None,
             },
         )
     }

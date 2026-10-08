@@ -373,6 +373,8 @@ mod tests {
             packages: vec![],
             locks: vec![],
             attached_environment: None,
+            clone_of: None,
+            task: None,
         };
         assert!(!serde_json::to_string(&spec).unwrap().contains("packages"));
         spec.packages = vec!["go".into(), "jq".into()];
@@ -530,6 +532,8 @@ mod tests {
                 resolved_at: "2026-09-08T00:00:00Z".into(), source: LockSource::Nixhub,
             }],
             attached_environment: None,
+            clone_of: None,
+            task: None,
         });
         match SnapshotState::of_workspace(&w) {
             SnapshotState::Workspace { image, packages, locks, quota_gb, attached_environment, .. } => {

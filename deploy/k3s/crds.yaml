@@ -390,6 +390,11 @@
                         },
                         "type": "object"
                       },
+                      "cloneOf": {
+                        "description": "The workspace this one was cloned from. Recorded here, not on the bench's disk, so the\nsidebar's tree is read from the platform: a clone is listed as an ordinary workspace and\nthis is the only thing that says whose. Written once by `clone_ws`, never changed after;\nrestore and bench creation leave it `None`.",
+                        "nullable": true,
+                        "type": "string"
+                      },
                       "desiredState": {
                         "description": "What the operator asked for, independent of what is currently true.",
                         "enum": [
@@ -583,6 +588,11 @@
                           "quotaGb"
                         ],
                         "type": "object"
+                      },
+                      "task": {
+                        "description": "What a delegated clone was made to do (one line, as the caller sent it). Written once by\n`clone_ws` with `clone_of`; `None` for a person's own clone.",
+                        "nullable": true,
+                        "type": "string"
                       },
                       "team": {
                         "default": "",

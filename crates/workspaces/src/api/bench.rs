@@ -330,6 +330,8 @@ pub(crate) async fn create_bench(
             packages: Vec::new(),
             locks: Vec::new(),
             attached_environment: None,
+            clone_of: None,
+            task: None,
         },
     )
     .await?;

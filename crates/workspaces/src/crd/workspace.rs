@@ -82,6 +82,16 @@ pub struct WorkspaceSpec {
     /// unattached rather than leaving a grant behind.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub attached_environment: Option<String>,
+    /// The workspace this one was cloned from. Recorded here, not on the bench's disk, so the
+    /// sidebar's tree is read from the platform: a clone is listed as an ordinary workspace and
+    /// this is the only thing that says whose. Written once by `clone_ws`, never changed after;
+    /// restore and bench creation leave it `None`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub clone_of: Option<String>,
+    /// What a delegated clone was made to do (one line, as the caller sent it). Written once by
+    /// `clone_ws` with `clone_of`; `None` for a person's own clone.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub task: Option<String>,
     /// `Some` = this workspace IS the owner's bench in `team`. `is_bench` is the only predicate
     /// for that anywhere — never the name prefix, a label or the container list, all of which a
     /// restored or hand-edited object can carry without being one. Written only by `/v1`.

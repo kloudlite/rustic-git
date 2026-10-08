@@ -22,6 +22,24 @@ fn copied_access(src: Option<&crd::Workspace>) -> crd::Access {
 #[derive(serde::Deserialize)]
 pub(crate) struct CloneBody {
     pub(crate) name: String,
+    /// What a delegated clone is for, one line; shown in the sidebar's tree.
+    #[serde(default)]
+    pub(crate) task: Option<String>,
+}
+
+const TASK_MAX_CHARS: usize = 200;
+
+/// Trimmed; empty is no task. Counted in chars, not bytes, so a non-ASCII line is not cut short.
+pub(crate) fn check_task(task: Option<&str>) -> Result<Option<String>, Response> {
+    let t = task.map(str::trim).unwrap_or("");
+    if t.chars().count() > TASK_MAX_CHARS {
+        return Err((
+            StatusCode::UNPROCESSABLE_ENTITY,
+            Json(serde_json::json!({ "error": format!("task must be at most {TASK_MAX_CHARS} characters") })),
+        )
+            .into_response());
+    }
+    Ok((!t.is_empty()).then(|| t.to_string()))
 }
 
 
@@ -41,6 +59,7 @@ pub(crate) async fn clone_ws(
 ) -> Result<Response, Response> {
     let owner = caller_for(&s, &headers, &method, uri.path()).await?;
     check_ws_name(&body.name)?;
+    let task = check_task(body.task.as_deref())?;
     let src = my_ws(&s, &owner, &id).await?;
     refuse_taken_name(kube(&s)?, &owner, &src.spec.team, &body.name).await?;
     // The source's own locks, carried whole: a clone copies a package list, it does not re-pick
@@ -95,6 +114,8 @@ pub(crate) async fn clone_ws(
             packages: src.spec.packages.clone(),
             locks,
             attached_environment: None,
+            clone_of: Some(id.clone()),
+            task,
         },
     )
     .await?;
@@ -268,6 +289,8 @@ pub(crate) async fn restore_ws(
             locks,
             // Retired: an environment is the space's choice now, so a frozen value is not carried.
             attached_environment: None,
+            clone_of: None,
+            task: None,
         },
     )
     .await?;
@@ -301,6 +324,8 @@ mod tests {
                 packages: vec![],
                 locks: vec![],
                 attached_environment: None,
+                clone_of: None,
+                task: None,
             },
         );
         w.metadata.labels = None;

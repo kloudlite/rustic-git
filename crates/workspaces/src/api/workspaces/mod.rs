@@ -101,6 +101,8 @@ pub(super) fn ws_doc(w: &crd::Workspace, pushed: &HashSet<String>) -> Workspace 
             gateway: gateway_url(&w.spec.region, &id),
             host_key,
         }),
+        clone_of: w.spec.clone_of.clone(),
+        task: w.spec.task.clone(),
         packages_status: st.and_then(|s| s.conditions.iter().find(|c| c.type_ == crd::PACKAGES_READY).map(ConditionDoc::from)),
         replicated: st.and_then(|s| s.conditions.iter().find(|c| c.type_ == "Replicated").map(ConditionDoc::from)),
         degraded: st.and_then(|s| s.conditions.iter().find(|c| c.type_ == "Degraded").map(ConditionDoc::from)),
@@ -331,6 +333,8 @@ pub(crate) async fn create_ws(
             packages: body.packages,
             locks,
             attached_environment: None,
+            clone_of: None,
+            task: None,
         },
     )
     .await?;
@@ -838,6 +842,8 @@ mod tests {
                 packages: vec![],
                 locks: vec![],
                 attached_environment: None,
+                clone_of: None,
+                task: None,
             },
         )
     }
@@ -885,6 +891,29 @@ mod tests {
         assert!(!ps.ready);
         assert_eq!(ps.reason, "BuildFailed");
         assert!(ps.message.contains("jq2"));
+    }
+
+    /// The sidebar's tree is read from the doc: `clone_ws` writes the pair into spec, so list, get
+    /// and the clone response (all `ws_doc`) carry it. No kube harness reaches `clone_ws` itself.
+    #[test]
+    fn a_workspace_doc_carries_clone_of_and_task() {
+        let mut w = ws_fixture();
+        assert!(ws_doc(&w, &Default::default()).clone_of.is_none());
+        w.spec.clone_of = Some("ws-src".into());
+        w.spec.task = Some("fix the build".into());
+        let d = ws_doc(&w, &Default::default());
+        assert_eq!((d.clone_of.as_deref(), d.task.as_deref()), (Some("ws-src"), Some("fix the build")));
+    }
+
+    #[test]
+    fn a_clone_task_is_trimmed_and_capped_at_200_chars() {
+        use super::clone_restore::check_task;
+        assert_eq!(check_task(None).unwrap(), None);
+        assert_eq!(check_task(Some("  \n ")).unwrap(), None);
+        assert_eq!(check_task(Some(" do it ")).unwrap().as_deref(), Some("do it"));
+        assert!(check_task(Some(&"é".repeat(200))).is_ok());
+        let r = check_task(Some(&"é".repeat(201))).unwrap_err();
+        assert_eq!(r.status(), axum::http::StatusCode::UNPROCESSABLE_ENTITY);
     }
 
     /// `Degraded/NodeDead` and `Decommissioning/NodeLeaving` are what the web turns into its two

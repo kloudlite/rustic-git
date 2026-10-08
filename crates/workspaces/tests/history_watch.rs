@@ -40,6 +40,8 @@ fn ws(uid: &str, rv: &str, phase: Phase) -> crd::Workspace {
             packages: Vec::new(),
             locks: vec![],
             attached_environment: None,
+            clone_of: None,
+            task: None,
         },
     );
     w.metadata = meta("ws-abc", uid, rv);

@@ -121,6 +121,12 @@ pub struct Workspace {
     /// "installing…" rather than as a failure that was never reported.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub packages_status: Option<PackagesDoc>,
+    /// `spec.clone_of`: the source workspace id, for the sidebar's tree.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub clone_of: Option<String>,
+    /// `spec.task`: what a delegated clone is for.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub task: Option<String>,
     /// The `Replicated` condition, verbatim from the owner's own write — the UI's "safe to start
     /// anywhere" vs "still copying". Absent until the owner has said anything: inventing a value
     /// here would be a second truth that can disagree with the node's.

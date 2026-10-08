@@ -62,6 +62,8 @@ pub(super) fn ws_spec() -> WorkspaceSpec {
         packages: vec![],
         locks: vec![],
         attached_environment: None,
+        clone_of: None,
+        task: None,
     }
 }
 

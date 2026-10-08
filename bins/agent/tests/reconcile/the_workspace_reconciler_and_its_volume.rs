@@ -258,6 +258,8 @@ fn a_git_seeded_pod_carries_an_init_container_with_the_key_and_no_token() {
         packages: vec![],
         locks: vec![],
         attached_environment: None,
+        clone_of: None,
+        task: None,
     };
     let source = spec.storage.as_ref().unwrap().source.as_ref().unwrap();
     let init = k8s::git_init_container(source, "alpine/git:2.45.2", "git.example.com", "22")
