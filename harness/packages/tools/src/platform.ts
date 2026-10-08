@@ -30,19 +30,15 @@ async function raw(method: string, path: string, body?: unknown): Promise<Raw> {
 }
 
 function show(r: Raw): string {
-  if (r.unavailable) return UNAVAILABLE;
-  if (r.status < 200 || r.status >= 300) return `error ${r.status}: ${r.text}`;
+  if (r.unavailable) throw new Error(UNAVAILABLE);
+  if (r.status < 200 || r.status >= 300) throw new Error(`${r.status}: ${r.text}`);
   if (r.status === 204 || !r.text) return "ok";
   return r.data === undefined ? r.text : JSON.stringify(r.data, null, 2);
 }
 
-/** One call, rendered for the model. */
+/** One call, rendered for the model. A non-2xx answer throws, so a direct call shows as failed and a codemode script stops. */
 export async function api(method: string, path: string, body?: unknown): Promise<string> {
-  try {
-    return show(await raw(method, path, body));
-  } catch (e: any) {
-    return `error: ${e?.message ?? e}`;
-  }
+  return show(await raw(method, path, body));
 }
 
 /** One call, parsed. For the TUI's own reads (sidebar): the same text a failed `api` shows, as an Error. */
@@ -84,7 +80,26 @@ const SERVICE = {
     resources: OBJ,
   },
   required: ["name", "image"],
+  description: "command, env and mounts default to empty",
 };
+
+/** The API requires command, env and mounts on every service; the schema asks only for name and image. */
+const withServiceDefaults = (s: any) => ({ command: [], env: {}, mounts: [], ...s });
+
+/** Fold service_status into each services[] entry so a poll reads ready where the spec is. */
+function withReady(out: string): string {
+  try {
+    const doc = JSON.parse(out);
+    if (!Array.isArray(doc?.services)) return out;
+    doc.services = doc.services.map((svc: any) => {
+      const st = doc.service_status?.find((x: any) => x.name === svc.name);
+      return { ...svc, ready: st?.ready ?? false, ...(st?.message ? { message: st.message } : {}) };
+    });
+    return JSON.stringify(doc, null, 2);
+  } catch {
+    return out;
+  }
+}
 
 function def(name: string, description: string, properties: Props, required: string[], run: (a: any) => Promise<string>): ToolDef {
   return { name, description, inputSchema: { type: "object", properties, required }, run: async (a) => run(a ?? {}) };
@@ -93,16 +108,12 @@ function def(name: string, description: string, properties: Props, required: str
 const attrOf = (p: string) => p.split("@")[0]!;
 const ASYNC = " Returns 202: the change converges asynchronously, so poll with the matching *_get.";
 
-/** GET a document and surface a failure as the error text the tool returns. */
+/** GET a document and throw on a failure like `api`. */
 async function load(path: string): Promise<{ doc: any } | { err: string }> {
-  try {
-    const r = await raw("GET", path);
-    if (r.unavailable) return { err: UNAVAILABLE };
-    if (r.status < 200 || r.status >= 300) return { err: `error ${r.status}: ${r.text}` };
-    return { doc: r.data };
-  } catch (e: any) {
-    return { err: `error: ${e?.message ?? e}` };
-  }
+  const r = await raw("GET", path);
+  if (r.unavailable) throw new Error(UNAVAILABLE);
+  if (r.status < 200 || r.status >= 300) throw new Error(`${r.status}: ${r.text}`);
+  return { doc: r.data };
 }
 
 export function platformTools(kind: "main" | "workspace", wsId?: string): ToolDef[] {
@@ -183,11 +194,11 @@ export function platformTools(kind: "main" | "workspace", wsId?: string): ToolDe
       const t = await teamOf(a);
       return "err" in t ? t.err : api("DELETE", `/v1/me/environments/${seg(t.team)}`);
     }),
-    envTool("env_get", "Read an environment's services, state and intercepts." + (ws ? " Defaults to the environment this workspace's space follows." : ""), {}, [], (env) => api("GET", `/v1/environments/${env}`)),
+    envTool("env_get", "Read an environment's services, state and intercepts. Each services[] entry carries ready (and message) from service_status; poll ready, not the spec." + (ws ? " Defaults to the environment this workspace's space follows." : ""), {}, [], async (env) => withReady(await api("GET", `/v1/environments/${env}`))),
     services("service_add", "Add one service to an environment; fails if the name exists." + ASYNC, { service: SERVICE }, ["service"], (cur, a) =>
-      cur.some((s) => s.name === a.service?.name) ? `error: service exists: ${a.service?.name}` : [...cur, a.service]),
+      cur.some((s) => s.name === a.service?.name) ? `error: service exists: ${a.service?.name}` : [...cur, withServiceDefaults(a.service)]),
     services("service_update", "Replace one existing service (matched by name) in an environment." + ASYNC, { service: SERVICE }, ["service"], (cur, a) =>
-      cur.some((s) => s.name === a.service?.name) ? cur.map((s) => (s.name === a.service.name ? a.service : s)) : `error: no such service: ${a.service?.name}`),
+      cur.some((s) => s.name === a.service?.name) ? cur.map((s) => (s.name === a.service.name ? withServiceDefaults(a.service) : s)) : `error: no such service: ${a.service?.name}`),
     services("service_remove", "Remove a service by name from an environment." + ASYNC, { name: S }, ["name"], (cur, a) =>
       cur.some((s) => s.name === a.name) ? cur.filter((s) => s.name !== a.name) : `error: no such service: ${a.name}`),
     envTool("intercept", "Route an environment service's traffic to a workspace." + ASYNC, { service: S, workspace: S, ports: { type: "array", items: { type: "object", properties: { service: N, workspace: N } } } }, ["service", ...(ws ? [] : ["workspace"])], (env, a) =>
@@ -206,7 +217,7 @@ export function platformTools(kind: "main" | "workspace", wsId?: string): ToolDe
     def("workspace_get", "Read one workspace's state; poll this after any lifecycle call.", { workspace: S }, ["workspace"], async (a) => api("GET", `/v1/workspaces/${seg(a.workspace)}`)),
     def("workspace_create", "Create a workspace in a region." + ASYNC, { name: S, region: S, quota_gb: N, image: S, repo: S, branch: S, packages: SL, team: S }, ["name", "region", "quota_gb"], async (a) =>
       api("POST", "/v1/workspaces", strip({ team: a.team, name: a.name, region: a.region, quota_gb: a.quota_gb, image: a.image, repo: a.repo, branch: a.branch, packages: a.packages }))),
-    def("workspace_clone", "Clone a workspace's current state into a new workspace." + ASYNC, { workspace: S, name: S }, ["workspace", "name"], async (a) => api("POST", `/v1/workspaces/${seg(a.workspace)}/clone`, { name: a.name })),
+    def("workspace_clone", "Clone a workspace's current state into a new workspace." + ASYNC, { workspace: S, name: S, task: { type: "string", description: "what the clone is for, at most 200 characters" } }, ["workspace", "name"], async (a) => api("POST", `/v1/workspaces/${seg(a.workspace)}/clone`, strip({ name: a.name, task: a.task }))),
     def("workspace_restore", "Create a workspace from a snapshot." + ASYNC, { name: S, snapshot_id: S, image: S, packages: SL, quota_gb: N }, ["name", "snapshot_id"], async (a) =>
       api("POST", "/v1/workspaces/restore", strip({ name: a.name, snapshot_id: a.snapshot_id, image: a.image, packages: a.packages, quota_gb: a.quota_gb }))),
     lifecycle("workspace_start", "Start a stopped workspace." + ASYNC, "POST", "/start"),
@@ -217,16 +228,16 @@ export function platformTools(kind: "main" | "workspace", wsId?: string): ToolDe
     def("worktree_drop", "Drop a worktree from a workspace." + ASYNC, { workspace: S, name: S }, ["workspace", "name"], async (a) => api("DELETE", `/v1/workspaces/${seg(a.workspace)}/trees/${seg(a.name)}`)),
     ...["packages_list", "packages_add", "packages_remove", "packages_update"].map(of),
     def("env_list", "List environments, optionally for one team.", { team: S }, [], async (a) => api("GET", `/v1/environments${qs({ owner: a.team })}`)),
-    def("env_get", "Read one environment's services, state and intercepts; poll this after any env call.", { env: S }, ["env"], async (a) => api("GET", `/v1/environments/${seg(a.env)}`)),
+    def("env_get", "Read one environment's services, state and intercepts; poll this after any env call. Each services[] entry carries ready (and message) from service_status; poll ready, not the spec.", { env: S }, ["env"], async (a) => withReady(await api("GET", `/v1/environments/${seg(a.env)}`))),
     def("env_delete", "Delete an environment for good.", { env: S }, ["env"], async (a) => api("DELETE", `/v1/environments/${seg(a.env)}`)),
     def("env_start", "Start a stopped environment." + ASYNC, { env: S }, ["env"], async (a) => api("POST", `/v1/environments/${seg(a.env)}/start`)),
     def("env_stop", "Stop a running environment." + ASYNC, { env: S }, ["env"], async (a) => api("POST", `/v1/environments/${seg(a.env)}/stop`)),
     def("env_create", "Create an environment of services in a region." + ASYNC, { name: S, region: S, services: { type: "array", items: SERVICE }, team: S, quota_gb: N }, ["name", "region"], async (a) =>
-      api("POST", "/v1/environments", strip({ name: a.name, region: a.region, services: a.services, owner: a.team, quota_gb: a.quota_gb }))),
+      api("POST", "/v1/environments", strip({ name: a.name, region: a.region, services: a.services?.map(withServiceDefaults), owner: a.team, quota_gb: a.quota_gb }))),
     def("env_clone", "Copy a live environment into a new one." + ASYNC, { env: S, name: S }, ["env", "name"], async (a) => api("POST", `/v1/environments/${seg(a.env)}/clone`, { name: a.name })),
     def("env_push", "Snapshot an environment to its history." + ASYNC, { env: S, message: S }, ["env"], async (a) => api("POST", `/v1/environments/${seg(a.env)}/push`, { message: a.message })),
     def("env_restore", "Create an environment from a snapshot." + ASYNC, { name: S, snapshot_id: S, team: S, services: { type: "array", items: SERVICE }, region: S, quota_gb: N }, ["name", "snapshot_id"], async (a) =>
-      api("POST", "/v1/environments/restore", strip({ name: a.name, snapshot_id: a.snapshot_id, owner: a.team, services: a.services, region: a.region, quota_gb: a.quota_gb }))),
+      api("POST", "/v1/environments/restore", strip({ name: a.name, snapshot_id: a.snapshot_id, owner: a.team, services: a.services?.map(withServiceDefaults), region: a.region, quota_gb: a.quota_gb }))),
     def("env_restore_in_place", "Roll an environment back to one of its own snapshots." + ASYNC, { env: S, snapshot_id: S }, ["env", "snapshot_id"], async (a) =>
       api("POST", `/v1/environments/${seg(a.env)}/restore-in-place`, { snapshot_id: a.snapshot_id })),
     ...["service_add", "service_update", "service_remove", "intercept", "release"].map(of),

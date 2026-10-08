@@ -42,9 +42,9 @@ test("api reads the token file on every call, reports unavailable, 204 and error
   await api("GET", "/x");
   expect(calls.map((c) => c.auth)).toEqual(["Bearer tok1", "Bearer tok2"]);
   expect(await api("DELETE", "/x")).toBe("ok");
-  expect(await api("POST", "/x", {})).toBe('error 409: {"error":"busy"}');
+  await expect(api("POST", "/x", {})).rejects.toThrow('409: {"error":"busy"}');
   delete process.env.KL_API_URL;
-  expect(await api("GET", "/x")).toBe("platform tools unavailable: KL_API_URL / KL_TOOL_TOKEN_FILE not set");
+  await expect(api("GET", "/x")).rejects.toThrow("platform tools unavailable");
 });
 
 test("packages_add merges by attr, packages_remove errors on unknown", async () => {
@@ -67,9 +67,11 @@ test("service add/update/remove PATCH the whole list; duplicates and strangers e
   routes["GET /v1/environments/e1"] = json({ services: [a] });
   routes["PATCH /v1/environments/e1"] = json({});
   await tool(t, "service_add").run({ env: "e1", service: b });
-  expect(calls.at(-1)!.body).toEqual({ services: [a, b] });
+  expect(calls.at(-1)!.body).toEqual({ services: [a, { ...b, command: [], env: {}, mounts: [] }] });
   await tool(t, "service_update").run({ env: "e1", service: { name: "a", image: "a:2" } });
-  expect(calls.at(-1)!.body).toEqual({ services: [{ name: "a", image: "a:2" }] });
+  expect(calls.at(-1)!.body).toEqual({ services: [{ name: "a", image: "a:2", command: [], env: {}, mounts: [] }] });
+  await tool(t, "service_update").run({ env: "e1", service: { name: "a", image: "a:3", env: { K: "v" } } });
+  expect(calls.at(-1)!.body).toEqual({ services: [{ name: "a", image: "a:3", command: [], env: { K: "v" }, mounts: [] }] });
   await tool(t, "service_remove").run({ env: "e1", name: "a" });
   expect(calls.at(-1)!.body).toEqual({ services: [] });
   expect(await tool(t, "service_add").run({ env: "e1", service: a })).toContain("error: service exists");
@@ -90,4 +92,24 @@ test("workspace sessions default env through /v1/me/environments", async () => {
   routes["GET /v1/me/environments"] = json([{ team: "other", environment: "x" }]);
   expect(await tool(t, "env_get").run({})).toBe("error: this workspace's space follows no environment");
   expect(t.some((x) => x.name === "workspace_create" || x.name === "workspace_stop")).toBe(false);
+});
+
+test("env_get folds service_status readiness into services[]; workspace_clone sends task only when given", async () => {
+  const t = platformTools("main");
+  routes["GET /v1/environments/e1"] = json({ services: [{ name: "a" }, { name: "b" }], service_status: [{ name: "a", ready: true }, { name: "b", ready: false, message: "pulling" }] });
+  const out = JSON.parse(await tool(t, "env_get").run({ env: "e1" }));
+  expect(out.services).toEqual([{ name: "a", ready: true }, { name: "b", ready: false, message: "pulling" }]);
+  expect(out.service_status.length).toBe(2);
+  routes["POST /v1/workspaces/w1/clone"] = json({}, 202);
+  await tool(t, "workspace_clone").run({ workspace: "w1", name: "c" });
+  expect(calls.at(-1)!.body).toEqual({ name: "c" });
+  await tool(t, "workspace_clone").run({ workspace: "w1", name: "c", task: "try x" });
+  expect(calls.at(-1)!.body).toEqual({ name: "c", task: "try x" });
+});
+
+test("a rejected service_add throws and sends no further call", async () => {
+  const t = platformTools("main");
+  routes["GET /v1/environments/e1"] = json({ services: [] });
+  routes["PATCH /v1/environments/e1"] = json({ error: "services[0]: missing field `command`" }, 422);
+  await expect(tool(t, "service_add").run({ env: "e1", service: { name: "n", image: "n:1" } })).rejects.toThrow("422:");
 });

@@ -18,8 +18,10 @@ type Listed = { name: string; description?: string; schema?: Record<string, unkn
 class NotReady extends Error {}
 
 async function lookup(ws: string): Promise<Addr> {
-  const out = await api("GET", `/v1/workspaces/${encodeURIComponent(ws)}/tools`);
-  if (out.startsWith("error") || out.startsWith("platform tools unavailable")) throw new NotReady(out.replace(/^error \d+: /, ""));
+  // api throws on a non-2xx answer; for these callers that is "not ready", not a crash
+  const out = await api("GET", `/v1/workspaces/${encodeURIComponent(ws)}/tools`).catch((e) => {
+    throw new NotReady(String(e?.message ?? e).replace(/^\d+: /, ""));
+  });
   const a = JSON.parse(out);
   if (!a?.address) throw new NotReady("no address");
   return a;

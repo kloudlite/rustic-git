@@ -62,5 +62,5 @@ test("a network error re-fetches the address once and retries once", async () =>
   handler = () => {
     throw new TypeError("down");
   };
-  expect(await t[0]!.run({})).toContain("error");
+  expect(await t[0]!.run({})).toContain("down");
 });
