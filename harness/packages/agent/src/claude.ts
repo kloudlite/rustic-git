@@ -35,9 +35,15 @@ import { createRequire } from "node:module";
 import { appendFile, mkdir } from "node:fs/promises";
 import { homedir } from "node:os";
 import { dirname, join } from "node:path";
+import { fileURLToPath } from "node:url";
 import { query as sdkQuery, type Options, type SDKUserMessage } from "@anthropic-ai/claude-agent-sdk";
 import { TOOL_PREFIX, toClaudeEntries } from "./claude-history.ts";
 import { createToolServer, declaredTools } from "./claude-tools.ts";
+
+// Claude sessions run Claude Code's loop, which never sees pi's skills; the codemode skill
+// reaches it as a local plugin (`kl:codemode`), loaded only while codemode is a tool.
+const KL_PLUGIN = fileURLToPath(new URL("../claude-plugin", import.meta.url));
+export const CODEMODE_SKILL = join(KL_PLUGIN, "skills", "codemode");
 
 export const AUTH_MESSAGE = "Not signed in to Claude. On your laptop run: kl-connect claude login";
 
@@ -618,6 +624,7 @@ export function createClaudeSession(opts: ClaudeOptions) {
       systemPrompt: { type: "preset", preset: "claude_code" },
       // the workspace's CLAUDE.md and .claude/, loaded by Claude Code itself
       settingSources: ["project"],
+      ...(declaredTools(piSession).some((t) => t.name === "codemode") ? { plugins: [{ type: "local" as const, path: KL_PLUGIN }] } : {}),
       cwd,
       model,
       extraArgs: { "thinking-display": "summarized" },

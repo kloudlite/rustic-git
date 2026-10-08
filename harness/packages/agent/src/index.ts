@@ -12,7 +12,7 @@ import {
 } from "@earendil-works/pi-coding-agent";
 import type { Api, AuthInteraction, AuthType, Credential, Model } from "@earendil-works/pi-ai";
 import type { Registry } from "@kloudlite-tui/tools";
-import { claudeSignedIn, createClaudeSession, type ClaudeSession } from "./claude.ts";
+import { CODEMODE_SKILL, claudeSignedIn, createClaudeSession, type ClaudeSession } from "./claude.ts";
 
 export { claudeSignedIn, type ClaudeSession };
 
@@ -127,12 +127,13 @@ async function envKeysFor(provider: {
   return [...new Set(asked)];
 }
 
-/** Auth status for every provider (env keys, stored credentials, ambient). */
 // Models read bash's prose ("Returns stdout and stderr") over its declared type and
 // JSON.parse the result: one failed call plus two probes per session (2026-10-08). pi's
 // codemode takes no extra guidance, so the note rides on the description it prepares.
 const BASH_NOTE =
-  "\n\nNote: `await tools.bash(...)` resolves to an object, not a string; read `.output` (and `.exit_code`).";
+  "\n\nNote: `await tools.bash(...)` resolves to an object, not a string; read `.output` (and `.exit_code`). " +
+  "Run independent calls in parallel (`Promise.all`, one tool call each), never chained with `;` in one bash. " +
+  "The codemode skill has worked examples.";
 function withBashNote(factory: ReturnType<typeof createCodemodeExtension>): typeof factory {
   return (pi: any) =>
     factory(
@@ -153,6 +154,7 @@ function withBashNote(factory: ReturnType<typeof createCodemodeExtension>): type
     );
 }
 
+/** Auth status for every provider (env keys, stored credentials, ambient). */
 export async function providerAuth(): Promise<ProviderAuth[]> {
   return Promise.all(
     models.getProviders().map(async (p) =>
@@ -339,6 +341,8 @@ export async function createSession({
       // model keeps reaching for `bash` and codemode never fires. `"only"`
       // drops the direct declarations, leaving scripts as the way to call them.
       extensionFactories: [{ name: "codemode", factory: withBashNote(createCodemodeExtension({ mode: "only" })) }],
+      // the same skill Claude sessions get through the plugin (claude.ts)
+      additionalSkillPaths: [CODEMODE_SKILL],
     });
     await resourceLoader.reload();
   }
