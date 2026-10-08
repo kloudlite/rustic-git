@@ -137,6 +137,9 @@ const CODEMODE_NOTE =
   "(2) `await tools.bash(...)` resolves to an object; read `.output` (and `.exit_code`), never call string methods on the result itself. " +
   "(3) Fetch URLs with `tools.web_fetch`, not curl in bash; one call per item, run together with `Promise.all`. " +
   "(4) To show the user a table, list or report, build it in the script and pass it to `tools.display({ markdown })`; the displayed text stays readable to you for follow-ups; reply in one line, never retype what was displayed. " +
+  "(5) `tools.searchTools(...)` and `tools.describeTool(...)` are async: always `await` them. " +
+  "(6) The shell is `tools.bash` in the main session and `tools.exec` in workspace and subagent sessions; call whichever the tool list has, never assume. " +
+  "(7) A poll loop exits as soon as the condition holds, has a bounded count, and checks `services[].ready` (or `service_status[].ready`), never a regex over the spec; a failed tool call throws, so never poll after a write you did not check. " +
   "The codemode skill has worked examples.";
 
 // Markdown the running script asked to show, by root tool call id (nested ids are `<parent>/<n>`).
