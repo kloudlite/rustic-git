@@ -128,15 +128,52 @@ async function envKeysFor(provider: {
 }
 
 // Models read bash's prose ("Returns stdout and stderr") over its declared type and
-// JSON.parse the result: one failed call plus two probes per session (2026-10-08). pi's
-// codemode takes no extra guidance, so the note rides on the description it prepares.
-const BASH_NOTE =
-  "\n\nNote: `await tools.bash(...)` resolves to an object, not a string; read `.output` (and `.exit_code`). " +
-  "Run independent calls in parallel (`Promise.all`, one tool call each), never chained with `;` in one bash. " +
+// JSON.parse the result: one failed call plus two probes per session (2026-10-08). The same
+// day the model retyped a 40-row table it already held. pi's codemode takes no extra guidance,
+// so the rules ride on the description it prepares, PREPENDED: the first version appended
+// them after the long API listing and the model skipped them.
+const CODEMODE_NOTE =
+  "Rules: (1) `await tools.bash(...)` resolves to an object; read `.output` (and `.exit_code`), never call string methods on the result itself. " +
+  "(2) Fetch URLs with `tools.web_fetch`, not curl in bash; one call per item, run together with `Promise.all`. " +
+  "(3) To show the user a table, list or report, build it in the script and pass it to `tools.display({ markdown })`; the displayed text stays readable to you for follow-ups; reply in one line, never retype what was displayed. " +
   "The codemode skill has worked examples.";
-function withBashNote(factory: ReturnType<typeof createCodemodeExtension>): typeof factory {
-  return (pi: any) =>
-    factory(
+
+// Markdown the running script asked to show, by root tool call id (nested ids are `<parent>/<n>`).
+// Folded into the codemode result's details so the UI renders it under the script's card.
+const displays = new Map<string, string[]>();
+const DISPLAY_CAP = 200_000;
+
+function displayTool() {
+  return {
+    name: "display",
+    label: "Display",
+    exposure: "codemode" as const,
+    description:
+      "Show markdown to the user, rendered in full under this script's card. The model sees only that it was shown. Use for finished tables, lists and reports.",
+    parameters: {
+      type: "object",
+      properties: { markdown: { type: "string", description: "Markdown to show." } },
+      required: ["markdown"],
+    } as any,
+    execute: async (toolCallId: string, params: { markdown: string }) => {
+      const markdown = params.markdown ?? "";
+      if (!markdown.trim()) throw new Error("display: markdown is empty");
+      const root = toolCallId.split("/")[0]!;
+      const shown = displays.get(root) ?? [];
+      const total = shown.reduce((n, m) => n + m.length, 0);
+      const text =
+        total + markdown.length > DISPLAY_CAP
+          ? "display: limit reached, not shown"
+          : (shown.push(markdown), displays.set(root, shown), `Shown to the user (${markdown.split("\n").length} lines); do not repeat it. Kept here for follow-ups:\n\n${markdown}`);
+      return { content: [{ type: "text" as const, text }], details: {} };
+    },
+  };
+}
+
+export function withCodemodeExtras(factory: ReturnType<typeof createCodemodeExtension>): typeof factory {
+  return (pi: any) => {
+    pi.registerTool(displayTool());
+    return factory(
       new Proxy(pi, {
         get: (t, k) =>
           k !== "registerTool"
@@ -146,12 +183,26 @@ function withBashNote(factory: ReturnType<typeof createCodemodeExtension>): type
                   ...tool,
                   prepareLoadout: (loadout: any) => {
                     const r = tool.prepareLoadout(loadout);
-                    if (r?.descriptions?.codemode) r.descriptions.codemode += BASH_NOTE;
+                    if (r?.descriptions?.codemode) r.descriptions.codemode = `${CODEMODE_NOTE}\n\n${r.descriptions.codemode}`;
                     return r;
+                  },
+                  execute: async (id: string, params: any, signal: any, onUpdate: any, ...rest: any[]) => {
+                    const live = (u: any) => {
+                      const shown = displays.get(id);
+                      return shown?.length ? { ...u, details: { ...u?.details, display: [...shown] } } : u;
+                    };
+                    try {
+                      const result = await tool.execute(id, params, signal, onUpdate && ((u: any) => onUpdate(live(u))), ...rest);
+                      const shown = displays.get(id);
+                      return shown?.length ? { ...result, details: { ...result.details, display: shown } } : result;
+                    } finally {
+                      displays.delete(id);
+                    }
                   },
                 }),
       }),
     );
+  };
 }
 
 /** Auth status for every provider (env keys, stored credentials, ambient). */
@@ -340,7 +391,7 @@ export async function createSession({
       // description lists only the tools that have no direct exposure — so the
       // model keeps reaching for `bash` and codemode never fires. `"only"`
       // drops the direct declarations, leaving scripts as the way to call them.
-      extensionFactories: [{ name: "codemode", factory: withBashNote(createCodemodeExtension({ mode: "only" })) }],
+      extensionFactories: [{ name: "codemode", factory: withCodemodeExtras(createCodemodeExtension({ mode: "only" })) }],
       // the same skill Claude sessions get through the plugin (claude.ts)
       additionalSkillPaths: [CODEMODE_SKILL],
     });

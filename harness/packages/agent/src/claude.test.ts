@@ -82,6 +82,27 @@ function run(f: ReturnType<typeof fake>, extra: object = {}) {
 }
 const tick = () => new Promise((r) => setTimeout(r, 20));
 
+test("codemode sessions load the kl plugin and enable its skill; others do not", async () => {
+  for (const withCodemode of [true, false]) {
+    const f = fake((_n, push) => text("x").forEach(push));
+    const p = piHost();
+    if (withCodemode) p.tools.push({ name: "codemode" });
+    const s = createClaudeSession({ key: "k", model: { id: "m" }, pi: p.host, query: f.query });
+    await s.prompt("a");
+    await tick();
+    const o = f.calls[0].options;
+    expect(o.tools).toEqual([]);
+    if (withCodemode) {
+      expect(o.skills).toEqual(["kl:codemode"]);
+      expect(o.plugins).toHaveLength(1);
+    } else {
+      expect(o.skills).toBeUndefined();
+      expect(o.plugins).toBeUndefined();
+    }
+    s.dispose();
+  }
+});
+
 test("two prompts are two turns on ONE query", async () => {
   const f = fake((n, push) => text(n === 1 ? "hi" : "bye").forEach(push));
   const { s, events } = run(f);

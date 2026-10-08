@@ -615,6 +615,7 @@ export function createClaudeSession(opts: ClaudeOptions) {
       includePartialMessages: true,
       permissionMode: "bypassPermissions",
       allowDangerouslySkipPermissions: true,
+      // `tools: []` removes the built-in Skill tool; `skills` is the one switch that turns it back on
       tools: [],
       // ponytail: one day per call so a long `bash` is never cut off by
       // Claude Code's MCP timeout; our abort is the real bound
@@ -624,7 +625,7 @@ export function createClaudeSession(opts: ClaudeOptions) {
       systemPrompt: { type: "preset", preset: "claude_code" },
       // the workspace's CLAUDE.md and .claude/, loaded by Claude Code itself
       settingSources: ["project"],
-      ...(declaredTools(piSession).some((t) => t.name === "codemode") ? { plugins: [{ type: "local" as const, path: KL_PLUGIN }] } : {}),
+      ...(declaredTools(piSession).some((t) => t.name === "codemode") ? { plugins: [{ type: "local" as const, path: KL_PLUGIN }], skills: ["kl:codemode"] } : {}),
       cwd,
       model,
       extraArgs: { "thinking-display": "summarized" },
