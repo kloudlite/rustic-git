@@ -240,13 +240,13 @@ pub async fn sweep_nodes(k: &dyn Cluster, mine: &dyn Fn(&str) -> bool) {
         }
     };
     for m in marks {
-        if m.taint.as_deref().is_some_and(&mine) {
+        if m.taint.as_deref().is_some_and(mine) {
             match k.restore_taint(&m.node, m.taint.as_deref().unwrap_or_default()).await {
                 Ok(()) => tracing::info!(kind = "taint", name = %m.node, "slo.drill.swept"),
                 Err(e) => tracing::warn!(kind = "taint", name = %m.node, error = %format!("{e:#}"), "slo.drill.sweep.failed"),
             }
         }
-        if !m.label.as_deref().is_some_and(&mine) {
+        if !m.label.as_deref().is_some_and(mine) {
             continue;
         }
         match k.restore_marked(&m.node, m.label.as_deref().unwrap_or_default(), m.action.unwrap_or(DrillAction::Both)).await {

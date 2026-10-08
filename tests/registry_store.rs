@@ -145,7 +145,7 @@ impl slatedb::object_store::ObjectStore for FailsOneGet {
         if *l == self.bad
             && self
                 .fails_left
-                .fetch_update(std::sync::atomic::Ordering::SeqCst, std::sync::atomic::Ordering::SeqCst, |n| {
+                .try_update(std::sync::atomic::Ordering::SeqCst, std::sync::atomic::Ordering::SeqCst, |n| {
                     n.checked_sub(1)
                 })
                 .is_ok()
