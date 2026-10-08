@@ -12,14 +12,13 @@
  * `anthropic/alwaysLoad` keeps Claude Code from deferring our tools behind its
  * tool search.
  *
- * ponytail: arguments are not schema-validated (pi's loop validates; this
- * runs `prepareArguments` only). A bad call fails inside `execute` and comes
- * back as an error result the model reads. Add validation if a tool misbehaves
- * on bad input.
+ * Calls run through pi's own `runToolCall`: argument preparation, schema
+ * validation, both hooks and the abort checks are pi's, not re-implemented.
  */
 import { randomUUID } from "node:crypto";
 import { Server } from "@modelcontextprotocol/sdk/server/index.js";
 import { CallToolRequestSchema, ListToolsRequestSchema } from "@modelcontextprotocol/sdk/types.js";
+import { runToolCall } from "@earendil-works/pi-agent-core";
 import { TOOL_PREFIX } from "./claude-history.ts";
 
 export type ToolHost = {
@@ -50,39 +49,35 @@ export function declaredTools(session: { agent: { state: { tools: any[] } } }): 
 const mcp = (c: any) => (c.type === "image" ? { type: "image", data: c.data, mimeType: c.mimeType } : { type: "text", text: c.text });
 
 async function call(host: ToolHost, name: string, id: string, raw: any, signal: AbortSignal) {
-  const done = (content: any[], isError: boolean, details?: unknown) => {
-    host.emit({ type: "tool_execution_end", toolCallId: id, toolName: name, result: { content, details }, isError });
-    host.onResult({ role: "toolResult", toolCallId: id, toolName: name, content, details, isError, timestamp: Date.now() });
-    return { content: content.map(mcp), isError };
-  };
-  const fail = (e: unknown) => done([{ type: "text", text: e instanceof Error ? e.message : String(e) }], true);
-  const tool = host.tools().find((t) => t.name === name);
-  if (!tool) {
-    host.emit({ type: "tool_execution_start", toolCallId: id, toolName: name, args: raw });
-    return fail(`Tool ${name} not found`);
-  }
+  host.emit({ type: "tool_execution_start", toolCallId: id, toolName: name, args: raw });
+  let outcome: any;
   try {
-    const args = tool.prepareArguments?.(raw) ?? raw;
-    host.emit({ type: "tool_execution_start", toolCallId: id, toolName: name, args });
-    const assistantMessage = await host.assistantFor(id);
-    const toolCall = { type: "toolCall", id, name, arguments: args };
-    const context = { messages: host.agent.state.messages, tools: host.agent.state.tools };
-    const gate = await host.agent.beforeToolCall?.({ assistantMessage, toolCall, args, context }, signal);
-    if (gate?.block) return done([{ type: "text", text: gate.reason ?? "Tool call blocked" }], true);
-    const r = await tool.execute(id, args, signal, (partialResult: any) =>
-      host.emit({ type: "tool_execution_update", toolCallId: id, toolName: name, args, partialResult }),
+    outcome = await runToolCall(
+      { type: "toolCall", id, name, arguments: raw },
+      {
+        tools: host.tools(),
+        assistantMessage: await host.assistantFor(id),
+        context: { messages: host.agent.state.messages, tools: host.agent.state.tools },
+        // wrapped, not passed bare: the hooks are methods and need their `this`
+        beforeToolCall: (c: any, s?: AbortSignal) => host.agent.beforeToolCall?.(c, s) as any,
+        afterToolCall: (c: any, s?: AbortSignal) => host.agent.afterToolCall?.(c, s) as any,
+        signal,
+        onUpdate: (partialResult: any) => {
+          try {
+            host.emit({ type: "tool_execution_update", toolCallId: id, toolName: name, args: raw, partialResult });
+          } catch {} // a broken listener must not fail the tool
+        },
+      } as any,
     );
-    let content = r?.content ?? [];
-    let details = r?.details;
-    let isError = !!r?.isError;
-    const after = await host.agent.afterToolCall?.({ assistantMessage, toolCall, args, result: r, isError, context }, signal);
-    if (after?.content) content = after.content;
-    if (after?.details !== undefined) details = after.details;
-    if (after?.isError !== undefined) isError = after.isError;
-    return done(content, isError, details);
   } catch (e) {
-    return fail(e);
+    outcome = { result: { content: [{ type: "text", text: e instanceof Error ? e.message : String(e) }] }, isError: true };
   }
+  const content = outcome.result?.content ?? [];
+  const details = outcome.result?.details;
+  const isError = !!outcome.isError;
+  host.emit({ type: "tool_execution_end", toolCallId: id, toolName: name, result: { content, details }, isError });
+  host.onResult({ role: "toolResult", toolCallId: id, toolName: name, content, details, isError, timestamp: Date.now() });
+  return { content: content.map(mcp), isError };
 }
 
 export function createToolServer(host: ToolHost): Server {

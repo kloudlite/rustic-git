@@ -88,7 +88,8 @@ test("the prefixed name is stripped", async () => {
 });
 
 test("a gate denial and a throw both come back as isError with the reason", async () => {
-  const denied = host(bash(async () => ({ content: [] })), {
+  let ran = false;
+  const denied = host(bash(async () => { ran = true; return { content: [] }; }), {
     agent: { state: { messages: [], tools: [] }, beforeToolCall: async () => ({ block: true, reason: "The user rejected this tool call." }) },
   });
   const c1 = await connect(denied.h);
@@ -96,6 +97,7 @@ test("a gate denial and a throw both come back as isError with the reason", asyn
     content: [{ type: "text", text: "The user rejected this tool call." }],
     isError: true,
   });
+  expect(ran).toBe(false);
   const thrown = host(bash(async () => { throw new Error("boom"); }));
   const c2 = await connect(thrown.h);
   expect(await c2.callTool({ name: "bash", arguments: {} })).toEqual({ content: [{ type: "text", text: "boom" }], isError: true });
@@ -136,4 +138,29 @@ test("declaredTools drops what codemode hides from requests", () => {
   const s: any = { agent: { state: { tools: [{ name: "codemode" }, { name: "bash" }] } }, _hiddenDeclarations: new Set(["bash"]) };
   expect(declaredTools(s).map((t) => t.name)).toEqual(["codemode"]);
   expect(declaredTools({ agent: { state: { tools: [{ name: "bash" }] } } }).map((t) => t.name)).toEqual(["bash"]);
+});
+
+test("aborting while the gate awaits stops execute and returns an error", async () => {
+  let ran = false;
+  let release!: () => void;
+  const gate = new Promise<void>((r) => (release = r));
+  const { h, turn } = host(bash(async () => { ran = true; return { content: [] }; }), {
+    agent: { state: { messages: [], tools: [] }, beforeToolCall: async () => { await gate; return undefined; } },
+  });
+  const c = await connect(h);
+  const call = c.callTool({ name: "bash", arguments: {} });
+  await new Promise((r) => setTimeout(r, 20));
+  turn.abort();
+  release();
+  expect((await call).isError).toBe(true);
+  expect(ran).toBe(false);
+});
+
+test("schema-invalid arguments are an error result and execute never runs", async () => {
+  let ran = false;
+  const tool = { ...bash(async () => { ran = true; return { content: [] }; }), parameters: { type: "object", properties: { command: { type: "string" } }, required: ["command"] } };
+  const { h } = host(tool);
+  const c = await connect(h);
+  expect((await c.callTool({ name: "bash", arguments: {} })).isError).toBe(true);
+  expect(ran).toBe(false);
 });
