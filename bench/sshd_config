@@ -28,6 +28,8 @@ PermitListen none
 AllowAgentForwarding no
 X11Forwarding no
 AllowStreamLocalForwarding remote
+# The pod's own KL_* variables are not accepted from the client: bench/sv/sshd/run sets them with
+# `-o SetEnv=` from the pod env. Only KL_CLIP (the caller's clipboard socket) is client-supplied.
 AcceptEnv KL_CLIP
 PermitTunnel no
 AllowUsers kl
