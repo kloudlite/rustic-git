@@ -62,6 +62,25 @@ test("a long block collapses to its head and a click toggles it both ways", asyn
   t.renderer.destroy();
 });
 
+test("clicking the expand row itself toggles once", async () => {
+  const long: Entry[] = [
+    { id: "a", kind: "agent", text: Array.from({ length: 25 }, (_, i) => `line ${i + 1}`).join("\n") },
+  ];
+  const t = await testRender(<Transcript entries={long} keys="page" />, { width: 70, height: 24 });
+  const frame = async () => {
+    await new Promise((r) => setTimeout(r, 30));
+    await t.renderOnce();
+    return t.captureCharFrame();
+  };
+  const row = (await frame()).split("\n").findIndex((l) => l.includes("Click to expand"));
+  expect(row).toBeGreaterThan(0);
+  await t.mockMouse.click(10, row);
+  const open = await frame();
+  expect(open).toContain("line 25");
+  expect(open).toContain("Click to collapse");
+  t.renderer.destroy();
+});
+
 // reasoning is a ticker while it streams and a readable block once it lands —
 // the old renderer clipped every thinking entry to one line, so a large
 // thinking budget was invisible
@@ -88,6 +107,20 @@ test("thinking tickers while streaming and opens up when done", async () => {
   expect(frame).toContain("+8 lines");
   expect(frame).not.toContain("reasoning line 11");
 }, 20000);
+
+test("a streaming thinking line wider than the screen stays one clean row", async () => {
+  const line = "I should read the codemode skill first, since instructions indicate it needs to be reviewed before making the first codemode call.";
+  const t = await testRender(<Transcript entries={[{ kind: "thinking", id: "a", text: line }]} />, { width: 60, height: 10 });
+  await new Promise((r) => setTimeout(r, 100));
+  await t.renderOnce();
+  const rows = t.captureCharFrame().split("\n").filter((l) => l.trim());
+  expect(rows).toHaveLength(1);
+  expect(rows[0]).toContain("I should read");
+  // opentui cuts the middle, so the newest words stay in view
+  expect(rows[0]).toContain("...");
+  expect(rows[0]).toContain("codemode call.");
+  t.renderer.destroy();
+});
 
 // Reaching the "… +N lines" row meant scrolling past the whole block first,
 // so the block itself is the toggle — but a drag over it still selects text.

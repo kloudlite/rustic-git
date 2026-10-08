@@ -161,7 +161,13 @@ function More({
   hover?: boolean;
 }) {
   return (
-    <box height={1} width="100%" onMouseDown={onToggle}>
+    <box
+      height={1}
+      width="100%"
+      // the cell around this row also toggles on a click (mouseup); without
+      // the stop, one click opened here and closed again on release (2026-10-08)
+      onMouseDown={onToggle && ((e: { stopPropagation(): void }) => (e.stopPropagation(), onToggle()))}
+    >
       <text fg={hover ? theme.fg : theme.muted} selectable={false}>
         {open ? "" : `… +${hidden} lines  `}
         {open ? "Click to collapse" : "Click to expand"}
@@ -324,7 +330,9 @@ function Row({
             height={1}
             overflow="hidden"
           >
-            <text fg={theme.muted} attributes={TextAttributes.ITALIC}>
+            {/* one row, cut with an ellipsis: wrapped into a height-1 box the
+                line was hard-cut and a stray glyph showed ("Ihshould", 2026-10-08) */}
+            <text fg={theme.muted} attributes={TextAttributes.ITALIC} wrapMode="none" truncate>
               {lines[lines.length - 1] ?? ""}
             </text>
           </box>
