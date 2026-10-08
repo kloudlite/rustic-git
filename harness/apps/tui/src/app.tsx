@@ -592,10 +592,12 @@ export function App({
           typeof partial === "string"
             ? partial
             : (partial?.content?.filter((b: any) => b.type === "text").map((b: any) => b.text).join("\n") ?? "");
-        if (text)
+        const display = partial?.details?.display;
+        if (text || display?.length)
           upsert(key, event.toolCallId, (prev) => ({
             ...(prev as Entry & { kind: "tool" }),
-            output: text,
+            ...(text ? { output: text } : {}),
+            ...(display?.length ? { display } : {}),
           }));
         break;
       }
@@ -611,6 +613,7 @@ export function App({
           status: event.isError ? "error" : "ok",
           output: text || (prev as any)?.output,
           error: event.isError ? text.split("\n")[0] : undefined,
+          display: result?.details?.display ?? (prev as any)?.display,
         }));
         break;
       }
@@ -963,6 +966,7 @@ const PERM_MODES: PermMode[] = ["default", "acceptEdits", "plan", "bypass"];
           status: m.isError ? "error" : "ok",
           output: text || undefined,
           error: m.isError ? text.split("\n")[0] : undefined,
+          display: m.details?.display,
         };
       }
     }

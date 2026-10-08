@@ -591,6 +591,13 @@ test("a restored session shows each tool's result", async () => {
   expect(f).toContain("RESULT-MARKER");
 });
 
+test("a restored session shows what a codemode script displayed", async () => {
+  const msgs = codemodeSession("return 1;", "shown", false);
+  (msgs[2] as any).details = { display: ["| hcol | hval |\n|---|---|\n| DISP-MARKER | 2 |"] };
+  const f = await restored(msgs);
+  expect(f).toContain("DISP-MARKER");
+});
+
 test("a restored session shows a failed tool's error", async () => {
   const f = await restored(codemodeSession("return 1;", "ERROR-MARKER boom", true));
   expect(f).toContain("ERROR-MARKER boom");

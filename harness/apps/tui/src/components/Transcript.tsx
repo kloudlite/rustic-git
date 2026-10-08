@@ -26,6 +26,8 @@ export type Entry =
       /** Streaming / final output (rendered for bash blocks). */
       output?: string;
       error?: string;
+      /** Markdown a codemode script showed the user (`tools.display`), always expanded. */
+      display?: string[];
       /** Unified diff hunk (edit/write tools). */
       diff?: FileDiff;
     }
@@ -398,6 +400,11 @@ function Row({
               <More hidden={script.hidden + out.hidden} open={open} onToggle={onOpen} hover={hover} />
             )}
             {entry.error && <text fg={theme.error}>{entry.error}</text>}
+            {entry.display?.map((md, i) => (
+              <box key={i} flexDirection="column" paddingTop={1}>
+                <Md text={md} />
+              </box>
+            ))}
           </box>
         );
       }
