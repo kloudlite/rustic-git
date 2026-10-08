@@ -45,12 +45,10 @@ export const AUTH_MESSAGE = "Not signed in to Claude. On your laptop run: kl-con
 type Level = "off" | "minimal" | "low" | "medium" | "high" | "xhigh" | "max";
 type Effort = NonNullable<Options["effort"]>;
 
-/** off/minimal/low -> low, medium -> medium, high -> high, xhigh/max -> max. */
+/** 1:1 onto the SDK's effort; `minimal` has no match and takes `low`; `off` is no effort (thinking disabled). */
 export function effortFor(level: Level | undefined): Effort | undefined {
-  if (!level) return undefined;
-  if (level === "off" || level === "minimal" || level === "low") return "low";
-  if (level === "xhigh" || level === "max") return "max";
-  return level;
+  if (!level || level === "off") return undefined;
+  return level === "minimal" ? "low" : level;
 }
 
 /** process.env minus everything that would route Claude Code off its own login. */
@@ -208,6 +206,10 @@ export function createClaudeSession(opts: ClaudeOptions) {
 
   let model = opts.model.id;
   let effort = effortFor(opts.thinkingLevel);
+  let thinkingOff = opts.thinkingLevel === "off";
+  let autoCompact: boolean | undefined;
+  let compacting = false;
+  let retry: number | undefined;
 
   const piSession = opts.pi;
   const record = (m: any) => {
@@ -258,6 +260,7 @@ export function createClaudeSession(opts: ClaudeOptions) {
         const f = inflight.get(m.toolCallId);
         if (!f) return; // given up on: that call already has its synthetic result
         record(m);
+        flushSteers();
         inflight.delete(m.toolCallId);
         f.resolve();
       },
@@ -291,15 +294,15 @@ export function createClaudeSession(opts: ClaudeOptions) {
   let sawState = false;
   let rateLimited: any;
   const followUps: { text: string; images?: Image[] }[] = [];
-  const steering: string[] = [];
+  const steering: { text: string; images?: Image[] }[] = [];
 
   // streaming state for the assistant message in flight
-  type Cur = { msg: any; parts: Map<number, any>; id?: string; input: number };
+  type Cur = { msg: any; parts: Map<number, any>; id?: string };
   let cur: Cur | undefined;
   const streamed = new Set<string>();
 
   const queueUpdate = () =>
-    emit({ type: "queue_update", steering: [...steering], followUp: followUps.map((f) => f.text) });
+    emit({ type: "queue_update", steering: steering.map((s) => s.text), followUp: followUps.map((f) => f.text) });
 
   const newMessage = (extra: object = {}) => ({
     role: "assistant",
@@ -357,7 +360,17 @@ export function createClaudeSession(opts: ClaudeOptions) {
     aborting = false;
     running = false;
     issued.clear();
+    if (compacting) {
+      compacting = false;
+      emit({ type: "compaction_end", reason: "threshold", aborted: true, willRetry: false });
+    }
     emit({ type: "agent_end", messages: [] });
+    const held = steering.splice(0);
+    if (held.length) {
+      queueUpdate();
+      for (const s of held) void send(s.text, s.images, true);
+      return;
+    }
     const next = followUps.shift();
     if (next) {
       queueUpdate();
@@ -365,16 +378,25 @@ export function createClaudeSession(opts: ClaudeOptions) {
     }
   }
 
+  // pi's formula (pi-ai anthropic-messages): every token the request carried
+  const usage = (u: any) => {
+    const x = cur!.msg.usage;
+    if (u.input_tokens != null) x.input = u.input_tokens;
+    if (u.output_tokens != null) x.output = u.output_tokens;
+    if (u.cache_read_input_tokens != null) x.cacheRead = u.cache_read_input_tokens;
+    if (u.cache_creation_input_tokens != null) x.cacheWrite = u.cache_creation_input_tokens;
+    x.totalTokens = x.input + x.output + x.cacheRead + x.cacheWrite;
+  };
+
   function onStream(ev: any) {
     switch (ev?.type) {
       case "message_start": {
-        cur = { msg: newMessage(), parts: new Map(), id: ev.message?.id, input: ev.message?.usage?.input_tokens ?? 0 };
+        cur = { msg: newMessage(), parts: new Map(), id: ev.message?.id };
         if (cur.id) streamed.add(cur.id);
-        cur.msg.usage.totalTokens = cur.input + (ev.message?.usage?.output_tokens ?? 0);
-        // the turn has moved on, so steers pushed earlier were taken in
-        if (steering.length) {
-          steering.length = 0;
-          queueUpdate();
+        if (ev.message?.usage) usage(ev.message.usage);
+        if (retry !== undefined) {
+          emit({ type: "auto_retry_end", success: true, attempt: retry });
+          retry = undefined;
         }
         emit({ type: "message_start", message: cur.msg });
         break;
@@ -432,11 +454,7 @@ export function createClaudeSession(opts: ClaudeOptions) {
         if (!cur) break;
         const sr = ev.delta?.stop_reason;
         if (sr) cur.msg.stopReason = sr === "tool_use" ? "toolUse" : sr === "max_tokens" ? "length" : "stop";
-        const u = ev.usage;
-        if (u) {
-          cur.input = u.input_tokens ?? cur.input;
-          cur.msg.usage.totalTokens = cur.input + (u.output_tokens ?? 0) + (u.cache_read_input_tokens ?? 0);
-        }
+        if (ev.usage) usage(ev.usage);
         break;
       }
       case "message_stop":
@@ -460,7 +478,7 @@ export function createClaudeSession(opts: ClaudeOptions) {
       else if (b.type === "tool_use") msg.content.push({ type: "toolCall", id: b.id, name: String(b.name).replace(TOOL_PREFIX, ""), arguments: b.input ?? {} });
     }
     emit({ type: "message_update", message: msg });
-    cur = { msg, parts: new Map(), input: 0 };
+    cur = { msg, parts: new Map() };
     endCur();
   }
 
@@ -476,6 +494,10 @@ export function createClaudeSession(opts: ClaudeOptions) {
           text = `Claude rate limited (${rateLimited.rateLimitType ?? "unknown"}), resets at ${at}`;
         }
         errorMessage(text);
+        if (retry !== undefined) {
+          emit({ type: "auto_retry_end", success: false, attempt: retry, finalError: text });
+          retry = undefined;
+        }
       }
     }
     rateLimited = undefined;
@@ -492,6 +514,23 @@ export function createClaudeSession(opts: ClaudeOptions) {
         if (m.subtype === "session_state_changed") {
           sawState = true;
           if (m.state === "idle") finish();
+          // ponytail: when to compact, what the summary says and the retry policy are Claude Code's; we only report them.
+        } else if (m.subtype === "status" && m.status === "compacting") {
+          compacting = true;
+          emit({ type: "compaction_start", reason: "threshold" });
+        } else if (m.subtype === "compact_boundary") {
+          compacting = false;
+          const meta = m.compact_metadata ?? {};
+          emit({
+            type: "compaction_end",
+            reason: meta.trigger === "manual" ? "manual" : "threshold",
+            result: { tokensBefore: meta.pre_tokens, estimatedTokensAfter: meta.post_tokens },
+            aborted: false,
+            willRetry: false,
+          });
+        } else if (m.subtype === "api_retry") {
+          retry = m.attempt;
+          emit({ type: "auto_retry_start", attempt: m.attempt, maxAttempts: m.max_retries, delayMs: m.retry_delay_ms, errorMessage: String(m.error ?? m.error_status ?? "") });
         }
         break;
       case "stream_event":
@@ -533,11 +572,14 @@ export function createClaudeSession(opts: ClaudeOptions) {
         append: async () => {},
         load: async (k: any) => (k.sessionId === resumeId && !k.subpath ? history : null),
       } as any,
+      // ponytail: the SDK has no live thinking toggle; a switch to or from `off` lands on the next query
+      ...(thinkingOff ? { thinking: { type: "disabled" as const } } : {}),
       ...(effort ? { effort } : {}),
       ...(history.length ? { resume: resumeId } : {}),
     };
     input = stream;
     const mine = (q = run({ prompt: stream, options }));
+    if (autoCompact !== undefined) void q.applyFlagSettings({ autoCompactEnabled: autoCompact }).catch(() => {});
     sawState = false;
     void (async () => {
       try {
@@ -561,22 +603,37 @@ export function createClaudeSession(opts: ClaudeOptions) {
     })();
   }
 
-  async function send(text: string, images?: Image[]) {
-    if (!q) start();
+  /** Held steers go in at a boundary we choose, so clearQueue can still recall them. */
+  function flushSteers() {
+    if (!steering.length || !input) return;
+    for (const s of steering.splice(0)) pushUser(s.text, s.images, true);
+    queueUpdate();
+  }
+
+  /** `announce`: a steer has no TUI echo of its own, so it is emitted as the user message it now is. */
+  function pushUser(text: string, images?: Image[], announce = false) {
     const content: any = images?.length
       ? [
           ...images.map((i) => ({ type: "image", source: { type: "base64", media_type: i.mimeType, data: i.data } })),
           { type: "text", text },
         ]
       : text;
+    const msg = { role: "user", content: [...(images ?? []), { type: "text", text }], timestamp: stamp() };
+    if (announce) emit({ type: "message_start", message: msg });
+    record(msg);
+    if (announce) emit({ type: "message_end", message: msg });
+    input!.push({ type: "user", message: { role: "user", content }, parent_tool_use_id: null });
+  }
+
+  async function send(text: string, images?: Image[], announce = false) {
+    if (!q) start();
     if (!running) {
       turn = new AbortController();
       timing = { t0: Date.now(), model, effort };
       running = true;
       emit({ type: "agent_start" });
     }
-    record({ role: "user", content: [...(images ?? []), { type: "text", text }], timestamp: stamp() });
-    input!.push({ type: "user", message: { role: "user", content }, parent_tool_use_id: null });
+    pushUser(text, images, announce);
   }
 
   return {
@@ -595,13 +652,11 @@ export function createClaudeSession(opts: ClaudeOptions) {
     async prompt(text: string, o?: { images?: Image[] }) {
       await send(text, o?.images);
     },
-    /** Pushed straight into the live input; Claude Code takes it at its next boundary. */
+    /** Held until a tool result or the turn end (pi's boundaries); clearQueue drops it unrecorded. */
     async steer(text: string, images?: Image[]) {
-      // clearQueue cannot recall a push, so a re-queue of one already sent is a no-op
-      if (steering.includes(text)) return;
-      steering.push(text);
+      if (!running) return send(text, images);
+      steering.push({ text, images });
       queueUpdate();
-      await send(text, images);
     },
     /** Held here until the turn ends, then sent as its own prompt. */
     async followUp(text: string, images?: Image[]) {
@@ -610,10 +665,12 @@ export function createClaudeSession(opts: ClaudeOptions) {
       queueUpdate();
     },
     clearQueue() {
+      steering.length = 0;
       followUps.length = 0;
       queueUpdate();
     },
     async abort() {
+      steering.length = 0;
       followUps.length = 0;
       if (!running || !q) return;
       aborting = true;
@@ -629,11 +686,15 @@ export function createClaudeSession(opts: ClaudeOptions) {
      * picks it up from the options of its replacement.
      */
     setThinkingLevel(level: Level) {
+      thinkingOff = level === "off";
       effort = effortFor(level);
       void q?.applyFlagSettings({ effortLevel: effort ?? null }).catch(() => {});
     },
-    /** Claude Code compacts on its own; nothing to switch from here. */
-    setAutoCompactionEnabled(_on: boolean) {},
+    /** Live: Claude Code compacts, we only switch it. */
+    setAutoCompactionEnabled(on: boolean) {
+      autoCompact = on;
+      void q?.applyFlagSettings({ autoCompactEnabled: on }).catch(() => {});
+    },
     dispose() {
       disposed = true;
       unsubPi();

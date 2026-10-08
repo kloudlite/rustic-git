@@ -7,6 +7,7 @@ import { claudeEnv, createClaudeSession, effortFor } from "./claude.ts";
 function fake(reply: (n: number, push: (m: any) => void) => void) {
   const calls: any[] = [];
   const interrupts: number[] = [];
+  const flags: any[] = [];
   const query = (p: any) => {
     calls.push(p);
     const out: any[] = [];
@@ -32,10 +33,12 @@ function fake(reply: (n: number, push: (m: any) => void) => void) {
         push({ type: "result", subtype: "error_during_execution", is_error: true });
       },
       setModel: async () => {},
-      applyFlagSettings: async () => {},
+      applyFlagSettings: async (x: any) => {
+        flags.push(x);
+      },
     } as any;
   };
-  return { query: query as any, calls, interrupts };
+  return { query: query as any, calls, interrupts, flags };
 }
 
 const text = (t: string, i = 0) => [
@@ -348,10 +351,96 @@ test("env drops anthropic credentials and routing, keeps the rest", () => {
   expect(env.ENABLE_CLAUDEAI_MCP_SERVERS).toBe("0");
 });
 
-test("thinking levels map to effort", () => {
+test("thinking levels map 1:1; only minimal falls back to low; off disables thinking", () => {
   expect(["off", "minimal", "low", "medium", "high", "xhigh", "max"].map((l) => effortFor(l as never))).toEqual([
-    "low", "low", "low", "medium", "high", "max", "max",
+    undefined, "low", "low", "medium", "high", "xhigh", "max",
   ]);
+});
+
+test("off sends thinking disabled", async () => {
+  const f = fake((_n, push) => text("x").forEach(push));
+  const { s } = run(f, { thinkingLevel: "off" });
+  await s.prompt("a");
+  expect(f.calls[0].options.thinking).toEqual({ type: "disabled" });
+  expect(f.calls[0].options.effort).toBeUndefined();
+  s.dispose();
+});
+
+test("token total counts cache reads and writes", async () => {
+  const f = fake((_n, push) => {
+    push({ type: "stream_event", event: { type: "message_start", message: { id: "c", usage: { input_tokens: 3, cache_read_input_tokens: 10, cache_creation_input_tokens: 5 } } } });
+    push({ type: "stream_event", event: { type: "message_delta", usage: { output_tokens: 4 } } });
+    push({ type: "stream_event", event: { type: "message_stop" } });
+    push({ type: "result", subtype: "success" });
+  });
+  const { s, events } = run(f);
+  await s.prompt("a");
+  await tick();
+  const end = events.find((e) => e.type === "message_end");
+  expect(end.message.usage).toMatchObject({ input: 3, output: 4, cacheRead: 10, cacheWrite: 5, totalTokens: 22 });
+  s.dispose();
+});
+
+test("a steer is held until a tool result or the turn end, and clearQueue drops it", async () => {
+  let pushOut: (m: any) => void = () => {};
+  const f = fake((_n, push) => {
+    pushOut = push;
+    toolTurn(["tu1"], push);
+  });
+  const { s, events, p } = run(f);
+  p.tools.push({ name: "bash", description: "d", parameters: { type: "object" }, execute: async () => ({ content: [] }) });
+  await s.prompt("go");
+  await tick();
+  const pushed = () => p.recorded.filter((m) => m.role === "user").map((m) => m.content.at(-1).text);
+  await s.steer("drop me");
+  expect(events.at(-1)).toMatchObject({ type: "queue_update", steering: ["drop me"] });
+  s.clearQueue();
+  expect(events.at(-1)).toMatchObject({ type: "queue_update", steering: [], followUp: [] });
+  await s.steer("keep me");
+  expect(pushed()).toEqual(["go"]);
+  const c = await mcpOf(f.calls[0].options);
+  await c.callTool({ name: "bash", arguments: {}, _meta: { "claudecode/toolUseId": "tu1" } });
+  expect(pushed()).toEqual(["go", "keep me"]);
+  expect(events.filter((e) => e.type === "queue_update").at(-1)).toMatchObject({ steering: [] });
+  // record order: the tool call, its result, then the steer
+  expect(p.recorded.map((m) => m.role)).toEqual(["user", "assistant", "toolResult", "user"]);
+  expect(events.filter((e) => e.type === "message_start" && e.message.role === "user").map((e) => e.message.content.at(-1).text)).toEqual(["keep me"]);
+  pushOut({ type: "result", subtype: "success" });
+  s.dispose();
+});
+
+test("a steer still held at turn end becomes the next turn", async () => {
+  const f = fake((n, push) => text(`r${n}`).forEach(push));
+  const { s, events, p } = run(f);
+  await s.prompt("a");
+  await s.steer("b");
+  await tick();
+  await tick();
+  expect(p.recorded.filter((m) => m.role === "user").map((m) => m.content.at(-1).text)).toEqual(["a", "b"]);
+  expect(events.filter((e) => e.type === "agent_end").length).toBe(2);
+  s.dispose();
+});
+
+test("auto-compaction toggles live and compaction and retries become pi events", async () => {
+  const f = fake((_n, push) => {
+    push({ type: "system", subtype: "status", status: "compacting" });
+    push({ type: "system", subtype: "compact_boundary", compact_metadata: { trigger: "auto", pre_tokens: 9000, post_tokens: 1200 } });
+    push({ type: "system", subtype: "api_retry", attempt: 1, max_retries: 3, retry_delay_ms: 500, error_status: 529, error: "overloaded" });
+    text("ok").forEach(push);
+  });
+  const { s, events } = run(f);
+  await s.prompt("a");
+  await tick();
+  expect(events.find((e) => e.type === "compaction_start")).toMatchObject({ reason: "threshold" });
+  expect(events.find((e) => e.type === "compaction_end")).toMatchObject({
+    reason: "threshold", aborted: false, willRetry: false, result: { tokensBefore: 9000, estimatedTokensAfter: 1200 },
+  });
+  expect(events.find((e) => e.type === "auto_retry_start")).toMatchObject({ attempt: 1, maxAttempts: 3, delayMs: 500, errorMessage: "overloaded" });
+  expect(events.find((e) => e.type === "auto_retry_end")).toMatchObject({ success: true, attempt: 1 });
+  s.setAutoCompactionEnabled(false);
+  await tick();
+  expect(f.flags.at(-1)).toEqual({ autoCompactEnabled: false });
+  s.dispose();
 });
 
 test("each turn appends one timing line", async () => {
