@@ -18,7 +18,7 @@ import {
   writeSettings,
   type ModelRef,
 } from "@kloudlite-tui/agent";
-import { Registry, platformTools, podTools, webFetch, webSearch, type ToolDef } from "@kloudlite-tui/tools";
+import { Registry, platformTools, podTools, scratchRoot, scratchTools, webFetch, webSearch, type ToolDef } from "@kloudlite-tui/tools";
 import { delegateTools, type DelegateDeps } from "./delegate.ts";
 import { forgetSessions } from "./forget.ts";
 import * as git from "./git.ts";
@@ -69,12 +69,12 @@ function forgetting(t: ToolDef, deps: DelegateDeps): ToolDef {
   };
 }
 
-/** Who gets which hands: main reaches the platform and delegates; a workspace session has the
+/** Who gets which hands: main reaches the platform, delegates and has a confined scratch folder (bash, read, write); a workspace session has the
  * pod's code tools and its own slice of the platform; a subagent only code tools. */
-export async function registryFor(k: SessionKind, deps: DelegateDeps, opts: SessionOpts): Promise<Registry> {
+export async function registryFor(k: SessionKind, deps: DelegateDeps, opts: SessionOpts, key = "main"): Promise<Registry> {
   const r = new Registry();
   if (k.kind === "main")
-    return r.add(webFetch, webSearch, ...platformTools("main").map((t) => (t.name === "workspace_delete" ? forgetting(t, deps) : t)), ...delegateTools("main", undefined, deps, opts), ...opts.tools);
+    return r.add(webFetch, webSearch, ...platformTools("main").map((t) => (t.name === "workspace_delete" ? forgetting(t, deps) : t)), ...delegateTools("main", undefined, deps, opts), ...scratchTools(scratchRoot(key)), ...opts.tools);
   if (k.kind === "workspace")
     return r.add(webFetch, webSearch, ...(await podTools(k.ws)), ...platformTools("workspace", k.ws), ...delegateTools("workspace", k.ws, deps, opts), ...opts.tools);
   return r.add(webFetch, ...(await podTools(k.ws)));
@@ -119,7 +119,7 @@ export class LocalBackend implements Backend {
       sessions: listSessions(),
       cwd: process.cwd(),
       home: homedir(),
-      tools: [webFetch.name, webSearch.name, ...platformTools("main").map((t) => t.name), "workspace_ask", "subagent"],
+      tools: [webFetch.name, webSearch.name, ...platformTools("main").map((t) => t.name), "workspace_ask", "subagent", "bash", "read", "write"],
     };
   }
 
@@ -129,7 +129,7 @@ export class LocalBackend implements Backend {
     await this.#live.get(key)?.dispose();
     const k = sessionKind(key);
     const deps = { live: this.#live, busy: this.#busy, open: (key: string, o: SessionOpts) => this.session(key, o) };
-    const registry = await registryFor(k, deps, opts);
+    const registry = await registryFor(k, deps, opts, key);
     const agent: any = await createSession({
       key,
       model,

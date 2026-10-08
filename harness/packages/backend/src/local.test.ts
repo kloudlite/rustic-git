@@ -12,6 +12,7 @@ test("hello carries what the TUI reads at boot", async () => {
   expect(h.cwd).toBe(process.cwd());
   expect(h.tools).toContain("workspace_create");
   expect(h.tools).toContain("workspace_ask");
+  expect(h.tools).toContain("bash");
   expect(h.tools.slice(0, 2)).toEqual(["web_fetch", "web_search"]);
   expect(h.catalog.length).toBeGreaterThan(0);
   expect(h.catalog[0]).toHaveProperty("input");
@@ -57,7 +58,7 @@ test("registry per session kind", async () => {
   expect(main).toContain("workspace_create");
   expect(main).toContain("workspace_ask");
   expect(main).toContain("question");
-  expect(main).not.toContain("read");
+  for (const n of ["bash", "read", "write"]) expect(main).toContain(n);
   expect(main).not.toContain("exec");
   const wsReg = await registryFor({ kind: "workspace", ws: "w1" }, deps, opts);
   const ws = wsReg.names();
@@ -65,6 +66,7 @@ test("registry per session kind", async () => {
   expect(ws).toContain("packages_add");
   expect(ws).not.toContain("workspace_create");
   expect(ws).not.toContain("workspace_ask");
+  expect(wsReg.get("read").description).not.toContain("scratch");
   expect(ws).toContain("subagent");
   expect((wsReg.get("packages_add").inputSchema as any).properties.workspace).toBeUndefined();
   const sub = (await registryFor({ kind: "subagent", ws: "w1" }, deps, opts)).names();
