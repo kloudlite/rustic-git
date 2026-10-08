@@ -8,6 +8,7 @@ import { SPECIAL } from "./Input.tsx";
 import type { FileDiff } from "../diff.ts";
 import { useWheelAccel } from "../wheel.ts";
 import { backend } from "../hello.ts";
+import { filesApi, unreachable } from "../filesApi.ts";
 import { displayRoot, type Change, type Match, type TreeNode } from "../git.ts";
 
 /** One selectable row in the left pane. */
@@ -24,11 +25,14 @@ type Row =
  */
 export function Files({
   root,
+  workspace,
   refreshKey,
   onClose,
   onCycle,
 }: {
   root: string;
+  /** A workspace view reads that workspace's `~/workspace` from its pod, never the bench's files. */
+  workspace?: string;
   /** bump to re-scan (agent finished an edit/write) */
   refreshKey: number;
   onClose: () => void;
@@ -36,6 +40,9 @@ export function Files({
   onCycle: () => void;
 }) {
   const wheel = useWheelAccel();
+  const fs = filesApi(workspace, backend());
+  const [podError, setPodError] = useState<string | null>(null);
+  const down = (e: unknown) => workspace && setPodError(unreachable(e));
   const [changes, setChanges] = useState<Change[]>([]);
   const [expanded, setExpanded] = useState<Set<string>>(new Set());
   const [dirCache, setDirCache] = useState<Record<string, TreeNode[]>>({});
@@ -52,11 +59,11 @@ export function Files({
   const scrollRef = useRef<ScrollBoxRenderable>(null);
   const [git, setGit] = useState(false);
   useEffect(() => {
-    backend().fs.isGitRepo(root).then(setGit).catch(() => {});
+    fs.isGitRepo(root).then((g) => (setGit(g), setPodError(null))).catch(down);
   }, [root]);
 
   const rescan = () => {
-    backend().fs.changes(root).then(setChanges).catch(() => setChanges([]));
+    fs.changes(root).then((c) => (setChanges(c), setPodError(null))).catch((e) => (setChanges([]), down(e)));
     setDirCache({});
   };
   useEffect(rescan, [root]);
@@ -72,10 +79,9 @@ export function Files({
   const dir = (rel: string): TreeNode[] => {
     if (!(rel in dirCache)) {
       dirCache[rel] = []; // mark in flight; never re-request while it loads
-      backend()
-        .fs.listDir(root, rel)
+      fs.listDir(root, rel)
         .then((nodes) => setDirCache((c) => ({ ...c, [rel]: nodes })))
-        .catch(() => {});
+        .catch(down);
     }
     return dirCache[rel]!;
   };
@@ -136,8 +142,7 @@ export function Files({
   useEffect(() => {
     if (!open?.status) return setDiff(null);
     let live = true;
-    backend()
-      .fs.fileDiff(root, open.path, open.status)
+    fs.fileDiff(root, open.path, open.status)
       .then((d) => live && setDiff(d))
       .catch(() => {});
     return () => {
@@ -149,8 +154,7 @@ export function Files({
   useEffect(() => {
     if (!open) return setFull(null);
     let live = true;
-    backend()
-      .fs.fullFile(root, open.path, open.status)
+    fs.fullFile(root, open.path, open.status)
       .then((lines) => live && setFull({ path: open.path, lines, added: 0, removed: 0 }))
       .catch(() => {});
     return () => {
@@ -200,8 +204,7 @@ export function Files({
             const query = p.text.trim();
             if (!query) setSearch(null);
             else
-              backend()
-                .fs.grep(root, query)
+              fs.grep(root, query)
                 .then((matches) => setSearch({ query, matches }))
                 .catch(() => setSearch({ query, matches: [] }));
             setMatchIdx(0);
@@ -314,7 +317,8 @@ export function Files({
       {/* header */}
       <box flexDirection="row" justifyContent="space-between" paddingLeft={1} paddingRight={1}>
         <text>
-          <span fg={theme.muted}>{displayRoot(root)}</span>
+          <span fg={theme.muted}>{workspace ? "~/workspace" : displayRoot(root)}</span>
+          {podError ? <span fg={theme.error}>  {podError}</span> : ""}
           {flash ? <span fg={theme.success}>  ● updated</span> : ""}
         </text>
         <text fg={theme.muted}>

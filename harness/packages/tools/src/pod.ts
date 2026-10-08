@@ -27,14 +27,16 @@ async function lookup(ws: string): Promise<Addr> {
 
 /** A ready workspace's tool server, for reads that are not model tool calls (sidebar). One
  * lookup per call: the address and token rotate, and a sidebar beat is 5 s apart. */
-async function podFetch<T>(ws: string, path: string, init: RequestInit, ms: number): Promise<T> {
+async function podFetch<T>(ws: string, path: string, init: RequestInit, ms: number, text = false): Promise<T> {
   const a = await apiJson<Addr>("GET", `/v1/workspaces/${encodeURIComponent(ws)}/tools`);
   if (!a?.address) throw new Error("no address");
   const res = await fetch(`http://${a.address}${path}`, { ...init, headers: { ...(init.headers as object), ...headers(a) }, signal: AbortSignal.timeout(ms) });
   if (!res.ok) throw new Error(`error ${res.status}`); // body withheld: it may echo the token
-  return (await res.json()) as T;
+  return (text ? await res.text() : await res.json()) as T;
 }
 export const podGet = <T>(ws: string, path: string, ms = 5000) => podFetch<T>(ws, path, {}, ms);
+/** A pod file's bytes as text (`/fs/file`). */
+export const podText = (ws: string, path: string, ms = 10_000) => podFetch<string>(ws, path, {}, ms, true);
 export const podPost = <T>(ws: string, tool: string, args: unknown, ms = 5000) =>
   podFetch<T>(ws, `/tools/${tool}`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(args ?? {}) }, ms);
 

@@ -145,4 +145,13 @@ export interface Backend {
     listDir(root: string, rel: string): Promise<TreeNode[]>;
     grep(root: string, query: string, limit?: number): Promise<Match[]>;
   };
+  /** The same reads against a workspace's own `~/workspace`, from its pod's ide server. Rejects
+   * with the reason when the pod cannot be reached; there is no grep (no pod endpoint). */
+  podfs: {
+    isGitRepo(ws: string): Promise<boolean>;
+    changes(ws: string): Promise<Change[]>;
+    fileDiff(ws: string, path: string, status: ChangeStatus): Promise<FileDiff | null>;
+    fullFile(ws: string, path: string, status?: ChangeStatus): Promise<DiffLine[]>;
+    listDir(ws: string, rel: string): Promise<TreeNode[]>;
+  };
 }

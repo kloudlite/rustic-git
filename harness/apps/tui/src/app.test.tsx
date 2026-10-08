@@ -265,7 +265,7 @@ test("workspaces carry their own named sessions", async () => {
   t.done();
 });
 
-test("s searches file contents from the files view", async () => {
+test("s in a workspace files view never searches the bench's files", async () => {
   const t = await mount();
   t.mockInput.pressKey("1"); // enter a workspace
   await t.frame();
@@ -279,7 +279,7 @@ test("s searches file contents from the files view", async () => {
   t.mockInput.pressKey("RETURN");
   const f = await t.frame();
   expect(f).toContain("search sessionKey");
-  expect(f).toContain("src/sessions.ts:"); // a hit, with its line number
+  expect(f).not.toContain("src/sessions.ts:"); // workspace search has no pod endpoint: no bench hits
 
   t.mockInput.pressKey("ESCAPE"); // clears the search, stays in the view
   expect(await t.frame()).not.toContain("search sessionKey");

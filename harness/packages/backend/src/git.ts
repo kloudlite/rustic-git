@@ -53,7 +53,7 @@ export function changes(root: string): Change[] {
 }
 
 /** Parse `git diff` unified output into DiffLines (original-file numbering). */
-function parseUnified(text: string): DiffLine[] {
+export function parseUnified(text: string): DiffLine[] {
   const lines: DiffLine[] = [];
   let oldNo = 0;
   let newNo = 0;

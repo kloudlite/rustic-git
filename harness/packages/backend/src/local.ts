@@ -24,6 +24,7 @@ import { WORKSPACE_DIR, delegateTools, type DelegateDeps } from "./delegate.ts";
 import { forgetSessions } from "./forget.ts";
 import * as git from "./git.ts";
 import { toolDiff } from "./diff.ts";
+import { podfs } from "./podfs.ts";
 import { space } from "./space.ts";
 import { PROTOCOL } from "./wire.ts";
 import type { Backend, CatalogModel, Hello, SessionHandle, SessionOpts } from "./index.ts";
@@ -215,6 +216,8 @@ export class LocalBackend implements Backend {
     login: async (provider: string, type: any, ui: any) => void (await loginProvider(provider, type, ui)),
     claudeSignedIn: async (fresh?: boolean) => claudeSignedIn(fresh),
   };
+
+  podfs = podfs;
 
   fs = {
     isGitRepo: async (root: string) => git.isGitRepo(root),

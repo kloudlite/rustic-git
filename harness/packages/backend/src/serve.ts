@@ -42,6 +42,7 @@ export function serve(backend: Backend, peer: Peer) {
   for (const [group, ops] of [
     ["sessions", backend.sessions],
     ["fs", backend.fs],
+    ["podfs", backend.podfs],
   ] as const)
     for (const [name, fn] of Object.entries(ops)) peer.handle(`${group}.${name}`, (args: unknown[]) => (fn as any)(...args));
 
