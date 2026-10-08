@@ -207,11 +207,11 @@ async fn list_bench_teams(s: &ApiState, headers: &HeaderMap) -> Result<Response,
         err(StatusCode::SERVICE_UNAVAILABLE, "team list unavailable")
     };
     let dir = s.directory.as_ref().ok_or_else(|| unavailable("no directory".into()))?;
-    let region = dir.personal_region(&caller.name).await.map_err(&unavailable)?;
+    let region = dir.personal_region(&caller.name).await.map_err(unavailable)?;
     let mut out = vec![json!({"slug": caller.name, "name": "Personal", "region": region, "personal": true})];
-    for slug in dir.member_teams(&caller.name).await.map_err(&unavailable)? {
+    for slug in dir.member_teams(&caller.name).await.map_err(unavailable)? {
         // A team deleted between the two reads is simply not listed.
-        if let Some((name, region)) = dir.bench_team(&slug).await.map_err(&unavailable)? {
+        if let Some((name, region)) = dir.bench_team(&slug).await.map_err(unavailable)? {
             out.push(json!({"slug": slug, "name": name, "region": region, "personal": false}));
         }
     }
