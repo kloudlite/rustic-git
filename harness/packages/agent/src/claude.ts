@@ -21,21 +21,24 @@
  * setAutoCompactionEnabled, messages, agent.beforeToolCall) and emits the same
  * `AgentSessionEvent` shapes, so the TUI renders it unchanged.
  *
- * Tools are Claude Code's built-ins, run by the child itself with
- * `bypassPermissions` (the bench is the sandbox). Our tool `registry` is not
- * bridged: pi tools and Claude Code tools are different worlds, and an MCP
- * bridge would put a second hop in every call. The TUI sees them as
- * `tool_execution_*` events built from the stream's tool_use / tool_result.
- *
- * History: Claude Code holds the transcript (`resume`); `messages` stays empty,
- * so a reopened session shows nothing extra but remembers everything.
+ * Tools, prompt and transcript are pi's (spec 2026-10-08-claude-tool-host).
+ * The pi AgentSession is built as for any model but its loop never runs:
+ * its declared tools are served to the child over in-process MCP
+ * (`claude-tools.ts`), `session.systemPrompt` is the system prompt, and
+ * every finished message is recorded into pi's file and `agent.state`.
+ * Each query start resumes Claude Code from pi's record
+ * (`claude-history.ts` through `sessionStore`), so switching to or from a
+ * pi model never loses a turn. Claude Code's built-in tools are off.
  */
+import { randomUUID } from "node:crypto";
 import { execFile } from "node:child_process";
 import { createRequire } from "node:module";
 import { appendFile, mkdir } from "node:fs/promises";
 import { homedir } from "node:os";
 import { dirname, join } from "node:path";
 import { query as sdkQuery, type Options, type SDKUserMessage } from "@anthropic-ai/claude-agent-sdk";
+import { TOOL_PREFIX, toClaudeEntries } from "./claude-history.ts";
+import { createToolServer, declaredTools } from "./claude-tools.ts";
 
 export const AUTH_MESSAGE = "Not signed in to Claude. On your laptop run: kl-connect claude login";
 
@@ -122,13 +125,20 @@ type QueryFn = (p: { prompt: AsyncIterable<SDKUserMessage>; options?: Options })
   close?(): void;
 };
 
+export type PiHost = {
+  agent: { state: { messages: any[]; tools: any[] }; beforeToolCall?: any; afterToolCall?: any };
+  systemPrompt: string;
+  sessionManager: { appendMessage(m: any): unknown; buildSessionContext(): { messages: any[] } };
+  subscribe(l: (e: any) => void): () => void;
+  dispose?(): void;
+};
+
 export type ClaudeOptions = {
   key: string;
   model: { id: string };
-  fresh?: boolean;
   thinkingLevel?: Level;
-  /** Where the Claude session id is kept (the key's meta.json). */
-  store: { get(): string | undefined; set(id: string | undefined): void };
+  /** The pi session whose tools, prompt and record this one runs on. */
+  pi: PiHost;
   cwd?: string;
   /** Injected in tests so they need no binary and no network. */
   query?: QueryFn;
@@ -184,27 +194,6 @@ let lastStamp = 0;
 /** Message ids in the TUI are the creation timestamp, so they must be unique. */
 const stamp = () => (lastStamp = Math.max(Date.now(), lastStamp + 1));
 
-const pi = (name: string) => name.toLowerCase();
-
-/** Claude Code tool args in the shape the TUI's summaries and diffs read. */
-function piArgs(name: string, a: any): any {
-  if (!a || typeof a !== "object") return a;
-  const path = a.file_path ?? a.path;
-  if (name === "Edit") return { path, edits: [{ oldText: a.old_string, newText: a.new_string }] };
-  if (name === "Write") return { path, content: a.content };
-  return path ? { ...a, path } : a;
-}
-
-function textOf(content: unknown): string {
-  if (typeof content === "string") return content;
-  if (Array.isArray(content))
-    return content
-      .filter((b: any) => b?.type === "text")
-      .map((b: any) => b.text)
-      .join("\n");
-  return "";
-}
-
 export function createClaudeSession(opts: ClaudeOptions) {
   const run: QueryFn = opts.query ?? (sdkQuery as unknown as QueryFn);
   const listeners = new Set<Listener>();
@@ -212,10 +201,60 @@ export function createClaudeSession(opts: ClaudeOptions) {
     for (const l of [...listeners]) l(e);
   };
 
+  // the TUI is fullscreen, so timing goes to a file, never stderr
+  const timingLog = opts.timingLog ?? (opts.query ? undefined : TIMING_LOG);
+  let timing: Timing | undefined;
+  const since = () => (timing ? Date.now() - timing.t0 : undefined);
+
   let model = opts.model.id;
   let effort = effortFor(opts.thinkingLevel);
-  let sessionId = opts.fresh ? undefined : opts.store.get();
-  if (opts.fresh) opts.store.set(undefined);
+
+  const piSession = opts.pi;
+  const record = (m: any) => {
+    piSession.sessionManager.appendMessage(m);
+    piSession.agent.state.messages = [...piSession.agent.state.messages, m];
+  };
+  let turn = new AbortController();
+  // tool_use id -> the recorded assistant message that issued it (this turn)
+  const issued = new Map<string, any>();
+  const waiting = new Map<string, (m: any) => void>();
+  const lastAssistant = () => piSession.agent.state.messages.findLast((m: any) => m.role === "assistant");
+  /**
+   * The MCP call can overtake our read of the stream, and the gate and
+   * codemode's nested calls need the issuing message recorded first.
+   * Resolves early with the last assistant message when the turn aborts.
+   * ponytail: 5 s cap then the last assistant message; a stream that slow
+   * has bigger problems.
+   */
+  const assistantFor = (id: string) =>
+    issued.has(id)
+      ? Promise.resolve(issued.get(id))
+      : new Promise<any>((resolve) => {
+          const done = (m: any) => (clearTimeout(t), turn.signal.removeEventListener("abort", onAbort), waiting.delete(id), resolve(m));
+          const onAbort = () => done(lastAssistant());
+          const t = setTimeout(onAbort, 5_000);
+          turn.signal.addEventListener("abort", onAbort, { once: true });
+          waiting.set(id, done);
+          if (turn.signal.aborted) onAbort();
+        });
+  // one server per query: an MCP Server binds one transport, and each start() spawns a new child
+  const toolServer = () =>
+    createToolServer({
+      tools: () => declaredTools(piSession),
+      agent: piSession.agent,
+      assistantFor,
+      signal: () => turn.signal,
+      emit: (e) => {
+        if (!running) return; // a tool outliving its turn (child died) must not trail agent_end
+        if (e.type === "tool_execution_start" && timing) timing.tool ??= since();
+        emit(e);
+      },
+      onResult: (m) => record(m),
+    });
+  // codemode's nested calls are emitted on the pi session itself
+  const unsubPi = piSession.subscribe((e: any) => {
+    if (e?.parentToolCallId && String(e.type).startsWith("tool_execution_")) emit(e);
+  });
 
   let input: Pushable<SDKUserMessage> | undefined;
   let q: ReturnType<QueryFn> | undefined;
@@ -224,10 +263,6 @@ export function createClaudeSession(opts: ClaudeOptions) {
   let aborting = false;
   let sawState = false;
   let rateLimited: any;
-  // the TUI is fullscreen, so timing goes to a file, never stderr
-  const timingLog = opts.timingLog ?? (opts.query ? undefined : TIMING_LOG);
-  let timing: Timing | undefined;
-  const since = () => (timing ? Date.now() - timing.t0 : undefined);
   const followUps: { text: string; images?: Image[] }[] = [];
   const steering: string[] = [];
 
@@ -235,7 +270,6 @@ export function createClaudeSession(opts: ClaudeOptions) {
   type Cur = { msg: any; parts: Map<number, any>; id?: string; input: number };
   let cur: Cur | undefined;
   const streamed = new Set<string>();
-  const tools = new Map<string, string>(); // tool_use id -> name
 
   const queueUpdate = () =>
     emit({ type: "queue_update", steering: [...steering], followUp: followUps.map((f) => f.text) });
@@ -243,9 +277,12 @@ export function createClaudeSession(opts: ClaudeOptions) {
   const newMessage = (extra: object = {}) => ({
     role: "assistant",
     content: [] as any[],
-    timestamp: stamp(),
+    api: "anthropic-messages",
+    provider: "anthropic",
+    model,
+    usage: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, totalTokens: 0, cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 } },
     stopReason: "stop",
-    usage: { totalTokens: 0 },
+    timestamp: stamp(),
     ...extra,
   });
 
@@ -253,12 +290,21 @@ export function createClaudeSession(opts: ClaudeOptions) {
     const msg = newMessage({ stopReason, errorMessage: text });
     emit({ type: "message_start", message: msg });
     emit({ type: "message_end", message: msg });
+    record(msg);
   }
 
   function endCur() {
     if (!cur) return;
-    emit({ type: "message_end", message: cur.msg });
+    const msg = cur.msg;
     cur = undefined;
+    record(msg);
+    emit({ type: "message_end", message: msg });
+    for (const b of msg.content)
+      if (b.type === "toolCall") {
+        issued.set(b.id, msg);
+        waiting.get(b.id)?.(msg);
+        waiting.delete(b.id);
+      }
   }
 
   function finish() {
@@ -267,6 +313,7 @@ export function createClaudeSession(opts: ClaudeOptions) {
     if (aborting) errorMessage("", "aborted");
     aborting = false;
     running = false;
+    issued.clear();
     emit({ type: "agent_end", messages: [] });
     const next = followUps.shift();
     if (next) {
@@ -275,15 +322,10 @@ export function createClaudeSession(opts: ClaudeOptions) {
     }
   }
 
-  function toolStart(id: string, name: string, args: any) {
-    tools.set(id, name);
-    emit({ type: "tool_execution_start", toolCallId: id, toolName: pi(name), args: piArgs(name, args) });
-  }
-
   function onStream(ev: any) {
     switch (ev?.type) {
       case "message_start": {
-        cur = { msg: newMessage({ model }), parts: new Map(), id: ev.message?.id, input: ev.message?.usage?.input_tokens ?? 0 };
+        cur = { msg: newMessage(), parts: new Map(), id: ev.message?.id, input: ev.message?.usage?.input_tokens ?? 0 };
         if (cur.id) streamed.add(cur.id);
         cur.msg.usage.totalTokens = cur.input + (ev.message?.usage?.output_tokens ?? 0);
         // the turn has moved on, so steers pushed earlier were taken in
@@ -302,12 +344,13 @@ export function createClaudeSession(opts: ClaudeOptions) {
           cur.msg.content.push(part);
           cur.parts.set(ev.index, part);
         } else if (b?.type === "thinking") {
-          const part = { type: "thinking", thinking: "" };
+          const part = { type: "thinking", thinking: "", thinkingSignature: "" };
           cur.msg.content.push(part);
           cur.parts.set(ev.index, part);
         } else if (b?.type === "tool_use") {
-          if (timing) timing.tool ??= since();
-          cur.parts.set(ev.index, { tool: true, id: b.id, name: b.name, json: "" });
+          const part = { type: "toolCall", id: b.id, name: String(b.name).replace(TOOL_PREFIX, ""), arguments: {} as any, json: "" };
+          cur.msg.content.push(part);
+          cur.parts.set(ev.index, part);
         }
         break;
       }
@@ -322,7 +365,10 @@ export function createClaudeSession(opts: ClaudeOptions) {
           part.thinking += d.thinking;
           if (timing) timing.thinking ??= since();
         }
-        else if (d?.type === "input_json_delta") {
+        else if (d?.type === "signature_delta") {
+          part.thinkingSignature += d.signature;
+          break;
+        } else if (d?.type === "input_json_delta") {
           part.json += d.partial_json;
           break;
         } else break;
@@ -331,17 +377,18 @@ export function createClaudeSession(opts: ClaudeOptions) {
       }
       case "content_block_stop": {
         const part = cur?.parts.get(ev.index);
-        if (part?.tool) {
-          let args: any = {};
+        if (part?.type === "toolCall") {
           try {
-            args = part.json ? JSON.parse(part.json) : {};
+            part.arguments = part.json ? JSON.parse(part.json) : {};
           } catch {}
-          toolStart(part.id, part.name, args);
+          delete part.json;
         }
         break;
       }
       case "message_delta": {
         if (!cur) break;
+        const sr = ev.delta?.stop_reason;
+        if (sr) cur.msg.stopReason = sr === "tool_use" ? "toolUse" : sr === "max_tokens" ? "length" : "stop";
         const u = ev.usage;
         if (u) {
           cur.input = u.input_tokens ?? cur.input;
@@ -362,32 +409,16 @@ export function createClaudeSession(opts: ClaudeOptions) {
       return;
     }
     if (m.message?.id && streamed.has(m.message.id)) return;
-    const msg = newMessage({ model });
+    const msg = newMessage();
     emit({ type: "message_start", message: msg });
     for (const b of m.message?.content ?? []) {
       if (b.type === "text") msg.content.push({ type: "text", text: b.text });
-      else if (b.type === "thinking") msg.content.push({ type: "thinking", thinking: b.thinking });
-      else if (b.type === "tool_use") toolStart(b.id, b.name, b.input);
+      else if (b.type === "thinking") msg.content.push({ type: "thinking", thinking: b.thinking, thinkingSignature: b.signature ?? "" });
+      else if (b.type === "tool_use") msg.content.push({ type: "toolCall", id: b.id, name: String(b.name).replace(TOOL_PREFIX, ""), arguments: b.input ?? {} });
     }
     emit({ type: "message_update", message: msg });
-    emit({ type: "message_end", message: msg });
-  }
-
-  function onUser(m: any) {
-    const content = m.message?.content;
-    if (!Array.isArray(content)) return;
-    for (const b of content) {
-      if (b?.type !== "tool_result" || !tools.has(b.tool_use_id)) continue;
-      const name = tools.get(b.tool_use_id)!;
-      tools.delete(b.tool_use_id);
-      emit({
-        type: "tool_execution_end",
-        toolCallId: b.tool_use_id,
-        toolName: pi(name),
-        isError: !!b.is_error,
-        result: { content: [{ type: "text", text: textOf(b.content) }] },
-      });
-    }
+    cur = { msg, parts: new Map(), input: 0 };
+    endCur();
   }
 
   function onResult(m: any) {
@@ -415,10 +446,7 @@ export function createClaudeSession(opts: ClaudeOptions) {
   function handle(m: any) {
     switch (m?.type) {
       case "system":
-        if (m.subtype === "init" && m.session_id && m.session_id !== sessionId) {
-          sessionId = m.session_id;
-          opts.store.set(sessionId);
-        } else if (m.subtype === "session_state_changed") {
+        if (m.subtype === "session_state_changed") {
           sawState = true;
           if (m.state === "idle") finish();
         }
@@ -428,9 +456,6 @@ export function createClaudeSession(opts: ClaudeOptions) {
         break;
       case "assistant":
         if (!m.parent_tool_use_id) onAssistant(m);
-        break;
-      case "user":
-        if (!m.parent_tool_use_id) onUser(m);
         break;
       case "rate_limit_event":
         if (m.rate_limit_info?.status === "rejected") rateLimited = m.rate_limit_info;
@@ -443,18 +468,30 @@ export function createClaudeSession(opts: ClaudeOptions) {
 
   function start() {
     const stream = new Pushable<SDKUserMessage>();
+    const cwd = opts.cwd ?? process.cwd();
+    // a fresh id per query; Claude Code reads pi's record for it once, before the child spawns
+    const resumeId = randomUUID();
+    const history = toClaudeEntries(piSession.sessionManager.buildSessionContext().messages, { sessionId: resumeId, cwd, model });
     const options: Options = {
       includePartialMessages: true,
       permissionMode: "bypassPermissions",
       allowDangerouslySkipPermissions: true,
-      systemPrompt: { type: "preset", preset: "claude_code" },
+      tools: [],
+      // ponytail: one day per call so a long `bash` is never cut off by
+      // Claude Code's MCP timeout; our abort is the real bound
+      mcpServers: { kl: { type: "sdk", name: "kl", instance: toolServer() as any, timeout: 86_400_000 } as any },
+      systemPrompt: piSession.systemPrompt,
       settingSources: [],
-      cwd: opts.cwd ?? process.cwd(),
+      cwd,
       model,
       extraArgs: { "thinking-display": "summarized" },
       env: claudeEnv(),
+      sessionStore: {
+        append: async () => {},
+        load: async (k: any) => (k.sessionId === resumeId && !k.subpath ? history : null),
+      } as any,
       ...(effort ? { effort } : {}),
-      ...(sessionId ? { resume: sessionId } : {}),
+      ...(history.length ? { resume: resumeId } : {}),
     };
     input = stream;
     const mine = (q = run({ prompt: stream, options }));
@@ -475,6 +512,7 @@ export function createClaudeSession(opts: ClaudeOptions) {
         // the child is gone; the next prompt starts a new query with resume
         q = undefined;
         input = undefined;
+        turn.abort();
         if (!disposed) finish();
       }
     })();
@@ -489,19 +527,20 @@ export function createClaudeSession(opts: ClaudeOptions) {
         ]
       : text;
     if (!running) {
+      turn = new AbortController();
       timing = { t0: Date.now(), model, effort };
       running = true;
       emit({ type: "agent_start" });
     }
+    record({ role: "user", content: [...(images ?? []), { type: "text", text }], timestamp: stamp() });
     input!.push({ type: "user", message: { role: "user", content }, parent_tool_use_id: null });
   }
 
   return {
     isClaude: true as const,
-    /** Claude Code runs its own tools under bypassPermissions; the TUI's gate has nothing to wrap. */
-    agent: { beforeToolCall: undefined as any },
+    agent: piSession.agent,
     get messages(): any[] {
-      return [];
+      return piSession.agent.state.messages;
     },
     get model() {
       return { provider: "anthropic", id: model };
@@ -535,6 +574,7 @@ export function createClaudeSession(opts: ClaudeOptions) {
       followUps.length = 0;
       if (!running || !q) return;
       aborting = true;
+      turn.abort();
       await q.interrupt().catch(() => {});
     },
     async setModel(m: { id: string }) {
@@ -553,9 +593,12 @@ export function createClaudeSession(opts: ClaudeOptions) {
     setAutoCompactionEnabled(_on: boolean) {},
     dispose() {
       disposed = true;
+      unsubPi();
+      turn.abort();
       input?.close();
       q?.close?.();
       listeners.clear();
+      piSession.dispose?.();
     },
   };
 }

@@ -1,4 +1,6 @@
 import { expect, test } from "bun:test";
+import { Client } from "@modelcontextprotocol/sdk/client/index.js";
+import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
 import { claudeEnv, createClaudeSession, effortFor } from "./claude.ts";
 
 /** A fake `query`: records its calls, and scripts a reply per pushed user message. */
@@ -48,16 +50,29 @@ const text = (t: string, i = 0) => [
   { type: "result", subtype: "success", result: t, num: i },
 ];
 
-const store = () => {
-  let id: string | undefined;
-  return { get: () => id, set: (v: string | undefined) => (id = v) };
-};
+function piHost(messages: any[] = []) {
+  const recorded: any[] = [];
+  const subs = new Set<(e: any) => void>();
+  const tools: any[] = [];
+  const host = {
+    agent: { state: { messages: [...messages], tools } } as any,
+    systemPrompt: "PI PROMPT",
+    sessionManager: {
+      appendMessage: (m: any) => recorded.push(m),
+      buildSessionContext: () => ({ messages: [...messages, ...recorded] }),
+    },
+    subscribe: (l: (e: any) => void) => (subs.add(l), () => subs.delete(l)),
+    emitPi: (e: any) => subs.forEach((l) => l(e)),
+  };
+  return { host, recorded, tools };
+}
 
 function run(f: ReturnType<typeof fake>, extra: object = {}) {
-  const s = createClaudeSession({ key: "k", model: { id: "claude-haiku-4-5" }, store: store(), query: f.query, ...extra });
+  const p = piHost();
+  const s = createClaudeSession({ key: "k", model: { id: "claude-haiku-4-5" }, pi: p.host, query: f.query, ...extra });
   const events: any[] = [];
   s.subscribe((e) => events.push(e));
-  return { s, events };
+  return { s, events, p };
 }
 const tick = () => new Promise((r) => setTimeout(r, 20));
 
@@ -81,49 +96,196 @@ test("two prompts are two turns on ONE query", async () => {
   s.dispose();
 });
 
-test("the claude session id is saved and options match the brief", async () => {
+test("options: no built-in tools, our MCP server, pi's prompt, history through sessionStore", async () => {
   const f = fake((_n, push) => text("x").forEach(push));
-  const st = store();
-  const s = createClaudeSession({ key: "k", model: { id: "m" }, store: st, query: f.query, thinkingLevel: "xhigh" });
+  const p = piHost([{ role: "user", content: [{ type: "text", text: "earlier" }], timestamp: 1 }]);
+  const s = createClaudeSession({ key: "k", model: { id: "m" }, pi: p.host, query: f.query });
   await s.prompt("a");
   await tick();
-  expect(st.get()).toBe("sid-1");
   const o = f.calls[0].options;
-  expect(o.includePartialMessages).toBe(true);
+  expect(o.tools).toEqual([]);
+  expect(o.mcpServers.kl).toMatchObject({ type: "sdk", name: "kl" });
+  expect(o.mcpServers.kl.timeout).toBe(86_400_000);
+  expect(o.systemPrompt).toBe("PI PROMPT");
   expect(o.permissionMode).toBe("bypassPermissions");
   expect(o.settingSources).toEqual([]);
-  expect(o.effort).toBe("max");
+  expect(o.includePartialMessages).toBe(true);
   expect(o.extraArgs["thinking-display"]).toBe("summarized");
-  expect(o.resume).toBeUndefined();
+  expect(typeof o.resume).toBe("string");
+  const entries = await o.sessionStore.load({ projectKey: "x", sessionId: o.resume });
+  expect(entries.map((e: any) => e.message.content)).toEqual(["earlier"]);
+  expect(await o.sessionStore.load({ projectKey: "x", sessionId: "other" })).toBeNull();
+  expect(await o.sessionStore.load({ projectKey: "x", sessionId: o.resume, subpath: "agent-1" })).toBeNull();
   s.dispose();
-  // a later session resumes it; /clear (fresh) drops it
-  createClaudeSession({ key: "k", model: { id: "m" }, store: st, query: f.query }).prompt("b");
-  expect(f.calls[1].options.resume).toBe("sid-1");
-  createClaudeSession({ key: "k", model: { id: "m" }, store: st, query: f.query, fresh: true }).prompt("c");
-  expect(f.calls[2].options.resume).toBeUndefined();
-  expect(st.get()).toBeUndefined();
+  // nothing recorded yet: no resume
+  const empty = piHost();
+  await createClaudeSession({ key: "k", model: { id: "m" }, pi: empty.host, query: f.query }).prompt("b");
+  expect(f.calls[1].options.resume).toBeUndefined();
 });
 
-test("tool_use and tool_result become tool_execution_start and _end", async () => {
-  const f = fake((_n, push) => {
-    push({ type: "stream_event", event: { type: "message_start", message: { id: "t" } } });
-    push({ type: "stream_event", event: { type: "content_block_start", index: 0, content_block: { type: "tool_use", id: "tu1", name: "Bash" } } });
-    push({ type: "stream_event", event: { type: "content_block_delta", index: 0, delta: { type: "input_json_delta", partial_json: '{"command":' } } });
-    push({ type: "stream_event", event: { type: "content_block_delta", index: 0, delta: { type: "input_json_delta", partial_json: '"ls"}' } } });
-    push({ type: "stream_event", event: { type: "content_block_stop", index: 0 } });
-    push({ type: "stream_event", event: { type: "message_stop" } });
-    push({ type: "user", message: { content: [{ type: "tool_result", tool_use_id: "tu1", content: "a.txt", is_error: false }] } });
-    push({ type: "result", subtype: "success" });
-  });
-  const { s, events } = run(f);
-  await s.prompt("go");
+test("each finished message is recorded in pi's file and pi's state", async () => {
+  const f = fake((_n, push) => text("hi").forEach(push));
+  const { s, p } = run(f);
+  await s.prompt("one");
   await tick();
-  const start = events.find((e) => e.type === "tool_execution_start");
-  expect(start).toMatchObject({ toolCallId: "tu1", toolName: "bash", args: { command: "ls" } });
-  const end = events.find((e) => e.type === "tool_execution_end");
-  expect(end).toMatchObject({ toolCallId: "tu1", isError: false, result: { content: [{ type: "text", text: "a.txt" }] } });
+  expect(p.recorded.map((m) => m.role)).toEqual(["user", "assistant"]);
+  expect(p.recorded[0].content).toEqual([{ type: "text", text: "one" }]);
+  expect(p.recorded[1]).toMatchObject({ role: "assistant", provider: "anthropic", api: "anthropic-messages", model: "claude-haiku-4-5", stopReason: "stop" });
+  expect(p.recorded[1].content.find((b: any) => b.type === "text").text).toBe("hi");
+  expect(p.host.agent.state.messages.map((m: any) => m.role)).toEqual(["user", "assistant"]);
+  expect(s.messages).toBe(p.host.agent.state.messages);
+  expect(s.agent).toBe(p.host.agent);
   s.dispose();
 });
+
+
+async function mcpOf(options: any) {
+  const [a, b] = InMemoryTransport.createLinkedPair();
+  await options.mcpServers.kl.instance.connect(a);
+  const c = new Client({ name: "t", version: "1" });
+  await c.connect(b);
+  return c;
+}
+
+const toolTurn = (ids: string[], push: (m: any) => void, stop = true) => {
+  push({ type: "stream_event", event: { type: "message_start", message: { id: `t${ids[0]}`, usage: { input_tokens: 1 } } } });
+  ids.forEach((id, i) => {
+    push({ type: "stream_event", event: { type: "content_block_start", index: i, content_block: { type: "tool_use", id, name: "mcp__kl__bash" } } });
+    push({ type: "stream_event", event: { type: "content_block_delta", index: i, delta: { type: "input_json_delta", partial_json: '{"command":"ls"}' } } });
+    push({ type: "stream_event", event: { type: "content_block_stop", index: i } });
+  });
+  push({ type: "stream_event", event: { type: "message_delta", delta: { stop_reason: "tool_use" }, usage: { output_tokens: 2 } } });
+  if (stop) push({ type: "stream_event", event: { type: "message_stop" } });
+};
+
+test("tool_use stays in the message as a toolCall; the bridge runs the pi tool and records the result", async () => {
+  let pushOut: (m: any) => void = () => {};
+  const f = fake((_n, push) => {
+    pushOut = push;
+    toolTurn(["tu1"], push);
+  });
+  const { s, events, p } = run(f);
+  const ran: string[] = [];
+  p.tools.push({ name: "bash", description: "d", parameters: { type: "object" }, execute: async (id: string) => (ran.push(id), { content: [{ type: "text", text: "a.txt" }] }) });
+  await s.prompt("go");
+  await tick();
+  const c = await mcpOf(f.calls[0].options);
+  const r = await c.callTool({ name: "bash", arguments: { command: "ls" }, _meta: { "claudecode/toolUseId": "tu1" } });
+  expect(r).toEqual({ content: [{ type: "text", text: "a.txt" }], isError: false });
+  expect(ran).toEqual(["tu1"]);
+  const assistant = p.recorded.find((m) => m.role === "assistant");
+  expect(assistant.stopReason).toBe("toolUse");
+  expect(assistant.content).toContainEqual({ type: "toolCall", id: "tu1", name: "bash", arguments: { command: "ls" } });
+  expect(p.recorded.at(-1)).toMatchObject({ role: "toolResult", toolCallId: "tu1", isError: false });
+  expect(events.filter((e) => e.type.startsWith("tool_execution")).map((e) => e.type)).toEqual(["tool_execution_start", "tool_execution_end"]);
+  pushOut({ type: "result", subtype: "success" });
+  s.dispose();
+});
+
+test("parallel calls each get their id and the same recorded assistant message", async () => {
+  const f = fake((_n, push) => toolTurn(["tu1", "tu2"], push));
+  const { s, p } = run(f);
+  const seen: any[] = [];
+  p.tools.push({ name: "bash", description: "d", parameters: { type: "object" }, execute: async () => ({ content: [] }) });
+  p.host.agent.beforeToolCall = async (ctx: any) => (seen.push([ctx.toolCall.id, ctx.assistantMessage]), undefined);
+  await s.prompt("go");
+  await tick();
+  const c = await mcpOf(f.calls[0].options);
+  await Promise.all(["tu1", "tu2"].map((id) => c.callTool({ name: "bash", arguments: {}, _meta: { "claudecode/toolUseId": id } })));
+  expect(seen.map((x) => x[0]).sort()).toEqual(["tu1", "tu2"]);
+  expect(seen[0][1]).toBe(seen[1][1]);
+  expect(seen[0][1].content.filter((b: any) => b.type === "toolCall").length).toBe(2);
+  s.dispose();
+});
+
+test("a call that overtakes its assistant message waits for it to be recorded", async () => {
+  let pushOut: (m: any) => void = () => {};
+  const f = fake((_n, push) => {
+    pushOut = push;
+    toolTurn(["tu1"], push, false); // message_stop held back
+  });
+  const { s, p } = run(f);
+  let gateSaw: any;
+  p.tools.push({ name: "bash", description: "d", parameters: { type: "object" }, execute: async () => ({ content: [] }) });
+  p.host.agent.beforeToolCall = async (ctx: any) => ((gateSaw = ctx.assistantMessage), undefined);
+  await s.prompt("go");
+  await tick();
+  const c = await mcpOf(f.calls[0].options);
+  const call = c.callTool({ name: "bash", arguments: {}, _meta: { "claudecode/toolUseId": "tu1" } });
+  await tick();
+  expect(gateSaw).toBeUndefined();
+  pushOut({ type: "stream_event", event: { type: "message_stop" } });
+  await call;
+  expect(gateSaw.content).toContainEqual({ type: "toolCall", id: "tu1", name: "bash", arguments: { command: "ls" } });
+  expect(p.host.agent.state.messages).toContain(gateSaw);
+  s.dispose();
+});
+
+test("a call waiting for its assistant message gives up when the turn aborts", async () => {
+  const f = fake((_n, push) => toolTurn(["tu1"], push, false)); // message_stop never comes
+  const { s, p } = run(f);
+  p.tools.push({ name: "bash", description: "d", parameters: { type: "object" }, execute: async () => ({ content: [] }) });
+  await s.prompt("go");
+  await tick();
+  const c = await mcpOf(f.calls[0].options);
+  let settled = false;
+  const call = c.callTool({ name: "bash", arguments: {}, _meta: { "claudecode/toolUseId": "tu1" } }).then(() => (settled = true), () => (settled = true));
+  await tick();
+  expect(settled).toBe(false);
+  await s.abort();
+  await Promise.race([call, new Promise((r) => setTimeout(r, 1000))]);
+  expect(settled).toBe(true);
+  s.dispose();
+});
+
+test("child death mid-tool aborts execute and ends the turn with an error", async () => {
+  let die: () => void = () => {};
+  const f = fake((_n, push) => toolTurn(["tu1"], push));
+  // a query whose iterator throws when told to: the child died
+  const query = (p: any) => {
+    const q = f.query(p);
+    const it = q[Symbol.asyncIterator]();
+    let dead: (e: Error) => void = () => {};
+    const death = new Promise<never>((_r, reject) => (dead = reject));
+    die = () => dead(new Error("claude exited"));
+    return Object.assign(q, {
+      [Symbol.asyncIterator]: () => ({ next: () => Promise.race([it.next(), death]) }),
+    });
+  };
+  const { s, events, p } = run({ ...f, query: query as any });
+  let signal: AbortSignal | undefined;
+  p.tools.push({
+    name: "bash", description: "d", parameters: { type: "object" },
+    execute: (_id: string, _a: any, sig: AbortSignal) => ((signal = sig), new Promise((_r, rej) => sig.addEventListener("abort", () => rej(new Error("aborted"))))),
+  });
+  await s.prompt("go");
+  await tick();
+  const c = await mcpOf(f.calls[0].options);
+  void c.callTool({ name: "bash", arguments: {}, _meta: { "claudecode/toolUseId": "tu1" } });
+  await tick();
+  die();
+  await tick();
+  expect(signal?.aborted).toBe(true);
+  expect(events.some((e) => e.type === "message_end" && e.message.stopReason === "error")).toBe(true);
+  expect(events.at(-1).type).toBe("agent_end");
+  // next prompt starts a new query resumed from pi's record
+  await s.prompt("again");
+  expect(f.calls.length).toBe(2);
+  const entries = await f.calls[1].options.sessionStore.load({ projectKey: "x", sessionId: f.calls[1].options.resume });
+  expect(entries.some((e: any) => e.type === "assistant")).toBe(true);
+  s.dispose();
+});
+
+test("codemode's nested tool events from the pi session reach the TUI", async () => {
+  const f = fake(() => {});
+  const { s, events, p } = run(f);
+  (p.host as any).emitPi({ type: "tool_execution_start", toolCallId: "n1", toolName: "bash", args: {}, parentToolCallId: "tu1" });
+  (p.host as any).emitPi({ type: "tool_execution_start", toolCallId: "x", toolName: "bash", args: {} });
+  (p.host as any).emitPi({ type: "message_end", message: {} });
+  expect(events.map((e) => e.toolCallId)).toEqual(["n1"]);
+  s.dispose();
+});
+
 
 test("abort interrupts and the turn is reported aborted", async () => {
   const f = fake(() => {});
