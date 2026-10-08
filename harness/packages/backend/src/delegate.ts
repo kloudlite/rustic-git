@@ -1,5 +1,7 @@
-//! Tools that start another session and wait for its answer: `workspace_ask` (main asks a
-//! workspace's own session) and `subagent` (a throwaway session with the pod tools only).
+//! Tools that start another session: `workspace_ask` (main hands a workspace's own session a goal;
+//! fire-and-forget, the answer comes back later as a `[from <ws>] ...` message prompted, or followed
+//! up when busy, into the CALLER's session so main never blocks) and `subagent` (a throwaway session
+//! with the pod tools only; this one blocks, workspace sessions rely on its answer).
 //! `subagent` never works in the parent: it clones the parent workspace (a btrfs worktree, so cheap),
 //! runs in the clone, commits there and pushes straight into the parent's checked-out branch over
 //! SSH (the parent's home seed sets receive.denyCurrentBranch=updateInstead; the owner's platform
@@ -174,7 +176,7 @@ async function runInClone(P: string, task: string, deps: DelegateDeps, opts: (ke
   }
 }
 
-export function delegateTools(kind: "main" | "workspace", ws: string | undefined, deps: DelegateDeps, caller: SessionOpts): ToolDef[] {
+export function delegateTools(kind: "main" | "workspace", ws: string | undefined, deps: DelegateDeps, caller: SessionOpts, callerKey = "main"): ToolDef[] {
   // same model, same gate; nothing of the TUI's own tools goes along
   // the request carries the delegated session's key so the TUI files the card under that workspace
   const opts = (key: string, extra: Partial<SessionOpts> = {}): SessionOpts => ({
@@ -204,18 +206,30 @@ export function delegateTools(kind: "main" | "workspace", ws: string | undefined
   const ask: ToolDef = {
     name: "workspace_ask",
     description:
-      "Ask a workspace's own session to do something inside that workspace (edit code, run commands, answer about its files) and get its answer; the main session has no filesystem of its own.",
+      "Hand a workspace's own session a goal (in the person's words); returns at once and the workspace's answer arrives later as a message. Never wait or poll for it.",
     inputSchema: { type: "object", properties: { workspace: { type: "string" }, request: { type: "string" } }, required: ["workspace", "request"] },
     async run(input: { workspace: string; request: string }) {
       const key = input.workspace;
       const text = `[from main session] ${input.request}`;
-      const existing = deps.live.get(key);
-      const h = existing ?? (await deps.open(key, opts(key)));
-      try {
-        return await answer(h, () => (existing && deps.busy.has(key) ? h.followUp(text) : h.prompt(text)));
-      } finally {
-        if (!existing) await h.dispose();
-      }
+      // Not awaited: main must stay free for the person while the workspace works.
+      void (async () => {
+        const existing = deps.live.get(key);
+        let h: SessionHandle | undefined;
+        let reply: string;
+        try {
+          h = existing ?? (await deps.open(key, opts(key)));
+          const s = h;
+          reply = `[from ${key}] ${await answer(s, () => (existing && deps.busy.has(key) ? s.followUp(text) : s.prompt(text)))}`;
+        } catch (err) {
+          reply = `[from ${key}] failed: ${err instanceof Error ? err.message : String(err)}`;
+        }
+        // the caller may be gone; the workspace view still has the transcript. Not awaited: a prompt may last the caller's whole turn.
+        const c = deps.live.get(callerKey);
+        if (c) void (deps.busy.has(callerKey) ? c.followUp(reply) : c.prompt(reply)).catch(() => {});
+        // a session opened for this ask goes only after its answer was delivered
+        if (h && !existing) await h.dispose().catch(() => {});
+      })();
+      return `sent to ${key}; its session is working on it. Its answer will arrive here as a message from ${key}; do not wait or poll for it.`;
     },
   };
   return [ask, subagent];

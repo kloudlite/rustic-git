@@ -74,7 +74,7 @@ function forgetting(t: ToolDef, deps: DelegateDeps): ToolDef {
 export async function registryFor(k: SessionKind, deps: DelegateDeps, opts: SessionOpts, key = "main"): Promise<Registry> {
   const r = new Registry();
   if (k.kind === "main")
-    return r.add(webFetch, webSearch, ...platformTools("main").map((t) => (t.name === "workspace_delete" ? forgetting(t, deps) : t)), ...delegateTools("main", undefined, deps, opts), ...scratchTools(scratchRoot(key)), ...opts.tools);
+    return r.add(webFetch, webSearch, ...platformTools("main").map((t) => (t.name === "workspace_delete" ? forgetting(t, deps) : t)), ...delegateTools("main", undefined, deps, opts, key), ...scratchTools(scratchRoot(key)), ...opts.tools);
   if (k.kind === "workspace")
     return r.add(webFetch, webSearch, ...(await podTools(k.ws)), ...platformTools("workspace", k.ws), ...delegateTools("workspace", k.ws, deps, opts), ...opts.tools);
   return r.add(webFetch, ...(await podTools(k.ws)));

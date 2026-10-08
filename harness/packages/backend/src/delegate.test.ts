@@ -4,6 +4,8 @@ import type { SessionHandle, SessionOpts } from "./index.ts";
 
 const caller = { model: { provider: "p", id: "m" }, tools: [], permission: async () => ({}) } as unknown as SessionOpts;
 
+const flush = () => new Promise((r) => setTimeout(r, 5));
+
 function fake(reply = "done") {
   const subs = new Set<(e: any) => void>();
   const sent: string[] = [];
@@ -31,14 +33,47 @@ test("workspace_ask follows up a busy session, prompts an idle one, disposes onl
   live.set("w1", h);
   const [ask] = delegateTools("main", undefined, { live, busy, open: async () => fake() }, caller);
   await ask!.run({ workspace: "w1", request: "a" });
+  await flush();
   busy.add("w1");
   await ask!.run({ workspace: "w1", request: "b" });
+  await flush();
   expect(h.sent).toEqual(["prompt:[from main session] a", "followUp:[from main session] b"]);
   expect(h.disposed).toBe(0);
   const opened = fake();
   const [ask2] = delegateTools("main", undefined, { live: new Map(), busy: new Set(), open: async () => opened }, caller);
   await ask2!.run({ workspace: "w2", request: "c" });
+  await flush();
   expect(opened.disposed).toBe(1);
+});
+
+test("workspace_ask returns before the workspace finishes, then delivers [from ws] into the caller", async () => {
+  const subs = new Set<(e: any) => void>();
+  const sent: string[] = [];
+  let disposed = 0;
+  const ws = { prompt: async (t: string) => void sent.push(t), followUp: async (t: string) => void sent.push(`f:${t}`), dispose: async () => void disposed++, subscribe: (cb: any) => (subs.add(cb), () => subs.delete(cb)) } as unknown as SessionHandle;
+  const got: string[] = [];
+  const main = { prompt: async (t: string) => void got.push(`prompt:${t}`), followUp: async (t: string) => void got.push(`followUp:${t}`) } as unknown as SessionHandle;
+  const live = new Map<string, SessionHandle>([["main", main]]);
+  const busy = new Set<string>();
+  const [ask] = delegateTools("main", undefined, { live, busy, open: async () => ws }, caller, "main");
+  const r = await ask!.run({ workspace: "ws-a", request: "x" });
+  expect(r).toContain("do not wait or poll");
+  await flush();
+  expect(got).toEqual([]);
+  const end = (t: string) => {
+    for (const s of subs) (s({ type: "message_end", message: { role: "assistant", content: [{ type: "text", text: t }] } }), s({ type: "agent_end", messages: [] }));
+  };
+  expect(disposed).toBe(0);
+  end("built");
+  await flush();
+  expect(got).toEqual(["prompt:[from ws-a] built"]);
+  expect(disposed).toBe(1);
+  busy.add("main");
+  await ask!.run({ workspace: "ws-a", request: "y" });
+  await flush();
+  end("again");
+  await flush();
+  expect(got[1]).toBe("followUp:[from ws-a] again");
 });
 
 // ---- subagent in its own clone ----
@@ -188,6 +223,7 @@ test("a delegated session's permission request names the delegated session", asy
   let given!: SessionOpts;
   const [ask] = delegateTools("main", undefined, { live: new Map(), busy: new Set(), open: async (_k, o) => ((given = o), fake()) }, c);
   await ask!.run({ workspace: "ws-a", request: "x" });
+  await flush();
   await given.permission({ name: "bash", args: {} }, new AbortController().signal);
   await given.permission({ name: "bash", args: {}, session: "ws-a:agent-1" }, new AbortController().signal);
   expect(seen).toEqual(["ws-a", "ws-a:agent-1"]);
