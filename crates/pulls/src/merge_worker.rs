@@ -1029,9 +1029,11 @@ mod tests {
     fn a_hung_subprocess_is_killed_with_its_children_and_fails_the_job() {
         let td = tempfile::tempdir().unwrap();
         let pidfile = td.path().join("pid");
-        let script = format!("echo $$ > {}; sleep 30; true", pidfile.display());
+        // Written whole (tmp + mv) and with room to land: under a loaded CI box a 300 ms deadline
+        // killed sh mid-`echo`, leaving an empty pid file.
+        let script = format!("echo $$ > {0}.tmp && mv {0}.tmp {0}; sleep 30; true", pidfile.display());
         let started = Instant::now();
-        let got = as_job(Duration::from_millis(300), || {
+        let got = as_job(Duration::from_secs(2), || {
             let first = out(Command::new("sh").args(["-c", &script]));
             // The deadline is the job's: the NEXT command is refused without being spawned.
             let second = local(Path::new("."), &["--version"]);
