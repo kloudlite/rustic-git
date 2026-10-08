@@ -18,8 +18,9 @@ import {
   writeSettings,
   type ModelRef,
 } from "@kloudlite-tui/agent";
-import { Registry, platformTools, podTools, webFetch, webSearch } from "@kloudlite-tui/tools";
+import { Registry, platformTools, podTools, webFetch, webSearch, type ToolDef } from "@kloudlite-tui/tools";
 import { delegateTools, type DelegateDeps } from "./delegate.ts";
+import { forgetSessions } from "./forget.ts";
 import * as git from "./git.ts";
 import { toolDiff } from "./diff.ts";
 import { PROTOCOL } from "./wire.ts";
@@ -56,11 +57,23 @@ function defaultModel(list: CatalogModel[]): ModelRef {
   return opus ?? list[0] ?? { provider: "anthropic", id: "claude-opus-5" };
 }
 
+function forgetting(t: ToolDef, deps: DelegateDeps): ToolDef {
+  return {
+    ...t,
+    async run(input: { workspace: string }) {
+      const r = await t.run(input);
+      if (typeof r === "string" && !r.startsWith("error") && !r.startsWith("platform tools unavailable")) await forgetSessions(input.workspace, deps.live);
+      return r;
+    },
+  };
+}
+
 /** Who gets which hands: main reaches the platform and delegates; a workspace session has the
  * pod's code tools and its own slice of the platform; a subagent only code tools. */
 export async function registryFor(k: SessionKind, deps: DelegateDeps, opts: SessionOpts): Promise<Registry> {
   const r = new Registry();
-  if (k.kind === "main") return r.add(webFetch, webSearch, ...platformTools("main"), ...delegateTools("main", undefined, deps, opts), ...opts.tools);
+  if (k.kind === "main")
+    return r.add(webFetch, webSearch, ...platformTools("main").map((t) => (t.name === "workspace_delete" ? forgetting(t, deps) : t)), ...delegateTools("main", undefined, deps, opts), ...opts.tools);
   if (k.kind === "workspace")
     return r.add(webFetch, webSearch, ...(await podTools(k.ws)), ...platformTools("workspace", k.ws), ...delegateTools("workspace", k.ws, deps, opts), ...opts.tools);
   return r.add(webFetch, ...(await podTools(k.ws)));

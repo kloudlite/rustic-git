@@ -12,6 +12,7 @@
 import { randomBytes } from "node:crypto";
 import { api, podExec, type ExecResult, type ToolDef } from "@kloudlite-tui/tools";
 import type { SessionHandle, SessionOpts } from "./index.ts";
+import { forgetSessions } from "./forget.ts";
 
 export type DelegateDeps = {
   /** Open sessions by key (LocalBackend's map). */
@@ -24,6 +25,8 @@ export type DelegateDeps = {
   exec?: (ws: string, cmd: string, timeoutMs?: number) => Promise<ExecResult>;
   /** Waits between polls; tests pass a no-op (the caps count slept time, not wall time). */
   sleep?: (ms: number) => Promise<void>;
+  /** Drops a deleted workspace's bench sessions; tests pass a fake. */
+  forget?: (ws: string) => Promise<void>;
 };
 
 const WS = "/home/kl/workspace";
@@ -77,7 +80,14 @@ async function runInClone(P: string, task: string, deps: DelegateDeps, opts: (e?
       await sleep(2000);
     }
   };
-  const del = (id: string) => call("DELETE", p(id)).catch(() => "");
+  const forget = deps.forget ?? ((id: string) => forgetSessions(id, deps.live));
+  // the subagent's own session history goes with its clone, once the platform took the delete
+  const del = async (id: string) => {
+    await h?.dispose(); // before its history goes
+    h = undefined;
+    const r = await call("DELETE", p(id)).catch(() => "error");
+    if (!r.startsWith("error") && !r.startsWith("platform tools unavailable")) await forget(id);
+  };
 
   const base = await exec(P, `cd ${WS} && git rev-parse --abbrev-ref HEAD && git rev-parse HEAD`);
   const [branch, baseSha] = base.stdout.trim().split("\n");

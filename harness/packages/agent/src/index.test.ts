@@ -95,3 +95,12 @@ test("noTools builtin: no pi fs/shell tools active, custom tools kept", async ()
   expect(active).toContain("mine");
   s.dispose();
 });
+
+test("dropSessions removes a workspace's sessions and its subagents', keeps others", async () => {
+  // CONFIG_DIR is fixed at first import, so other tests' sessions may share it: compare ours only
+  const { dropSessions, nameSession, listSessions } = await import("./index.ts");
+  for (const k of ["ws-a", "ws-a:x1", "ws-a:agent-12", "ws-ab", "ws-ab:y", "main", "main:ws-a"]) nameSession(k, k);
+  dropSessions("ws-a");
+  const ours = new Set(["ws-a", "ws-a:x1", "ws-a:agent-12", "ws-ab", "ws-ab:y", "main", "main:ws-a"]);
+  expect(listSessions().map((m: any) => m.key).filter((k: string) => ours.has(k)).sort()).toEqual(["main", "main:ws-a", "ws-ab", "ws-ab:y"]);
+});

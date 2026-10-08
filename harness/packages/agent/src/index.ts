@@ -1,4 +1,4 @@
-import { mkdirSync, readdirSync, readFileSync, renameSync, writeFileSync } from "node:fs";
+import { mkdirSync, readdirSync, readFileSync, renameSync, rmSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
 import {
@@ -352,6 +352,23 @@ export function clearSessionHistory(key: string): void {
       renameSync(join(dir, name), join(archive, `${Date.now()}-${name}`));
     } catch {}
   }
+}
+
+/**
+ * Forget a deleted workspace's sessions: its own (`<ws>`, `<ws>:<id>`) and its subagents'
+ * (`<ws>:agent-<hex>`). Only after the platform accepted the delete, so a refused delete keeps
+ * the history. Keys are sanitised into dir names (`:` becomes `_`); workspace ids never hold `_`.
+ */
+export function dropSessions(ws: string): void {
+  const own = sessionDir(ws).split("/").pop()!;
+  let dirs: string[];
+  try {
+    dirs = readdirSync(join(CONFIG_DIR, "sessions"));
+  } catch {
+    return;
+  }
+  for (const d of dirs)
+    if (d === own || d.startsWith(`${own}_`)) rmSync(join(CONFIG_DIR, "sessions", d), { recursive: true, force: true });
 }
 
 export async function createSession({

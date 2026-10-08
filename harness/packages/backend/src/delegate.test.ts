@@ -71,9 +71,10 @@ function rig(o: { branch?: string; head?: string; pushes?: { code: number; stder
   };
   const child = fake("did it");
   const opened: string[] = [];
-  const deps = { live: new Map<string, SessionHandle>(), busy: new Set<string>(), open: async (k: string) => (opened.push(k), child), api, exec, sleep: async () => {} };
+  const forgot: string[] = [];
+  const deps = { live: new Map<string, SessionHandle>(), busy: new Set<string>(), open: async (k: string) => (opened.push(k), child), api, exec, sleep: async () => {}, forget: async (ws: string) => void forgot.push(ws) };
   const [, sub] = delegateTools("main", undefined, deps, caller);
-  return { calls, execs, child, opened, run: (task = "fix the bug\nmore") => sub!.run({ workspace: "P", task }) as Promise<string>, setHead: (h: string) => (head = h) };
+  return { calls, execs, child, opened, forgot, run: (task = "fix the bug\nmore") => sub!.run({ workspace: "P", task }) as Promise<string>, setHead: (h: string) => (head = h) };
 }
 const deleted = (r: Rig) => r.calls.includes("DELETE /v1/workspaces/ws-c1");
 
@@ -94,6 +95,7 @@ test("clone happy path: ready, session on the clone, commit, push to the parent 
   expect(out).toBe("did it\n\npushed abc1234 to main in P:\na.ts\nb.ts");
   expect(out).not.toContain("SECRET");
   expect(r.child.disposed).toBe(1);
+  expect(r.forgot).toEqual(["ws-c1"]);
 });
 
 test("clone with no changes: no push, clone deleted", async () => {
@@ -137,6 +139,7 @@ test("push failing twice keeps the clone and names it", async () => {
   expect(out).toContain("push failed:");
   expect(out).toContain("clone ws-c1 kept with the commits");
   expect(deleted(r)).toBe(false);
+  expect(r.forgot).toEqual([]);
 });
 
 test("a refusal that is not a moved branch (dirty parent) is not retried", async () => {
