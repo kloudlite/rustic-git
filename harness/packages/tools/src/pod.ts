@@ -89,13 +89,15 @@ export async function podTools(ws: string): Promise<ToolDef[]> {
           return text;
         }
       }
+      let msg = text;
       try {
-        return `error: ${JSON.parse(text).error ?? text}`;
-      } catch {
-        return `error: ${text}`;
-      }
+        msg = JSON.parse(text).error ?? text;
+      } catch {}
+      throw new Error(`${name} ${res!.status}: ${msg}`);
     } catch (e: any) {
-      return e instanceof NotReady ? `workspace not ready: ${e.message}` : `error: ${e?.message ?? e}`;
+      // a failed call throws (a codemode script stops, a direct call shows as failed); a command that ran and exited non-zero is a 200 and stays a result
+      if (e instanceof NotReady) throw new Error(`${name}: workspace not ready: ${e.message}`);
+      throw e?.message?.startsWith(`${name} `) ? e : new Error(`${name}: ${e?.message ?? e}`);
     }
   }
 

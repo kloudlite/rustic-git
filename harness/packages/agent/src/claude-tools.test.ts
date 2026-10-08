@@ -1,6 +1,7 @@
 import { expect, test } from "bun:test";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
+import { adaptTools } from "./index.ts";
 import { createToolServer, declaredTools, type ToolHost } from "./claude-tools.ts";
 
 const assistant = { role: "assistant", content: [{ type: "toolCall", id: "tu1", name: "bash", arguments: {} }] };
@@ -176,4 +177,12 @@ test("an already-aborted turn never reaches the gate or execute, and still emits
   expect(ran).toBe(false);
   expect(events.map((e) => e.type)).toEqual(["tool_execution_start", "tool_execution_end"]);
   expect(results.length).toBe(1);
+});
+
+test("a registry tool whose run() throws reports isError with its message (direct and nested calls share runToolCall)", async () => {
+  const [tool] = adaptTools({ all: () => [{ name: "bash", description: "", inputSchema: { type: "object", properties: {} }, run: async () => { throw new Error("service_add 422: missing field `command`"); } }] } as any);
+  const { h } = host(tool);
+  const r = await (await connect(h)).callTool({ name: "bash", arguments: {} });
+  expect(r.isError).toBe(true);
+  expect(JSON.stringify(r.content)).toContain("422: missing field");
 });

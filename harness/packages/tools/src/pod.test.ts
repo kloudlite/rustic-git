@@ -44,7 +44,7 @@ test("pod not ready falls back to the permissive schema and call says not ready"
   const t = await podTools("w1");
   expect(t.length).toBe(21);
   expect(t[0]!.inputSchema).toEqual({ type: "object", additionalProperties: true });
-  expect(await t[0]!.run({})).toStartWith("workspace not ready: ");
+  await expect(t[0]!.run({})).rejects.toThrow("workspace not ready");
 });
 
 test("a network error re-fetches the address once and retries once", async () => {
@@ -62,5 +62,17 @@ test("a network error re-fetches the address once and retries once", async () =>
   handler = () => {
     throw new TypeError("down");
   };
-  expect(await t[0]!.run({})).toContain("down");
+  await expect(t[0]!.run({})).rejects.toThrow("down");
+});
+
+test("a 4xx from a pod tool throws with tool name and status; a non-zero exit stays a result", async () => {
+  handler = (u) => {
+    if (u.endsWith("/v1/workspaces/w1/tools")) return j({ address: "10.0.0.1:7788" });
+    if (u.endsWith("/tools")) return j({ tools: [] });
+    if (u.endsWith("/tools/read")) return j({ error: "no such file" }, 404);
+    return j({ exit_code: 3, stdout: "", stderr: "boom" });
+  };
+  const t = await podTools("w1");
+  await expect(t.find((x) => x.name === "read")!.run({ path: "x" })).rejects.toThrow('read 404: no such file');
+  expect(await t.find((x) => x.name === "exec")!.run({ cmd: "false" })).toContain('"exit_code": 3');
 });
