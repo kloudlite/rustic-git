@@ -3,6 +3,9 @@
 # COLORTERM: ssh does not forward it, and without it opentui drops to 256 colours (bench/sv/ttyd/run).
 case "$SSH_ORIGINAL_COMMAND" in
   claude-login) exec claude auth login ;;
+  # The laptop TUI's backend (kl-connect + kl-tui): frames on stdio, no pty, no --cwd so the
+  # agent works in the home directory sshd started in.
+  kl-host) exec bun run --silent /opt/kl/harness/packages/backend/src/serve.ts ;;
   "") exec env COLORTERM=truecolor bun run --silent --cwd /opt/kl/harness/apps/tui dev ;;
   *) echo "kl bench: unknown command" >&2; exit 2 ;;
 esac

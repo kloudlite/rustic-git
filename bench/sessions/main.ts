@@ -2,7 +2,7 @@
 // bench-pod-local, never exposed off the box. `--ping` is the agent's readiness probe contract
 // (bins/agent/.../bench.rs:122): "is this bench quiesced enough to snapshot/stop", answered from
 // the same idle tracking `/idle` exposes so the probe and the UI cannot drift apart. Idle = no
-// graphcode TUI running: ttyd and sshd each start one per login and end it when the login ends.
+// TUI and no laptop-TUI host running: ttyd and sshd start one per login and end it with the login.
 import http from "node:http";
 import fs from "node:fs";
 
@@ -10,6 +10,7 @@ const PORT = 8917;
 const IDLE_SECS = Number(process.env.KL_BENCH_IDLE_SECS ?? 300);
 
 const TUI = "/opt/kl/harness/apps/tui";
+const HOST = "/opt/kl/harness/packages/backend/src/serve.ts";
 
 function clients(): number {
   let n = 0;
@@ -22,10 +23,10 @@ function clients(): number {
   for (const pid of pids) {
     if (!/^\d+$/.test(pid)) continue;
     try {
-      // The `bun run --cwd TUI dev` each login starts; argv[0] check skips ttyd, whose own argv
-      // carries the same command line.
+      // `bun run --cwd TUI dev` (ttyd, ssh) or `bun run serve.ts` (kl-host, the laptop TUI); the
+      // argv[0] check skips ttyd, whose own argv carries the same command line.
       const argv = fs.readFileSync(`/proc/${pid}/cmdline`, "utf8").split("\0");
-      if (argv[0].endsWith("bun") && argv.includes(TUI)) n++;
+      if (argv[0].endsWith("bun") && (argv.includes(TUI) || argv.includes(HOST))) n++;
     } catch {
       // exited between readdir and read
     }
