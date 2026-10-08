@@ -726,6 +726,8 @@ export function createClaudeSession(opts: ClaudeOptions) {
   return {
     isClaude: true as const,
     agent: piSession.agent,
+    /** The pi session under it, for the permission gate on codemode's nested calls (local.ts). */
+    pi: piSession,
     get messages(): any[] {
       return piSession.agent.state.messages;
     },

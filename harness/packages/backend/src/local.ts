@@ -66,6 +66,29 @@ export async function registryFor(k: SessionKind, deps: DelegateDeps, opts: Sess
   return r.add(webFetch, ...(await podTools(k.ws)));
 }
 
+/** The permission gate, on both doors a call comes through: `agent.beforeToolCall` for a
+ * model's own calls (pi's loop and Claude's tool server both call it), and the pi session's
+ * `_beforeToolCall` for calls a codemode script makes, which pi's nested runner sends straight
+ * there with the parent's id and no signal. Gated once per call: top level has no parent id. */
+export function installGate(agent: any, permission: SessionOpts["permission"]): void {
+  const ask = async (ctx: any, signal: AbortSignal) => {
+    const name = ctx.toolCall.name;
+    if (!GATED.has(name)) return undefined;
+    const decision = await permission({ name, args: ctx.args, diff: toolDiff(name, ctx.args) ?? undefined }, signal);
+    return decision.block ? decision : undefined;
+  };
+  const inner = agent.agent.beforeToolCall;
+  agent.agent.beforeToolCall = async (ctx: any, signal?: AbortSignal) =>
+    (await ask(ctx, signal ?? new AbortController().signal)) ?? inner?.(ctx, signal);
+  const pi = agent.pi ?? agent;
+  const nested = pi._beforeToolCall?.bind(pi);
+  if (!nested) return;
+  // ponytail: nested calls get no abort signal from pi, so an abort mid-card leaves the card up
+  // until answered; thread the codemode call's signal through if that bites.
+  pi._beforeToolCall = async (ctx: any, parentId?: string) =>
+    (parentId && (await ask(ctx, new AbortController().signal))) || nested(ctx, parentId);
+}
+
 export class LocalBackend implements Backend {
   /** Open sessions, for workspace_ask to reach a running one; `busy` = mid-turn. */
   #live = new Map<string, SessionHandle>();
@@ -102,18 +125,7 @@ export class LocalBackend implements Backend {
       autoCompact: opts.autoCompact,
       codemode: opts.codemode,
     });
-    const inner = agent.agent.beforeToolCall;
-    agent.agent.beforeToolCall = async (ctx: any, signal?: AbortSignal) => {
-      const name = ctx.toolCall.name;
-      if (GATED.has(name)) {
-        const decision = await opts.permission(
-          { name, args: ctx.args, diff: toolDiff(name, ctx.args) ?? undefined },
-          signal ?? new AbortController().signal,
-        );
-        if (decision.block) return decision;
-      }
-      return inner?.(ctx, signal);
-    };
+    installGate(agent, opts.permission);
     agent.subscribe((e: any) => {
       if (e.type === "agent_start") this.#busy.add(key);
       else if (e.type === "agent_end") this.#busy.delete(key);

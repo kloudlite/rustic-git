@@ -2,7 +2,7 @@ import { expect, test } from "bun:test";
 import { mkdtempSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { LocalBackend, GATED, EDITS, registryFor, sessionKind } from "./local.ts";
+import { LocalBackend, GATED, EDITS, installGate, registryFor, sessionKind } from "./local.ts";
 import { toolDiff } from "./diff.ts";
 import { PROTOCOL } from "./wire.ts";
 
@@ -92,3 +92,28 @@ test(":agent- sessions are hidden from sessions.list", async () => {
   await h.dispose();
   await h2.dispose();
 }, 20000);
+
+test("the gate asks for a codemode script's nested gated call, once for a top-level one", async () => {
+  const seen: string[] = [];
+  const pi: any = {
+    agent: {} as any,
+    async _beforeToolCall(_ctx: any, _parent?: string) {
+      seen.push("pi");
+      return undefined;
+    },
+  };
+  pi.agent.beforeToolCall = (ctx: any) => pi._beforeToolCall(ctx);
+  const asked: string[] = [];
+  installGate(pi, async (req) => {
+    asked.push(req.name);
+    return req.name === "exec" ? { block: true, reason: "no" } : {};
+  });
+  const call = (name: string) => ({ toolCall: { name }, args: {} });
+  // nested: pi's runner calls _beforeToolCall with the parent id, never agent.beforeToolCall
+  expect(await pi._beforeToolCall(call("exec"), "cm1")).toEqual({ block: true, reason: "no" });
+  expect(await pi._beforeToolCall(call("read"), "cm1")).toBeUndefined();
+  // top level: asked once, then falls through to pi's own hook
+  await pi.agent.beforeToolCall(call("bash"));
+  expect(asked).toEqual(["exec", "bash"]);
+  expect(seen).toEqual(["pi", "pi"]);
+});
