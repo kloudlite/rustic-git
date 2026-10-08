@@ -318,6 +318,25 @@ test("abort interrupts and the turn is reported aborted, as one message holding 
   s.dispose();
 });
 
+test("a steer held across an abort goes out as a new run, never continuing the aborted one", async () => {
+  const f = fake((n, push) => (n === 1 ? text("part").slice(0, 6) : text("fresh")).forEach(push));
+  const { s, events, p } = run(f);
+  await s.prompt("long");
+  await tick();
+  const ab = s.abort();
+  await s.steer("after abort"); // lands while the abort is settling
+  await ab;
+  await tick();
+  await tick();
+  const ends = events.map((e, i) => (e.type === "agent_end" ? i : -1)).filter((i) => i >= 0);
+  const starts = events.map((e, i) => (e.type === "agent_start" ? i : -1)).filter((i) => i >= 0);
+  expect(ends.length).toBe(2);
+  expect(starts.length).toBe(2);
+  expect(ends[0]).toBeLessThan(starts[1]!); // agent_end of the aborted run comes before the steer's run
+  expect(p.recorded.filter((m) => m.role === "user").map((m) => m.content.at(-1).text)).toEqual(["long", "after abort"]);
+  s.dispose();
+});
+
 test("follow-ups wait for the turn to end, then run on the same query", async () => {
   const f = fake((n, push) => text(`r${n}`).forEach(push));
   const { s, events } = run(f);

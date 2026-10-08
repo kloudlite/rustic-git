@@ -294,21 +294,8 @@ export async function createSession({
 }): Promise<AgentSession | ClaudeSession> {
   const cwd = process.cwd();
   const dir = sessionDir(key);
-  if (model.provider === "anthropic") {
-    writeMeta({ ...(readMeta(key) ?? { key }), key, updated: Date.now() });
-    // `registry` is not bridged: Claude Code runs its own built-in tools
-    return createClaudeSession({
-      key,
-      model,
-      fresh,
-      thinkingLevel,
-      store: {
-        get: () => readMeta(key)?.claudeSessionId,
-        set: (id) => writeMeta({ ...(readMeta(key) ?? { key, updated: Date.now() }), key, claudeSessionId: id }),
-      },
-    });
-  }
   // meta.json makes a session findable later: its key, its name, last use
+  // (Claude models and pi's own models share this key and transcript)
   writeMeta({ ...(readMeta(key) ?? { key }), key, updated: Date.now() });
   // pi's codemode ships as an extension and is registered *inactive*, so both
   // halves are needed: the factory on a resource loader, and the tool activated
@@ -345,5 +332,13 @@ export async function createSession({
   // add codemode to pi's defaults rather than replacing them
   if (codemode) session.setActiveToolsByName([...session.getActiveToolNames(), "codemode"]);
   if (autoCompact !== undefined) session.setAutoCompactionEnabled(autoCompact);
+  // Claude models run Claude Code's loop on this same session: its tools,
+  // prompt and transcript (spec 2026-10-08-claude-tool-host). pi's own loop
+  // never starts for them.
+  if (model.provider === "anthropic") {
+    const claude = createClaudeSession({ key, model, thinkingLevel, pi: session as never });
+    if (autoCompact !== undefined) claude.setAutoCompactionEnabled(autoCompact);
+    return claude;
+  }
   return session;
 }

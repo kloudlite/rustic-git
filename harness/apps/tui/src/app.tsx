@@ -1184,8 +1184,8 @@ const PERM_MODES: PermMode[] = ["default", "acceptEdits", "plan", "bypass"];
         const live = resolveModel({ provider, id });
         const cur = agents.current.get(activeKey);
         if (live && cur) {
-          // Claude and pi keep separate histories: a switch across the two
-          // starts the other family's session for this key, nothing carried
+          // Claude and pi share one transcript (pi's file): a switch across
+          // the two rebuilds the session for this key from that file
           cur
             .then((a) => {
               const wasClaude = "isClaude" in a;

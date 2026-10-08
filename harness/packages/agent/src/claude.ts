@@ -361,6 +361,7 @@ export function createClaudeSession(opts: ClaudeOptions) {
     finishing = false;
     if (!running) return;
     // an aborted turn is ONE assistant message, as pi records it; none in flight gets an empty one
+    const aborted = aborting;
     if (aborting && cur) cur.msg.stopReason = "aborted";
     const hadPartial = !!cur;
     endCur();
@@ -379,8 +380,9 @@ export function createClaudeSession(opts: ClaudeOptions) {
       compacting = false;
       emit({ type: "compaction_end", reason: compactReason, result: undefined, aborted: true, willRetry: false });
     }
-    // pi keeps one run: a steer held at the end continues it, with no agent_end/agent_start between
-    if (steering.length && input) {
+    // pi keeps one run: a steer held at the end continues it, with no agent_end/agent_start between;
+    // an abort stops the run, so its held steers go out as a new one below
+    if (steering.length && input && !aborted) {
       const held = steering.splice(0);
       queueUpdate();
       timing = { t0: Date.now(), model, effort };
