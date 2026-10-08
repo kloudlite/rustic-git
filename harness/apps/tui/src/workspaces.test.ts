@@ -1,6 +1,6 @@
 import { expect, test } from "bun:test";
 import type { SpaceView } from "@kloudlite-tui/backend";
-import { fromSpace, wsPath, type Workspace } from "./workspaces.ts";
+import { fromSpace, procName, wsPath, type Workspace } from "./workspaces.ts";
 
 const w = (id: string, parent?: string): Workspace =>
   ({ id, name: id, owner: "karthik", parent, status: "running", ports: [], repo: "r", branch: "main" });
@@ -46,15 +46,25 @@ test("fromSpace: service port is the first port, interceptedBy becomes the works
 });
 
 test("fromSpace: processes are named by their binary; failed or non-zero exits are crashed", () => {
-  const p = (id: string, cmd: string, state: string, extra = {}) => ({ id, cmd, state, logs: ["l"], ...extra });
+  const p = (id: string, cmd: string, state: string, extra = {}) => ({ id, cmd, state, logs: [{ text: "l" }], ...extra });
   const { workspaces } = fromSpace(
-    view({ workspaces: [sw("a", { processes: [p("1", "/usr/bin/go run ./x", "running"), p("2", "ls", "exited", { exit_code: 0 }), p("3", "make", "exited", { exit_code: 2 }), p("4", "sh", "exited", { exit_code: 0, failed: true })] })] }),
+    view({ workspaces: [sw("a", { processes: [p("1", "/usr/bin/go run ./x", "running"), p("2", "ls", "exited", { exit_code: 0 }), p("3", "make", "exited", { exit_code: 2 }), p("4", "sh", "exited", { exit_code: 0, failed: true }), p("5", "", "exited")] })] }),
   );
-  expect(workspaces[0]!.processes!.map((x) => [x.name, x.status, x.code])).toEqual([["go", "running", undefined], ["ls", "exited", 0], ["make", "crashed", 2], ["sh", "crashed", 0]]);
+  expect(workspaces[0]!.processes!.map((x) => [x.name, x.status, x.code])).toEqual([["go run", "running", undefined], ["ls", "exited", 0], ["make", "crashed", 2], ["sh", "crashed", 0], ["5", "exited", undefined]]);
 });
 
 test("fromSpace: the connected environment picks the index; unknown falls back to 0", () => {
   const e = (id: string) => ({ id, name: id, owner: "t", state: "running", services: [] });
   expect(fromSpace(view({ environments: [e("a"), e("b")], connected: "b" })).envIndex).toBe(1);
   expect(fromSpace(view({ environments: [e("a"), e("b")], connected: "zz" })).envIndex).toBe(0);
+});
+
+test("procName: the label a person would give the command", () => {
+  expect(procName("npm run dev")).toBe("npm run dev");
+  expect(procName("cd web && bun run dev")).toBe("bun run dev");
+  expect(procName("PORT=3000 node server.js")).toBe("node server.js");
+  expect(procName("bash -lc 'npx vite --port 5173'")).toBe("vite");
+  expect(procName("/usr/bin/python3 -m http.server 8000")).toBe("python3 http.server");
+  expect(procName("")).toBe("");
+  expect(procName("x".repeat(40))).toHaveLength(32);
 });

@@ -36,15 +36,16 @@ export type ProcessStatus = "running" | "starting" | "exited" | "crashed";
 
 /** A process the workspace runs — what the backend is actually doing. */
 export type Process = {
+  id: string;
   name: string;
   command: string;
   status: ProcessStatus;
-  /** Port it listens on, when it serves one. */
-  port?: number;
+  /** RFC 3339, from the pod's process list. */
+  startedAt?: string;
   /** Exit code, for a process that stopped. */
   code?: number;
-  /** Recent output, oldest first. */
-  logs: string[];
+  /** Recent output, oldest first; stderr lines carry `err`. */
+  logs: { text: string; err?: true }[];
 };
 
 export type Service = {
@@ -95,6 +96,30 @@ export function envLabel(e: Environment, user: string): string {
   return e.owner === user ? e.name : `${e.owner}/${e.name}`;
 }
 
+const base = (w: string) => w.split("/").pop() ?? w;
+const RUNNERS = new Set(["npm", "pnpm", "yarn", "bun"]);
+const SHELLS = new Set(["sh", "bash", "zsh"]);
+
+/** A short label for a process from its command line: `npm run dev`, `vite`, `node server.js`. */
+export function procName(cmd: string): string {
+  let c = cmd.trim();
+  for (;;) {
+    const n = c.replace(/^cd\s+\S+\s*&&\s*/, "").replace(/^[A-Za-z_][A-Za-z0-9_]*=\S*\s+/, "");
+    if (n === c) break;
+    c = n;
+  }
+  const [first = "", ...rest] = c.split(/\s+/).filter(Boolean);
+  const head = base(first);
+  let out: string;
+  if (RUNNERS.has(head) && rest[0] === "run" && rest[1]) out = `${head} run ${rest[1]}`;
+  else if ((head === "npx" || head === "bunx") && rest[0]) out = rest[0];
+  else if (SHELLS.has(head) && (rest[0] === "-c" || rest[0] === "-lc")) {
+    const script = rest.slice(1).join(" ").replace(/^(["'])(.*)\1$/, "$2");
+    return procName(script);
+  } else out = [head, rest.find((a) => !a.startsWith("-"))].filter(Boolean).join(" ");
+  return out.length > 32 ? `${out.slice(0, 31)}…` : out;
+}
+
 /**
  * The backend's view as sidebar rows. Tree order is what Sidebar relies on: each workspace, then
  * its clones. ponytail: the platform has no clone progress and `error` is shown as stopped; add a
@@ -114,7 +139,9 @@ export function fromSpace(v: SpaceView): { workspaces: Workspace[]; environments
     repo: w.repo ?? "",
     branch: w.branch ?? "",
     processes: w.processes?.map((p) => ({
-      name: p.cmd.trim().split(/\s+/)[0]?.split("/").pop() || p.id,
+      id: p.id,
+      name: procName(p.cmd) || p.id,
+      startedAt: p.started_at,
       command: p.cmd,
       status: p.state === "running" ? "running" : p.failed || (p.exit_code ?? 0) !== 0 ? "crashed" : "exited",
       code: p.exit_code ?? undefined,

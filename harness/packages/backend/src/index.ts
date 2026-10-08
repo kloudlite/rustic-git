@@ -33,7 +33,7 @@ export type LoginType = Parameters<typeof loginProvider>[1];
 export type LoginUi = Parameters<typeof loginProvider>[2];
 export type CatalogModel = { provider: string; id: string; name: string; input: string[] };
 /** What the sidebar shows, read by the bench from the platform (./space). JSON-safe: it crosses ssh. */
-export type SpaceProcess = { id: string; cmd: string; state: string; exit_code?: number | null; failed?: boolean; logs: string[] };
+export type SpaceProcess = { id: string; cmd: string; state: string; exit_code?: number | null; failed?: boolean; started_at?: string; logs: { text: string; err?: true }[] };
 export type SpaceWorkspace = {
   id: string;
   name: string;

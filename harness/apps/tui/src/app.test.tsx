@@ -297,27 +297,60 @@ test("mouse: clicking a sidebar workspace and a hint", async () => {
   t.done();
 });
 
-test("processes view lists what the workspace runs, with its logs", async () => {
+async function processesView() {
   const t = await mount();
   t.mockInput.pressKey("1"); // api-gateway
   await t.frame();
   t.mockInput.pressKey("f"); // files
   await t.frame();
   t.mockInput.pressKey("f"); // processes
+  return t;
+}
+
+test("processes view lists what the workspace runs, with its logs", async () => {
+  const t = await processesView();
   const f = await t.frame();
-  expect(f).toContain("2/3 running");
-  expect(f).toContain("go run ./cmd/gateway"); // the platform names a process by its command, not "server:8080"
-  expect(f).toContain("crashed (1)");
+  expect(f).toContain("2 running · 1 crashed");
+  expect(f).toContain("RUNNING");
+  expect(f).toContain("STOPPED");
+  expect(f).toContain("gateway serve --port 8080"); // the reader header carries the full command
   expect(f).toContain("listening on :8080"); // selected process's log
+  expect(f).toContain("following");
 
   t.mockInput.pressKey("j"); // metrics
   await t.frame();
   t.mockInput.pressKey("j"); // tests (crashed)
-  expect(await t.frame()).toContain("--- FAIL: TestRateLimit");
+  const g = await t.frame();
+  expect(g).toContain("--- FAIL: TestRateLimit");
+  expect(g).toContain("limiter_test.go:42: want 100 got 128"); // stderr line
   t.done();
 });
 
+test("processes view: section headers with counts, crashed row, filter, follow", async () => {
+  const t = await processesView();
+  const f = await t.frame();
+  expect(f).toMatch(/RUNNING\s+2/);
+  expect(f).toMatch(/STOPPED\s+1/);
+  expect(f).toMatch(/✕ go test\s+exit 1/);
+  expect(f).toMatch(/● gateway serve\s+\S+/);
 
+  t.mockInput.pressKey("F", { shift: true }); // toggles follow off
+  expect(await t.frame()).not.toContain("following");
+  t.mockInput.pressKey("F", { shift: true });
+  expect(await t.frame()).toContain("following");
+
+  t.mockInput.pressKey("/");
+  await t.frame();
+  await t.mockInput.typeText("metrics");
+  expect(await t.frame()).toContain("/metrics");
+  t.mockInput.pressEnter();
+  const g = await t.frame();
+  expect(g).toContain("/metrics");
+  expect(g).toContain("1/3");
+  expect(g).not.toContain("STOPPED");
+  expect(g).not.toContain("go test");
+  t.done();
+});
 
 test("sidebar: session header, workspaces with their ephemerals, environment with its services", async () => {
   const t = await mount();

@@ -1,29 +1,55 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { useKeyboard } from "@opentui/react";
-import { type ScrollBoxRenderable } from "@opentui/core";
+import { TextAttributes, type ScrollBoxRenderable } from "@opentui/core";
 import { theme } from "../theme.ts";
 import { SplitBorder } from "../ui/border.ts";
-import type { Process, ProcessStatus } from "../workspaces.ts";
+import { SPECIAL } from "./Input.tsx";
+import type { Process } from "../workspaces.ts";
 import { useWheelAccel } from "../wheel.ts";
 
-const color = (status: ProcessStatus) =>
-  ({
-    running: theme.success,
-    starting: theme.warning,
-    exited: theme.muted,
-    crashed: theme.error,
-  })[status];
+type Row = { kind: "header"; label: string; extra: string } | { kind: "proc"; proc: Process };
 
-const detail = (p: Process) =>
-  p.status === "exited" || p.status === "crashed" ? `${p.status} (${p.code ?? 0})` : p.status;
+const stopped = (p: Process) => p.status === "exited" || p.status === "crashed";
+
+/** `<1m`, `4m`, `1h 12m`, `2d 3h`; empty when the start time is unknown. */
+export function uptime(startedAt: string | undefined, now: number): string {
+  const t = startedAt ? Date.parse(startedAt) : NaN;
+  if (Number.isNaN(t)) return "";
+  const m = Math.max(0, Math.floor((now - t) / 60_000));
+  if (m < 1) return "<1m";
+  if (m < 60) return `${m}m`;
+  const h = Math.floor(m / 60);
+  if (h < 24) return `${h}h ${m % 60}m`;
+  return `${Math.floor(h / 24)}d ${h % 24}h`;
+}
+
+/** RUNNING then STOPPED, filtered by name or command; a section with no rows is not drawn. */
+function buildRows(processes: Process[], filter: string): Row[] {
+  const q = filter.toLowerCase();
+  const shown = processes.filter((p) => !q || p.name.toLowerCase().includes(q) || p.command.toLowerCase().includes(q));
+  const out: Row[] = [];
+  for (const [label, list] of [
+    ["RUNNING", shown.filter((p) => !stopped(p))],
+    ["STOPPED", shown.filter(stopped)],
+  ] as const) {
+    if (!list.length) continue;
+    out.push({ kind: "header", label, extra: String(list.length) });
+    for (const proc of list) out.push({ kind: "proc", proc });
+  }
+  return out;
+}
+
+const glyph = (p: Process) => (stopped(p) ? (p.status === "crashed" ? "✕" : "○") : "●");
+const glyphColor = (p: Process) => (p.status === "crashed" ? theme.error : stopped(p) ? theme.muted : theme.success);
+const exit = (p: Process) => (p.status === "crashed" ? `exit ${p.code ?? 1}` : "done");
 
 /**
- * Processes view: what the workspace is running on the left, that process's
- * output on the right. Same shape and keys as the files view — j/k move, l or
- * enter focuses the log, tab swaps panes, esc goes back.
+ * Processes view, laid out like the files view: what the workspace runs on the left (RUNNING,
+ * STOPPED), the selected process's command and log on the right. j/k move, l or enter focuses the
+ * log, tab swaps panes, `/` filters, esc backs out a layer. The log follows its tail until you
+ * scroll up; G or F resumes. Exited processes keep their log (the pod lists them for 10 minutes).
  */
 export function Processes({
-  workspace,
   processes,
   onClose,
   onCycle,
@@ -35,94 +61,158 @@ export function Processes({
   onCycle: () => void;
 }) {
   const wheel = useWheelAccel();
-  const [sel, setSel] = useState(0);
+  const [selId, setSelId] = useState<string | null>(null);
   const [pane, setPane] = useState<"list" | "log">("list");
+  const [filter, setFilter] = useState("");
+  const [typing, setTyping] = useState(false);
+  const [follow, setFollow] = useState(true);
+  const [flash, setFlash] = useState(false);
   const logRef = useRef<ScrollBoxRenderable>(null);
-  const cur = Math.min(sel, Math.max(0, processes.length - 1));
-  const proc = processes[cur];
-  const lines = useMemo(() => proc?.logs ?? [], [proc]);
 
-  // a new selection starts at the tail of that process's output
+  const rows = useMemo(() => buildRows(processes, filter), [processes, filter]);
+  const picks = rows.flatMap((r) => (r.kind === "proc" ? [r.proc] : []));
+  const proc = picks.find((p) => p.id === selId) ?? picks[0];
+  const lines = proc?.logs ?? [];
+
+  const toEnd = () => logRef.current?.scrollTo(Number.MAX_SAFE_INTEGER);
+  const select = (p: Process) => {
+    setSelId(p.id);
+    setFollow(true);
+  };
+
+  // follow keeps the tail in view as lines arrive; a new selection starts at the tail
   useEffect(() => {
-    logRef.current?.scrollTo(Math.max(0, lines.length - 1));
-  }, [cur, lines.length]);
+    if (follow) toEnd();
+  }, [proc?.id, lines.length, follow]);
+
+  // the files view's flash: the selected process gained lines
+  const seen = useRef<{ id?: string; n: number }>({ n: 0 });
+  useEffect(() => {
+    const prev = seen.current;
+    seen.current = { id: proc?.id, n: lines.length };
+    if (prev.id !== proc?.id || lines.length <= prev.n) return;
+    setFlash(true);
+    const t = setTimeout(() => setFlash(false), 1200);
+    return () => clearTimeout(t);
+  }, [proc?.id, lines.length]);
+
+  const move = (d: number) => {
+    const i = picks.findIndex((p) => p.id === proc?.id);
+    const next = picks[Math.max(0, Math.min(picks.length - 1, i + d))];
+    if (next) select(next);
+  };
 
   useKeyboard((key) => {
     if (key.ctrl || key.meta || key.option) return;
-    if (key.name === "escape") return onClose();
-    if (key.name === "f") return onCycle();
-    if (key.name === "tab") return setPane((p) => (p === "list" ? "log" : "list"));
+    if (typing) {
+      if (key.name === "escape") {
+        setFilter("");
+        return setTyping(false);
+      }
+      if (key.name === "return") return setTyping(false);
+      if (key.name === "backspace" || key.name === "delete") return setFilter((f) => f.slice(0, -1));
+      if (SPECIAL.has(key.name)) return;
+      const t = key.sequence;
+      if (t && !t.startsWith("\x1b") && t >= " ") setFilter((f) => f + t);
+      return;
+    }
+    // shift arrives as an upper-case name or as name + shift, depending on the terminal
+    const k = key.shift ? key.name.toUpperCase() : key.name;
+    if (k === "escape") return filter ? setFilter("") : onClose();
+    if (key.sequence === "/") return setTyping(true);
+    if (k === "f") return onCycle();
+    if (k === "tab") return setPane((p) => (p === "list" ? "log" : "list"));
     if (pane === "list") {
-      if (key.name === "j" || key.name === "down") return setSel(Math.min(processes.length - 1, cur + 1));
-      if (key.name === "k" || key.name === "up") return setSel(Math.max(0, cur - 1));
-      if (key.name === "l" || key.name === "return") return setPane("log");
+      if (k === "j" || k === "down") return move(1);
+      if (k === "k" || k === "up") return move(-1);
+      if (k === "l" || k === "return") return setPane("log");
+      if (k === "G") return (setFollow(true), toEnd());
+      if (k === "F") return setFollow((f) => (f ? false : (toEnd(), true)));
       return;
     }
     const sb = logRef.current;
     const page = Math.max(1, (sb?.viewport.height ?? 20) - 2);
-    if (key.name === "j" || key.name === "down") sb?.scrollBy(1);
-    if (key.name === "k" || key.name === "up") sb?.scrollBy(-1);
-    if (key.name === "d") sb?.scrollBy(Math.ceil(page / 2));
-    if (key.name === "u") sb?.scrollBy(-Math.ceil(page / 2));
-    if (key.name === "g") sb?.scrollTo(0);
-    if (key.name === "G") sb?.scrollTo(Math.max(0, lines.length - 1));
-    if (key.name === "h") setPane("list");
+    // any upward scroll lets go of the tail
+    const up = (n: number) => (setFollow(false), sb?.scrollBy(-n));
+    if (k === "j" || k === "down") sb?.scrollBy(1);
+    if (k === "k" || k === "up") up(1);
+    if (k === "d") sb?.scrollBy(Math.ceil(page / 2));
+    if (k === "u") up(Math.ceil(page / 2));
+    if (k === "g") (setFollow(false), sb?.scrollTo(0));
+    if (k === "G") (setFollow(true), toEnd());
+    if (k === "F") setFollow((f) => (f ? false : (toEnd(), true)));
+    if (k === "h") setPane("list");
   });
 
-  const running = processes.filter((p) => p.status === "running").length;
+  const running = processes.filter((p) => !stopped(p)).length;
+  const crashed = processes.filter((p) => p.status === "crashed").length;
+  const now = Date.now();
+  const metaOf = (p: Process) => (stopped(p) ? exit(p) : uptime(p.startedAt, now));
 
   return (
     <box flexDirection="column" flexGrow={1} minHeight={0}>
       <box flexDirection="row" justifyContent="space-between" paddingLeft={1} paddingRight={1}>
-        <text fg={theme.muted}>{workspace}</text>
+        <text>
+          <span fg={theme.muted}>~/workspace</span>
+          {flash ? <span fg={theme.success}>  ● updated</span> : ""}
+        </text>
         <text fg={theme.muted}>
-          {running}/{processes.length} running
+          {typing ? (
+            <span>
+              <span fg={theme.accent}>/</span>
+              <span fg={theme.fg}>{filter}</span>
+              <span attributes={TextAttributes.INVERSE}> </span>
+            </span>
+          ) : filter ? (
+            <span>
+              <span fg={theme.accent}>/</span>
+              <span fg={theme.fg}>{filter}</span>
+              <span fg={theme.muted}> · {picks.length}/{processes.length}</span>
+            </span>
+          ) : processes.length === 0 ? (
+            "no processes"
+          ) : (
+            `${running} running${crashed ? ` · ${crashed} crashed` : ""}`
+          )}
         </text>
       </box>
 
       <box flexDirection="row" flexGrow={1} minHeight={0} marginTop={1}>
-        <box
-          flexDirection="column"
-          width="38%"
-          minWidth={22}
-          flexShrink={0}
-          paddingLeft={1}
-          onMouseDown={() => setPane("list")}
-        >
-          {processes.length === 0 ? (
-            <text fg={theme.muted}>nothing running in this workspace</text>
-          ) : (
-            processes.map((p, i) => {
-              const on = i === cur && pane === "list";
+        {/* left: what is running, then what stopped */}
+        <box flexDirection="column" width="42%" minWidth={24} flexShrink={0} paddingLeft={1} onMouseDown={() => setPane("list")}>
+          <scrollbox flexGrow={1} flexBasis={0} scrollbarOptions={{ visible: false }} scrollAcceleration={wheel}>
+            {rows.map((row, i) => {
+              if (row.kind === "header")
+                return (
+                  <box key={`h${row.label}`} marginTop={i === 0 ? 0 : 1} flexDirection="row" justifyContent="space-between" paddingRight={1}>
+                    <text fg={theme.muted}><b>{row.label}</b></text>
+                    <text fg={theme.muted}>{row.extra}</text>
+                  </box>
+                );
+              const p = row.proc;
+              const active = p.id === proc?.id && pane === "list";
               return (
                 <box
-                  key={p.name}
-                  flexDirection="column"
-                  onMouseDown={() => {
-                    setSel(i);
-                    setPane("list");
-                  }}
+                  key={p.id}
+                  flexDirection="row"
+                  height={1}
+                  overflow="hidden"
+                  paddingLeft={1}
+                  paddingRight={1}
+                  backgroundColor={active ? theme.selection : undefined}
+                  onMouseDown={() => (select(p), setPane("list"))}
                 >
-                  <box height={1} overflow="hidden" paddingLeft={1} backgroundColor={on ? theme.selection : undefined}>
-                    <text selectable={false}>
-                      <span fg={on ? theme.bg : color(p.status)}>•</span>{" "}
-                      <span fg={on ? theme.bg : theme.fg}>{p.name}</span>
-                      {p.port ? <span fg={on ? theme.bg : theme.muted}>:{p.port}</span> : ""}
-                      <span fg={on ? theme.bg : theme.muted}>
-                        {"  "}
-                        {detail(p)}
-                      </span>
-                    </text>
-                  </box>
-                  <box height={1} overflow="hidden" paddingLeft={3}>
-                    <text fg={theme.muted}>{p.command}</text>
-                  </box>
+                  <text selectable={false} fg={active ? theme.bg : glyphColor(p)}>{glyph(p)} </text>
+                  <text selectable={false} fg={active ? theme.bg : theme.fg}>{p.name}</text>
+                  <box flexGrow={1} />
+                  <text selectable={false} fg={active ? theme.bg : theme.muted}>{metaOf(p)}</text>
                 </box>
               );
-            })
-          )}
+            })}
+          </scrollbox>
         </box>
 
+        {/* right: the reader — the selected process's command and log */}
         <box
           flexDirection="column"
           flexGrow={1}
@@ -134,49 +224,48 @@ export function Processes({
         >
           {!proc ? (
             <box paddingLeft={2} paddingTop={1}>
-              <text fg={theme.muted}>no process selected</text>
+              <text fg={theme.muted}>nothing has run in this workspace — background commands the agent starts (exec with detach) show here</text>
             </box>
           ) : (
             <>
               <box flexDirection="row" justifyContent="space-between" paddingLeft={2} paddingRight={2}>
-                <text>
-                  <span fg={theme.fg}>{proc.name}</span>
-                  <span fg={theme.muted}>  {proc.command}</span>
-                </text>
-                <text fg={color(proc.status)}>{detail(proc)}</text>
-              </box>
-              <scrollbox
-                ref={logRef}
-                flexGrow={1}
-                flexBasis={0}
-                marginTop={1}
-                paddingLeft={2}
-                scrollbarOptions={{ visible: false }} scrollAcceleration={wheel}
-              >
-                <box flexDirection="column" flexShrink={0}>
-                  {lines.length === 0 ? (
-                    <text fg={theme.muted}>(no output yet)</text>
-                  ) : (
-                    lines.map((line, i) => (
-                      <text key={i} fg={theme.muted}>
-                        {line}
-                      </text>
-                    ))
-                  )}
+                <box flexGrow={1} height={1} overflow="hidden">
+                  <text fg={theme.fg}>{proc.command}</text>
                 </box>
+                <text fg={theme.muted}>
+                  {proc.status} · {metaOf(proc) || "—"} · {lines.length} lines
+                  {follow ? <span fg={theme.accent}>  following</span> : ""}
+                </text>
+              </box>
+              <scrollbox ref={logRef} flexGrow={1} flexBasis={0} marginTop={1} paddingLeft={1} scrollbarOptions={{ visible: false }} scrollAcceleration={wheel}>
+                {lines.length === 0 ? (
+                  <box paddingLeft={1}>
+                    <text fg={theme.muted}>{stopped(proc) ? "no output" : "no output yet"}</text>
+                  </box>
+                ) : (
+                  lines.map((l, i) => (
+                    <box key={i} flexDirection="row" height={1} overflow="hidden" flexShrink={0}>
+                      <text fg={theme.muted}>{String(i + 1).padStart(4)}  </text>
+                      <text fg={l.err ? theme.error : theme.fg}>{l.text}</text>
+                    </box>
+                  ))
+                )}
               </scrollbox>
             </>
           )}
         </box>
       </box>
 
+      {/* footer hints */}
       <box flexDirection="row" gap={2} paddingLeft={1} marginTop={1}>
-        <text fg={theme.muted}>processes › {proc?.name ?? "—"}</text>
+        <text fg={theme.muted}>{`processes › ${proc?.name ?? "—"}`}</text>
         <box flexGrow={1} />
         <text fg={theme.fg}>j k <span fg={theme.muted}>move</span></text>
-        <text fg={theme.fg}>l <span fg={theme.muted}>logs</span></text>
-        <text fg={theme.fg}>h <span fg={theme.muted}>back</span></text>
-        <text fg={theme.fg}>u d <span fg={theme.muted}>scroll</span></text>
+        <text fg={theme.fg}>l <span fg={theme.muted}>open</span></text>
+        <text fg={theme.fg}>tab <span fg={theme.muted}>pane</span></text>
+        <text fg={theme.fg}>G <span fg={theme.muted}>tail</span></text>
+        <text fg={theme.fg}>F <span fg={theme.muted}>follow</span></text>
+        <text fg={theme.fg}>/ <span fg={theme.muted}>filter</span></text>
         <text fg={theme.fg}>esc <span fg={theme.muted}>back</span></text>
       </box>
     </box>

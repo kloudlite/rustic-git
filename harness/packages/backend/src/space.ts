@@ -11,15 +11,18 @@ import { apiJson, podGet, podPost } from "@kloudlite-tui/tools";
 import type { SpaceEnvironment, SpaceProcess, SpaceView, SpaceWorkspace } from "./index.ts";
 
 const POD_CAP_MS = 5000;
-const LOG_LINES = 20;
+const LOG_LINES = 500;
 
 const capped = <T>(p: Promise<T>): Promise<T | undefined> =>
   Promise.race([p.catch(() => undefined), new Promise<undefined>((r) => setTimeout(r, POD_CAP_MS))]);
 
-/** Per running process: where the last read stopped and the tail so far, so a beat reads only
- * what is new instead of the whole 4 MiB ring. Keyed "ws/procId"; pruned when the process leaves
- * the list. */
-const cursors = new Map<string, { next: number; next_err: number; lines: string[] }>();
+/** Per process: where the last read stopped and the tail so far, so a beat reads only what is new
+ * instead of the whole 4 MiB ring. `done` marks an exited process whose final read happened: its
+ * lines stay (a crash keeps its log) and it is never read again. Keyed "ws/procId"; pruned when the
+ * process leaves the list. */
+const cursors = new Map<string, { next: number; next_err: number; lines: Line[]; done?: true }>();
+
+type Line = { text: string; err?: true };
 
 async function processes(ws: string): Promise<SpaceProcess[]> {
   const { processes } = await podPost<{ processes: Omit<SpaceProcess, "logs">[] }>(ws, "process_list", {}, POD_CAP_MS);
@@ -27,10 +30,9 @@ async function processes(ws: string): Promise<SpaceProcess[]> {
   for (const k of cursors.keys()) if (k.startsWith(`${ws}/`) && !live.has(k)) cursors.delete(k);
   return Promise.all(
     processes.map(async (p) => {
-      let logs: string[] = [];
-      if (p.state === "running") {
-        const key = `${ws}/${p.id}`;
-        const c = cursors.get(key) ?? { next: 0, next_err: 0, lines: [] };
+      const key = `${ws}/${p.id}`;
+      const c = cursors.get(key) ?? { next: 0, next_err: 0, lines: [] };
+      if (!c.done) {
         const o = await capped(
           podPost<{ stdout?: string; stderr?: string; next?: number; next_err?: number }>(
             ws, "process_output", { id: p.id, since: c.next, since_err: c.next_err }, POD_CAP_MS,
@@ -38,15 +40,16 @@ async function processes(ws: string): Promise<SpaceProcess[]> {
         );
         if (o) {
           // each stream split on its own: joined first, stdout's last partial line would fuse with stderr's first
-          const add = (t?: string) => (t ?? "").split("\n").filter(Boolean);
-          c.lines = [...c.lines, ...add(o.stdout), ...add(o.stderr)].slice(-LOG_LINES);
+          const add = (t: string | undefined, err?: true): Line[] =>
+            (t ?? "").split("\n").filter(Boolean).map((text) => (err ? { text, err } : { text }));
+          c.lines = [...c.lines, ...add(o.stdout), ...add(o.stderr, true)].slice(-LOG_LINES);
           c.next = o.next ?? c.next;
           c.next_err = o.next_err ?? c.next_err;
+          if (p.state !== "running") c.done = true;
           cursors.set(key, c);
         }
-        logs = c.lines;
       }
-      return { ...p, logs };
+      return { ...p, logs: c.lines };
     }),
   );
 }

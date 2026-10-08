@@ -65,9 +65,9 @@ test("lists the user's workspaces and the team's environments, reads clone paren
   expect(w3!.processes).toBeUndefined(); // not ready: pod never asked
   expect(w1!.changes).toBe(2);
   expect(w1!.processes!.map((p) => p.id)).toEqual(["p1", "p2"]);
-  expect(w1!.processes![0]!.logs).toHaveLength(20);
-  expect(w1!.processes![0]!.logs.at(-1)).toBe("l29");
-  expect(w1!.processes![1]!.logs).toEqual([]); // only running processes are read
+  expect(w1!.processes![0]!.logs).toHaveLength(30);
+  expect(w1!.processes![0]!.logs.at(-1)).toEqual({ text: "l29" });
+  expect(w1!.processes![1]!.logs).toHaveLength(30); // an exited process is read too, once
   expect(v.environments[0]!.services).toEqual([{ name: "api", ports: [8080], interceptedBy: "w1" }, { name: "db", ports: [5432], interceptedBy: undefined }]);
   expect(JSON.stringify(v)).not.toContain("TOKEN");
   expect(urls.some((u) => u.includes("w3/tools"))).toBe(false);
@@ -95,10 +95,39 @@ test("a running process is read from the cursor the last answer gave, not from 0
   }) as any;
   const b = new LocalBackend();
   const first = await b.space();
-  expect(first.workspaces[0]!.processes![0]!.logs).toEqual(["a", "b", "e1"]);
+  expect(first.workspaces[0]!.processes![0]!.logs).toEqual([{ text: "a" }, { text: "b" }, { text: "e1", err: true }]);
   const second = await b.space();
   expect(reads[1]).toMatchObject({ id: "px", since: 4, since_err: 3 });
-  expect(second.workspaces[0]!.processes![0]!.logs).toEqual(["a", "b", "e1", "c"]);
+  expect(second.workspaces[0]!.processes![0]!.logs).toEqual([{ text: "a" }, { text: "b" }, { text: "e1", err: true }, { text: "c" }]);
+});
+
+test("an exited process never seen running is read once; stderr lines are tagged", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "kl-space-"));
+  writeFileSync(join(dir, "tok"), "SECRET-TOKEN\n");
+  Object.assign(process.env, { KL_API_URL: "http://api", KL_TOOL_TOKEN_FILE: join(dir, "tok"), KL_OWNER: "me", KL_TEAM: "acme", KL_BENCH: "bench" });
+  const json = (v: unknown) => new Response(JSON.stringify(v));
+  let reads = 0;
+  globalThis.fetch = (async (u: any) => {
+    const url = String(u);
+    if (url.startsWith("http://api/v1/workspaces?")) return json([{ id: "wd", name: "dead", owner: "me", state: "ready" }]);
+    if (url.startsWith("http://api/v1/environments")) return json([]);
+    if (url.endsWith("/v1/me/environments")) return json([]);
+    if (url.endsWith("/v1/workspaces/wd/tools")) return json({ address: "10.0.0.3:7788", token: "T" });
+    if (url.endsWith("/tools/process_list")) return json({ processes: [{ id: "pd", cmd: "boom", state: "exited", exit_code: 1, failed: true, started_at: "2026-10-01T00:00:00Z" }] });
+    if (url.endsWith("/tools/process_output")) {
+      reads++;
+      return json({ stdout: "out\n", stderr: "bad\n", next: 4, next_err: 4 });
+    }
+    return json({ error: "nope" });
+  }) as any;
+  const b = new LocalBackend();
+  const first = await b.space();
+  const p = first.workspaces[0]!.processes![0]!;
+  expect(p.started_at).toBe("2026-10-01T00:00:00Z");
+  expect(p.logs).toEqual([{ text: "out" }, { text: "bad", err: true }]);
+  const second = await b.space();
+  expect(reads).toBe(1);
+  expect(second.workspaces[0]!.processes![0]!.logs).toEqual(p.logs);
 });
 
 test("a failing list call is unavailable, with the API's text and no token", async () => {
