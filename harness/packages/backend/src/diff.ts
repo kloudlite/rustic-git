@@ -94,7 +94,9 @@ function writeDiff(args: { path?: string; content?: string }): FileDiff | null {
 
 /** Diff for whichever mutating tool this is, or null. */
 export function toolDiff(name: string, args: any): FileDiff | null {
-  if (name === "edit") return editDiff(args);
+  // ponytail: the pod's edit ({path, edits:[{old,new}]}) targets a file on the pod, not the bench;
+  // its diff needs a pod read, add when wanted.
+  if (name === "edit") return args?.edits?.some?.((e: any) => "old" in e || "new" in e) ? null : editDiff(args);
   if (name === "write") return writeDiff(args);
   return null;
 }

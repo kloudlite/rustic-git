@@ -18,16 +18,30 @@ import {
   writeSettings,
   type ModelRef,
 } from "@kloudlite-tui/agent";
-import { Registry, webFetch, webSearch } from "@kloudlite-tui/tools";
+import { Registry, platformTools, podTools, webFetch, webSearch } from "@kloudlite-tui/tools";
+import { delegateTools } from "./delegate.ts";
 import * as git from "./git.ts";
 import { toolDiff } from "./diff.ts";
 import { PROTOCOL } from "./wire.ts";
 import type { Backend, CatalogModel, Hello, SessionHandle, SessionOpts } from "./index.ts";
 
 /** Tools that ask before they run. */
-export const GATED = new Set(["bash", "write", "edit", "web_fetch"]);
+export const GATED = new Set([
+  "bash", "write", "edit", "patch", "exec", "web_fetch",
+  "workspace_stop", "workspace_delete", "worktree_drop", "env_delete", "env_stop", "env_restore_in_place",
+  "service_remove", "volume_delete", "snapshot_delete",
+]);
 /** Tools that only mutate the workspace's files — what acceptEdits waves through. */
-export const EDITS = new Set(["write", "edit"]);
+export const EDITS = new Set(["write", "edit", "patch"]);
+
+export type SessionKind = { kind: "main" } | { kind: "workspace"; ws: string } | { kind: "subagent"; ws: string };
+
+/** `main[:id]` is the main session, `<ws>:agent-<hex>` a subagent, anything else a workspace's. */
+export function sessionKind(key: string): SessionKind {
+  const base = key.split(":")[0]!;
+  if (base === "main") return { kind: "main" };
+  return key.includes(":agent-") ? { kind: "subagent", ws: base } : { kind: "workspace", ws: base };
+}
 
 function catalog(): CatalogModel[] {
   return models.getModels().map((m) => ({ provider: m.provider, id: m.id, name: m.name ?? m.id, input: [...m.input] }));
@@ -43,6 +57,10 @@ function defaultModel(list: CatalogModel[]): ModelRef {
 }
 
 export class LocalBackend implements Backend {
+  /** Open sessions, for workspace_ask to reach a running one; `busy` = mid-turn. */
+  #live = new Map<string, SessionHandle>();
+  #busy = new Set<string>();
+
   async hello(): Promise<Hello> {
     const list = catalog();
     return {
@@ -54,17 +72,27 @@ export class LocalBackend implements Backend {
       sessions: listSessions(),
       cwd: process.cwd(),
       home: homedir(),
-      tools: [webFetch.name, webSearch.name],
+      tools: [webFetch.name, webSearch.name, ...platformTools("main").map((t) => t.name), "workspace_ask", "subagent"],
     };
   }
 
   async session(key: string, opts: SessionOpts): Promise<SessionHandle> {
     const model = resolveModel(opts.model);
     if (!model) throw new Error(`unknown model ${opts.model.provider}/${opts.model.id}`);
+    await this.#live.get(key)?.dispose();
+    const k = sessionKind(key);
+    const deps = { live: this.#live, busy: this.#busy, open: (key: string, o: SessionOpts) => this.session(key, o) };
+    // who gets which hands: main reaches the platform and delegates; a workspace session has the
+    // pod's code tools and its own slice of the platform; a subagent only code tools.
+    const registry = new Registry();
+    if (k.kind === "main") registry.add(webFetch, webSearch, ...platformTools("main"), ...delegateTools("main", undefined, deps, opts), ...opts.tools);
+    else if (k.kind === "workspace")
+      registry.add(webFetch, webSearch, ...(await podTools(k.ws)), ...platformTools("workspace", k.ws), ...delegateTools("workspace", k.ws, deps, opts), ...opts.tools);
+    else registry.add(webFetch, ...(await podTools(k.ws)));
     const agent: any = await createSession({
       key,
       model,
-      registry: new Registry().add(webFetch, webSearch, ...opts.tools),
+      registry,
       fresh: opts.fresh,
       thinkingLevel: opts.thinkingLevel,
       autoCompact: opts.autoCompact,
@@ -82,7 +110,11 @@ export class LocalBackend implements Backend {
       }
       return inner?.(ctx, signal);
     };
-    return {
+    agent.subscribe((e: any) => {
+      if (e.type === "agent_start") this.#busy.add(key);
+      else if (e.type === "agent_end") this.#busy.delete(key);
+    });
+    const handle: SessionHandle = {
       messages: agent.messages,
       isClaude: "isClaude" in agent,
       prompt: async (text, o) => agent.prompt(text, o),
@@ -90,7 +122,11 @@ export class LocalBackend implements Backend {
       followUp: async (text, images) => agent.followUp(text, images),
       clearQueue: async () => void agent.clearQueue(),
       abort: async () => agent.abort(),
-      dispose: async () => agent.dispose(),
+      dispose: async () => {
+        if (this.#live.get(key) === handle) this.#live.delete(key);
+        this.#busy.delete(key);
+        agent.dispose();
+      },
       setModel: async (ref) => {
         const m = resolveModel(ref);
         if (!m) throw new Error(`unknown model ${ref.provider}/${ref.id}`);
@@ -107,10 +143,13 @@ export class LocalBackend implements Backend {
           ),
         ),
     };
+    this.#live.set(key, handle);
+    return handle;
   }
 
   sessions = {
-    list: async (prefix?: string) => listSessions(prefix),
+    // subagent sessions are throwaway: never offered for resume
+    list: async (prefix?: string) => listSessions(prefix).filter((s) => !s.key.includes(":agent-")),
     name: async (key: string, name: string) => nameSession(key, name),
     describe: async (key: string, d: string) => describeSession(key, d),
     clear: async (key: string) => clearSessionHistory(key),

@@ -415,29 +415,14 @@ test("the sidebar resizes with [ and ] and clamps at its limits", async () => {
   t.done();
 });
 
-// The env tools are defined once but close over a ref, so the danger is a tool
-// that acts on the state of the render that defined it. Create through the tool
-// and look for the workspace in the frame.
-test("the env tools act on live state and reach the UI", async () => {
+// The platform tools live in the backend now; the TUI owns only what needs the user.
+test("the TUI registers only the question tool", async () => {
   const tools: ToolDef[] = [];
   const t = await testRender(<App tools={tools} />, { width: 160, height: 40 });
-  const run = (name: string, input: unknown) => tools.find((t) => t.name === name)!.run(input);
-  await new Promise((r) => setTimeout(r, 400));
-
-  expect(tools.map((t) => t.name)).toContain("env_status");
-  expect(await run("env_status", {})).toContain("environment:");
-
-  expect(await run("workspace_create", { name: "probe-ws" })).toContain("created");
   await new Promise((r) => setTimeout(r, 200));
-  await t.renderOnce();
-  expect(await run("env_status", {})).toContain("probe-ws");
-  expect(t.captureCharFrame()).toContain("probe-ws");
-
-  // a name that does not exist has to come back with the names that do
-  const bad = await run("env_connect", { name: "nope" });
-  expect(bad).toContain("error");
-  expect(bad).toContain("production");
-}, 20000);
+  expect(tools.map((t) => t.name)).toEqual(["question"]);
+  t.done();
+});
 
 // Permission mode is per-session chrome: shift+tab cycles it and only a
 // non-default mode shows, so the ordinary case stays quiet.
