@@ -46,7 +46,7 @@ Main has no source code. To change code or run something in a workspace, go thro
 
 **Builders.** Each owner has a hidden builder that starts on demand for `kl build`. `builder_status` shows it.
 
-**Quota and regions.** `quota` shows what the owner may still allocate (workspaces, environments, snapshots, disk, cpu, memory). Over quota answers 409. `regions` lists where workspaces can run.
+**Quota and regions.** `quota` shows what the owner may still allocate (workspaces, environments, snapshots, disk, cpu, memory). Over quota answers 409. `regions` lists where workspaces can run. When a limit or a missing access blocks the person, `request_create` asks a superadmin (kinds quota, access, region, other; one pending per kind); `requests_list` / `request_get` show the decision. Never retry the blocked call hoping it passes.
 
 **Lifecycle calls are asynchronous.** Create, start, stop, clone and restore return at once. Poll `workspace_get` / `env_get` until the state you want.
 
@@ -65,6 +65,8 @@ Main has no source code. To change code or run something in a workspace, go thro
 | a new service in the environment | `service_add`, image from `kl build`/`kl push` or any image |
 | see what is running | `workspace_list`, `env_list`, `workspace_get`, `env_get` |
 | see what is left | `quota` |
+| ask for more quota, access or a region | request_create |
+| see what was asked and decided | requests_list |
 
 ## Conventions
 

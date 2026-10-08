@@ -119,6 +119,9 @@ pub const ENVIRONMENT_ID_ROUTES: &[&str] = &[
 /// router, so a new route is refused to a bench tool until somebody decides otherwise.
 pub(crate) const BENCH_TOOL_ROUTES: &[(&str, &str)] = &[
     ("GET", "/v1/quota"),
+    ("GET", "/v1/requests"),
+    ("POST", "/v1/requests"),
+    ("GET", "/v1/requests/{id}"),
     ("GET", "/v1/regions"),
     ("GET", "/v1/workspaces"),
     ("POST", "/v1/workspaces"),
@@ -226,8 +229,6 @@ mod route_tests {
     /// router, so a new route is a deliberate choice of audience rather than a silent default.
     const NOT_BENCH_TOOL_ROUTES: &[&str] = &[
         "/v1/quota-requests",
-        "/v1/requests",
-        "/v1/requests/{id}",
         "/v1/workspaces/{id}/ssh-session",
         "/v1/internal/builders",
         "/v1/internal/builders/{slug}",

@@ -118,3 +118,15 @@ test("service_add of an existing name rejects with the refusal, no prefix", asyn
   routes["GET /v1/environments/e1"] = json({ services: [{ name: "web", image: "w:1" }] });
   await expect(tool(platformTools("main"), "service_add").run({ env: "e1", service: { name: "web", image: "w:2" } })).rejects.toThrow("service exists: web");
 });
+
+test("request_create sends only the kind's own payload; requests_list filters by owner", async () => {
+  const t = platformTools("main");
+  routes["POST /v1/requests"] = json({});
+  routes["GET /v1/requests?owner=acme"] = json([]);
+  const post = async (a: any) => (await tool(t, "request_create").run(a), calls.at(-1)!.body);
+  expect(await post({ kind: "access", reason: "r", access: { team: "acme", role: "member" } })).toEqual({ kind: "access", reason: "r", access: { team: "acme", role: "member" } });
+  expect(await post({ kind: "region", reason: "r", region: "eu" })).toEqual({ kind: "region", reason: "r", region: { region: "eu" } });
+  expect(await post({ kind: "other", reason: "r", title: "t", body: "b" })).toEqual({ kind: "other", reason: "r", other: { title: "t", body: "b" } });
+  await tool(t, "requests_list").run({ owner: "acme" });
+  expect(calls.at(-1)!.url).toBe("/v1/requests?owner=acme");
+});

@@ -254,7 +254,29 @@ export function platformTools(kind: "main" | "workspace", wsId?: string): ToolDe
     def("volume_delete", "Delete a detached volume for good.", { volume: S }, ["volume"], async (a) => api("DELETE", `/v1/volumes/${seg(a.volume)}`)),
     def("snapshot_delete", "Delete one snapshot of a volume.", { volume: S, snapshot: S }, ["volume", "snapshot"], async (a) => api("DELETE", `/v1/volumes/${seg(a.volume)}/snapshots/${seg(a.snapshot)}`)),
     def("builder_status", "Check the image builder's state for a team.", { team: S }, [], async (a) => api("GET", `/v1/builders/me${qs({ team: a.team })}`)),
-    def("quota", "Show an owner's quota and current usage.", { owner: S }, [], async (a) => api("GET", `/v1/quota${qs({ owner: a.owner })}`)),
+    def("quota", "Show an owner's limits and current usage (workspaces, environments, snapshots, diskGb, cpu, memoryGb). Creating past a limit answers 409; ask for more with request_create kind quota.", { owner: S }, [], async (a) => api("GET", `/v1/quota${qs({ owner: a.owner })}`)),
+    def("requests_list", "List the person's requests (quota, access, region, other) and their teams', with state pending/approved/denied and the decision note.", { owner: S }, [], async (a) => api("GET", `/v1/requests${qs({ owner: a.owner })}`)),
+    def("request_get", "Show one request and its decision.", { id: S }, ["id"], async (a) => api("GET", `/v1/requests/${seg(a.id)}`)),
+    def(
+      "request_create",
+      "Ask a superadmin for something the person cannot do now: more quota, access to a team, a region, or anything else. One pending request per owner per kind (409 otherwise). Returns at once; the decision comes later, check it with request_get.",
+      {
+        owner: { type: "string", description: "team slug; omit for the person's own" },
+        kind: { type: "string", enum: ["quota", "access", "region", "other"] },
+        reason: S,
+        quota: {
+          type: "object",
+          description: "the new ceilings wanted, only the dimensions that change",
+          properties: { workspaces: { type: "integer" }, environments: { type: "integer" }, snapshots: { type: "integer" }, diskGb: { type: "integer" }, cpu: { type: "integer" }, memoryGb: { type: "integer" } },
+        },
+        access: { type: "object", properties: { team: S, role: { type: "string", enum: ["member", "admin", "owner"] } }, required: ["team", "role"] },
+        region: { type: "string", description: "the region name" },
+        title: S,
+        body: S,
+      },
+      ["kind", "reason"],
+      async (a) => api("POST", "/v1/requests", strip({ owner: a.owner, kind: a.kind, reason: a.reason, quota: a.quota, access: a.access, region: a.region ? { region: a.region } : undefined, other: a.kind === "other" ? { title: a.title, body: a.body } : undefined })),
+    ),
     def("regions", "List the regions workspaces and environments can be created in.", {}, [], async () => api("GET", "/v1/regions")),
   ];
 }
