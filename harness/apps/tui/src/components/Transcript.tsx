@@ -6,6 +6,7 @@ import { theme } from "../theme.ts";
 import { SplitBorder } from "../ui/border.ts";
 import { DiffView } from "./Diff.tsx";
 import type { FileDiff } from "../diff.ts";
+import { foldRepeats } from "../retry.ts";
 
 export type Entry =
   | { kind: "user"; text: string; images?: number }
@@ -30,9 +31,16 @@ export type Entry =
       display?: string[];
       /** Unified diff hunk (edit/write tools). */
       diff?: FileDiff;
+      /** Times this row replaced a failed one (see retry.ts). */
+      retries?: number;
+      /** Consecutive identical codemode inner calls folded into this row. */
+      repeats?: number;
     }
   | { kind: "info"; text: string }
   | { kind: "error"; text: string };
+
+const retryTag = (e: { retries?: number }) =>
+  e.retries && e.retries > 0 ? <span fg={theme.muted}>{` · retry ${e.retries}`}</span> : "";
 
 /** Rows kept when a block is collapsed (Claude Code shows a short head). */
 const COLLAPSE_MAX = 10;
@@ -402,6 +410,7 @@ function Row({
               <box flexDirection="column">
                 <text fg={running ? theme.fg : theme.accent}>
                   {running ? "⚙ codemode" : "⌁ codemode"}
+                  {retryTag(entry)}
                 </text>
                 <text fg={theme.muted}>{script.text}</text>
               </box>
@@ -409,6 +418,7 @@ function Row({
               <text fg={running ? theme.fg : theme.muted}>
                 {running ? "⚙ " : "$ "}
                 {script.text}
+                {retryTag(entry)}
               </text>
             )}
             {entry.name === "codemode" && out.text !== "" && (
@@ -475,6 +485,8 @@ function Row({
               <span attributes={failed ? undefined : TextAttributes.DIM}>
                 {entry.summary}
               </span>
+              {retryTag(entry)}
+              {entry.repeats && entry.repeats > 1 ? <span fg={theme.muted}>{` ×${entry.repeats}`}</span> : ""}
             </text>
           </box>
           {entry.error && (
@@ -577,7 +589,7 @@ export function Transcript({
     setAway(!atBottom(sb));
   });
 
-  const visible = entries.slice(-SCROLLBACK);
+  const visible = foldRepeats(entries).slice(-SCROLLBACK);
 
   // An unrestored session has nothing to say yet: the welcome screen means
   // "this session is empty", and showing it before the transcript is read

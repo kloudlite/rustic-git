@@ -5,6 +5,7 @@ import type { ToolDef } from "@kloudlite-tui/tools";
 import { SessionTitle } from "./components/SessionTitle.tsx";
 import { Queue } from "./components/Queue.tsx";
 import { Transcript, type Entry } from "./components/Transcript.tsx";
+import { foldRetries, foldRetry } from "./retry.ts";
 import { Prompt } from "./components/Prompt.tsx";
 import { Sidebar } from "./components/Sidebar.tsx";
 import { HintBar } from "./components/HintBar.tsx";
@@ -613,14 +614,23 @@ export function App({
         break;
       }
       case "tool_execution_start":
-        upsert(key, event.toolCallId, () => ({
-          kind: "tool",
-          id: event.toolCallId,
-          name: event.toolName,
-          summary: toolSummary(event.toolName, event.args),
-          status: "running",
-          diff: event.diff,
-        }));
+        setSessions((map) =>
+          patchSession(map, key, (s) => {
+            const made: Entry = {
+              kind: "tool",
+              id: event.toolCallId,
+              name: event.toolName,
+              summary: toolSummary(event.toolName, event.args),
+              status: "running",
+              diff: event.diff,
+            };
+            const i = s.entries.findIndex((e) => "id" in e && e.id === event.toolCallId);
+            if (i === -1) return { entries: foldRetry(s.entries, made) }; // a retry replaces its failed row
+            const entries = [...s.entries];
+            entries[i] = made;
+            return { entries };
+          }),
+        );
         break;
       case "tool_execution_update": {
         // streaming tool output → rendered as the bash block's tail
@@ -945,7 +955,7 @@ const PERM_MODES: PermMode[] = ["default", "acceptEdits", "plan", "bypass"];
     }
     setSessions((map) =>
       patchSession(map, key, (s) =>
-        s.entries.length === 0 ? { entries, history, restored: true } : { restored: true },
+        s.entries.length === 0 ? { entries: foldRetries(entries), history, restored: true } : { restored: true },
       ),
     );
   }
