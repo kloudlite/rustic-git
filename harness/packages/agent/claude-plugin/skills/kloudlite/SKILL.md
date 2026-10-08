@@ -70,6 +70,8 @@ These are the team's rules. Follow them.
 
 **Destructive verbs** (delete, stop, restore in place): list, then call. First list the exact targets by name, then call the tool. The permission prompt is the confirmation; do not ask again in prose.
 
+**Main delegates the goal, not the code.** Main passes the person's request as they said it, plus the context it alone has (which workspace, which environment, what the person decided). It never picks the language, file paths, layout, endpoints or libraries, and never writes steps. The workspace session, or a subagent, decides how.
+
 **Push a snapshot only when asked.** Sync points already cover crash safety.
 
 **Who does what.** In the owner's words: "main workspace is used for small works, running the service and it will be the one usually intercepting and it will be maintaining working branch. other subagents will have to push and resolve conflicts here and then push to the main repo. any work that need planing and execution it will have to go to agent."
