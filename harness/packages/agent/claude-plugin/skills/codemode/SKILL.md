@@ -25,6 +25,12 @@ Use a single plain call inside a script when you only need one simple command an
 - `tools.read({ path })` resolves to the file's text.
 - A call that is blocked or gets bad arguments rejects with an `Error`.
 
+## Three rules first
+
+1. `await tools.bash(...)` resolves to an object; read `.output` (and `.exit_code`), never call string methods on the result itself.
+2. Fetch URLs with `tools.web_fetch`, not curl in bash; one call per item, run together with `Promise.all`.
+3. To show the user a table, list or report, build it in the script and pass it to `tools.display({ markdown })`. The displayed text stays readable to you for follow-ups; reply in one line, never retype what was displayed.
+
 ## Rules
 
 1. Run independent calls in parallel with `Promise.all`, or `Promise.allSettled` when some may fail. Make one tool call per item. Never chain commands with `;` or `&&` inside one `bash` call to fetch many things in a row; that runs them one at a time.
@@ -34,18 +40,20 @@ Use a single plain call inside a script when you only need one simple command an
 
 ## Examples
 
-Top 40 Hacker News stories, fetched in parallel:
+Top Hacker News stories as a table (build it in the script, show it, reply in one line):
 
 ```js
-const ids = JSON.parse(await tools.web_fetch({ url: "https://hacker-news.firebaseio.com/v0/topstories.json" })).slice(0, 40);
-const items = await Promise.allSettled(
+const ids = JSON.parse(await tools.web_fetch({ url: "https://hacker-news.firebaseio.com/v0/topstories.json" })).slice(0, 20);
+const items = await Promise.all(
   ids.map((id) => tools.web_fetch({ url: `https://hacker-news.firebaseio.com/v0/item/${id}.json` }).then(JSON.parse)),
 );
-return items
-  .filter((r) => r.status === "fulfilled")
-  .map((r, i) => `${i + 1}. ${r.value.title} (${r.value.score} points)`)
-  .join("\n");
+const rows = items.map((s, i) => `| ${i + 1} | ${s.title.replace(/\|/g, "\\|")} | ${s.score} | ${s.descendants ?? 0} | ${s.url ?? `https://news.ycombinator.com/item?id=${s.id}`} |`);
+const markdown = ["| # | Title | Points | Comments | URL |", "|---|---|---|---|---|", ...rows].join("\n");
+await tools.display({ markdown });
+return "shown";
 ```
+
+Then reply in one line, e.g. "Shown above: the top 20 stories." Do not retype the table.
 
 Several commands at once, each checked:
 
