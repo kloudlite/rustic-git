@@ -950,6 +950,20 @@ const PERM_MODES: PermMode[] = ["default", "acceptEdits", "plan", "bypass"];
               status: "ok",
             });
         }
+      } else if (m.role === "toolResult") {
+        // same fold as tool_execution_end, so a reopened session shows what each tool returned
+        const i = entries.findIndex((e) => e.kind === "tool" && e.id === m.toolCallId);
+        if (i === -1) continue;
+        const text = (m.content ?? [])
+          .filter((b: any) => b.type === "text")
+          .map((b: any) => b.text)
+          .join("\n");
+        entries[i] = {
+          ...(entries[i] as Entry & { kind: "tool" }),
+          status: m.isError ? "error" : "ok",
+          output: text || undefined,
+          error: m.isError ? text.split("\n")[0] : undefined,
+        };
       }
     }
     setSessions((map) =>

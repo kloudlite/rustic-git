@@ -367,6 +367,7 @@ function Row({
       if (entry.name === "bash" || entry.name === "codemode") {
         // opencode Shell via BlockTool: panel bg block, $ command, output tail
         const out = collapse(entry.output, open, width - 2);
+        const script = collapse(entry.summary, open, width - 2);
         return (
           <box
             flexDirection="column"
@@ -380,12 +381,12 @@ function Row({
                 <text fg={running ? theme.fg : theme.accent}>
                   {running ? "⚙ codemode" : "⌁ codemode"}
                 </text>
-                <text fg={theme.muted}>{collapse(entry.summary, open, width - 2).text}</text>
+                <text fg={theme.muted}>{script.text}</text>
               </box>
             ) : (
               <text fg={running ? theme.fg : theme.muted}>
                 {running ? "⚙ " : "$ "}
-                {collapse(entry.summary, open, width - 2).text}
+                {script.text}
               </text>
             )}
             {entry.name === "codemode" && out.text !== "" && (
@@ -393,7 +394,8 @@ function Row({
             )}
             {out.text !== "" && <text fg={theme.muted}>{out.text}</text>}
             {shellRows(entry, width) > COLLAPSE_MAX && (
-              <More hidden={out.hidden} open={open} onToggle={onOpen} hover={hover} />
+              // a long codemode script collapses too, so its cut rows count as hidden
+              <More hidden={script.hidden + out.hidden} open={open} onToggle={onOpen} hover={hover} />
             )}
             {entry.error && <text fg={theme.error}>{entry.error}</text>}
           </box>

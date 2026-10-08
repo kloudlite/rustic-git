@@ -16,3 +16,13 @@ test("codemode only: pi declares codemode, not bash (the Claude bridge relies on
   expect(s.systemPrompt).toContain("codemode");
   s.dispose();
 });
+
+test("codemode description tells the model tools.bash resolves to an object", async () => {
+  process.env.KLOUDLITE_CONFIG_DIR = mkdtempSync(join(tmpdir(), "kl-cfg-"));
+  const { createSession, models } = await import("./index.ts");
+  const model = models.getModels().find((m: any) => m.provider !== "anthropic") as any;
+  const s: any = await createSession({ key: `t-${process.pid}-note`, model, codemode: true, fresh: true });
+  const tool = declaredTools(s).find((t: any) => t.name === "codemode");
+  expect(tool.description).toContain("resolves to an object, not a string");
+  s.dispose();
+});

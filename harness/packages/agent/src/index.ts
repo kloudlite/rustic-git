@@ -128,6 +128,31 @@ async function envKeysFor(provider: {
 }
 
 /** Auth status for every provider (env keys, stored credentials, ambient). */
+// Models read bash's prose ("Returns stdout and stderr") over its declared type and
+// JSON.parse the result: one failed call plus two probes per session (2026-10-08). pi's
+// codemode takes no extra guidance, so the note rides on the description it prepares.
+const BASH_NOTE =
+  "\n\nNote: `await tools.bash(...)` resolves to an object, not a string; read `.output` (and `.exit_code`).";
+function withBashNote(factory: ReturnType<typeof createCodemodeExtension>): typeof factory {
+  return (pi: any) =>
+    factory(
+      new Proxy(pi, {
+        get: (t, k) =>
+          k !== "registerTool"
+            ? Reflect.get(t, k)
+            : (tool: any) =>
+                t.registerTool({
+                  ...tool,
+                  prepareLoadout: (loadout: any) => {
+                    const r = tool.prepareLoadout(loadout);
+                    if (r?.descriptions?.codemode) r.descriptions.codemode += BASH_NOTE;
+                    return r;
+                  },
+                }),
+      }),
+    );
+}
+
 export async function providerAuth(): Promise<ProviderAuth[]> {
   return Promise.all(
     models.getProviders().map(async (p) =>
@@ -313,7 +338,7 @@ export async function createSession({
       // description lists only the tools that have no direct exposure — so the
       // model keeps reaching for `bash` and codemode never fires. `"only"`
       // drops the direct declarations, leaving scripts as the way to call them.
-      extensionFactories: [{ name: "codemode", factory: createCodemodeExtension({ mode: "only" }) }],
+      extensionFactories: [{ name: "codemode", factory: withBashNote(createCodemodeExtension({ mode: "only" })) }],
     });
     await resourceLoader.reload();
   }

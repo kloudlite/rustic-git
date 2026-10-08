@@ -541,3 +541,65 @@ test("toggling codemode rebuilds the open session with the new value", async () 
   setup.renderer.destroy();
   boot(real, hello());
 });
+
+// A reopened session carries tool results as separate `toolResult` messages; the
+// transcript has to fold each into its tool entry or every restored tool looks empty.
+async function restored(messages: unknown[]) {
+  const real = backend();
+  const wrap = <T extends object>(t: T, over: Partial<T>) =>
+    new Proxy(t, {
+      get: (o: any, p) => (p in over ? (over as any)[p] : typeof o[p] === "function" ? o[p].bind(o) : o[p]),
+    }) as T;
+  boot(
+    wrap(real, {
+      session: async (key, opts) => {
+        const h = await real.session(key, opts);
+        return wrap(h, { messages: messages as any });
+      },
+    }),
+    { ...hello(), settings: { ...hello().settings, vim: "on", sidebarWidth: 42 } },
+  );
+  const setup = await testRender(<App />, { width: COLS, height: ROWS, kittyKeyboard: true });
+  let f = "";
+  for (let i = 0; i < 10; i++) {
+    await tick();
+    await setup.renderOnce();
+    f = setup.captureCharFrame();
+  }
+  setup.renderer.destroy();
+  boot(real, hello());
+  return f;
+}
+
+const codemodeSession = (code: string, result: string, isError: boolean) => [
+  { role: "user", content: [{ type: "text", text: "run it" }] },
+  {
+    role: "assistant",
+    content: [{ type: "toolCall", id: "t1", name: "codemode", arguments: { code } }],
+  },
+  {
+    role: "toolResult",
+    toolCallId: "t1",
+    toolName: "codemode",
+    content: [{ type: "text", text: result }],
+    isError,
+  },
+];
+
+test("a restored session shows each tool's result", async () => {
+  const f = await restored(codemodeSession("return 1;", "RESULT-MARKER", false));
+  expect(f).toContain("RESULT-MARKER");
+});
+
+test("a restored session shows a failed tool's error", async () => {
+  const f = await restored(codemodeSession("return 1;", "ERROR-MARKER boom", true));
+  expect(f).toContain("ERROR-MARKER boom");
+});
+
+test("a long codemode script's expander counts the script's hidden rows, not just the output's", async () => {
+  // COLLAPSE_MAX is 10 in Transcript.tsx; 15 short rows hide 5
+  const code = Array.from({ length: 15 }, (_, i) => `const v${i} = ${i};`).join("\n");
+  const f = await restored(codemodeSession(code, "ok", false));
+  expect(f).not.toContain("+0 lines");
+  expect(f).toContain("+5 lines");
+});
