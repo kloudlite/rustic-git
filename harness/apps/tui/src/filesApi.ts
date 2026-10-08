@@ -4,6 +4,9 @@ import type { Backend } from "@kloudlite-tui/backend";
  * The reads Files draws from. A workspace view reads that workspace's pod (`podfs`) and ignores
  * `root` (a bench path); it never touches the bench-local `fs`. Grep has no pod endpoint.
  */
+/** Shown when `s` is pressed in a workspace view: the pod has no grep endpoint. */
+export const NO_SEARCH = "search is not available for workspaces";
+
 export function filesApi(workspace: string | undefined, be: Pick<Backend, "fs" | "podfs">): Backend["fs"] {
   if (!workspace) return be.fs;
   const p = be.podfs;
@@ -13,7 +16,7 @@ export function filesApi(workspace: string | undefined, be: Pick<Backend, "fs" |
     fileDiff: (_r, path, status) => p.fileDiff(workspace, path, status),
     fullFile: (_r, path, status) => p.fullFile(workspace, path, status),
     listDir: (_r, rel) => p.listDir(workspace, rel),
-    grep: () => Promise.reject(new Error("search is not available for workspaces")),
+    grep: () => Promise.reject(new Error(NO_SEARCH)),
   };
 }
 

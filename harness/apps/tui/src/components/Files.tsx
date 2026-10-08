@@ -8,7 +8,7 @@ import { SPECIAL } from "./Input.tsx";
 import type { FileDiff } from "../diff.ts";
 import { useWheelAccel } from "../wheel.ts";
 import { backend } from "../hello.ts";
-import { filesApi, unreachable } from "../filesApi.ts";
+import { filesApi, NO_SEARCH, unreachable } from "../filesApi.ts";
 import { displayRoot, type Change, type Match, type TreeNode } from "../git.ts";
 
 /** One selectable row in the left pane. */
@@ -240,6 +240,7 @@ export function Files({
       return onClose();
     }
     if (key.sequence === "/") return setPrompt({ kind: "filter", text: filter });
+    if (key.name === "s" && workspace) return setPodError(NO_SEARCH);
     if (key.name === "s") return setPrompt({ kind: "search", text: search?.query ?? "" });
     if (key.name === "f") return onCycle();
     if (key.name === "r") return rescan();

@@ -1,5 +1,5 @@
 import { expect, test } from "bun:test";
-import { filesApi } from "./filesApi.ts";
+import { filesApi, NO_SEARCH } from "./filesApi.ts";
 
 const fake = () => {
   const calls: string[] = [];
@@ -17,7 +17,7 @@ test("a workspace view never calls the bench-local reader", async () => {
   await api.listDir("/home/kl", ".");
   await api.fullFile("/home/kl", "a");
   await api.fileDiff("/home/kl", "a", "M");
-  await expect(api.grep("/home/kl", "x")).rejects.toThrow("not available for workspaces");
+  await expect(api.grep("/home/kl", "x")).rejects.toThrow(NO_SEARCH);
   expect(calls.every((c) => c === "pod")).toBe(true);
   expect(calls.length).toBe(5);
 });
