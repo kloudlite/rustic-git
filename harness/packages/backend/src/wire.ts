@@ -26,6 +26,10 @@ export class Peer {
 
   constructor(private readonly write: (line: string) => void) {}
 
+  get idle() {
+    return this.#running.size === 0;
+  }
+
   get closed() {
     return this.#closed;
   }
