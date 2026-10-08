@@ -658,19 +658,26 @@ export function App({
   }
 
   /** Get or lazily open the backend session behind a session key. */
-  function ensureAgent(key: string, opts?: { fresh?: boolean; model?: ModelRef }): Promise<SessionHandle> {
+  function ensureAgent(
+    key: string,
+    opts?: { fresh?: boolean; model?: ModelRef; codemode?: boolean; after?: Promise<unknown> },
+  ): Promise<SessionHandle> {
     const existing = agents.current.get(key);
     if (existing) return existing;
-    const created = backend()
-      .session(key, {
-        model: opts?.model ?? getSession(sessions, key).model,
-        fresh: opts?.fresh,
-        thinkingLevel: prefs.thinkingLevel,
-        autoCompact: prefs.autoCompact === "on",
-        codemode: prefs.codemode === "on",
-        tools: tuiTools,
-        permission: (req, signal) => gate(key, req, signal),
-      })
+    // `after` is the old session's dispose: the backend keys sessions by name, so
+    // a dispose landing after this open would close the new one instead
+    const created = (opts?.after ?? Promise.resolve())
+      .then(() =>
+        backend().session(key, {
+          model: opts?.model ?? getSession(sessions, key).model,
+          fresh: opts?.fresh,
+          thinkingLevel: prefs.thinkingLevel,
+          autoCompact: prefs.autoCompact === "on",
+          codemode: opts?.codemode ?? prefs.codemode === "on",
+          tools: tuiTools,
+          permission: (req, signal) => gate(key, req, signal),
+        }),
+      )
       .then((agent) => {
         agent.subscribe((event) => handleAgentEvent(key, event));
         if (!opts?.fresh) restoreTranscript(key, agent);
@@ -682,6 +689,17 @@ export function App({
       setSessions((map) => patchSession(map, key, { restored: true }));
     });
     return created;
+  }
+
+  /** Rebuild open sessions whose build-time state changed; each comes back with its transcript. */
+  function reopen(keys: string[], opts?: { codemode?: boolean }) {
+    for (const k of keys) {
+      const old = agents.current.get(k);
+      if (!old) continue;
+      agents.current.delete(k);
+      const after = old.then((a) => a.dispose()).catch(() => {});
+      ensureAgent(k, { ...opts, after }).catch(() => {});
+    }
   }
 
   /** Show an interactive prompt and resolve with the chosen option id. */
@@ -1180,7 +1198,12 @@ const PERM_MODES: PermMode[] = ["default", "acceptEdits", "plan", "bypass"];
                 agents.current.delete(activeKey);
                 await a.dispose();
                 await ensureAgent(activeKey, { model: { provider, id } });
-              } else await a.setModel({ provider, id });
+              } else {
+                await a.setModel({ provider, id });
+                // pi re-derives the level on a model switch (its own default, or
+                // the level clamped by the last model), so restate the user's
+                await a.setThinkingLevel(prefs.thinkingLevel);
+              }
             })
             .catch(() => {});
         }
@@ -1223,14 +1246,21 @@ const PERM_MODES: PermMode[] = ["default", "acceptEdits", "plan", "bypass"];
           agent.then((a) => a.setAutoCompactionEnabled(value === "on")).catch(() => {});
       }
       // pi fixes the tool list when the session is built, so unlike
-      // thinkingLevel and autoCompact this cannot be pushed into live sessions
+      // thinkingLevel and autoCompact this cannot be pushed into a live session:
+      // every open one is rebuilt instead, its transcript restored from pi's file
       if (key === "codemode" && (value === "on" || value === "off")) {
+        const running = [...agents.current.keys()].filter((k) => getSession(sessions, k).busy);
+        if (running.length) {
+          append(activeKey, {
+            kind: "error",
+            text: `codemode unchanged — a turn is running in ${running.join(", ")}; let it finish or interrupt it first`,
+          });
+          return;
+        }
         setPrefs((p) => ({ ...p, codemode: value }));
         backend().settings.write({ codemode: value }).catch(() => {});
-        append(key, {
-          kind: "info",
-          text: `codemode ${value} — applies to sessions started from now on`,
-        });
+        reopen([...agents.current.keys()], { codemode: value === "on" });
+        append(activeKey, { kind: "info", text: `codemode ${value} — every open session now runs with it` });
       }
       if (key === "vim" && (value === "on" || value === "off")) {
         setPrefs((p) => ({ ...p, vim: value }));
@@ -1452,6 +1482,10 @@ const PERM_MODES: PermMode[] = ["default", "acceptEdits", "plan", "bypass"];
                 onDone={(ok) => {
                   setLogin(null);
                   if (ok) {
+                    // a Claude child spawned signed out keeps its old credentials,
+                    // so idle Claude sessions are rebuilt to spawn a fresh one
+                    for (const [k, a] of agents.current)
+                      a.then((h) => h.isClaude && !getSession(sessions, k).busy && reopen([k])).catch(() => {});
                     loadProviderAuth().then(setAuth).catch(() => {});
                     refreshCatalog().then(setModels).catch(() => {});
                   }

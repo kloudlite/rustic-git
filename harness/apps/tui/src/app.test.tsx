@@ -503,3 +503,41 @@ test("ctrl+s submits the prompt without clearing it twice", async () => {
   expect(t.captureCharFrame()).toContain("steered");
   t.done();
 });
+
+// pi fixes the tool list when a session is built, so toggling codemode has to
+// rebuild every open session — closing the old one before the new one opens,
+// since the backend keys sessions by name.
+test("toggling codemode rebuilds the open session with the new value", async () => {
+  const real = backend();
+  const seen: string[] = [];
+  // a Proxy, not a spread: the backend and its handles are class instances
+  const wrap = <T extends object>(t: T, over: Partial<T>) =>
+    new Proxy(t, {
+      get: (o: any, p) => (p in over ? (over as any)[p] : typeof o[p] === "function" ? o[p].bind(o) : o[p]),
+    }) as T;
+  boot(
+    wrap(real, {
+      session: async (key, opts) => {
+        seen.push(`open ${opts.codemode}`);
+        const h = await real.session(key, opts);
+        return wrap(h, { dispose: async () => (seen.push("dispose"), h.dispose()) });
+      },
+    }),
+    { ...hello(), settings: { ...hello().settings, vim: "on", codemode: "on" } },
+  );
+  const setup = await testRender(<App />, { width: COLS, height: ROWS, kittyKeyboard: true });
+  await tick();
+  await setup.renderOnce();
+  setup.mockInput.pressKey("i");
+  await tick();
+  await setup.renderOnce();
+  await setup.mockInput.typeText("/settings codemode off");
+  await tick();
+  await setup.renderOnce();
+  setup.mockInput.pressKey("RETURN");
+  for (let i = 0; i < 50 && seen.length < 3; i++) await tick();
+  await setup.renderOnce();
+  expect(seen).toEqual(["open true", "dispose", "open false"]);
+  setup.renderer.destroy();
+  boot(real, hello());
+});
