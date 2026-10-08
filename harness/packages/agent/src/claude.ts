@@ -13,7 +13,7 @@
  * respawn, no `--resume` per message. (The pi-claude-agent-sdk bridge ends its
  * input stream after every result, which costs a process start per message;
  * that is the behaviour this file exists to avoid.) If the child dies, the next
- * prompt starts a fresh query with `resume: <claude session id>`.
+ * prompt starts a fresh query resumed from pi's record.
  *
  * Shape: this implements the subset of pi's `AgentSession` that
  * `apps/tui/src/app.tsx` touches (subscribe, prompt, steer, followUp,
@@ -130,6 +130,9 @@ export type PiHost = {
   sessionManager: { appendMessage(m: any): unknown; buildSessionContext(): { messages: any[] } };
   subscribe(l: (e: any) => void): () => void;
   dispose?(): void;
+  // pi 1.0.4 private input pipeline, see expand()
+  _tryExecuteExtensionCommand?(text: string): Promise<boolean>;
+  _queueUserInput?(text: string, images: any, behavior: "steer" | "followUp", source: string): Promise<string>;
 };
 
 export type ClaudeOptions = {
@@ -196,7 +199,10 @@ const stamp = () => (lastStamp = Math.max(Date.now(), lastStamp + 1));
 export function createClaudeSession(opts: ClaudeOptions) {
   const run: QueryFn = opts.query ?? (sdkQuery as unknown as QueryFn);
   const listeners = new Set<Listener>();
+  // a disposed session is retired: its file already belongs to the replacement, so a late tool result must not write
+  let disposed = false;
   const emit = (e: any) => {
+    if (disposed) return;
     for (const l of [...listeners]) l(e);
   };
 
@@ -218,6 +224,7 @@ export function createClaudeSession(opts: ClaudeOptions) {
 
   const piSession = opts.pi;
   const record = (m: any) => {
+    if (disposed) return;
     piSession.sessionManager.appendMessage(m);
     piSession.agent.state.messages = [...piSession.agent.state.messages, m];
   };
@@ -294,7 +301,6 @@ export function createClaudeSession(opts: ClaudeOptions) {
 
   let input: Pushable<SDKUserMessage> | undefined;
   let q: ReturnType<QueryFn> | undefined;
-  let disposed = false;
   let running = false;
   let aborting = false;
   let sawState = false;
@@ -336,6 +342,8 @@ export function createClaudeSession(opts: ClaudeOptions) {
     if (!cur) return;
     const msg = cur.msg;
     cur = undefined;
+    // an abort between content_block_start and _stop leaves the partial-json accumulator behind
+    for (const b of msg.content) if (b.type === "toolCall") delete b.json;
     record(msg);
     emit({ type: "message_end", message: msg });
     batch.clear();
@@ -381,7 +389,7 @@ export function createClaudeSession(opts: ClaudeOptions) {
       emit({ type: "compaction_end", reason: compactReason, result: undefined, aborted: true, willRetry: false });
     }
     // pi keeps one run: a steer held at the end continues it, with no agent_end/agent_start between;
-    // an abort stops the run, so its held steers go out as a new one below
+    // an abort stops the run and, as in pi (agent-session.js:1905), leaves both queues for the next prompt
     if (steering.length && input && !aborted) {
       const held = steering.splice(0);
       queueUpdate();
@@ -391,6 +399,10 @@ export function createClaudeSession(opts: ClaudeOptions) {
     }
     running = false;
     emit({ type: "agent_end", messages: [] });
+    if (aborted) {
+      if (steering.length || followUps.length) queueUpdate(); // still pending: tell the TUI
+      return;
+    }
     const dead = steering.splice(0);
     if (dead.length) {
       queueUpdate();
@@ -479,7 +491,10 @@ export function createClaudeSession(opts: ClaudeOptions) {
       case "message_delta": {
         if (!cur) break;
         const sr = ev.delta?.stop_reason;
-        if (sr) cur.msg.stopReason = sr === "tool_use" ? "toolUse" : sr === "max_tokens" ? "length" : "stop";
+        if (sr) {
+          cur.msg.stopReason = sr === "tool_use" ? "toolUse" : sr === "max_tokens" ? "length" : sr === "refusal" ? "error" : "stop";
+          if (sr === "refusal") cur.msg.errorMessage = "Refused";
+        }
         if (ev.usage) usage(ev.usage);
         break;
       }
@@ -631,7 +646,7 @@ export function createClaudeSession(opts: ClaudeOptions) {
         }
       }
       if (q === mine) {
-        // the child is gone; the next prompt starts a new query with resume
+        // the child is gone; the next prompt starts a new query resumed from pi's record
         q = undefined;
         input = undefined;
         turn.abort();
@@ -655,7 +670,7 @@ export function createClaudeSession(opts: ClaudeOptions) {
           { type: "text", text },
         ]
       : text;
-    const msg = { role: "user", content: [...(images ?? []), { type: "text", text }], timestamp: stamp() };
+    const msg = { role: "user", content: [{ type: "text", text }, ...(images ?? [])], timestamp: stamp() };
     if (announce) emit({ type: "message_start", message: msg });
     record(msg);
     if (announce) emit({ type: "message_end", message: msg });
@@ -664,13 +679,37 @@ export function createClaudeSession(opts: ClaudeOptions) {
 
   async function send(text: string, images?: Image[], announce = false) {
     if (!q) start();
-    if (!running) {
+    const fresh = !running;
+    if (fresh) {
+      gaveUp.clear(); // late results of the last run are over by now; a new run's ids are new
       turn = new AbortController();
       timing = { t0: Date.now(), model, effort };
       running = true;
       emit({ type: "agent_start" });
     }
     pushUser(text, images, announce);
+    // pi's run start drains the steering queue after the prompt (agent-loop.js:42-56, 68-69)
+    if (fresh && steering.length) {
+      for (const s of steering.splice(0)) pushUser(s.text, s.images, true);
+      queueUpdate();
+    }
+  }
+
+  /**
+   * pi's own input steps (agent-session.js:1513-1545, 1686-1702): extension
+   * commands, input handlers, /skill: and prompt templates. `undefined` = handled, send nothing.
+   * ponytail: reads pi 1.0.4 private methods (expandPromptTemplate is not exported); a pin bump re-checks them.
+   * _queueUserInput ends in _queueSteer/_queueFollowUp, which a shadow object captures instead of queueing into pi's idle agent.
+   */
+  async function expand(text: string, images: Image[] | undefined, behavior: "steer" | "followUp", command: boolean) {
+    const p = piSession;
+    if (!p._queueUserInput) return { text, images };
+    if (command && text.startsWith("/") && (await p._tryExecuteExtensionCommand?.(text))) return undefined;
+    let out: { text: string; images?: Image[] } | undefined;
+    const capture = { value: async (t: string, i?: Image[]) => void (out = { text: t, images: i }) };
+    const shadow = Object.create(p, { _queueSteer: capture, _queueFollowUp: capture });
+    await p._queueUserInput.call(shadow, text, images, behavior, "interactive");
+    return out;
   }
 
   return {
@@ -687,18 +726,24 @@ export function createClaudeSession(opts: ClaudeOptions) {
       return () => listeners.delete(l);
     },
     async prompt(text: string, o?: { images?: Image[] }) {
-      await send(text, o?.images);
+      const x = await expand(text, o?.images, "steer", true);
+      if (x) await send(x.text, x.images);
     },
     /** Held until a tool result or the turn end (pi's boundaries); clearQueue drops it unrecorded. */
     async steer(text: string, images?: Image[]) {
-      if (!running) return send(text, images);
-      steering.push({ text, images });
+      const x = await expand(text, images, "steer", false);
+      if (!x) return;
+      // idle with steers left by an abort: queue behind them, as pi does
+      if (!running && !steering.length) return send(x.text, x.images);
+      steering.push(x);
       queueUpdate();
     },
     /** Held here until the turn ends, then sent as its own prompt. */
     async followUp(text: string, images?: Image[]) {
-      if (!running) return send(text, images);
-      followUps.push({ text, images });
+      const x = await expand(text, images, "followUp", false);
+      if (!x) return;
+      if (!running) return send(x.text, x.images);
+      followUps.push(x);
       queueUpdate();
     },
     clearQueue() {
@@ -707,8 +752,6 @@ export function createClaudeSession(opts: ClaudeOptions) {
       queueUpdate();
     },
     async abort() {
-      steering.length = 0;
-      followUps.length = 0;
       if (!running || !q) return;
       aborting = true;
       turn.abort();
@@ -719,8 +762,8 @@ export function createClaudeSession(opts: ClaudeOptions) {
       await q?.setModel(m.id).catch(() => {});
     },
     /**
-     * Live via applyFlagSettings (effortLevel accepts 'max'); a dead child
-     * picks it up from the options of its replacement.
+     * Live via applyFlagSettings (effortLevel accepts 'max'); the replacement
+     * of a dead child starts with the current effort and thinking in its options.
      */
     setThinkingLevel(level: Level) {
       thinkingOff = level === "off";
@@ -735,7 +778,7 @@ export function createClaudeSession(opts: ClaudeOptions) {
       void q?.applyFlagSettings({ autoCompactEnabled: on }).catch(() => {});
     },
     dispose() {
-      disposed = true;
+      disposed = true; // first: nothing a running tool does from here on may touch the transcript
       unsubPi();
       turn.abort();
       input?.close();

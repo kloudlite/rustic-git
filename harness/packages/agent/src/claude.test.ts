@@ -318,7 +318,7 @@ test("abort interrupts and the turn is reported aborted, as one message holding 
   s.dispose();
 });
 
-test("a steer held across an abort goes out as a new run, never continuing the aborted one", async () => {
+test("an abort keeps the queues; the next prompt sends the prompt, then the held steers, as one run (pi)", async () => {
   const f = fake((n, push) => (n === 1 ? text("part").slice(0, 6) : text("fresh")).forEach(push));
   const { s, events, p } = run(f);
   await s.prompt("long");
@@ -328,12 +328,119 @@ test("a steer held across an abort goes out as a new run, never continuing the a
   await ab;
   await tick();
   await tick();
-  const ends = events.map((e, i) => (e.type === "agent_end" ? i : -1)).filter((i) => i >= 0);
-  const starts = events.map((e, i) => (e.type === "agent_start" ? i : -1)).filter((i) => i >= 0);
-  expect(ends.length).toBe(2);
-  expect(starts.length).toBe(2);
-  expect(ends[0]).toBeLessThan(starts[1]!); // agent_end of the aborted run comes before the steer's run
-  expect(p.recorded.filter((m) => m.role === "user").map((m) => m.content.at(-1).text)).toEqual(["long", "after abort"]);
+  expect(events.filter((e) => e.type === "agent_end").length).toBe(1);
+  expect(events.filter((e) => e.type === "agent_start").length).toBe(1);
+  expect(events.filter((e) => e.type === "queue_update").at(-1)).toMatchObject({ steering: ["after abort"] });
+  await s.prompt("next");
+  await tick();
+  // pi: the prompt is the run's first message, the steering queue drains right after (agent-loop.js:42-56, 68-69)
+  expect(p.recorded.filter((m) => m.role === "user").map((m) => m.content.at(-1).text)).toEqual(["long", "next", "after abort"]);
+  expect(events.filter((e) => e.type === "agent_start").length).toBe(2);
+  expect(events.filter((e) => e.type === "queue_update").at(-1)).toMatchObject({ steering: [] });
+  s.dispose();
+});
+
+test("an abort keeps a queued follow-up and shows it still pending", async () => {
+  const f = fake((n, push) => (n === 1 ? text("part").slice(0, 6) : text("fresh")).forEach(push));
+  const { s, events } = run(f);
+  await s.prompt("long");
+  await tick();
+  await s.followUp("then tests");
+  await s.abort();
+  await tick();
+  expect(events.filter((e) => e.type === "agent_start").length).toBe(1);
+  expect(events.filter((e) => e.type === "queue_update").at(-1)).toMatchObject({ followUp: ["then tests"] });
+  s.dispose();
+});
+
+test("a tool still running at dispose writes nothing afterwards", async () => {
+  const f = fake((_n, push) => toolTurn(["tu1"], push));
+  const { s, p } = run(f);
+  let release: () => void = () => {};
+  p.tools.push({ name: "bash", description: "d", parameters: { type: "object" }, execute: () => new Promise((r) => (release = () => r({ content: [{ type: "text", text: "late" }] }))) });
+  await s.prompt("go");
+  await tick();
+  const c = await mcpOf(f.calls[0].options);
+  void c.callTool({ name: "bash", arguments: {}, _meta: { "claudecode/toolUseId": "tu1" } }).catch(() => {});
+  await tick();
+  s.dispose();
+  const before = p.recorded.length;
+  release();
+  await tick();
+  expect(p.recorded.length).toBe(before);
+  expect(p.recorded.some((m) => m.role === "toolResult")).toBe(false);
+});
+
+test("a tool that never resolves is closed once after the 5 s cap, and its late result is dropped", async () => {
+  let pushOut: (m: any) => void = () => {};
+  const f = fake((_n, push) => ((pushOut = push), toolTurn(["tu1"], push)));
+  const { s, events, p } = run(f);
+  let release: () => void = () => {};
+  p.tools.push({ name: "bash", description: "d", parameters: { type: "object" }, execute: () => new Promise((r) => (release = () => r({ content: [{ type: "text", text: "late" }] }))) });
+  await s.prompt("go");
+  await tick();
+  const c = await mcpOf(f.calls[0].options);
+  void c.callTool({ name: "bash", arguments: {}, _meta: { "claudecode/toolUseId": "tu1" } }).catch(() => {});
+  await tick();
+  pushOut({ type: "result", subtype: "success" });
+  await new Promise((r) => setTimeout(r, 5_200));
+  const results = () => p.recorded.filter((m) => m.role === "toolResult");
+  expect(results().length).toBe(1);
+  expect(results()[0]).toMatchObject({ toolCallId: "tu1", isError: true, content: [{ type: "text", text: "Operation aborted" }] });
+  expect(events.at(-1).type).toBe("agent_end");
+  release();
+  await tick();
+  expect(results().length).toBe(1);
+  expect(events.filter((e) => e.type === "tool_execution_end").length).toBe(1);
+  s.dispose();
+}, 15_000);
+
+test("prompt, steer and followUp go through pi's input expansion first", async () => {
+  const f = fake((_n, push) => text("x").forEach(push));
+  const { s, p } = run(f);
+  const host = p.host as any;
+  host._expandSkillCommand = (t: string) => (t.startsWith("/skill:") ? `<skill>${t.slice(7)}</skill>` : t);
+  host._tryExecuteExtensionCommand = async (t: string) => t === "/ext";
+  host._queueUserInput = async function (t: string, i: any, b: string) {
+    const x = this._expandSkillCommand(t);
+    await (b === "steer" ? this._queueSteer(x, i) : this._queueFollowUp(x, i));
+    return "queued";
+  };
+  await s.prompt("/ext");
+  expect(f.calls.length).toBe(0); // an extension command is handled, nothing is sent
+  await s.prompt("/skill:review");
+  await tick();
+  expect(p.recorded[0].content).toEqual([{ type: "text", text: "<skill>review</skill>" }]);
+  await s.steer("/skill:a");
+  await tick();
+  expect(p.recorded.filter((m) => m.role === "user").at(-1).content[0].text).toBe("<skill>a</skill>");
+  s.dispose();
+});
+
+test("a recorded user message is the text, then the images", async () => {
+  const f = fake((_n, push) => text("x").forEach(push));
+  const { s, p } = run(f);
+  const img = { type: "image" as const, data: "AA", mimeType: "image/png" };
+  await s.prompt("look", { images: [img] });
+  expect(p.recorded[0].content).toEqual([{ type: "text", text: "look" }, img]);
+  s.dispose();
+});
+
+test("an abort between a tool call's start and stop records no partial json", async () => {
+  const f = fake((_n, push) =>
+    [
+      { type: "stream_event", event: { type: "message_start", message: { id: "mj", usage: { input_tokens: 1 } } } },
+      { type: "stream_event", event: { type: "content_block_start", index: 0, content_block: { type: "tool_use", id: "tj", name: "mcp__kl__bash" } } },
+      { type: "stream_event", event: { type: "content_block_delta", index: 0, delta: { type: "input_json_delta", partial_json: '{"comm' } } },
+    ].forEach(push),
+  );
+  const { s, p } = run(f);
+  await s.prompt("go");
+  await tick();
+  await s.abort();
+  await tick();
+  const call = p.recorded.find((m) => m.role === "assistant").content[0];
+  expect(call).toEqual({ type: "toolCall", id: "tj", name: "bash", arguments: {} });
   s.dispose();
 });
 
