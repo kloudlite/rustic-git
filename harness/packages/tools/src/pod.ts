@@ -92,3 +92,26 @@ export async function podTools(ws: string): Promise<ToolDef[]> {
     };
   });
 }
+
+export type ExecResult = { code: number; stdout: string; stderr: string };
+
+/** One shell job in workspace `ws` through its tool server (same lookup as `podTools`, fresh each
+ * call: callers are the delegate's few git steps, not a hot path). A transport or non-2xx failure
+ * comes back as code -1 with the reason in stderr, never a throw. The token stays in the header. */
+export async function podExec(ws: string, cmd: string, timeoutMs = 120_000): Promise<ExecResult> {
+  try {
+    const a = await lookup(ws);
+    const res = await fetch(`http://${a.address}/tools/exec`, {
+      method: "POST",
+      headers: { "content-type": "application/json", ...headers(a) },
+      body: JSON.stringify({ cmd, timeout_ms: timeoutMs }),
+      signal: AbortSignal.timeout(timeoutMs + 15_000),
+    });
+    const text = await res.text();
+    if (!res.ok) return { code: -1, stdout: "", stderr: `exec ${res.status}: ${text}` };
+    const j = JSON.parse(text);
+    return { code: j.exit_code ?? -1, stdout: j.stdout ?? "", stderr: j.stderr ?? "" };
+  } catch (e: any) {
+    return { code: -1, stdout: "", stderr: e instanceof NotReady ? `workspace not ready: ${e.message}` : `${e?.message ?? e}` };
+  }
+}

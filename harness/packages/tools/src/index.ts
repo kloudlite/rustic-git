@@ -41,4 +41,4 @@ export class Registry {
 }
 export { webFetch, webSearch } from "./web.ts";
 export { api, platformTools } from "./platform.ts";
-export { podTools } from "./pod.ts";
+export { podTools, podExec, type ExecResult } from "./pod.ts";
