@@ -268,6 +268,13 @@ test("child death mid-tool aborts execute and ends the turn with an error", asyn
   expect(signal?.aborted).toBe(true);
   expect(events.some((e) => e.type === "message_end" && e.message.stopReason === "error")).toBe(true);
   expect(events.at(-1).type).toBe("agent_end");
+  const kinds = events.map((e) => e.type);
+  expect(kinds.indexOf("tool_execution_start")).toBeLessThan(kinds.indexOf("tool_execution_end"));
+  expect(kinds.indexOf("tool_execution_end")).toBeLessThan(kinds.lastIndexOf("agent_end"));
+  // record: user, assistant (tool_use), its one result, then the error
+  expect(p.recorded.map((m) => m.role)).toEqual(["user", "assistant", "toolResult", "assistant"]);
+  expect(p.recorded.filter((m) => m.role === "toolResult").length).toBe(1);
+  expect(p.recorded[3].stopReason).toBe("error");
   // next prompt starts a new query resumed from pi's record
   await s.prompt("again");
   expect(f.calls.length).toBe(2);
@@ -287,15 +294,19 @@ test("codemode's nested tool events from the pi session reach the TUI", async ()
 });
 
 
-test("abort interrupts and the turn is reported aborted", async () => {
-  const f = fake(() => {});
-  const { s, events } = run(f);
+test("abort interrupts and the turn is reported aborted, as one message holding the partial", async () => {
+  const f = fake((_n, push) => text("part").slice(0, 6).forEach(push)); // no message_stop
+  const { s, events, p } = run(f);
   await s.prompt("long");
   await tick();
   await s.abort();
   await tick();
   expect(f.interrupts.length).toBe(1);
   expect(events.some((e) => e.type === "message_end" && e.message.stopReason === "aborted")).toBe(true);
+  const aborted = p.recorded.filter((m) => m.stopReason === "aborted");
+  expect(aborted.length).toBe(1);
+  expect(p.recorded.filter((m) => m.role === "assistant").length).toBe(1);
+  expect(aborted[0].content.find((b: any) => b.type === "text").text).toBe("part");
   expect(events.at(-1).type).toBe("agent_end");
   s.dispose();
 });

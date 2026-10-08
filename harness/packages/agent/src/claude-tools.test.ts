@@ -164,3 +164,16 @@ test("schema-invalid arguments are an error result and execute never runs", asyn
   expect((await c.callTool({ name: "bash", arguments: {} })).isError).toBe(true);
   expect(ran).toBe(false);
 });
+
+test("an already-aborted turn never reaches the gate or execute, and still emits start and end once", async () => {
+  let ran = false;
+  const { h, turn, order, events, results } = host(bash(async () => { ran = true; return { content: [] }; }));
+  turn.abort();
+  const c = await connect(h);
+  const r = await c.callTool({ name: "bash", arguments: {} });
+  expect(r.isError).toBe(true);
+  expect(order).toEqual([]);
+  expect(ran).toBe(false);
+  expect(events.map((e) => e.type)).toEqual(["tool_execution_start", "tool_execution_end"]);
+  expect(results.length).toBe(1);
+});

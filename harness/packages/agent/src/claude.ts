@@ -230,12 +230,13 @@ export function createClaudeSession(opts: ClaudeOptions) {
     issued.has(id)
       ? Promise.resolve(issued.get(id))
       : new Promise<any>((resolve) => {
-          const done = (m: any) => (clearTimeout(t), turn.signal.removeEventListener("abort", onAbort), waiting.delete(id), resolve(m));
+          const sig = turn.signal;
+          const done = (m: any) => (clearTimeout(t), sig.removeEventListener("abort", onAbort), waiting.delete(id), resolve(m));
           const onAbort = () => done(lastAssistant());
           const t = setTimeout(onAbort, 5_000);
-          turn.signal.addEventListener("abort", onAbort, { once: true });
+          sig.addEventListener("abort", onAbort, { once: true });
           waiting.set(id, done);
-          if (turn.signal.aborted) onAbort();
+          if (sig.aborted) onAbort();
         });
   // one server per query: an MCP Server binds one transport, and each start() spawns a new child
   const toolServer = () =>
@@ -245,12 +246,38 @@ export function createClaudeSession(opts: ClaudeOptions) {
       assistantFor,
       signal: () => turn.signal,
       emit: (e) => {
-        if (!running) return; // a tool outliving its turn (child died) must not trail agent_end
-        if (e.type === "tool_execution_start" && timing) timing.tool ??= since();
+        if (gaveUp.has(e.toolCallId)) return; // already closed by settleTools
+        if (e.type === "tool_execution_start") {
+          if (timing) timing.tool ??= since();
+          let done!: () => void;
+          inflight.set(e.toolCallId, { name: e.toolName, done: new Promise<void>((r) => (done = r)), resolve: done });
+        }
         emit(e);
       },
-      onResult: (m) => record(m),
+      onResult: (m) => {
+        const f = inflight.get(m.toolCallId);
+        if (!f) return; // given up on: that call already has its synthetic result
+        record(m);
+        inflight.delete(m.toolCallId);
+        f.resolve();
+      },
     });
+  // tool calls started and not yet resulted; a turn does not end before they do (pi's Promise.all)
+  const inflight = new Map<string, { name: string; done: Promise<void>; resolve: () => void }>();
+  const gaveUp = new Set<string>();
+  /** Wait for running tools (the turn's signal is already aborted on abort/death); 5 s cap, then a synthetic error result each. */
+  async function settleTools() {
+    let t: any;
+    await Promise.race([Promise.all([...inflight.values()].map((f) => f.done)), new Promise((r) => (t = setTimeout(r, 5_000)))]);
+    clearTimeout(t);
+    for (const [id, f] of inflight) {
+      const content = [{ type: "text", text: "Operation aborted" }];
+      gaveUp.add(id);
+      emit({ type: "tool_execution_end", toolCallId: id, toolName: f.name, result: { content }, isError: true });
+      record({ role: "toolResult", toolCallId: id, toolName: f.name, content, isError: true, timestamp: Date.now() });
+    }
+    inflight.clear();
+  }
   // codemode's nested calls are emitted on the pi session itself
   const unsubPi = piSession.subscribe((e: any) => {
     if (e?.parentToolCallId && String(e.type).startsWith("tool_execution_")) emit(e);
@@ -286,7 +313,10 @@ export function createClaudeSession(opts: ClaudeOptions) {
     ...extra,
   });
 
+  // closing messages wait behind running tools so the record reads assistant, results, error
+  const late: [string, string][] = [];
   function errorMessage(text: string, stopReason = "error") {
+    if (inflight.size) return void late.push([text, stopReason]);
     const msg = newMessage({ stopReason, errorMessage: text });
     emit({ type: "message_start", message: msg });
     emit({ type: "message_end", message: msg });
@@ -307,10 +337,23 @@ export function createClaudeSession(opts: ClaudeOptions) {
       }
   }
 
+  let finishing = false;
   function finish() {
+    if (!running || finishing) return;
+    if (!inflight.size) return conclude();
+    finishing = true;
+    void settleTools().then(conclude);
+  }
+
+  function conclude() {
+    finishing = false;
     if (!running) return;
+    // an aborted turn is ONE assistant message, as pi records it; none in flight gets an empty one
+    if (aborting && cur) cur.msg.stopReason = "aborted";
+    const hadPartial = !!cur;
     endCur();
-    if (aborting) errorMessage("", "aborted");
+    for (const [t, r] of late.splice(0)) errorMessage(t, r);
+    if (aborting && !hadPartial) errorMessage("", "aborted");
     aborting = false;
     running = false;
     issued.clear();
@@ -423,9 +466,9 @@ export function createClaudeSession(opts: ClaudeOptions) {
 
   function onResult(m: any) {
     if (m.subtype !== "success" || m.is_error) {
-      endCur();
-      // an interrupt ends the turn with an error result; finish() reports it as aborted
+      // an interrupt ends the turn with an error result; finish() records the partial message as aborted
       if (!aborting) {
+        endCur();
         const auth = /log ?in|authenticat|credential|401/i.test(String(m.result ?? m.errors ?? ""));
         let text = auth ? AUTH_MESSAGE : (m.errors?.join?.("; ") || m.result || m.subtype || "request failed");
         if (rateLimited) {

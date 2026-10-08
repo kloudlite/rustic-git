@@ -52,11 +52,15 @@ async function call(host: ToolHost, name: string, id: string, raw: any, signal: 
   host.emit({ type: "tool_execution_start", toolCallId: id, toolName: name, args: raw });
   let outcome: any;
   try {
+    const assistantMessage = await host.assistantFor(id);
+    // pi's runToolCall runs the gate before its own abort check; an aborted turn must never show a permission card
+    if (signal.aborted) outcome = { result: { content: [{ type: "text", text: "Operation aborted" }], details: {} }, isError: true };
+    else
     outcome = await runToolCall(
       { type: "toolCall", id, name, arguments: raw },
       {
         tools: host.tools(),
-        assistantMessage: await host.assistantFor(id),
+        assistantMessage,
         context: { messages: host.agent.state.messages, tools: host.agent.state.tools },
         // wrapped, not passed bare: the hooks are methods and need their `this`
         beforeToolCall: (c: any, s?: AbortSignal) => host.agent.beforeToolCall?.(c, s) as any,
