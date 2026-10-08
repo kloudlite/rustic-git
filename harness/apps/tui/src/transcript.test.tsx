@@ -1,4 +1,5 @@
 import { expect, test } from "bun:test";
+import { useState } from "react";
 import { testRender } from "@opentui/react/test-utils";
 import { Transcript, type Entry } from "./components/Transcript.tsx";
 
@@ -245,3 +246,25 @@ test("an empty session that has been read shows the welcome screen", async () =>
   expect(t.captureCharFrame()).toContain("Orchestrate agents");
   t.renderer.destroy();
 }, 15000);
+
+test("a thinking block that finishes streaming remounts with its header on its own row", async () => {
+  const text = "I should load the config first and then check every caller before editing anything at all here";
+  let finish = () => {};
+  const App = () => {
+    const [done, setDone] = useState(false);
+    finish = () => setDone(true);
+    return <Transcript entries={[{ id: "t", kind: "thinking", text, done }]} />;
+  };
+  const t = await testRender(<App />, { width: 60, height: 12 });
+  const frame = async () => {
+    await new Promise((r) => setTimeout(r, 30));
+    await t.renderOnce();
+    return t.captureCharFrame();
+  };
+  await frame();
+  finish(); // same entry id, done flips: the host box must not be reused (it kept height 1)
+  const out = await frame();
+  expect(out.split("\n").some((l) => l.includes("Thinking") && !l.includes("should"))).toBe(true);
+  expect(out).toContain("I should load");
+  t.renderer.destroy();
+});

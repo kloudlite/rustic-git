@@ -332,14 +332,14 @@ function Row({
         const lines = entry.text.trim().split("\n");
         return (
           <box
+            key="think-tick"
             border={["left"]}
             borderColor={theme.border}
             paddingLeft={2}
             height={1}
             overflow="hidden"
           >
-            {/* one row, cut with an ellipsis: wrapped into a height-1 box the
-                line was hard-cut and a stray glyph showed ("Ihshould", 2026-10-08) */}
+            {/* one row, cut with an ellipsis */}
             <text fg={theme.muted} attributes={TextAttributes.ITALIC} wrapMode="none" truncate>
               {lines[lines.length - 1] ?? ""}
             </text>
@@ -356,8 +356,12 @@ function Row({
       // into a box that was never sized for it
       const body = collapse(entry.text, open, width - RAIL);
       const long = rowCount(entry.text, width - RAIL) > COLLAPSE_MAX;
+      // distinct keys remount the box when `done` flips; a reused instance kept
+      // height 1 (opentui ignores a prop removed to null) and drew the header
+      // under the body ("Ihshould", 2026-10-08)
       return (
         <box
+          key="think-done"
           flexDirection="column"
           border={["left"]}
           borderColor={theme.border}
