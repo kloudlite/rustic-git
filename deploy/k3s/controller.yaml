@@ -38,7 +38,7 @@ spec:
       serviceAccountName: kloudlite-controller
       containers:
         - name: controller
-          image: ghcr.io/kloudlite/kloudlite-controller:c28fafc310dabd0e2c568ba8f020514012941f56@sha256:453784e2b6d5f6b816de06a9e4c5999789893748a4f412c2a92025c407184a29
+          image: ghcr.io/kloudlite/kloudlite-controller:67eb66a4cb92bd131f3816b9c31d33277a89350b@sha256:42e04fd7d8d9b4841411f9e63bcb5eed7789c33a94a30b886375e4361d68352e
           imagePullPolicy: IfNotPresent
           ports:
             - name: http
