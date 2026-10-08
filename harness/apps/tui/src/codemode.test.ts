@@ -24,11 +24,11 @@ test("codemode on adds it to pi's defaults instead of replacing them", async () 
   expect(await activeTools(true)).toEqual([...off, "codemode"]);
 });
 
-// `mode: "only"` is what makes the model actually reach for it: pi hides the
-// direct declarations and lists them in codemode's own description instead, so
-// a script is the way to call them. The loadout is prepared per request, not at
+// `mode: "on"`: direct tools stay declared (one action is one call) and their
+// descriptions say how a script calls them; codemode's own description does not
+// repeat them. The loadout is prepared per request, not at
 // session build, so this asks the tool definition directly.
-test("codemode hides the direct tools and lists them as callable", async () => {
+test("codemode keeps the direct tools declared and tells how scripts call them", async () => {
   const s = (await createSession({
     key: "codemode-test-loadout",
     model: catalog[0] as never,
@@ -44,6 +44,6 @@ test("codemode hides the direct tools and lists them as callable", async () => {
       getNamespace: () => undefined,
       getPromptGuidelines: () => [],
     });
-  expect(hiddenDeclarations).toContain("bash");
-  expect(descriptions.codemode).toContain("grep");
+  expect(hiddenDeclarations).toEqual([]);
+  expect(descriptions.bash).toContain("tools.bash(args)");
 });

@@ -133,9 +133,10 @@ async function envKeysFor(provider: {
 // so the rules ride on the description it prepares, PREPENDED: the first version appended
 // them after the long API listing and the model skipped them.
 const CODEMODE_NOTE =
-  "Rules: (1) `await tools.bash(...)` resolves to an object; read `.output` (and `.exit_code`), never call string methods on the result itself. " +
-  "(2) Fetch URLs with `tools.web_fetch`, not curl in bash; one call per item, run together with `Promise.all`. " +
-  "(3) To show the user a table, list or report, build it in the script and pass it to `tools.display({ markdown })`; the displayed text stays readable to you for follow-ups; reply in one line, never retype what was displayed. " +
+  "Rules: (1) Call a tool directly for one action. Use codemode only for several calls, a loop over items, or to filter large output. " +
+  "(2) `await tools.bash(...)` resolves to an object; read `.output` (and `.exit_code`), never call string methods on the result itself. " +
+  "(3) Fetch URLs with `tools.web_fetch`, not curl in bash; one call per item, run together with `Promise.all`. " +
+  "(4) To show the user a table, list or report, build it in the script and pass it to `tools.display({ markdown })`; the displayed text stays readable to you for follow-ups; reply in one line, never retype what was displayed. " +
   "The codemode skill has worked examples.";
 
 // Markdown the running script asked to show, by root tool call id (nested ids are `<parent>/<n>`).
@@ -414,12 +415,11 @@ export async function createSession({
   const resourceLoader = new DefaultResourceLoader({
     cwd,
     agentDir: getAgentDir(),
-    // `mode: "only"` is what actually makes the model use codemode. Under pi's
-    // default `"on"` the built-ins stay directly declared and codemode's own
-    // description lists only the tools that have no direct exposure, so the
-    // model keeps reaching for `bash` and codemode never fires. `"only"`
-    // drops the direct declarations, leaving scripts as the way to call them.
-    ...(codemode ? { extensionFactories: [{ name: "codemode", factory: withCodemodeExtras(createCodemodeExtension({ mode: "only" })) }] } : {}),
+    // `mode: "on"`: tools stay declared directly beside `codemode`. A script is for many calls, a
+    // loop, or filtering large output; one action is one direct call (owner ruling 2026-10-08).
+    // An earlier "on" never fired codemode because nothing said when; the codemode skill and the
+    // rules prepended to its description (CODEMODE_NOTE) now carry that.
+    ...(codemode ? { extensionFactories: [{ name: "codemode", factory: withCodemodeExtras(createCodemodeExtension({ mode: "on" })) }] } : {}),
     // the same skills Claude sessions get through the plugin (claude.ts)
     appendSystemPrompt: systemAppends(codemode),
   });

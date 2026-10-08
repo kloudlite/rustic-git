@@ -4,15 +4,17 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { declaredTools } from "./claude-tools.ts";
 
-test("codemode only: pi declares codemode, not bash (the Claude bridge relies on it)", async () => {
+test("codemode on: pi declares the direct tools beside codemode (the Claude bridge mirrors it)", async () => {
   process.env.KLOUDLITE_CONFIG_DIR = mkdtempSync(join(tmpdir(), "kl-cfg-"));
   const { createSession, models } = await import("./index.ts");
+  const { Registry } = await import("@kloudlite-tui/tools");
+  const registry = new Registry().add({ name: "bash", description: "run", inputSchema: { type: "object", properties: {} }, run: async () => "" } as any);
   const model = models.getModels().find((m: any) => m.provider !== "anthropic") as any;
-  const s: any = await createSession({ key: `t-${process.pid}`, model, codemode: true, fresh: true });
+  const s: any = await createSession({ key: `t-${process.pid}`, model, codemode: true, fresh: true, registry });
   const names = declaredTools(s).map((t: any) => t.name);
   expect(names).toContain("codemode");
-  expect(names).not.toContain("bash");
-  expect(s.agent.state.tools.map((t: any) => t.name)).not.toContain("bash"); // no built-ins at all (noTools)
+  expect(names).toContain("bash");
+  expect(s.agent.state.tools.map((t: any) => t.name)).not.toContain("read"); // no pi built-ins (noTools)
   expect(s.systemPrompt).toContain("codemode");
   s.dispose();
 });

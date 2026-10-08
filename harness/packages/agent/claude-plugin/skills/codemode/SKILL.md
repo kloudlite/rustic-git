@@ -25,11 +25,12 @@ Use a single plain call inside a script when you only need one simple command an
 - `tools.read({ path })` resolves to the file's text.
 - A call that is blocked or gets bad arguments rejects with an `Error`.
 
-## Three rules first
+## Four rules first
 
-1. `await tools.bash(...)` resolves to an object; read `.output` (and `.exit_code`), never call string methods on the result itself.
-2. Fetch URLs with `tools.web_fetch`, not curl in bash; one call per item, run together with `Promise.all`.
-3. To show the user a table, list or report, build it in the script and pass it to `tools.display({ markdown })`. The displayed text stays readable to you for follow-ups; reply in one line, never retype what was displayed.
+1. Call a tool directly for one action. Use codemode only for several calls, a loop over items, or to filter large output.
+2. `await tools.bash(...)` resolves to an object; read `.output` (and `.exit_code`), never call string methods on the result itself.
+3. Fetch URLs with `tools.web_fetch`, not curl in bash; one call per item, run together with `Promise.all`.
+4. To show the user a table, list or report, build it in the script and pass it to `tools.display({ markdown })`. The displayed text stays readable to you for follow-ups; reply in one line, never retype what was displayed.
 
 ## Rules
 
