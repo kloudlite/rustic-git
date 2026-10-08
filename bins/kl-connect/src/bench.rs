@@ -15,7 +15,7 @@ pub const BENCH_START_WAIT: Duration = Duration::from_secs(90);
 /// `region` is the `--region` flag: it only matters for an unbound personal bench (its first use
 /// binds the region), so it is sent to `create_bench` only when `team` is absent or names the
 /// caller's own handle — a team's region is the team's, not this laptop's flag.
-pub async fn bench(team: Option<&str>, start: bool, region: Option<&str>) -> Result<(), String> {
+pub async fn bench(team: Option<&str>, start: bool, region: Option<&str>, remote_tui: bool) -> Result<(), String> {
     let cfg = crate::config::load()?;
     // The team lands in ssh's argv and in a /bin/sh-parsed ProxyCommand.
     if let Some(t) = team.filter(|t| !crate::sshconfig::safe_name(t)) {
@@ -36,15 +36,37 @@ pub async fn bench(team: Option<&str>, start: bool, region: Option<&str>) -> Res
     let local = crate::config::dir().join(format!("clip-{}.sock", std::process::id()));
     let listener = crate::clip::listen(&local).map_err(|e| format!("clipboard socket {}: {e}", local.display()))?;
     let clip = tokio::spawn(crate::clip::serve(listener));
-    let st = tokio::process::Command::new("ssh")
-        .args(ssh_argv(&me, &known_hosts, owner, team, Some((&crate::clip::remote_path(), &local)), None))
-        .status()
-        .await;
+    let remote_clip = crate::clip::remote_path();
+    let fwd = Some((remote_clip.as_path(), local.as_path()));
+    let laptop = if remote_tui { None } else { kl_tui_beside(&me) };
+    let mut st = match &laptop {
+        Some(tui) => {
+            let mut args = vec!["--ssh".to_string()];
+            args.extend(ssh_argv(&me, &known_hosts, owner, team, fwd, Some("kl-host"), false));
+            tokio::process::Command::new(tui).args(args).status().await
+        }
+        None => Err(std::io::Error::other("no kl-tui")),
+    };
+    // 3 = the bench predates the laptop TUI (or speaks another protocol): run it there instead.
+    if laptop.is_none() || matches!(&st, Ok(s) if s.code() == Some(3)) {
+        restore_terminal();
+        st = tokio::process::Command::new("ssh")
+            .args(ssh_argv(&me, &known_hosts, owner, team, fwd, None, true))
+            .status()
+            .await;
+    }
     clip.abort();
     let _ = std::fs::remove_file(&local);
     restore_terminal();
     let st = st.map_err(|e| format!("running ssh: {e}"))?;
     std::process::exit(st.code().unwrap_or(1));
+}
+
+/// The laptop TUI ships beside kl-connect (same release, same install dir); `None` means run the
+/// TUI on the bench as before.
+fn kl_tui_beside(me: &std::path::Path) -> Option<std::path::PathBuf> {
+    let p = me.with_file_name("kl-tui");
+    p.is_file().then_some(p)
 }
 
 /// Undo the modes the bench TUI switches on. A dropped connection kills it before its own cleanup
@@ -65,8 +87,8 @@ fn restore_terminal() {
     let _ = out.flush();
 }
 
-/// The ssh argv for the bench: `-t` because the remote's `ForceCommand` is the graphcode TUI, not
-/// a one-shot command, so ssh must allocate a pty for it. `HostKeyAlias` pins the key per bench
+/// The ssh argv for the bench: `-t` when the remote runs the TUI itself (its ForceCommand needs a
+/// pty); the laptop TUI's `kl-host` speaks frames on plain pipes, so it gets none. `HostKeyAlias` pins the key per bench
 /// owner (the name ssh dials is never resolved: the ProxyCommand carries the bytes).
 /// `LogLevel=ERROR` drops the one first-contact "Permanently added" line; a changed key is still
 /// an error and still shown. The exe path is double-quoted, as in `ws.rs`: it can hold spaces.
@@ -80,6 +102,7 @@ fn ssh_argv(
     team: Option<&str>,
     clip: Option<(&std::path::Path, &std::path::Path)>,
     command: Option<&str>,
+    tty: bool,
 ) -> Vec<String> {
     let proxy = match team {
         Some(t) => format!("ProxyCommand=\"{}\" bench-proxy {t}", me.display()),
@@ -105,7 +128,9 @@ fn ssh_argv(
             format!("SetEnv=KL_CLIP={}", remote.display()),
         ]);
     }
-    v.push("-t".to_string());
+    if tty {
+        v.push("-t".to_string());
+    }
     v.push(format!("kl@bench-{owner}"));
     // The bench's ForceCommand (bench/term/login-shell) allow-lists this word.
     v.extend(command.map(String::from));
@@ -132,7 +157,7 @@ pub async fn claude_login(team: Option<&str>) -> Result<(), String> {
         "Signing in Claude Code on bench-{owner}. Open the URL it prints, sign in, paste the code back here."
     );
     let st = tokio::process::Command::new("ssh")
-        .args(ssh_argv(&me, &known_hosts, owner, team, None, Some("claude-login")))
+        .args(ssh_argv(&me, &known_hosts, owner, team, None, Some("claude-login"), true))
         .status()
         .await;
     restore_terminal();
@@ -344,11 +369,11 @@ mod tests {
             ]
         };
         assert_eq!(
-            ssh_argv(me, kh, "k", None, Some((remote, local)), None),
+            ssh_argv(me, kh, "k", None, Some((remote, local)), None, true),
             tail("k", "ProxyCommand=\"/opt/kl connect/kl-connect\" bench-proxy")
         );
         assert_eq!(
-            ssh_argv(me, kh, "acme", Some("acme"), Some((remote, local)), None),
+            ssh_argv(me, kh, "acme", Some("acme"), Some((remote, local)), None, true),
             tail("acme", "ProxyCommand=\"/opt/kl connect/kl-connect\" bench-proxy acme")
         );
     }
@@ -357,10 +382,31 @@ mod tests {
     fn login_argv_has_no_clipboard_forward_and_ends_with_the_command() {
         let me = std::path::Path::new("/bin/kl-connect");
         let kh = std::path::Path::new("/k/known");
-        let a = ssh_argv(me, kh, "acme", Some("acme"), None, Some("claude-login"));
+        let a = ssh_argv(me, kh, "acme", Some("acme"), None, Some("claude-login"), true);
         assert!(!a.iter().any(|x| x == "-R" || x.starts_with("SetEnv")));
         assert!(a.contains(&"-t".to_string()));
         assert_eq!(a[a.len() - 2..], ["kl@bench-acme", "claude-login"]);
+    }
+
+    #[test]
+    fn ssh_argv_tty_is_optional() {
+        let p = std::path::Path::new("/x/kl-connect");
+        let k = std::path::Path::new("/x/kh");
+        let with = ssh_argv(p, k, "me", None, None, None, true);
+        let without = ssh_argv(p, k, "me", None, None, Some("kl-host"), false);
+        assert!(with.contains(&"-t".to_string()));
+        assert!(!without.contains(&"-t".to_string()));
+        assert_eq!(without.last().unwrap(), "kl-host");
+    }
+
+    #[test]
+    fn kl_tui_found_beside_the_exe() {
+        let dir = tempfile::tempdir().unwrap();
+        let me = dir.path().join("kl-connect");
+        std::fs::write(&me, b"").unwrap();
+        assert!(kl_tui_beside(&me).is_none());
+        std::fs::write(dir.path().join("kl-tui"), b"").unwrap();
+        assert_eq!(kl_tui_beside(&me), Some(dir.path().join("kl-tui")));
     }
 
     #[tokio::test]

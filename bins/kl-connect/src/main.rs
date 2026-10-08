@@ -39,6 +39,9 @@ struct Cli {
     /// Only used for an unbound personal bench's first `--start` (a team's region is the team's).
     #[arg(long)]
     region: Option<String>,
+    /// Run the TUI on the bench instead of on this laptop (slower to type in; for when kl-tui misbehaves).
+    #[arg(long)]
+    remote_tui: bool,
 }
 
 #[derive(Subcommand)]
@@ -121,7 +124,7 @@ async fn main() {
     let _ = rustls::crypto::ring::default_provider().install_default();
     let cli = Cli::parse();
     let r = match &cli.cmd {
-        None => bench::bench(cli.team.as_deref(), cli.start, cli.region.as_deref()).await,
+        None => bench::bench(cli.team.as_deref(), cli.start, cli.region.as_deref(), cli.remote_tui).await,
         Some(cmd) => run(cmd).await,
     };
     if let Err(e) = r {
