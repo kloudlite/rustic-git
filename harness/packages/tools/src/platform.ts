@@ -102,7 +102,13 @@ function withReady(out: string): string {
 }
 
 function def(name: string, description: string, properties: Props, required: string[], run: (a: any) => Promise<string>): ToolDef {
-  return { name, description, inputSchema: { type: "object", properties, required }, run: async (a) => run(a ?? {}) };
+  // the tools' own refusals ("error: service exists") fail like an API error does, never pass as a result
+  const checked = async (a: any) => {
+    const r = await run(a ?? {});
+    if (r.startsWith("error: ")) throw new Error(r.slice(7));
+    return r;
+  };
+  return { name, description, inputSchema: { type: "object", properties, required }, run: checked };
 }
 
 const attrOf = (p: string) => p.split("@")[0]!;

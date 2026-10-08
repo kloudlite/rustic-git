@@ -72,7 +72,9 @@ function answer(h: SessionHandle, send: () => Promise<void>): Promise<string> {
 }
 
 async function runInClone(P: string, task: string, deps: DelegateDeps, opts: (key: string, e?: Partial<SessionOpts>) => SessionOpts): Promise<string> {
-  const call = deps.api ?? api;
+  // api throws on a non-2xx answer; this flow branches on the status text ("error 409: … already being cut")
+  const call = (m: string, path: string, body?: unknown) =>
+    (deps.api ?? api)(m, path, body).catch((e: any) => `error ${e?.message ?? e}`);
   const exec = deps.exec ?? podExec;
   const sleep = deps.sleep ?? ((ms: number) => new Promise<void>((r) => setTimeout(r, ms)));
   const p = (id: string) => `/v1/workspaces/${encodeURIComponent(id)}`;

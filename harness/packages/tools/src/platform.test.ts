@@ -56,7 +56,7 @@ test("packages_add merges by attr, packages_remove errors on unknown", async () 
   await tool(t, "packages_remove").run({ workspace: "w1", packages: ["git"] });
   expect(calls.at(-1)!.body).toEqual({ packages: ["nodejs"] });
   const n = calls.length;
-  expect(await tool(t, "packages_remove").run({ workspace: "w1", packages: ["zzz"] })).toBe("error: not declared: zzz");
+  await expect(tool(t, "packages_remove").run({ workspace: "w1", packages: ["zzz"] })).rejects.toThrow("not declared: zzz");
   expect(calls.length).toBe(n + 1); // the GET only, no PATCH
 });
 
@@ -74,9 +74,9 @@ test("service add/update/remove PATCH the whole list; duplicates and strangers e
   expect(calls.at(-1)!.body).toEqual({ services: [{ name: "a", image: "a:3", command: [], env: { K: "v" }, mounts: [] }] });
   await tool(t, "service_remove").run({ env: "e1", name: "a" });
   expect(calls.at(-1)!.body).toEqual({ services: [] });
-  expect(await tool(t, "service_add").run({ env: "e1", service: a })).toContain("error: service exists");
-  expect(await tool(t, "service_update").run({ env: "e1", service: b })).toContain("error: no such service");
-  expect(await tool(t, "service_remove").run({ env: "e1", name: "q" })).toContain("error: no such service");
+  await expect(tool(t, "service_add").run({ env: "e1", service: a })).rejects.toThrow("service exists: a");
+  await expect(tool(t, "service_update").run({ env: "e1", service: b })).rejects.toThrow("no such service");
+  await expect(tool(t, "service_remove").run({ env: "e1", name: "q" })).rejects.toThrow("no such service");
 });
 
 test("workspace sessions default env through /v1/me/environments", async () => {
@@ -90,7 +90,7 @@ test("workspace sessions default env through /v1/me/environments", async () => {
   await tool(t, "intercept").run({ service: "web" });
   expect(calls.at(-1)!.body).toEqual({ service: "web", workspace: "w1" });
   routes["GET /v1/me/environments"] = json([{ team: "other", environment: "x" }]);
-  expect(await tool(t, "env_get").run({})).toBe("error: this workspace's space follows no environment");
+  await expect(tool(t, "env_get").run({})).rejects.toThrow("this workspace's space follows no environment");
   expect(t.some((x) => x.name === "workspace_create" || x.name === "workspace_stop")).toBe(false);
 });
 
@@ -112,4 +112,9 @@ test("a rejected service_add throws and sends no further call", async () => {
   routes["GET /v1/environments/e1"] = json({ services: [] });
   routes["PATCH /v1/environments/e1"] = json({ error: "services[0]: missing field `command`" }, 422);
   await expect(tool(t, "service_add").run({ env: "e1", service: { name: "n", image: "n:1" } })).rejects.toThrow("422:");
+});
+
+test("service_add of an existing name rejects with the refusal, no prefix", async () => {
+  routes["GET /v1/environments/e1"] = json({ services: [{ name: "web", image: "w:1" }] });
+  await expect(tool(platformTools("main"), "service_add").run({ env: "e1", service: { name: "web", image: "w:2" } })).rejects.toThrow("service exists: web");
 });

@@ -85,7 +85,13 @@ function rig(o: { branch?: string; head?: string; pushes?: { code: number; stder
   const clone = [...(o.clone ?? ['{"id":"ws-c1"}'])];
   const pushes = [...(o.pushes ?? [{ code: 0, stderr: "" }])];
   let head = o.head ?? "newsha";
+  // like the real api: a failed answer throws "<status>: <text>"
   const api = async (m: string, path: string, body?: any) => {
+    const r = await answer(m, path, body);
+    if (r.startsWith("error ")) throw new Error(r.slice(6));
+    return r;
+  };
+  const answer = async (m: string, path: string, body?: any) => {
     calls.push(`${m} ${path}`);
     if (path.endsWith("/clone")) bodies.push(body);
     if (path.endsWith("/clone")) return clone.length > 1 ? clone.shift()! : clone[0]!;
