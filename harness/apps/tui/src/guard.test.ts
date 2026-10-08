@@ -14,5 +14,5 @@ test("TUI keeps the backend's gate sets", async () => {
   const { GATED, EDITS } = await import("@kloudlite-tui/backend/local");
   const app = await Bun.file(join(import.meta.dir, "app.tsx")).text();
   for (const t of GATED) expect(app).toContain(`"${t}"`);
-  expect([...EDITS]).toEqual(["write", "edit"]);
+  expect([...EDITS]).toEqual(["write", "edit", "patch"]);
 });

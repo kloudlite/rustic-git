@@ -494,6 +494,7 @@ export function App({
     const clip = (v: string) => (v.length > 100 ? `${v.slice(0, 99)}…` : v);
     if (args && typeof args === "object") {
       if (name === "bash" && args.command) return clip(one(args.command));
+      if (name === "exec" && args.cmd) return clip(one(Array.isArray(args.cmd) ? args.cmd.join(" ") : args.cmd));
       // codemode's arg is a whole script — keep its newlines, the block renders them
       if (name === "codemode" && args.code) return String(args.code);
       const path = args.path ?? args.file_path ?? args.filePath;
@@ -800,9 +801,13 @@ export function App({
   /** Tools that require permission before running. */
   // web_fetch leaves the machine, and the URL can come from text the model
   // just read, so the user sees it before it goes out
-  const GATED = new Set(["bash", "write", "edit", "web_fetch"]);
+  const GATED = new Set([
+    "bash", "write", "edit", "patch", "exec", "web_fetch",
+    "workspace_stop", "workspace_delete", "worktree_drop", "env_delete", "env_stop", "env_restore_in_place",
+    "service_remove", "volume_delete", "snapshot_delete",
+  ]);
   /** Tools that only mutate the workspace's files — what acceptEdits waves through. */
-  const EDITS = new Set(["write", "edit"]);
+  const EDITS = new Set(["write", "edit", "patch"]);
 
 /** Shift+tab cycles these in order. */
 type PermMode = "default" | "acceptEdits" | "plan" | "bypass";
@@ -830,7 +835,9 @@ const PERM_MODES: PermMode[] = ["default", "acceptEdits", "plan", "bypass"];
           ? "Shell command"
           : name === "web_fetch"
             ? "Fetch a URL"
-            : `${name === "write" ? "Write" : "Edit"} ${args?.path ?? "file"}`,
+            : EDITS.has(name)
+              ? `${name === "write" ? "Write" : "Edit"} ${args?.path ?? "file"}`
+              : `Run ${name}`,
       body:
         name === "bash"
           ? `$ ${args?.command ?? ""}`

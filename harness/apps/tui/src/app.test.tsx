@@ -421,7 +421,6 @@ test("the TUI registers only the question tool", async () => {
   const t = await testRender(<App tools={tools} />, { width: 160, height: 40 });
   await new Promise((r) => setTimeout(r, 200));
   expect(tools.map((t) => t.name)).toEqual(["question"]);
-  t.done();
 });
 
 // Permission mode is per-session chrome: shift+tab cycles it and only a
