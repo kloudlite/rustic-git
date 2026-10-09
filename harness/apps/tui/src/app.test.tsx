@@ -582,7 +582,7 @@ test("session_closed makes the next prompt reopen the session", async () => {
   for (let i = 0; i < 10 && opens < 1; i++) await tick();
   await tick();
   expect(opens).toBe(1);
-  fire({ type: "session_closed" });
+  fire({ type: "session_closed", reopen: false });
   await tick();
   setup.mockInput.pressKey("i");
   await tick();

@@ -26,7 +26,7 @@ export { connect, RemoteBackend } from "./remote.ts";
 
 export type Settings = ReturnType<typeof readSettings>;
 export type SessionMeta = ReturnType<typeof listSessions>[number];
-export type LiveSessionMeta = SessionMeta & { busy: boolean; cleared?: number };
+export type LiveSessionMeta = SessionMeta & { busy: boolean };
 export type LoginOption = ReturnType<typeof loginOptions>[number];
 export type ProviderAuth = Awaited<ReturnType<typeof providerAuth>>[number];
 export type LoginType = Parameters<typeof loginProvider>[1];
@@ -125,7 +125,7 @@ export type SessionOpts = {
 type Image = Parameters<AgentSession["steer"]>[1] extends (infer I)[] | undefined ? I : never;
 /** `session_closed`: the agent behind this handle was disposed (rebuilt, or idle with no views);
  * the handle is dead and the client reopens on its next action. */
-export type SessionEvent = (AgentSessionEvent & { diff?: FileDiff }) | { type: "session_closed" } | SessionState;
+export type SessionEvent = (AgentSessionEvent & { diff?: FileDiff }) | { type: "session_closed"; reopen: boolean } | SessionState;
 
 export type SessionHandle = {
   /** Snapshot taken when the session opened; restoreTranscript reads it. */

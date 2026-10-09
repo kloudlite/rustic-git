@@ -226,8 +226,8 @@ export function shareable(base: SessionHandle, onZero: () => void): { view: () =
 export function baseHandle(
   agent: any,
   key: string,
-  hooks: { busy: Set<string>; onEnd(): void; onDispose(): void; onChange?(): void; state: SessionState },
-): SessionHandle {
+  hooks: { busy: Set<string>; onEnd(): void; onDispose(): void; onChange?(): void; state: SessionState; rebuild?(): Promise<void> },
+): SessionHandle & { close(reopen: boolean): Promise<void> } {
   const subs = new Set<(e: SessionEvent) => void>();
   let closed = false;
   const state = hooks.state;
@@ -241,6 +241,17 @@ export function baseHandle(
     }
   };
   const pushState = () => emit(state);
+  /** `reopen` tells every view the session lives on (rebuilt): reattach, don't treat it as gone. */
+  const close = async (reopen = false) => {
+    if (closed) return;
+    closed = true;
+    for (const cb of [...subs]) cb({ type: "session_closed", reopen });
+    subs.clear();
+    hooks.onDispose();
+    hooks.busy.delete(key);
+    if (typeof unsub === "function") unsub();
+    agent.dispose();
+  };
   const unsub = agent.subscribe((event: any) => {
     if (event.type === "agent_start") hooks.busy.add(key);
     else if (event.type === "agent_end") hooks.busy.delete(key);
@@ -273,19 +284,18 @@ export function baseHandle(
     clearQueue: async () => void agent.clearQueue(),
     btw: (q) => ("isClaude" in agent ? agent.btw(q) : piBtw(agent, q)),
     abort: async () => agent.abort(),
-    dispose: async () => {
-      if (closed) return;
-      closed = true;
-      for (const cb of [...subs]) cb({ type: "session_closed" });
-      subs.clear();
-      hooks.onDispose();
-      hooks.busy.delete(key);
-      if (typeof unsub === "function") unsub();
-      agent.dispose();
-    },
+    dispose: () => close(false),
+    close,
     setModel: async (ref) => {
       const m = resolveModel(ref);
       if (!m) throw new Error(`unknown model ${ref.provider}/${ref.id}`);
+      if ((ref.provider === "anthropic") !== "isClaude" in agent) {
+        // Claude and pi are different agents: crossing means a rebuild from the stored state
+        if (hooks.busy.has(key)) throw new Error("a turn is running");
+        state.model = { provider: ref.provider, id: ref.id };
+        pushState();
+        return hooks.rebuild?.();
+      }
       await agent.setModel(m);
       state.model = { provider: ref.provider, id: ref.id };
       pushState();
@@ -302,8 +312,10 @@ export function baseHandle(
     },
     setCodemode: async (on) => {
       if (state.codemode === on) return;
-      state.codemode = on; // Task 2 adds the busy refusal and the rebuild
+      if (hooks.busy.has(key)) throw new Error("a turn is running");
+      state.codemode = on;
       pushState();
+      await hooks.rebuild?.();
     },
     subscribe: (cb) => (subs.add(cb), () => void subs.delete(cb)),
   };
@@ -311,13 +323,10 @@ export function baseHandle(
 
 export class LocalBackend implements Backend {
   /** Open sessions (the agents' base handles), for workspace_ask to reach a running one. */
-  #live = new Map<string, SessionHandle>();
+  #live = new Map<string, ReturnType<typeof baseHandle>>();
   #busy = new Set<string>();
   #watchers = new Set<(list: LiveSessionMeta[]) => void>();
-  /** When each key's history was last cleared: another view still showing the old transcript
-   * wipes it when this changes (its own copy lives in that client, which `clear` never reaches). */
-  #cleared = new Map<string, number>();
-  #list = () => listSessions().map((m) => ({ ...m, busy: this.#busy.has(m.key), cleared: this.#cleared.get(m.key) }));
+  #list = () => listSessions().map((m) => ({ ...m, busy: this.#busy.has(m.key) }));
   /** Every view's sidebar: the stored list with which keys are mid-turn right now. */
   #changed() {
     if (this.#watchers.size === 0) return;
@@ -340,7 +349,34 @@ export class LocalBackend implements Backend {
     this.#create = o.create ?? createSession;
   }
   /** Keys to rebuild at their next `agent_end` (an opener needed a different build mid-turn). */
-  #rebuild = new Set<string>();
+  #rebuildAtEnd = new Set<string>();
+  /** Per key chain: opens and rebuilds run one at a time. */
+  #opening = new Map<string, Promise<unknown>>();
+  #serial<T>(key: string, fn: () => Promise<T>): Promise<T> {
+    // one at a time per key: an open racing a rebuild must find the rebuilt agent, never build a
+    // second one on the same session file (one writer per file)
+    const prev = this.#opening.get(key) ?? Promise.resolve();
+    const next = prev.catch(() => {}).then(fn);
+    this.#opening.set(key, next);
+    void next.finally(() => this.#opening.get(key) === next && this.#opening.delete(key)).catch(() => {});
+    return next;
+  }
+
+  /** test seam: mark a key busy without a model turn */
+  busyForTest(key: string, on: boolean) {
+    on ? this.#busy.add(key) : this.#busy.delete(key);
+  }
+
+  /** Dispose the live agent so every view reopens it; the next open rebuilds from #state. `force`
+   * skips the busy refusal (clear aborts first). */
+  #rebuild(key: string, force = false): Promise<void> {
+    return this.#serial(key, async () => {
+      if (!force && this.#busy.has(key)) throw new Error("a turn is running");
+      const live = this.#live.get(key);
+      this.#built.delete(key);
+      await live?.close(true);
+    });
+  }
   #clients = new Clients();
   /** Unregisters of the clients each key's views added; a closed agent has no client left. */
   #offs = new Map<string, Set<() => void>>();
@@ -399,7 +435,8 @@ export class LocalBackend implements Backend {
     const base = this.#live.get(key);
     const sh = this.#shared.get(key);
     if (!base || !sh || this.#busy.has(key)) return;
-    if (sh.count() === 0 || this.#rebuild.has(key)) void base.dispose();
+    if (this.#rebuildAtEnd.has(key)) void base.close(true);
+    else if (sh.count() === 0) void base.close(false);
   }
 
   /** Register this view's client (card callback + TUI tools) for its key; the view's dispose removes it. */
@@ -426,7 +463,11 @@ export class LocalBackend implements Backend {
     });
   }
 
-  async session(key: string, opts: SessionOpts): Promise<SessionHandle> {
+  session(key: string, opts: SessionOpts): Promise<SessionHandle> {
+    return this.#serial(key, () => this.#open(key, opts));
+  }
+
+  async #open(key: string, opts: SessionOpts): Promise<SessionHandle> {
     // a rebuild for a missing tool keeps what the person set; `fresh` and first builds take `initial`
     const prev = opts.fresh ? undefined : this.#state.get(key);
     const want = prev?.model ?? opts.initial?.model ?? defaultModel(catalog());
@@ -446,11 +487,11 @@ export class LocalBackend implements Backend {
       if (!opts.tools.some((t) => !built.tools.has(t.name))) return this.#attach(key, opts, sh.view());
       if (live.busy) {
         // rebuilt at its agent_end; until then this opener sees the old agent
-        this.#rebuild.add(key);
+        this.#rebuildAtEnd.add(key);
         return this.#attach(key, opts, sh.view());
       }
     }
-    await live?.dispose(); // other views get session_closed
+    await live?.close(true); // other views get session_closed and reopen
     const model = resolveModel(want);
     if (!model) throw new Error(`unknown model ${want.provider}/${want.id}`);
     const k = sessionKind(key);
@@ -486,17 +527,18 @@ export class LocalBackend implements Backend {
       tokens: prev?.tokens ?? 0,
     };
     this.#state.set(key, state);
-    const handle: SessionHandle = baseHandle(agent, key, {
+    const handle: ReturnType<typeof baseHandle> = baseHandle(agent, key, {
       busy: this.#busy,
       state,
       onEnd: () => void setTimeout(() => this.#settle(key), 0),
       onChange: () => this.#changed(),
+      rebuild: () => this.#rebuild(key),
       onDispose: () => {
         if (this.#live.get(key) !== handle) return;
         this.#live.delete(key);
         this.#shared.delete(key);
         this.#built.delete(key);
-        this.#rebuild.delete(key);
+        this.#rebuildAtEnd.delete(key);
         for (const off of this.#offs.get(key) ?? []) off();
         this.#offs.delete(key);
         // dispose clears busy right after this hook, so report once that has happened
@@ -519,7 +561,16 @@ export class LocalBackend implements Backend {
     list: async (prefix?: string) => listSessions(prefix),
     name: async (key: string, name: string) => (await nameSession(key, name), this.#changed()),
     describe: async (key: string, d: string) => (await describeSession(key, d), this.#changed()),
-    clear: async (key: string) => (await clearSessionHistory(key), this.#cleared.set(key, Date.now()), this.#changed()),
+    clear: async (key: string) => {
+      // abort first if mid-turn (as the TUI's /clear did), close the agent, then archive: every view
+      // reopens against the emptied history
+      if (this.#busy.has(key)) await this.#live.get(key)?.abort();
+      await this.#rebuild(key, true);
+      await clearSessionHistory(key);
+      const st = this.#state.get(key);
+      if (st) (st.tokens = 0), (st.queued = { steering: [], followUp: [] });
+      this.#changed();
+    },
     watch: async (cb: (list: LiveSessionMeta[]) => void) => {
       this.#watchers.add(cb);
       cb(this.#list());
@@ -529,7 +580,22 @@ export class LocalBackend implements Backend {
 
   space = async (): Promise<SpaceView> => ({ ...(await spaceView()), tasks: readTasks(tasksFile()) });
 
-  settings = { write: async (patch: Parameters<typeof writeSettings>[0]) => writeSettings(patch) };
+  settings = {
+    write: async (patch: Parameters<typeof writeSettings>[0]) => {
+      const out = await writeSettings(patch);
+      if (patch.codemode) {
+        const on = patch.codemode === "on";
+        for (const key of [...this.#live.keys()]) {
+          const st = this.#state.get(key);
+          if (!st || st.codemode === on) continue;
+          st.codemode = on;
+          if (this.#busy.has(key)) this.#rebuildAtEnd.add(key);
+          else await this.#rebuild(key).catch(() => {});
+        }
+      }
+      return out;
+    },
+  };
 
   models = {
     refresh: async () => {
@@ -540,7 +606,12 @@ export class LocalBackend implements Backend {
 
   auth = {
     providers: () => providerAuth(),
-    login: async (provider: string, type: any, ui: any) => void (await loginProvider(provider, type, ui)),
+    login: async (provider: string, type: any, ui: any) => {
+      await loginProvider(provider, type, ui);
+      // an agent built before the sign-in holds the old (missing) credentials
+      for (const key of [...this.#live.keys()])
+        if (this.#state.get(key)?.model.provider === "anthropic" && !this.#busy.has(key)) await this.#rebuild(key).catch(() => {});
+    },
     claudeSignedIn: async (fresh?: boolean) => claudeSignedIn(fresh),
   };
 
