@@ -10,7 +10,7 @@
 //! workspace image's own `prelude`), supervising four runit services under `/etc/kl/sv`: the
 //! `ttyd` behind the `term` front door, each browser connection its own graphcode TUI, `sshd` (its
 //! host key persists at `~/.ssh-host`, each login its own TUI via `ForceCommand`) and the `sessions` node service, an
-//! idle/readiness probe: a loopback-only HTTP server on `127.0.0.1:8917` that sshd (`BENCH_PORT`) and ttyd (`BENCH_TERM_PORT`) sit beside, not
+//! idle/readiness probe: a loopback-only HTTP server on `127.0.0.1:8917` that sshd (`BENCH_PORT`) and ttyd (`BENCH_TERM_PORT`) and the daemon's TUI listener (`BENCH_TUI_PORT`) sit beside, not
 //! on. A crash in any one is restarted by runit in place — there is no second pod phase to fall
 //! back to.
 //!
@@ -25,6 +25,11 @@ use k8s_openapi::api::core::v1::{EnvVarSource, ExecAction, ObjectFieldSelector};
 pub const BENCH_PORT: u16 = 7789;
 /// ttyd's own port — a second gateway hole beside `BENCH_PORT`, same pod.
 pub const BENCH_TERM_PORT: u16 = 7681;
+/// The bench daemon's TUI listener (`harness/packages/backend/src/daemon.ts` `listenTcp`): the
+/// laptop kl-tui reaches it through the gateway's `/tui/{bench}` route with no ssh in the path.
+/// 7790 is the workspace ttyd, so the daemon takes the next one. The gateway token is its only
+/// lock; `allow_gateway_bench` is what keeps every other pod off it.
+pub const BENCH_TUI_PORT: u16 = 7791;
 /// The container every session's agent runs in. Named `sessions` since 2026-09-17 (spec §2.2): a
 /// bench pod has no shell and no workspace container at all (owner ruling 2026-09-25) — it is
 /// the ONLY container, so "the bench container" now means the whole pod.
@@ -107,6 +112,7 @@ pub fn bench_container(
         ports: Some(vec![
             ContainerPort { container_port: BENCH_PORT as i32, name: Some("ssh".into()), ..Default::default() },
             ContainerPort { container_port: BENCH_TERM_PORT as i32, name: Some("ttyd".into()), ..Default::default() },
+            ContainerPort { container_port: BENCH_TUI_PORT as i32, name: Some("tui".into()), ..Default::default() },
         ]),
         volume_mounts: Some(vec![
             // The bench's OWN volume, which is its home (2026-09-22): `.bench/` and the person's
@@ -184,6 +190,7 @@ pub fn allow_gateway_bench(namespace: &str, id: &str) -> NetworkPolicy {
                     "ports": [
                         { "protocol": "TCP", "port": BENCH_PORT as i32 },
                         { "protocol": "TCP", "port": BENCH_TERM_PORT as i32 },
+                        { "protocol": "TCP", "port": BENCH_TUI_PORT as i32 },
                     ],
                 }],
             }))

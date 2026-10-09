@@ -65,7 +65,7 @@ fn a_bench_runs_its_services_under_runit_and_pings_kl_sessions() {
         "no *_API_KEY env var of any name belongs on this container"
     );
     let ports: Vec<i32> = c.ports.unwrap().iter().map(|p| p.container_port).collect();
-    assert_eq!(ports, [7789, 7681]);
+    assert_eq!(ports, [BENCH_PORT as i32, BENCH_TERM_PORT as i32, BENCH_TUI_PORT as i32]);
 }
 
 #[test]
@@ -174,6 +174,6 @@ fn only_the_gateway_may_reach_a_bench_workspace_pod() {
         Some(IntOrString::Int(n)) => Some(n),
         _ => None,
     }).collect();
-    assert_eq!(ports, [BENCH_PORT as i32, BENCH_TERM_PORT as i32]);
+    assert_eq!(ports, [BENCH_PORT as i32, BENCH_TERM_PORT as i32, BENCH_TUI_PORT as i32]);
     assert_eq!(rule.from.as_ref().unwrap().len(), 1);
 }
