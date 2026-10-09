@@ -16,8 +16,8 @@ export type PendingAsk = {
   text: string;
   /** What the caller's person typed in its current turn: lent to the workspace turn so a quote of it counts as asked (consent.ts). */
   words?: string[];
-  /** Board task this ask carries; kept so a resend still marks and quotes it. */
-  task?: string;
+  /** Id of the message-log entry for this ask (messages.ts); the reply is logged as answering it. */
+  msg?: string;
   /** Resends so far; resumeAsks gives up after two. */
   tries: number;
   /** The caller's session settings, to reopen it for the reply after a restart. */

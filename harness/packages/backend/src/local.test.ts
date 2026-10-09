@@ -1,11 +1,12 @@
 import { expect, test } from "bun:test";
-import { mkdtempSync } from "node:fs";
+import { mkdtempSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { LocalBackend, ALWAYS_ASK, asking, baseHandle, mustAsk, roleCard, stripCard, shareable, installGate, registryFor, sessionCwd, sessionKind } from "./local.ts";
 import { toolDiff } from "./diff.ts";
 import { Cards } from "./cards.ts";
 import { PROTOCOL } from "./wire.ts";
+import { readBoards, readTasks } from "./tasks.ts";
 
 test("hello carries what the TUI reads at boot", async () => {
   const h = await new LocalBackend().hello();
@@ -353,3 +354,26 @@ test("a typed prompt names an unnamed session", async () => {
   expect(meta?.name).toBe("fix the build please, it fails on the li");
   await h.dispose();
 }, 20000);
+
+test("every session has task tools writing its own board", async () => {
+  delete process.env.KL_API_URL;
+  const tasks = mkdtempSync(join(tmpdir(), "kl-boards-"));
+  const deps = { live: new Map(), busy: new Set<string>(), open: async () => null as never, permit: async () => ({}), cards: new Cards(() => {}), tasks };
+  const opts: any = { tools: [] };
+  const ws = await registryFor({ kind: "workspace", ws: "w1" }, deps, opts, "w1:agent-1");
+  expect(ws.names()).toEqual(expect.arrayContaining(["task_add", "task_update", "task_list"]));
+  expect((await registryFor({ kind: "main" }, deps, opts)).names()).toContain("task_add");
+  await (ws.get("task_add") as any).run({ title: "mine" });
+  expect(readTasks(join(tasks, "w1.json")).map((t) => t.title)).toEqual(["mine"]);
+  expect(readTasks(join(tasks, "main.json"))).toEqual([]);
+  // boards: main first even when empty, then each non-empty board by name
+  await (ws.get("task_add") as any).run({ title: "again" });
+  writeFileSync(join(tasks, "ws-a.json"), "[]");
+  expect(readBoards(tasks).map((b) => [b.session, b.tasks.length])).toEqual([["main", 0], ["w1", 2]]);
+});
+
+test("space() carries the boards (main first) and the message log", async () => {
+  const v = await new LocalBackend().space();
+  expect(v.boards![0]!.session).toBe("main");
+  expect(Array.isArray(v.messages)).toBe(true);
+});

@@ -6,15 +6,18 @@ import { delegateTools, dispatchAsk, resumeAsks } from "./delegate.ts";
 import type { DelegateDeps } from "./delegate.ts";
 import type { SessionHandle, SessionOpts } from "./index.ts";
 import { addTask, readTasks } from "./tasks.ts";
+import { readMessages } from "./messages.ts";
 
 const caller = { initial: { model: { provider: "p", id: "m" } }, tools: [] } as unknown as SessionOpts;
 const asks = mkdtempSync(join(tmpdir(), "kl-asks-"));
+const messages = join(mkdtempSync(join(tmpdir(), "kl-msgs-")), "messages.json");
 const D = (o: Partial<DelegateDeps> = {}): DelegateDeps => ({
   live: new Map(),
   busy: new Set(),
   open: async () => null as never,
   permit: async () => ({}),
   asks,
+  messages,
   ...o,
 });
 
@@ -153,9 +156,9 @@ test("main_tell delivers the tagged message into main: prompt when idle, followU
   const main = fake();
   const busy = new Set<string>();
   const tell = tellOf(D({ busy, open: async () => main }));
-  expect(await tell.run({ kind: "need", task: "T1", text: "x" })).toBe("told main");
+  expect(await tell.run({ kind: "need", text: "x" })).toBe("told main");
   await flush();
-  expect(main.sent).toEqual(["prompt:[from ws-a] [task T1] need: x"]);
+  expect(main.sent).toEqual(["prompt:[from ws-a] need: x"]);
   busy.add("main");
   await tell.run({ kind: "blocked", text: "y" });
   await flush();
@@ -243,46 +246,35 @@ test("a delegated session's permission request goes to the caller's key and name
 
 const board = () => join(mkdtempSync(join(tmpdir(), "kl-board-")), "tasks.json");
 
-test("workspace_ask with a blocked task is refused and opens nothing", async () => {
+test("workspace_ask sends only words, logs the caller's task as `for`, and leaves boards alone", async () => {
   const tasks = board();
   addTask(tasks, { title: "a" });
-  addTask(tasks, { title: "b", dependsOn: ["T1"] });
-  let opened = 0;
-  const [ask] = delegateTools("main", undefined, D({ tasks, open: async () => (opened++, null as never) }), caller);
-  expect(await ask!.run({ workspace: "w", request: "x", task: "T2" })).toBe("error: T2 waits on T1");
-  expect(await ask!.run({ workspace: "w", request: "x", task: "T9" })).toBe("error: unknown task T9");
+  const log = join(mkdtempSync(join(tmpdir(), "kl-msgs-")), "m.json");
+  const ws = fake("done it");
+  const main = fake();
+  const [ask] = delegateTools("main", undefined, D({ messages: log, open: route(ws, main) }), caller);
+  await ask!.run({ workspace: "w", request: "x", for: "T1" });
   await flush();
-  expect(opened).toBe(0);
-  expect(readTasks(tasks)[1]!.state).toBe("queued");
+  expect(ws.sent).toEqual(["prompt:[from main session] x"]);
+  expect(readTasks(tasks)[0]!.state).toBe("queued");
+  const [m1, m2] = readMessages(log);
+  expect(m1).toMatchObject({ from: "main", to: "w", text: "[from main session] x", for: "T1" });
+  expect(m2).toMatchObject({ from: "w", to: "main", reply: m1!.id });
+  expect(main.sent[0]).toBe("prompt:[from w] done it");
 });
 
-test("workspace_ask with a ready task marks it running there and carries the task id", async () => {
+test("main_tell has no task, logs kind and the ask it answers, and never changes a board", async () => {
   const tasks = board();
-  addTask(tasks, { title: "a" });
-  const ws = fake("partial");
+  addTask(tasks, { title: "first" });
+  const log = join(mkdtempSync(join(tmpdir(), "kl-msgs-")), "m.json");
   const main = fake();
-  const [ask] = delegateTools("main", undefined, D({ tasks, open: route(ws, main) }), caller);
-  await ask!.run({ workspace: "w", request: "x", task: "T1" });
-  expect(readTasks(tasks)[0]).toMatchObject({ state: "running", workspace: "w" });
+  const lastAsk = new Map([["w", "abc"]]);
+  const tell = tellOf(D({ messages: log, lastAsk, open: route(fake(), main) }), "w");
+  await tell.run({ kind: "done", text: "shipped" });
   await flush();
-  expect(ws.sent).toEqual(["prompt:[from main session] [task T1] x"]);
-  expect(main.sent[0]).toContain("T1 is still running on the board");
-});
-
-test("main_tell done with a task marks it done and names the next and newly ready tasks", async () => {
-  const tasks = board();
-  addTask(tasks, { title: "first", workspace: "w" });
-  addTask(tasks, { title: "second", workspace: "w", dependsOn: ["T1"] });
-  addTask(tasks, { title: "third", dependsOn: ["T1"] });
-  const main = fake();
-  const tell = tellOf(D({ tasks, open: route(fake(), main) }), "w");
-  await tell.run({ kind: "done", task: "T1", text: "shipped" });
-  await flush();
-  expect(readTasks(tasks)[0]).toMatchObject({ state: "done", note: "shipped" });
-  expect(main.sent[0]).toBe("prompt:[from w] [task T1] done: shipped\nboard: T1 done; next for w: T2 second; now ready: T2, T3");
-  await tell.run({ kind: "blocked", task: "T9", text: "x" });
-  await flush();
-  expect(main.sent[1]).toContain("board: no task T9");
+  expect(main.sent[0]).toBe("prompt:[from w] done: shipped");
+  expect(readTasks(tasks)[0]!.state).toBe("queued");
+  expect(readMessages(log)[0]).toMatchObject({ from: "w", to: "main", kind: "done", reply: "abc" });
 });
 
 test("workspace_ask lends the caller's typed words to the workspace key before prompting", async () => {

@@ -1,14 +1,17 @@
-//! Main's task board: one JSON file, written by main's task tools and by `main_tell` /
-//! `workspace_ask` as work moves. No dispatcher by design: main decides what runs next, the board
-//! only records, orders (priority, then age) and says what is blocked on what. Written tmp +
+//! A session's own task board: one JSON file per session (`~/.kl/tasks/{session}.json`), written only
+//! by that session's task tools. Messages between sessions never touch a board. No dispatcher by
+//! design: the session decides what runs next, the board only records, orders (priority, then age)
+//! and says what is blocked on what. Written tmp +
 //! rename like asks.ts so a crash never leaves half a file.
-import { mkdirSync, readFileSync, renameSync, writeFileSync } from "node:fs";
+import { mkdirSync, readdirSync, readFileSync, renameSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { dirname, join } from "node:path";
 import type { ToolDef } from "@kloudlite-tui/tools";
 import type { BoardTask, TaskState } from "./index.ts";
 
-export const tasksFile = () => join(homedir(), ".kl", "tasks.json");
+export const tasksDir = () => join(homedir(), ".kl", "tasks");
+/** `session` is the BASE key ("main" or the workspace id), the part before the first `:`. */
+export const tasksFile = (session: string, dir = tasksDir()) => join(dir, `${session.split(":")[0]}.json`);
 
 const STATES: TaskState[] = ["queued", "running", "blocked", "done", "failed"];
 
@@ -25,6 +28,20 @@ function write(file: string, ts: BoardTask[]): void {
   mkdirSync(dirname(file), { recursive: true });
   writeFileSync(`${file}.tmp`, JSON.stringify(ts));
   renameSync(`${file}.tmp`, file);
+}
+
+/** Every session's board under `dir`: main first (always), then the others by name, empty ones skipped. */
+export function readBoards(dir = tasksDir()): { session: string; tasks: BoardTask[] }[] {
+  const out = [{ session: "main", tasks: readTasks(tasksFile("main", dir)) }];
+  let names: string[] = [];
+  try {
+    names = readdirSync(dir).sort();
+  } catch {}
+  for (const n of names) {
+    const tasks = n.endsWith(".json") && n !== "main.json" ? readTasks(join(dir, n)) : [];
+    if (tasks.length) out.push({ session: n.slice(0, -5), tasks });
+  }
+  return out;
 }
 
 /** The path from `from` back to `to` through dependsOn, if any. */
@@ -49,18 +66,18 @@ function badDeps(ts: BoardTask[], id: string, deps: string[]): string | undefine
   return undefined;
 }
 
-export function addTask(file: string, a: { title: string; workspace?: string; priority?: number; dependsOn?: string[]; note?: string }): BoardTask | string {
+export function addTask(file: string, a: { title: string; priority?: number; dependsOn?: string[]; note?: string }): BoardTask | string {
   const ts = readTasks(file);
   const id = `T${Math.max(0, ...ts.map((t) => Number(t.id.slice(1)) || 0)) + 1}`;
   const dependsOn = a.dependsOn ?? [];
   const bad = badDeps(ts, id, dependsOn);
   if (bad) return bad;
-  const t: BoardTask = { id, title: a.title, workspace: a.workspace, priority: a.priority ?? 3, dependsOn, state: "queued", note: a.note, created: Date.now() };
+  const t: BoardTask = { id, title: a.title, priority: a.priority ?? 3, dependsOn, state: "queued", note: a.note, created: Date.now() };
   write(file, [...ts, t]);
   return t;
 }
 
-export function updateTask(file: string, id: string, p: Partial<Pick<BoardTask, "title" | "workspace" | "priority" | "dependsOn" | "state" | "note">>): BoardTask | string {
+export function updateTask(file: string, id: string, p: Partial<Pick<BoardTask, "title" | "priority" | "dependsOn" | "state" | "note">>): BoardTask | string {
   const ts = readTasks(file);
   const cur = ts.find((t) => t.id === id);
   if (!cur) return `error: unknown task ${id}`;
@@ -78,42 +95,38 @@ export const blockers = (ts: BoardTask[], t: BoardTask): string[] => t.dependsOn
 
 const order = (a: BoardTask, b: BoardTask) => a.priority - b.priority || a.created - b.created;
 
-/** Queued, unblocked tasks of `workspace` (unassigned ones when it is undefined), best first. */
-export const ready = (ts: BoardTask[], workspace?: string): BoardTask[] =>
-  ts.filter((t) => t.state === "queued" && t.workspace === workspace && !blockers(ts, t).length).sort(order);
+/** Queued, unblocked tasks, best first. */
+export const ready = (ts: BoardTask[]): BoardTask[] => ts.filter((t) => t.state === "queued" && !blockers(ts, t).length).sort(order);
 
 const line = (ts: BoardTask[], t: BoardTask): string => {
   const w = blockers(ts, t);
-  return `${t.id} [${t.state}] p${t.priority} ${t.title}${t.workspace ? ` (${t.workspace})` : ""}${w.length ? `  waits on ${w.join(", ")}` : ""}`;
+  return `${t.id} [${t.state}] p${t.priority} ${t.title}${w.length ? `  waits on ${w.join(", ")}` : ""}`;
 };
 
 export function boardText(ts: BoardTask[]): string {
   if (!ts.length) return "no tasks";
   const open = ts.filter((t) => t.state !== "done");
-  const names = [...new Set(open.map((t) => t.workspace ?? ""))].sort((a, b) => (a === "" ? 1 : b === "" ? -1 : a.localeCompare(b)));
-  const out = names.flatMap((n) => [n || "unassigned", ...open.filter((t) => (t.workspace ?? "") === n).sort(order).map((t) => `  ${line(ts, t)}`)]);
-  return [...out, `${ts.length - open.length} done`].join("\n");
+  return [...open.sort(order).map((t) => line(ts, t)), `${ts.length - open.length} done`].join("\n");
 }
 
 const STR = { type: "string" };
-const WS = { type: "string", description: "The workspace id (`ws-…`, the `id` from workspace_list). Do not use the name." };
 const DEPS = { type: "array", items: STR };
 
 export function taskTools(file: string): ToolDef[] {
   const add: ToolDef = {
     name: "task_add",
-    description: "Add a task to the board. A lower priority number runs first. The default is 3. `depends_on` lists the ids of tasks that must be done first. Returns the task line.",
-    inputSchema: { type: "object", properties: { title: STR, workspace: WS, priority: { type: "number" }, depends_on: DEPS, note: STR }, required: ["title"] },
-    async run(i: { title: string; workspace?: string; priority?: number; depends_on?: string[]; note?: string }) {
-      const r = addTask(file, { title: i.title, workspace: i.workspace, priority: i.priority, dependsOn: i.depends_on, note: i.note });
+    description: "Add a task to your own board. A lower priority number runs first. The default is 3. `depends_on` lists the ids of tasks that must be done first. Returns the task line.",
+    inputSchema: { type: "object", properties: { title: STR, priority: { type: "number" }, depends_on: DEPS, note: STR }, required: ["title"] },
+    async run(i: { title: string; priority?: number; depends_on?: string[]; note?: string }) {
+      const r = addTask(file, { title: i.title, priority: i.priority, dependsOn: i.depends_on, note: i.note });
       return typeof r === "string" ? r : line(readTasks(file), r);
     },
   };
   const update: ToolDef = {
     name: "task_update",
-    description: "Change a task. You can change the title, the workspace, the priority, `depends_on`, the state or the note. The tool refuses a dependency loop or an unknown id. Then the board does not change. Returns the task line.",
-    inputSchema: { type: "object", properties: { id: STR, title: STR, workspace: WS, priority: { type: "number" }, depends_on: DEPS, state: { type: "string", enum: STATES }, note: STR }, required: ["id"] },
-    async run(i: { id: string; title?: string; workspace?: string; priority?: number; depends_on?: string[]; state?: TaskState; note?: string }) {
+    description: "Change a task. You can change the title, the priority, `depends_on`, the state or the note. The tool refuses a dependency loop or an unknown id. Then the board does not change. Returns the task line.",
+    inputSchema: { type: "object", properties: { id: STR, title: STR, priority: { type: "number" }, depends_on: DEPS, state: { type: "string", enum: STATES }, note: STR }, required: ["id"] },
+    async run(i: { id: string; title?: string; priority?: number; depends_on?: string[]; state?: TaskState; note?: string }) {
       const { id, depends_on, ...rest } = i;
       const r = updateTask(file, id, { ...rest, dependsOn: depends_on });
       return typeof r === "string" ? r : line(readTasks(file), r);
@@ -121,7 +134,7 @@ export function taskTools(file: string): ToolDef[] {
   };
   const list: ToolDef = {
     name: "task_list",
-    description: "Show the task board. It lists the open tasks grouped by workspace, with what each task waits on. At the end it gives the count of done tasks.",
+    description: "Show the task board. It lists your open tasks, with what each task waits on. At the end it gives the count of done tasks.",
     inputSchema: { type: "object", properties: {} },
     async run() {
       return boardText(readTasks(file));

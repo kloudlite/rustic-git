@@ -2,6 +2,9 @@
 //! fire-and-forget, the answer comes back later as a `[from <ws>] ...` message prompted, or followed
 //! up when busy, into the CALLER's session so main never blocks) and `main_tell` (a workspace session
 //! tells main it is done, blocked, or needs something; the only way a workspace speaks to main).
+//! Messages carry only words: a task id never travels in the text and these tools never touch a
+//! board (each session's task tools write its own). The message log (messages.ts) is the one
+//! place that links a message to the sender's task (`for`) or to the ask it answers (`reply`).
 //! Delegated sessions ask through `deps.permit`, the daemon's gate: the card is raised for the caller's key on every connected TUI.
 //! The answer is the last assistant text seen before `agent_end`: Claude sessions emit
 //! `agent_end` with an empty message list, so the events are tracked instead. It only counts after
@@ -12,7 +15,7 @@ import type { Cards } from "./cards.ts";
 import { randomBytes } from "node:crypto";
 import type { ToolDef } from "@kloudlite-tui/tools";
 import type { PermissionRequest, Decision, SessionHandle, SessionOpts } from "./index.ts";
-import { blockers, ready, readTasks, tasksFile, updateTask } from "./tasks.ts";
+import { messagesFile, recordMessage } from "./messages.ts";
 import { asksDir, dropAsk, listAsks, saveAsk, type PendingAsk } from "./asks.ts";
 
 export type DelegateDeps = {
@@ -34,8 +37,12 @@ export type DelegateDeps = {
   /** ws keys that already sent done/blocked during the current ask: the final answer is then not
    * delivered a second time. */
   reported?: Set<string>;
-  /** Where the task board lives; tests pass a temp file. */
+  /** Where the session boards live (tasks.ts); tests pass a temp dir. */
   tasks?: string;
+  /** Where the message log lives (messages.ts); tests pass a temp file. */
+  messages?: string;
+  /** ws key -> id of the newest ask message sent to it: what its `main_tell` answers. */
+  lastAsk?: Map<string, string>;
   /** Snapshot of the words the person typed into `key` (consent.ts TurnWords). */
   typed?(key: string): string[];
   /** Add words to the turn of `key` as if typed there; a relayed ask lends the caller's. */
@@ -120,20 +127,7 @@ async function deliver(
   }
 }
 
-/** A done/blocked tell moves its task on the board and tells main what that frees: the workspace's
- * next task and the dependants that just became ready. Main still decides; this only saves it a
- * task_list. */
-function boardNote(deps: DelegateDeps, ws: string, i: { kind: string; task?: string; text: string }): string {
-  if (!i.task) return "";
-  const file = deps.tasks ?? tasksFile();
-  if (!readTasks(file).some((t) => t.id === i.task)) return `\nboard: no task ${i.task}`;
-  const state = i.kind === "done" ? "done" : "blocked";
-  updateTask(file, i.task, { state, note: i.text.slice(0, 200) });
-  const ts = readTasks(file);
-  const next = ready(ts, ws)[0];
-  const freed = state === "done" ? ts.filter((t) => t.state === "queued" && t.dependsOn.includes(i.task!) && !blockers(ts, t).length) : [];
-  return `\nboard: ${i.task} ${state}${next ? `; next for ${ws}: ${next.id} ${next.title}` : ""}${freed.length ? `; now ready: ${freed.map((t) => t.id).join(", ")}` : ""}`;
-}
+const base = (key: string) => key.split(":")[0]!;
 
 /** Run one ask to its delivery. Saved BEFORE the workspace is opened and dropped right before the
  * reply is delivered: a restart between the drop and the caller's session file loses one reply
@@ -144,6 +138,7 @@ export async function dispatchAsk(deps: DelegateDeps, a: PendingAsk): Promise<vo
   // main_tell answers to whoever asked last; a fresh ask starts a fresh report
   deps.lastCaller?.set(a.key, a.callerKey);
   deps.reported?.delete(a.key);
+  if (a.msg) deps.lastAsk?.set(a.key, a.msg);
   let h: SessionHandle | undefined;
   let reply: string;
   try {
@@ -160,8 +155,7 @@ export async function dispatchAsk(deps: DelegateDeps, a: PendingAsk): Promise<vo
   const told = deps.reported?.delete(a.key) ?? false;
   dropAsk(dir, a.id);
   if (!told) {
-    // the workspace answered without closing its task: main is the one who moves it on
-    if (a.task && readTasks(deps.tasks ?? tasksFile()).find((t) => t.id === a.task)?.state === "running") reply += `\n(${a.task} is still running on the board; task_update it)`;
+    recordMessage(deps.messages ?? messagesFile(), { from: base(a.key), to: base(a.callerKey), text: reply, reply: a.msg });
     await deliver(deps, a.callerKey, a, reply, a.key);
   }
   // our own view goes only after its answer was delivered
@@ -187,19 +181,17 @@ export function delegateTools(kind: "main" | "workspace", ws: string | undefined
     const tell: ToolDef = {
       name: "main_tell",
       description:
-        "Tell the main session something. Use `done` when the task is finished (tests pass, branch pushed). Use `blocked` when you cannot go on. Say what would unblock you. Use `need` when you need a fact or an action from another workspace or the person. Then keep working on what you can. Name the task id when the work came with one. After `done` or `blocked`, end your turn. Your report is the answer.",
+        "Tell the main session something. Use `done` when the task is finished (tests pass, branch pushed). Use `blocked` when you cannot go on. Say what would unblock you. Use `need` when you need a fact or an action from another workspace or the person. Then keep working on what you can. After `done` or `blocked`, end your turn. Your report is the answer.",
       inputSchema: {
         type: "object",
-        properties: { kind: { type: "string", enum: ["done", "blocked", "need"] }, task: { type: "string" }, text: { type: "string" } },
+        properties: { kind: { type: "string", enum: ["done", "blocked", "need"] }, text: { type: "string" } },
         required: ["kind", "text"],
       },
-      async run(i: { kind: "done" | "blocked" | "need"; task?: string; text: string }) {
+      async run(i: { kind: "done" | "blocked" | "need"; text: string }) {
         const to = deps.lastCaller?.get(ws!) ?? "main";
-        let msg = `[from ${ws}]${i.task ? ` [task ${i.task}]` : ""} ${i.kind}: ${i.text}`;
-        if (i.kind !== "need") {
-          deps.reported?.add(ws!);
-          msg += boardNote(deps, ws!, i);
-        }
+        const msg = `[from ${ws}] ${i.kind}: ${i.text}`;
+        if (i.kind !== "need") deps.reported?.add(ws!);
+        recordMessage(deps.messages ?? messagesFile(), { from: base(ws!), to: base(to), text: msg, kind: i.kind, reply: deps.lastAsk?.get(ws!) });
         await deliver(deps, to, callerSettings(deps, ws!, caller), msg, ws!);
         return `told ${to}`;
       },
@@ -210,26 +202,19 @@ export function delegateTools(kind: "main" | "workspace", ws: string | undefined
   const ask: ToolDef = {
     name: "workspace_ask",
     description:
-      "Give a goal to the session of a workspace. The goal is the words of the person plus context that only you have (environment, decisions, facts from the answer of another workspace). Do not give paths, libraries or steps. Pass `task` (a board id) to mark the task as running there. The tool refuses if the dependencies of the task are not done. It returns at once. The answer of the workspace arrives later as a `[from <ws>] ...` message. Do not wait or poll for it. This is the only way for main to get work done in a workspace.",
-    inputSchema: { type: "object", properties: { workspace: { type: "string", description: "The workspace id (`ws-…`, the `id` from workspace_list). Do not use the name." }, request: { type: "string" }, task: { type: "string" } }, required: ["workspace", "request"] },
-    async run(input: { workspace: string; request: string; task?: string }) {
+      "Give a goal to the session of a workspace. The goal is the words of the person plus context that only you have (environment, decisions, facts from the answer of another workspace). Do not give paths, libraries or steps. Pass `for` (the id of your own task this serves) so the Plan panel can link them. It returns at once. The answer of the workspace arrives later as a `[from <ws>] ...` message. Do not wait or poll for it. This is the only way for main to get work done in a workspace.",
+    inputSchema: { type: "object", properties: { workspace: { type: "string", description: "The workspace id (`ws-…`, the `id` from workspace_list). Do not use the name." }, request: { type: "string" }, for: { type: "string", description: "The id of your own board task this ask serves." } }, required: ["workspace", "request"] },
+    async run(input: { workspace: string; request: string; for?: string }) {
       const key = input.workspace;
-      const file = deps.tasks ?? tasksFile();
-      if (input.task) {
-        const ts = readTasks(file);
-        const t = ts.find((x) => x.id === input.task);
-        if (!t) return `error: unknown task ${input.task}`;
-        const w = blockers(ts, t);
-        if (w.length) return `error: ${t.id} waits on ${w.join(", ")}`;
-        updateTask(file, t.id, { state: "running", workspace: key });
-      }
+      const text = `[from main session] ${input.request}`;
+      const msg = recordMessage(deps.messages ?? messagesFile(), { from: base(callerKey), to: base(key), text, for: input.for });
       // Not awaited: main must stay free for the person while the workspace works.
       void dispatchAsk(deps, {
         id: hex(),
         callerKey,
         key,
-        text: `[from main session]${input.task ? ` [task ${input.task}]` : ""} ${input.request}`,
-        task: input.task,
+        text,
+        msg: msg.id,
         words: deps.typed?.(callerKey) ?? [],
         tries: 0,
         ...callerSettings(deps, callerKey, caller),

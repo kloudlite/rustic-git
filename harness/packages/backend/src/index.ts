@@ -56,7 +56,7 @@ export type SpaceEnvironment = {
   services: { name: string; ports: number[]; interceptedBy?: string }[];
 };
 export type TaskState = "queued" | "running" | "blocked" | "done" | "failed";
-export type BoardTask = { id: string; title: string; workspace?: string; priority: number; dependsOn: string[]; state: TaskState; note?: string; created: number };
+export type BoardTask = { id: string; title: string; priority: number; dependsOn: string[]; state: TaskState; note?: string; created: number };
 export type SpaceView = {
   available: boolean;
   error?: string;
@@ -65,9 +65,13 @@ export type SpaceView = {
   environments: SpaceEnvironment[];
   /** The environment the space follows (`GET /v1/me/environments`). */
   connected?: string;
-  /** Main's task board; only the local backend fills it. */
-  tasks?: BoardTask[];
+  /** Every session's own board, main first; only the local backend fills it. */
+  boards?: { session: string; tasks: BoardTask[] }[];
+  /** The newest messages sessions sent each other (messages.ts); only the local backend fills it. */
+  messages?: Message[];
 };
+/** One message between sessions; `from`/`to` are base session keys. `for` is the sender's own task id, `reply` the id of the message answered. */
+export type Message = { id: string; from: string; to: string; text: string; at: string; for?: string; kind?: string; reply?: string };
 export type ToolSpec = Pick<ToolDef, "name" | "description" | "inputSchema">;
 
 export type Hello = {

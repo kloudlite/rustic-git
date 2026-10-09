@@ -1,6 +1,5 @@
 import { expect, test } from "bun:test";
-import type { BoardTask } from "@kloudlite-tui/backend";
-import { taskGroups, uptime, workRows } from "./tasks.ts";
+import { type BoardTask, taskGroups, uptime, workRows } from "./tasks.ts";
 
 const T = (id: string, o: Partial<BoardTask> = {}): BoardTask => ({ id, title: id, priority: 3, dependsOn: [], state: "queued", created: Number(id.slice(1)), ...o });
 

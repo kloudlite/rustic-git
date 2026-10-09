@@ -1336,7 +1336,7 @@ export function App({
           {!filesView && !processesView && (
           <box flexDirection="column" flexShrink={0}>
           <Work
-            rows={workRows(space?.tasks ?? [], activeBase === "main" ? undefined : activeBase)}
+            rows={workRows(space?.boards?.find((b) => b.session === activeBase)?.tasks ?? [])}
             width={contentWidth}
           />
           <Queue

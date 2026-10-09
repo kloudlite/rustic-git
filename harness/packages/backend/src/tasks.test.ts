@@ -2,7 +2,7 @@ import { expect, test } from "bun:test";
 import { mkdtempSync, readFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { addTask, blockers, boardText, ready, readTasks, updateTask } from "./tasks.ts";
+import { addTask, blockers, boardText, ready, readTasks, taskTools, tasksFile, updateTask } from "./tasks.ts";
 
 const tmp = () => join(mkdtempSync(join(tmpdir(), "kl-tasks-")), "tasks.json");
 
@@ -39,26 +39,32 @@ test("ready orders by priority then created and skips tasks blocked by deps", ()
   expect(ready(ts).map((t) => t.id)).toEqual(["T2", "T3"]);
 });
 
-test("ready is per workspace; unassigned only for undefined", () => {
-  const f = tmp();
-  addTask(f, { title: "a", workspace: "ws-a" });
-  addTask(f, { title: "b", workspace: "ws-b" });
-  addTask(f, { title: "c" });
-  const ts = readTasks(f);
-  expect(ready(ts, "ws-a").map((t) => t.id)).toEqual(["T1"]);
-  expect(ready(ts).map((t) => t.id)).toEqual(["T3"]);
-});
-
 test("boardText shows waits on and the done count", () => {
   const f = tmp();
-  addTask(f, { title: "first", workspace: "ws-a" });
-  addTask(f, { title: "second", workspace: "ws-a", dependsOn: ["T1"] });
+  addTask(f, { title: "first" });
+  addTask(f, { title: "second", dependsOn: ["T1"] });
   addTask(f, { title: "old" });
   updateTask(f, "T3", { state: "done" });
   const ts = readTasks(f);
   expect(blockers(ts, ts[1]!)).toEqual(["T1"]);
   const t = boardText(ts);
-  expect(t).toContain("T2 [queued] p3 second (ws-a)  waits on T1");
+  expect(t).toContain("T2 [queued] p3 second  waits on T1");
   expect(t.endsWith("1 done")).toBe(true);
   expect(boardText([])).toBe("no tasks");
+});
+
+test("tasksFile is per base session", () => {
+  expect(tasksFile("main:x", "/d")).toBe("/d/main.json");
+  expect(tasksFile("ws-a", "/d")).toBe("/d/ws-a.json");
+});
+
+test("two sessions' boards are separate", async () => {
+  const d = mkdtempSync(join(tmpdir(), "kl-boards-"));
+  const [add] = taskTools(tasksFile("main", d));
+  const [wsAdd] = taskTools(tasksFile("ws-a:agent-1", d));
+  await add!.run({ title: "m" });
+  await wsAdd!.run({ title: "w1" });
+  await wsAdd!.run({ title: "w2" });
+  expect(readTasks(join(d, "main.json")).map((t) => t.title)).toEqual(["m"]);
+  expect(readTasks(join(d, "ws-a.json")).map((t) => [t.id, t.title])).toEqual([["T1", "w1"], ["T2", "w2"]]);
 });

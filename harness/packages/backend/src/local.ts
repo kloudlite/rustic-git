@@ -34,7 +34,8 @@ import { BECAUSE_SCHEMA, TurnWords, consented } from "./consent.ts";
 import { toolDiff } from "./diff.ts";
 import { podfs } from "./podfs.ts";
 import { space as spaceView } from "./space.ts";
-import { readTasks, taskTools, tasksFile } from "./tasks.ts";
+import { readBoards, taskTools, tasksFile } from "./tasks.ts";
+import { messagesFile, readMessages } from "./messages.ts";
 import { PROTOCOL } from "./wire.ts";
 import type { Backend, BenchEvent, CatalogModel, Decision, PermMode, PermissionRequest, Hello, LiveSessionMeta, SessionEvent, SessionHandle, SessionOpts, SessionState, SpaceView, ThinkingLevel } from "./index.ts";
 
@@ -94,13 +95,14 @@ export function roleCard(key: string): string {
   if (k.kind === "main")
     return [
       "[role: main session]",
-      "You orchestrate. You create, clone, start and delete workspaces and environments, keep the task board (task_add, task_update, task_list), and hand work to a workspace with workspace_ask (pass the task id).",
-      "You never write the code yourself. Reports arrive as `[from <ws>] ...` messages; update the board from them and dispatch the next ready task.",
+      "You orchestrate. You create, clone, start and delete workspaces and environments, keep the task board (task_add, task_update, task_list), and hand work to a workspace with workspace_ask (pass `for`, the id of your own task it serves).",
+      "You never write the code yourself. Reports arrive as `[from <ws>] ...` messages; update your own task from them and dispatch the next ready one.",
     ].join("\n");
   return [
     `[role: workspace session for ${k.ws}]`,
-    "You work only in this workspace. Work comes from the person or as `[from main session] [task T<n>] ...`.",
-    "You never create, clone, restore or delete workspaces. Report to main with main_tell: done, blocked, or need (for a fact or action from another workspace).",
+    "You work only in this workspace. Work comes from the person or as `[from main session] ...` messages.",
+    "Break the work into your own tasks with task_add (depends_on for order) and keep them updated with task_update.",
+    "You never create, clone, restore or delete workspaces. Report to main with main_tell: done, blocked, or need (for a fact or action from another workspace). Write the report as short markdown: one line saying the result, then bullets; never one run-on paragraph.",
     "Stop this workspace with workspace_stop only after you finished and main or the person said to stop.",
   ].join("\n");
 }
@@ -158,10 +160,10 @@ function question(key: string, cards: Cards): ToolDef {
 export async function registryFor(k: SessionKind, deps: DelegateDeps, opts: SessionOpts, key = "main"): Promise<Registry> {
   const r = new Registry();
   if (k.kind === "main")
-    return r.add(...[webFetch, webSearch, ...platformTools("main").map((t) => (t.name === "workspace_delete" ? forgetting(t, deps) : t)), ...delegateTools("main", undefined, deps, opts, key), ...taskTools(deps.tasks ?? tasksFile()), ...scratchTools(scratchRoot(key)), ...opts.tools].map(asking), ...(deps.cards ? [question(key, deps.cards)] : []));
+    return r.add(...[webFetch, webSearch, ...platformTools("main").map((t) => (t.name === "workspace_delete" ? forgetting(t, deps) : t)), ...delegateTools("main", undefined, deps, opts, key), ...taskTools(tasksFile(key, deps.tasks)), ...scratchTools(scratchRoot(key)), ...opts.tools].map(asking), ...(deps.cards ? [question(key, deps.cards)] : []));
   // the self-stop is the one call that never asks: it only snapshots and parks the workspace
   // that is already finished, and carries no `because` for a card to quote
-  return r.add(...[webFetch, webSearch, ...(await podTools(k.ws)), ...platformTools("workspace", k.ws), ...delegateTools("workspace", k.ws, deps, opts), ...opts.tools].map((t) => (t.name === "workspace_stop" ? t : asking(t))), ...(deps.cards ? [question(key, deps.cards)] : []));
+  return r.add(...[webFetch, webSearch, ...(await podTools(k.ws)), ...platformTools("workspace", k.ws), ...delegateTools("workspace", k.ws, deps, opts), ...taskTools(tasksFile(key, deps.tasks)), ...opts.tools].map((t) => (t.name === "workspace_stop" ? t : asking(t))), ...(deps.cards ? [question(key, deps.cards)] : []));
 }
 
 /** The permission gate, on both doors a call comes through: `agent.beforeToolCall` for a
@@ -500,11 +502,13 @@ export class LocalBackend implements Backend {
   /** main_tell's routing: who asked each workspace last, and which already reported this ask. */
   #lastCaller = new Map<string, string>();
   #reported = new Set<string>();
+  #lastAsk = new Map<string, string>();
 
   #deps(): DelegateDeps {
     return {
       lastCaller: this.#lastCaller,
       reported: this.#reported,
+      lastAsk: this.#lastAsk,
       live: this.#live,
       busy: this.#busy,
       open: (key, o) => this.session(key, o),
@@ -670,7 +674,7 @@ export class LocalBackend implements Backend {
     },
   };
 
-  space = async (): Promise<SpaceView> => ({ ...(await spaceView()), tasks: readTasks(tasksFile()) });
+  space = async (): Promise<SpaceView> => ({ ...(await spaceView()), boards: readBoards(), messages: readMessages(messagesFile()) });
 
   settings = {
     write: async (patch: Parameters<typeof writeSettings>[0]) => {

@@ -3,7 +3,10 @@
 //! tasks. Processes live on the Jobs screen (^j), not here. Tasks stay out of the sidebar on purpose:
 //! the plan belongs to the session doing the work. Pure so the grouping and ordering are tested
 //! without a renderer.
-import type { BoardTask } from "@kloudlite-tui/backend";
+import type { BoardTask as Board } from "@kloudlite-tui/backend";
+
+/** A board task as this panel groups it. The backend board is per session now, so `workspace` is unset until the panel is redesigned. */
+export type BoardTask = Board & { workspace?: string };
 
 export type TaskGroup = { workspace?: string; current?: BoardTask; queue: (BoardTask & { waits: string[] })[] };
 
