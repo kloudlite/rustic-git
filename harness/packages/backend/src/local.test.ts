@@ -2,7 +2,7 @@ import { expect, test } from "bun:test";
 import { mkdtempSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { LocalBackend, ALWAYS_ASK, asking, baseHandle, mustAsk, roleCard, shareable, installGate, registryFor, sessionCwd, sessionKind } from "./local.ts";
+import { LocalBackend, ALWAYS_ASK, asking, baseHandle, mustAsk, roleCard, stripCard, shareable, installGate, registryFor, sessionCwd, sessionKind } from "./local.ts";
 import { toolDiff } from "./diff.ts";
 import { PROTOCOL } from "./wire.ts";
 
@@ -322,3 +322,33 @@ test("baseHandle reports turn start and end to its change hook", () => {
   agent.emit({ type: "agent_end", messages: [] });
   expect(changes).toBe(2);
 });
+
+test("a user message_start carries shown without the role card", () => {
+  const agent = fakeAgent();
+  const h = baseHandle(agent, "ws-a", { busy: new Set(), onEnd() {}, onDispose() {}, state: undefined as any });
+  const got: any[] = [];
+  h.subscribe((e) => got.push(e));
+  const card = roleCard("ws-a");
+  agent.emit({ type: "message_start", message: { role: "user", timestamp: 7, content: [{ type: "text", text: `${card}\n\nhello` }] } });
+  expect(got[0].shown).toBe("hello");
+  agent.emit({ type: "message_start", message: { role: "user", timestamp: 8, content: [{ type: "text", text: "again" }] } });
+  expect(got[1].shown).toBe("again");
+});
+
+test("stripCard leaves text without a card alone", () => {
+  expect(stripCard("main", "plain")).toBe("plain");
+  expect(stripCard("main", `${roleCard("main")}\n\nx`)).toBe("x");
+});
+
+test("a typed prompt names an unnamed session", async () => {
+  process.env.KLOUDLITE_CONFIG_DIR = mkdtempSync(join(tmpdir(), "kl-cfg-"));
+  delete process.env.KL_API_URL;
+  const { models } = await import("@kloudlite-tui/agent");
+  const m = models.getModels().find((x: any) => x.provider !== "anthropic") as any;
+  const b = new LocalBackend();
+  const h = await b.session("w7", { initial: { model: { provider: m.provider, id: m.id } }, fresh: true, tools: [], client: true } as any);
+  await h.prompt("  fix   the build please, it fails on the linker step every time  ").catch(() => {});
+  const meta = (await b.sessions.list()).find((s) => s.key === "w7");
+  expect(meta?.name).toBe("fix the build please, it fails on the li");
+  await h.dispose();
+}, 20000);

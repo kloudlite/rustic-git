@@ -78,6 +78,12 @@ export function mustAsk(name: string, fence?: PodFence, egress = process.env.KLO
   return egress !== "fenced";
 }
 
+/** The person's own words: the first prompt carries the role card, which no view should show. */
+export function stripCard(key: string, text: string): string {
+  const card = `${roleCard(key)}\n\n`;
+  return text.startsWith(card) ? text.slice(card.length) : text;
+}
+
 /** Who this session is, on its first message: Claude sessions see skills only by name until they
  * load one, so the role must arrive in the conversation itself (the system prompt stays Claude
  * Code's own for billing, claude.ts). */
@@ -256,7 +262,11 @@ export function baseHandle(
     if (event.type === "agent_start") hooks.busy.add(key);
     else if (event.type === "agent_end") hooks.busy.delete(key);
     if (event.type === "agent_start" || event.type === "agent_end") hooks.onChange?.();
-    const e = event.type === "tool_execution_start" ? { ...event, diff: toolDiff(event.toolName, event.args) ?? undefined } : event;
+    let e = event.type === "tool_execution_start" ? { ...event, diff: toolDiff(event.toolName, event.args) ?? undefined } : event;
+    if (e.type === "message_start" && e.message?.role === "user") {
+      const text = (e.message.content ?? []).filter((b: any) => b.type === "text").map((b: any) => b.text).join("\n");
+      e = { ...e, shown: stripCard(key, text) };
+    }
     emit(e);
     if (event.type === "queue_update") {
       state.queued = { steering: [...(event.steering ?? [])], followUp: [...(event.followUp ?? [])] };
@@ -269,7 +279,14 @@ export function baseHandle(
   });
   return {
     get messages() {
-      return agent.messages;
+      return agent.messages.map((m: any) => {
+        if (m.role !== "user" || !Array.isArray(m.content)) return m;
+        const i = m.content.findIndex((b: any) => b.type === "text");
+        if (i < 0) return m;
+        const content = m.content.slice();
+        content[i] = { ...content[i], text: stripCard(key, content[i].text) };
+        return { ...m, content };
+      });
     },
     get busy() {
       return hooks.busy.has(key);
@@ -448,7 +465,11 @@ export class LocalBackend implements Backend {
     offs.add(off);
     const typed = opts.client
       ? {
-          prompt: (text: string, o?: Parameters<SessionHandle["prompt"]>[1]) => (this.#words(key).add(text), v.prompt(text, o)),
+          prompt: async (text: string, o?: Parameters<SessionHandle["prompt"]>[1]) => {
+            this.#words(key).add(text);
+            if (!listSessions().find((m) => m.key === key)?.name) await this.sessions.name(key, text.replace(/\s+/g, " ").trim().slice(0, 40));
+            return v.prompt(text, o);
+          },
           steer: (text: string, images?: Parameters<SessionHandle["steer"]>[1]) => (this.#words(key).add(text), v.steer(text, images)),
           followUp: (text: string, images?: Parameters<SessionHandle["followUp"]>[1]) => (this.#words(key).add(text), v.followUp(text, images)),
         }
