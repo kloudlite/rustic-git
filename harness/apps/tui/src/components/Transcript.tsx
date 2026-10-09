@@ -9,7 +9,7 @@ import type { FileDiff } from "../diff.ts";
 import { foldRepeats } from "../retry.ts";
 
 export type Entry =
-  | { kind: "user"; text: string; images?: number }
+  | { kind: "user"; id?: string; text: string; images?: number }
   | { kind: "agent"; id?: string; text: string }
   | {
       kind: "thinking";
