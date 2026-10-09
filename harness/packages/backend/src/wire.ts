@@ -3,7 +3,7 @@
 //! handler, `{ev, key, event}` one-way event. Each side numbers its own requests, so a reply's
 //! `re` always names one of the receiver's. Non-JSON lines are skipped: a stray write on the
 //! host's stdout must not kill the session (serve.ts also routes console to stderr).
-export const PROTOCOL = 1;
+export const PROTOCOL = 2;
 
 type Handler = (args: any, signal: AbortSignal) => Promise<unknown>;
 type Listener = (ev: string, key: string, event: unknown) => void;

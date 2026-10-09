@@ -534,7 +534,7 @@ test("toggling codemode rebuilds the open session with the new value", async () 
   boot(
     wrap(real, {
       session: async (key, opts) => {
-        seen.push(`open ${opts.codemode}`);
+        seen.push(`open ${opts.initial?.codemode}`);
         const h = await real.session(key, opts);
         return wrap(h, { dispose: async () => (seen.push("dispose"), h.dispose()) });
       },

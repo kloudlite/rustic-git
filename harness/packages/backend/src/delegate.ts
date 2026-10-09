@@ -78,10 +78,7 @@ function answer(h: SessionHandle, text: string, send: () => Promise<void>): Prom
  * tools, and cards routed to whoever is connected to the CALLER's session (named for the workspace). */
 function askOpts(deps: DelegateDeps, callerKey: string, a: PendingAsk, key: string): SessionOpts {
   return {
-    model: a.model,
-    thinkingLevel: a.thinkingLevel,
-    autoCompact: a.autoCompact,
-    codemode: a.codemode,
+    initial: { model: a.model, thinkingLevel: a.thinkingLevel, autoCompact: a.autoCompact, codemode: a.codemode },
     tools: [],
     permission: (req, s) => deps.permit(callerKey, { ...req, session: req.session ?? key }, s),
   };
@@ -91,15 +88,22 @@ function askOpts(deps: DelegateDeps, callerKey: string, a: PendingAsk, key: stri
  * nobody has it open) a freshly opened one. Prompt when idle, followUp when busy; main can start a
  * turn between the check and the call, so a refused prompt retries as a followUp instead of losing
  * the reply. Not awaited: a prompt lasts the caller's whole turn. */
+/** The caller's model and settings as they are NOW (the daemon's state is the truth), else as it opened. */
+function callerSettings(deps: DelegateDeps, callerKey: string, caller: SessionOpts) {
+  const s = deps.live.get(callerKey)?.state;
+  const i = caller.initial ?? {};
+  return { model: s?.model ?? i.model, thinkingLevel: s?.thinkingLevel ?? i.thinkingLevel, autoCompact: s?.autoCompact ?? i.autoCompact, codemode: s?.codemode ?? i.codemode };
+}
+
 async function deliver(
   deps: DelegateDeps,
   to: string,
-  o: Pick<SessionOpts, "model" | "thinkingLevel" | "autoCompact" | "codemode">,
+  o: NonNullable<SessionOpts["initial"]>,
   reply: string,
   from: string,
 ): Promise<void> {
   try {
-    const c = await deps.open(to, { model: o.model, thinkingLevel: o.thinkingLevel, autoCompact: o.autoCompact, codemode: o.codemode, tools: [] });
+    const c = await deps.open(to, { initial: { model: o.model, thinkingLevel: o.thinkingLevel, autoCompact: o.autoCompact, codemode: o.codemode }, tools: [] });
     void (deps.busy.has(to) ? c.followUp(reply) : c.prompt(reply))
       .catch(() => c.followUp(reply))
       .catch((e) => console.error("reply lost", to, from, e))
@@ -187,7 +191,7 @@ export function delegateTools(kind: "main" | "workspace", ws: string | undefined
           deps.reported?.add(ws!);
           msg += boardNote(deps, ws!, i);
         }
-        await deliver(deps, to, caller, msg, ws!);
+        await deliver(deps, to, callerSettings(deps, ws!, caller), msg, ws!);
         return `told ${to}`;
       },
     };
@@ -218,10 +222,7 @@ export function delegateTools(kind: "main" | "workspace", ws: string | undefined
         text: `[from main session]${input.task ? ` [task ${input.task}]` : ""} ${input.request}`,
         task: input.task,
         tries: 0,
-        model: caller.model,
-        codemode: caller.codemode,
-        thinkingLevel: caller.thinkingLevel,
-        autoCompact: caller.autoCompact,
+        ...callerSettings(deps, callerKey, caller),
       });
       return `sent to ${key}; its session is working on it. Its answer will arrive here as a message from ${key}; do not wait or poll for it.`;
     },

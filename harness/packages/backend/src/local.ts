@@ -34,7 +34,7 @@ import { podfs } from "./podfs.ts";
 import { space as spaceView } from "./space.ts";
 import { readTasks, taskTools, tasksFile } from "./tasks.ts";
 import { PROTOCOL } from "./wire.ts";
-import type { Backend, CatalogModel, Hello, LiveSessionMeta, SessionEvent, SessionHandle, SessionOpts, SpaceView } from "./index.ts";
+import type { Backend, CatalogModel, Hello, LiveSessionMeta, SessionEvent, SessionHandle, SessionOpts, SessionState, SpaceView, ThinkingLevel } from "./index.ts";
 
 /** House actions: they change what the person owns (or the registry), so they ask whatever walls hold. */
 export const ALWAYS_ASK = new Set([
@@ -185,6 +185,7 @@ export function sessionCwd(k: { kind: string }): string | undefined {
 function derive(src: SessionHandle, over: Partial<SessionHandle>): SessionHandle {
   return Object.defineProperties({ ...src, ...over }, {
     busy: { get: () => src.busy, enumerable: true },
+    state: { get: () => src.state, enumerable: true },
     messages: { get: () => src.messages, enumerable: true },
   }) as SessionHandle;
 }
@@ -225,21 +226,33 @@ export function shareable(base: SessionHandle, onZero: () => void): { view: () =
 export function baseHandle(
   agent: any,
   key: string,
-  hooks: { busy: Set<string>; onEnd(): void; onDispose(): void; onChange?(): void },
+  hooks: { busy: Set<string>; onEnd(): void; onDispose(): void; onChange?(): void; state: SessionState },
 ): SessionHandle {
   const subs = new Set<(e: SessionEvent) => void>();
   let closed = false;
-  const unsub = agent.subscribe((event: any) => {
-    if (event.type === "agent_start") hooks.busy.add(key);
-    else if (event.type === "agent_end") hooks.busy.delete(key);
-    if (event.type === "agent_start" || event.type === "agent_end") hooks.onChange?.();
-    const e = event.type === "tool_execution_start" ? { ...event, diff: toolDiff(event.toolName, event.args) ?? undefined } : event;
+  const state = hooks.state;
+  const emit = (e: SessionEvent) => {
     for (const cb of [...subs]) {
       try {
         cb(e);
       } catch (err) {
         console.error("session subscriber failed", key, err);
       }
+    }
+  };
+  const pushState = () => emit(state);
+  const unsub = agent.subscribe((event: any) => {
+    if (event.type === "agent_start") hooks.busy.add(key);
+    else if (event.type === "agent_end") hooks.busy.delete(key);
+    if (event.type === "agent_start" || event.type === "agent_end") hooks.onChange?.();
+    const e = event.type === "tool_execution_start" ? { ...event, diff: toolDiff(event.toolName, event.args) ?? undefined } : event;
+    emit(e);
+    if (event.type === "queue_update") {
+      state.queued = { steering: [...(event.steering ?? [])], followUp: [...(event.followUp ?? [])] };
+      pushState();
+    } else if (event.type === "message_end" && event.message?.role === "assistant") {
+      state.tokens += event.message.usage?.totalTokens ?? 0;
+      pushState();
     }
     if (event.type === "agent_end") hooks.onEnd();
   });
@@ -249,6 +262,9 @@ export function baseHandle(
     },
     get busy() {
       return hooks.busy.has(key);
+    },
+    get state() {
+      return state;
     },
     isClaude: "isClaude" in agent,
     prompt: async (text, o) => agent.prompt(agent.messages.length === 0 ? `${roleCard(key)}\n\n${text}` : text, o),
@@ -271,9 +287,24 @@ export function baseHandle(
       const m = resolveModel(ref);
       if (!m) throw new Error(`unknown model ${ref.provider}/${ref.id}`);
       await agent.setModel(m);
+      state.model = { provider: ref.provider, id: ref.id };
+      pushState();
     },
-    setThinkingLevel: async (level) => void agent.setThinkingLevel(level),
-    setAutoCompactionEnabled: async (on) => void agent.setAutoCompactionEnabled(on),
+    setThinkingLevel: async (level) => {
+      agent.setThinkingLevel(level);
+      state.thinkingLevel = level;
+      pushState();
+    },
+    setAutoCompactionEnabled: async (on) => {
+      agent.setAutoCompactionEnabled(on);
+      state.autoCompact = on;
+      pushState();
+    },
+    setCodemode: async (on) => {
+      if (state.codemode === on) return;
+      state.codemode = on; // Task 2 adds the busy refusal and the rebuild
+      pushState();
+    },
     subscribe: (cb) => (subs.add(cb), () => void subs.delete(cb)),
   };
 }
@@ -301,7 +332,11 @@ export class LocalBackend implements Backend {
   }
   #shared = new Map<string, ReturnType<typeof shareable>>();
   /** What each live agent was built with: a later opener that needs more rebuilds it. */
-  #built = new Map<string, { claude: boolean; codemode: boolean; tools: Set<string>; agent: any }>();
+  #built = new Map<string, { tools: Set<string>; agent: any }>();
+  readonly #create: typeof createSession;
+  constructor(o: { create?: typeof createSession } = {}) {
+    this.#create = o.create ?? createSession;
+  }
   /** Keys to rebuild at their next `agent_end` (an opener needed a different build mid-turn). */
   #rebuild = new Set<string>();
   #clients = new Clients();
@@ -390,26 +425,23 @@ export class LocalBackend implements Backend {
   }
 
   async session(key: string, opts: SessionOpts): Promise<SessionHandle> {
-    const model = resolveModel(opts.model);
-    if (!model) throw new Error(`unknown model ${opts.model.provider}/${opts.model.id}`);
+    // a rebuild for a missing tool keeps what the person set; `fresh` and first builds take `initial`
+    const prev = opts.fresh ? undefined : this.#live.get(key)?.state;
+    const want = prev?.model ?? opts.initial?.model ?? defaultModel(catalog());
+    const settings = readSettings();
+    const initial = {
+      thinkingLevel: prev?.thinkingLevel ?? opts.initial?.thinkingLevel ?? ((settings.thinkingLevel ?? "medium") as ThinkingLevel),
+      autoCompact: prev?.autoCompact ?? opts.initial?.autoCompact ?? (settings.autoCompact ?? "on") === "on",
+      codemode: prev?.codemode ?? opts.initial?.codemode ?? (settings.codemode ?? "on") === "on",
+    };
     const live = this.#live.get(key);
     const sh = this.#shared.get(key);
     const built = this.#built.get(key);
     if (live && sh && built && !opts.fresh) {
-      // An internal open (a reply delivered to main, an ask reaching a workspace) carries none of the
-      // TUI's tools: it takes the agent as the person left it. Its model and codemode are the asker's,
-      // and applying them would undo a model switch or rebuild the session under the person's TUI.
+      // The opener's model, thinking level and codemode are never applied here: the daemon's state is
+      // the truth and the opener reads it back (`state`). Only a tool it needs and the agent lacks rebuilds.
       if (opts.tools.length === 0) return this.#attach(key, opts, sh.view());
-      const needsRebuild =
-        (opts.model.provider === "anthropic") !== built.claude ||
-        !!opts.codemode !== built.codemode ||
-        opts.tools.some((t) => !built.tools.has(t.name));
-      if (!needsRebuild) {
-        const cur = built.agent.model;
-        if (cur && (cur.provider !== opts.model.provider || cur.id !== opts.model.id)) await live.setModel(opts.model);
-        if (opts.thinkingLevel && opts.thinkingLevel !== built.agent.thinkingLevel) await live.setThinkingLevel(opts.thinkingLevel);
-        return this.#attach(key, opts, sh.view());
-      }
+      if (!opts.tools.some((t) => !built.tools.has(t.name))) return this.#attach(key, opts, sh.view());
       if (live.busy) {
         // rebuilt at its agent_end; until then this opener sees the old agent
         this.#rebuild.add(key);
@@ -417,6 +449,8 @@ export class LocalBackend implements Backend {
       }
     }
     await live?.dispose(); // other views get session_closed
+    const model = resolveModel(want);
+    if (!model) throw new Error(`unknown model ${want.provider}/${want.id}`);
     const k = sessionKind(key);
     // the TUI's own tools run in whichever client is connected to this key NOW, not the opener
     const routed: SessionOpts = {
@@ -430,20 +464,21 @@ export class LocalBackend implements Backend {
     const cwd = sessionCwd(k);
     // best effort: off the bench (a laptop running the backend) / is not writable, and only Claude spawns there
     if (cwd) try { mkdirSync(cwd, { recursive: true }); } catch {}
-    const agent: any = await createSession({
+    const agent: any = await this.#create({
       key,
       model,
       registry,
       fresh: opts.fresh,
-      thinkingLevel: opts.thinkingLevel,
-      autoCompact: opts.autoCompact,
-      codemode: opts.codemode,
+      thinkingLevel: initial.thinkingLevel,
+      autoCompact: initial.autoCompact,
+      codemode: initial.codemode,
       role: k.kind,
       cwd,
     });
     installGate(agent, (req, signal) => this.#clients.route(key, (c) => !!c.permission, (c) => c.permission!(req, signal), signal), k.kind === "main" ? undefined : () => podFence(k.ws), () => ({ typed: this.#words(key).get(), self: k.kind === "main" ? undefined : k.ws }), k.kind);
     const handle: SessionHandle = baseHandle(agent, key, {
       busy: this.#busy,
+      state: { type: "session_state", model: { provider: want.provider, id: want.id }, ...initial, queued: { steering: [], followUp: [] }, tokens: 0 },
       onEnd: () => void setTimeout(() => this.#settle(key), 0),
       onChange: () => this.#changed(),
       onDispose: () => {
@@ -463,7 +498,7 @@ export class LocalBackend implements Backend {
       else if (e.type === "agent_end") this.#words(key).end();
     });
     this.#live.set(key, handle);
-    this.#built.set(key, { claude: "isClaude" in agent, codemode: !!opts.codemode, tools: new Set(opts.tools.map((t) => t.name)), agent });
+    this.#built.set(key, { tools: new Set(opts.tools.map((t) => t.name)), agent });
     const made = shareable(handle, () => this.#settle(key));
     this.#shared.set(key, made);
     this.#changed();

@@ -19,7 +19,7 @@ export type PendingAsk = {
   /** Resends so far; resumeAsks gives up after two. */
   tries: number;
   /** The caller's session settings, to reopen it for the reply after a restart. */
-  model: ModelRef;
+  model?: ModelRef;
   codemode?: boolean;
   thinkingLevel?: ThinkingLevel;
   autoCompact?: boolean;

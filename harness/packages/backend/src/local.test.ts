@@ -114,7 +114,8 @@ function promptAgent(messages: unknown[]) {
   const seen: string[] = [];
   return { seen, messages, subscribe: () => () => {}, prompt: async (t: string) => void (seen.push(t), messages.push({ role: "user" })), dispose() {} };
 }
-const handleOf = (agent: any, key: string) => baseHandle(agent, key, { busy: new Set(), onEnd() {}, onDispose() {} });
+const blank = (): any => ({ type: "session_state", model: { provider: "p", id: "m" }, thinkingLevel: "off", autoCompact: true, codemode: false, queued: { steering: [], followUp: [] }, tokens: 0 });
+const handleOf = (agent: any, key: string) => baseHandle(agent, key, { busy: new Set(), onEnd() {}, onDispose() {}, state: blank() });
 
 test("the role card rides the first prompt only, and never a resumed session's", async () => {
   const fresh = promptAgent([]);
@@ -139,7 +140,7 @@ test("sessions.list offers every key", async () => {
   const { models } = await import("@kloudlite-tui/agent");
   const m = models.getModels().find((x: any) => x.provider !== "anthropic") as any;
   const b = new LocalBackend();
-  const o: any = { model: { provider: m.provider, id: m.id }, fresh: true, tools: [], permission: async () => ({}) };
+  const o: any = { initial: { model: { provider: m.provider, id: m.id } }, fresh: true, tools: [], permission: async () => ({}) };
   const h = await b.session("w9", o);
   const keys = (await b.sessions.list()).map((s) => s.key);
   expect(keys).toContain("w9");
@@ -152,12 +153,12 @@ test("an internal open (no TUI tools) reuses a live session without disposing it
   const { models } = await import("@kloudlite-tui/agent");
   const ms = models.getModels().filter((x: any) => x.provider !== "anthropic") as any[];
   const b = new LocalBackend();
-  const o: any = { model: { provider: ms[0].provider, id: ms[0].id }, fresh: true, tools: [], permission: async () => ({}) };
+  const o: any = { initial: { model: { provider: ms[0].provider, id: ms[0].id } }, fresh: true, tools: [], permission: async () => ({}) };
   const h = await b.session("w8", o);
   const events: string[] = [];
   h.subscribe((e) => void events.push(e.type));
   const other = ms.find((x) => x.id !== ms[0].id) ?? ms[0];
-  const h2 = await b.session("w8", { model: { provider: other.provider, id: other.id }, tools: [] } as any);
+  const h2 = await b.session("w8", { initial: { model: { provider: other.provider, id: other.id } }, tools: [] } as any);
   expect(events).not.toContain("session_closed");
   expect(h2).toBeDefined();
   await h2.dispose();
@@ -223,7 +224,7 @@ test("baseHandle: events reach every subscriber and track busy; dispose says ses
   const agent = fakeAgent();
   const busy = new Set<string>();
   let ends = 0, disposes = 0;
-  const h = baseHandle(agent, "k", { busy, onEnd: () => void ends++, onDispose: () => void disposes++ });
+  const h = baseHandle(agent, "k", { busy, onEnd: () => void ends++, onDispose: () => void disposes++, state: blank() });
   const a: string[] = [], b: string[] = [];
   h.subscribe((e) => a.push(e.type));
   h.subscribe((e) => b.push(e.type));
@@ -275,7 +276,7 @@ test("sessions.watch answers at once and on every change, and stops after off", 
   delete process.env.KL_API_URL;
   const { models } = await import("@kloudlite-tui/agent");
   const pick = models.getModels().find((x: any) => x.provider !== "anthropic") as any;
-  const o: any = { model: { provider: pick.provider, id: pick.id }, fresh: true, tools: [], permission: async () => ({}) };
+  const o: any = { initial: { model: { provider: pick.provider, id: pick.id } }, fresh: true, tools: [], permission: async () => ({}) };
   const b = new LocalBackend();
   const lists: any[][] = [];
   const off = await b.sessions.watch((l) => lists.push(l));
@@ -302,7 +303,7 @@ test("sessions.watch answers at once and on every change, and stops after off", 
 test("baseHandle reports turn start and end to its change hook", () => {
   const agent = fakeAgent();
   let changes = 0;
-  baseHandle(agent, "main", { busy: new Set(), onEnd() {}, onDispose() {}, onChange: () => void changes++ });
+  baseHandle(agent, "main", { busy: new Set(), onEnd() {}, onDispose() {}, onChange: () => void changes++, state: blank() });
   agent.emit({ type: "agent_start" });
   agent.emit({ type: "agent_end", messages: [] });
   expect(changes).toBe(2);

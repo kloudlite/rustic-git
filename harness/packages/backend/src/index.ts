@@ -97,12 +97,22 @@ export type PermissionRequest = {
 };
 export type Decision = { block?: boolean; reason?: string };
 
-export type SessionOpts = {
+/** What the daemon holds for one live key and pushes to every view (protocol 2). */
+export type SessionState = {
+  type: "session_state";
   model: ModelRef;
+  thinkingLevel: ThinkingLevel;
+  autoCompact: boolean;
+  codemode: boolean;
+  queued: { steering: string[]; followUp: string[] };
+  /** Assistant tokens so far; 0 after clear. */
+  tokens: number;
+};
+
+export type SessionOpts = {
+  /** Used only when the daemon has no live agent for the key and builds one; never applied to a live one. */
+  initial?: { model?: ModelRef; thinkingLevel?: ThinkingLevel; autoCompact?: boolean; codemode?: boolean };
   fresh?: boolean;
-  thinkingLevel?: ThinkingLevel;
-  autoCompact?: boolean;
-  codemode?: boolean;
   /** Tools the TUI owns; their `run` executes in the TUI process. */
   tools: ToolDef[];
   /** Called only for gated tools: house actions always; bash, exec and web_fetch unless the fence holds (`mustAsk`); never write, edit, patch. Absent on internal opens (a
@@ -115,7 +125,7 @@ export type SessionOpts = {
 type Image = Parameters<AgentSession["steer"]>[1] extends (infer I)[] | undefined ? I : never;
 /** `session_closed`: the agent behind this handle was disposed (rebuilt, or idle with no views);
  * the handle is dead and the client reopens on its next action. */
-export type SessionEvent = (AgentSessionEvent & { diff?: FileDiff }) | { type: "session_closed" };
+export type SessionEvent = (AgentSessionEvent & { diff?: FileDiff }) | { type: "session_closed" } | SessionState;
 
 export type SessionHandle = {
   /** Snapshot taken when the session opened; restoreTranscript reads it. */
@@ -123,6 +133,8 @@ export type SessionHandle = {
   isClaude: boolean;
   /** A turn is running right now (live: a client that reconnects mid-turn sees it). */
   readonly busy: boolean;
+  /** Current snapshot; kept live by `session_state` events. */
+  readonly state: SessionState;
   prompt(text: string, o?: { images?: Image[] }): Promise<void>;
   steer(text: string, images?: Image[]): Promise<void>;
   followUp(text: string, images?: Image[]): Promise<void>;
@@ -134,6 +146,7 @@ export type SessionHandle = {
   setModel(ref: ModelRef): Promise<void>;
   setThinkingLevel(level: ThinkingLevel): Promise<void>;
   setAutoCompactionEnabled(on: boolean): Promise<void>;
+  setCodemode(on: boolean): Promise<void>;
   subscribe(cb: (e: SessionEvent) => void): () => void;
 };
 

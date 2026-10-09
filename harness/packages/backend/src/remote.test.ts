@@ -13,7 +13,7 @@ function fake(): Backend & { seen: string[] } {
   let opts!: SessionOpts;
   const b: any = {
     seen,
-    hello: async () => ({ protocol: 1, cwd: "/home/kl", tools: [] }),
+    hello: async () => ({ protocol: 2, cwd: "/home/kl", tools: [] }),
     session: async (_key: string, o: SessionOpts) => {
       opts = o;
       return {
@@ -49,7 +49,7 @@ test("session round trip: messages, permission, TUI tool, events with Error", as
   const { remote } = wired(b);
   const events: any[] = [];
   const h = await remote.session("k", {
-    model: { provider: "p", id: "m" },
+    initial: { model: { provider: "p", id: "m" } },
     tools: [{ name: "question", description: "", inputSchema: { type: "object" }, run: async (i: any) => `answered ${i.q}` }],
     permission: async (req) => ({ block: req.args.command === "rm" }),
   });
@@ -67,7 +67,7 @@ test("abort during permission sends cancel; late answer ignored", async () => {
   let answer!: (d: any) => void;
   let clientSignal!: AbortSignal;
   await remote.session("k", {
-    model: { provider: "p", id: "m" },
+    initial: { model: { provider: "p", id: "m" } },
     tools: [],
     permission: (_req, signal) => ((clientSignal = signal), new Promise((r) => (answer = r))),
   });
@@ -85,7 +85,7 @@ test("abort during permission sends cancel; late answer ignored", async () => {
 test("disconnect rejects pending calls", async () => {
   const b = fake();
   const { remote, client } = wired(b);
-  const h = await remote.session("k", { model: { provider: "p", id: "m" }, tools: [], permission: () => new Promise(() => {}) });
+  const h = await remote.session("k", { initial: { model: { provider: "p", id: "m" } }, tools: [], permission: () => new Promise(() => {}) });
   const p = h.prompt("ls");
   await Bun.sleep(5);
   client.close();
@@ -107,7 +107,7 @@ test("connect() rejects with code 3 on a protocol mismatch", async () => {
 test("stderr passes through before hello and is buffered after", async () => {
   const c = await connect([
     "sh", "-c",
-    `echo waking >&2; read l; echo '{"re":1,"ok":true,"value":{"protocol":1}}'; echo later >&2; sleep 0.2`,
+    `echo waking >&2; read l; echo '{"re":1,"ok":true,"value":{"protocol":2}}'; echo later >&2; sleep 0.2`,
   ]);
   await c.exited;
   expect(c.stderr()).toContain("later");
@@ -119,6 +119,6 @@ test("btw returns its string over the wire", async () => {
   const base = b.session;
   b.session = async (k: string, o: SessionOpts) => ({ ...(await base(k, o)), btw: async (q: string) => `answer to ${q}` }) as any;
   const { remote } = wired(b);
-  const h = await remote.session("k", { model: { provider: "p", id: "m" }, tools: [], permission: async () => ({ block: false }) });
+  const h = await remote.session("k", { initial: { model: { provider: "p", id: "m" } }, tools: [], permission: async () => ({ block: false }) });
   expect(await h.btw("why?")).toBe("answer to why?");
 });

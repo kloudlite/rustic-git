@@ -2,7 +2,7 @@
 //! Tools the TUI owns and the permission gate stay here — the host calls back for them. ssh's
 //! stderr (the bench-proxy's waking progress) is shown until `hello`, then buffered: after that
 //! the renderer owns the screen, so the tail is printed once the TUI exits.
-import type { Backend, Hello, LoginUi, SessionHandle, SessionOpts } from "./index.ts";
+import type { Backend, Hello, LoginUi, SessionHandle, SessionOpts, SessionState } from "./index.ts";
 import { Peer, PROTOCOL } from "./wire.ts";
 
 export class RemoteBackend implements Backend {
@@ -34,6 +34,18 @@ export class RemoteBackend implements Backend {
     });
   }
 
+  /** Start-up shared by `connect` and test pairs: hello, then the protocol check. */
+  async init(): Promise<Hello> {
+    let hello: Hello;
+    try {
+      hello = await this.hello();
+    } catch {
+      throw mismatch("the bench does not serve the laptop TUI");
+    }
+    if (hello.protocol !== PROTOCOL) throw mismatch(`protocol ${hello.protocol} on the bench, ${PROTOCOL} here`);
+    return hello;
+  }
+
   hello(): Promise<Hello> {
     return this.peer.request("hello", null);
   }
@@ -43,14 +55,17 @@ export class RemoteBackend implements Backend {
     this.#opts.set(key, opts);
     const subs = new Set<(e: any) => void>();
     this.#subs.set(key, subs);
-    const { messages, isClaude, busy } = await this.peer.request<{ messages: any; isClaude: boolean; busy: boolean }>("session.open", {
+    const { messages, isClaude, busy, state: first } = await this.peer.request<{ messages: any; isClaude: boolean; busy: boolean; state: SessionState }>("session.open", {
       key,
       ...rest,
       tools: tools.map(({ name, description, inputSchema }) => ({ name, description, inputSchema })),
     });
     // kept current from the stream: a client that reconnects mid-turn starts out busy
     let running = !!busy;
+    let state = first;
+    // first in the set: Set iterates in insertion order, so `state` is current before any subscriber runs
     subs.add((e) => {
+      if (e.type === "session_state") state = e;
       if (e.type === "agent_start") running = true;
       else if (e.type === "agent_end" || e.type === "session_closed") running = false;
     });
@@ -62,6 +77,9 @@ export class RemoteBackend implements Backend {
       get busy() {
         return running;
       },
+      get state() {
+        return state;
+      },
       prompt: call("prompt"),
       steer: call("steer"),
       followUp: call("followUp"),
@@ -71,6 +89,7 @@ export class RemoteBackend implements Backend {
       setModel: call("setModel"),
       setThinkingLevel: call("setThinkingLevel"),
       setAutoCompactionEnabled: call("setAutoCompactionEnabled"),
+      setCodemode: call("setCodemode"),
       dispose: async () => {
         this.#opts.delete(key);
         this.#subs.delete(key);
@@ -142,14 +161,10 @@ export async function connect(cmd: string[]) {
   const backend = new RemoteBackend(peer);
   let hello: Hello;
   try {
-    hello = await backend.hello();
-  } catch {
+    hello = await backend.init();
+  } catch (e) {
     child.kill();
-    throw mismatch("the bench does not serve the laptop TUI");
-  }
-  if (hello.protocol !== PROTOCOL) {
-    child.kill();
-    throw mismatch(`protocol ${hello.protocol} on the bench, ${PROTOCOL} here`);
+    throw e;
   }
   booted = true;
   return { backend, hello, exited, stderr: () => tail };

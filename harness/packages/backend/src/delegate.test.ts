@@ -7,7 +7,7 @@ import type { DelegateDeps } from "./delegate.ts";
 import type { SessionHandle, SessionOpts } from "./index.ts";
 import { addTask, readTasks } from "./tasks.ts";
 
-const caller = { model: { provider: "p", id: "m" }, tools: [] } as unknown as SessionOpts;
+const caller = { initial: { model: { provider: "p", id: "m" } }, tools: [] } as unknown as SessionOpts;
 const asks = mkdtempSync(join(tmpdir(), "kl-asks-"));
 const D = (o: Partial<DelegateDeps> = {}): DelegateDeps => ({
   live: new Map(),
@@ -122,14 +122,14 @@ test("the ask file exists while pending and is gone before delivery", async () =
   main.prompt = async () => void (atDeliver = readdirSync(dir).length);
   let atOpen = -1;
   const open = async (k: string) => (k === "main" ? main : (atOpen = readdirSync(dir).length, ws));
-  await dispatchAsk(D({ asks: dir, open }), { id: "a1", callerKey: "main", key: "w", text: "q", tries: 0, model: caller.model });
+  await dispatchAsk(D({ asks: dir, open }), { id: "a1", callerKey: "main", key: "w", text: "q", tries: 0, model: caller.initial!.model });
   expect(atOpen).toBe(1);
   expect(atDeliver).toBe(0);
 });
 
 test("resumeAsks resends a fresh ask with a prefix and tries+1; the third restart reports the loss", async () => {
   const dir = mkdtempSync(join(tmpdir(), "kl-asks-"));
-  const base = { callerKey: "main", key: "w", model: caller.model };
+  const base = { callerKey: "main", key: "w", model: caller.initial!.model };
   writeFileSync(join(dir, "a.json"), JSON.stringify({ ...base, id: "a", text: "q", tries: 0 }));
   writeFileSync(join(dir, "b.json"), JSON.stringify({ ...base, id: "b", text: "z", tries: 2 }));
   const ws = fake("r");
@@ -198,7 +198,7 @@ test("an ask whose session calls main_tell done delivers one message, and the ne
       (ws as any).emit({ type: "agent_end", messages: [] });
     });
   };
-  const ask = { id: "a", callerKey: "main", key: "w", text: "q", tries: 0, model: caller.model };
+  const ask = { id: "a", callerKey: "main", key: "w", text: "q", tries: 0, model: caller.initial!.model };
   await dispatchAsk(deps, ask);
   await flush();
   expect(main.sent).toEqual(["prompt:[from w] done: shipped"]);
@@ -224,7 +224,7 @@ test("main_tell need does not suppress the final answer", async () => {
       (ws as any).emit({ type: "agent_end", messages: [] });
     });
   };
-  await dispatchAsk(deps, { id: "a", callerKey: "main", key: "w", text: "q", tries: 0, model: caller.model });
+  await dispatchAsk(deps, { id: "a", callerKey: "main", key: "w", text: "q", tries: 0, model: caller.initial!.model });
   await flush();
   expect(main.sent[0]).toBe("prompt:[from w] need: a fact");
   expect(main.sent[1]).toContain("[from w] final");

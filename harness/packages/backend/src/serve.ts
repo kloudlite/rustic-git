@@ -8,7 +8,7 @@ import { Peer } from "./wire.ts";
 
 const METHODS = new Set([
   "prompt", "steer", "followUp", "clearQueue", "btw", "abort",
-  "setModel", "setThinkingLevel", "setAutoCompactionEnabled",
+  "setModel", "setThinkingLevel", "setAutoCompactionEnabled", "setCodemode",
 ]);
 
 export function serve(backend: Backend, peer: Peer) {
@@ -31,7 +31,7 @@ export function serve(backend: Backend, peer: Peer) {
     });
     open.set(key, h);
     h.subscribe((event) => peer.emit("session", key, event));
-    return { messages: h.messages, isClaude: h.isClaude, busy: h.busy };
+    return { messages: h.messages, isClaude: h.isClaude, busy: h.busy, state: h.state };
   });
 
   peer.handle("session.call", async ({ key, method, args }: { key: string; method: string; args: unknown[] }) => {

@@ -785,11 +785,13 @@ export function App({
     const created = (opts?.after ?? Promise.resolve())
       .then(() =>
         backend().session(key, {
-          model: opts?.model ?? getSession(sessions, key).model,
+          initial: {
+            model: opts?.model ?? getSession(sessions, key).model,
+            thinkingLevel: prefs.thinkingLevel,
+            autoCompact: prefs.autoCompact === "on",
+            codemode: opts?.codemode ?? prefs.codemode === "on",
+          },
           fresh: opts?.fresh,
-          thinkingLevel: prefs.thinkingLevel,
-          autoCompact: prefs.autoCompact === "on",
-          codemode: opts?.codemode ?? prefs.codemode === "on",
           // the question tool is registered once for every session; bind it to this key
           tools: tuiTools.map((t) => (t.name === "question" ? { ...t, run: (i: any) => askQuestion(key, i) } : t)),
           permission: (req, signal) => gate(key, req, signal),

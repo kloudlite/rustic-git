@@ -18,7 +18,7 @@ function fakeBackend() {
     sessions: {},
     fs: {},
     podfs: {},
-    hello: async () => ({ protocol: 1, cwd: "/home/kl", tools: [] }),
+    hello: async () => ({ protocol: 2, cwd: "/home/kl", tools: [] }),
     session: async (key: string) => ({
       messages: [],
       isClaude: false,
@@ -40,7 +40,7 @@ test("a relay carries hello to the daemon and exits 0 when stdin ends", async ()
   child.stdin.write('{"id":1,"op":"hello","args":null}\n');
   child.stdin.flush();
   const line = new TextDecoder().decode((await child.stdout[Symbol.asyncIterator]().next()).value);
-  expect(JSON.parse(line).value.protocol).toBe(1);
+  expect(JSON.parse(line).value.protocol).toBe(2);
   child.stdin.end();
   expect(await child.exited).toBe(0);
   server.close();
@@ -50,8 +50,8 @@ test("two relays at once both get hello", async () => {
   const s = sock();
   const server = await host(fakeBackend().b, s);
   const [a, b] = await Promise.all([client(s), client(s)]);
-  expect(a.hello.protocol).toBe(1);
-  expect(b.hello.protocol).toBe(1);
+  expect(a.hello.protocol).toBe(2);
+  expect(b.hello.protocol).toBe(2);
   server.close();
 });
 
@@ -109,7 +109,7 @@ test("the TCP listener speaks the same wire as host.sock", async () => {
   const server = await listenTcp(fakeBackend().b, 0, "127.0.0.1");
   const port = (server.address() as any).port;
   const c = tcpClient(port);
-  expect((await c.backend.hello()).protocol).toBe(1);
+  expect((await c.backend.hello()).protocol).toBe(2);
   c.close();
   server.close();
 });
@@ -118,7 +118,7 @@ test("a TCP client leaving disposes its views", async () => {
   const { b, disposed } = fakeBackend();
   const server = await listenTcp(b, 0, "127.0.0.1");
   const c = tcpClient((server.address() as any).port);
-  await c.backend.session("main", { model: { provider: "x", id: "y" }, tools: [] });
+  await c.backend.session("main", { initial: { model: { provider: "x", id: "y" } }, tools: [] });
   c.close();
   await new Promise((r) => setTimeout(r, 50));
   expect(disposed).toEqual(["main"]);
