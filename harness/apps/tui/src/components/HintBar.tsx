@@ -28,7 +28,7 @@ export function HintBar({
   /** Narrow terminal: show only the essential hints so the row can't wrap. */
   compact: boolean;
   /** Hints are clickable: the id matches the key they stand for. */
-  onHint?: (id: "type" | "jump" | "files" | "jobs" | "commands" | "help" | "queue") => void;
+  onHint?: (id: "type" | "jump" | "files" | "jobs" | "plan" | "done" | "commands" | "help" | "queue") => void;
 }) {
   const click = (id: Parameters<NonNullable<typeof onHint>>[0]) =>
     onHint ? () => onHint(id) : undefined;
@@ -44,7 +44,7 @@ export function HintBar({
         {queued > 0 && (
           <box onMouseDown={click("queue")}>
             <text selectable={false} fg={theme.warning}>
-              {queued} queued <span attributes={TextAttributes.DIM}>q edit</span>
+              {queued} queued <span attributes={TextAttributes.DIM}>↑ edit</span>
             </text>
           </box>
         )}
@@ -64,6 +64,8 @@ export function HintBar({
             {!compact && <text selectable={false} fg={theme.fg}>j k <span fg={theme.muted}>workspaces</span></text>}
             {!compact && <box onMouseDown={click("jump")}><text selectable={false} fg={theme.fg}>p <span fg={theme.muted}>jump</span></text></box>}
             {inWorkspace && <box onMouseDown={click("files")}><text selectable={false} fg={theme.fg}>f <span fg={theme.muted}>files</span></text></box>}
+            <box onMouseDown={click("plan")}><text selectable={false} fg={theme.fg}>^g <span fg={theme.muted}>plan</span></text></box>
+            {!compact && <box onMouseDown={click("done")}><text selectable={false} fg={theme.fg}>^q <span fg={theme.muted}>done</span></text></box>}
             <box onMouseDown={click("jobs")}><text selectable={false} fg={theme.fg}>^j <span fg={theme.muted}>jobs</span></text></box>
             <box onMouseDown={click("commands")}><text selectable={false} fg={theme.fg}>/ <span fg={theme.muted}>commands</span></text></box>
             <box onMouseDown={click("help")}><text selectable={false} fg={theme.fg}>? <span fg={theme.muted}>help</span></text></box>
@@ -78,6 +80,8 @@ export function HintBar({
             <text selectable={false} fg={theme.fg}>enter <span fg={theme.muted}>send</span></text>
             {!compact && <box onMouseDown={click("jump")}><text selectable={false} fg={theme.fg}>^p <span fg={theme.muted}>jump</span></text></box>}
             {inWorkspace && <box onMouseDown={click("files")}><text selectable={false} fg={theme.fg}>^f <span fg={theme.muted}>files</span></text></box>}
+            <box onMouseDown={click("plan")}><text selectable={false} fg={theme.fg}>^g <span fg={theme.muted}>plan</span></text></box>
+            {!compact && <box onMouseDown={click("done")}><text selectable={false} fg={theme.fg}>^q <span fg={theme.muted}>done</span></text></box>}
             <box onMouseDown={click("jobs")}><text selectable={false} fg={theme.fg}>^j <span fg={theme.muted}>jobs</span></text></box>
             <box onMouseDown={click("commands")}><text selectable={false} fg={theme.fg}>/ <span fg={theme.muted}>commands</span></text></box>
           </>

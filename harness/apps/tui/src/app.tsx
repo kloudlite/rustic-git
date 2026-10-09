@@ -9,8 +9,10 @@ import { Transcript, type Entry } from "./components/Transcript.tsx";
 import { foldRetries, foldRetry } from "./retry.ts";
 import { Prompt } from "./components/Prompt.tsx";
 import { Sidebar } from "./components/Sidebar.tsx";
-import { Work } from "./components/Work.tsx";
-import { workRows } from "./tasks.ts";
+import { Plan } from "./components/Plan.tsx";
+import { PlanScreen } from "./components/PlanScreen.tsx";
+import { DoneScreen } from "./components/DoneScreen.tsx";
+import { doneTasks, planRows } from "./tasks.ts";
 import { HintBar } from "./components/HintBar.tsx";
 import { Files } from "./components/Files.tsx";
 import { Processes, isCtrlJ } from "./components/Processes.tsx";
@@ -93,7 +95,7 @@ function ago(at: number): string {
  * What the session column shows. The title bar names the current context on
  * the left and lists these on the right — click one (or press f) to open it.
  */
-type ViewId = "agent" | "files" | "processes";
+type ViewId = "agent" | "files" | "processes" | "plan" | "done";
 const WIDE_COLUMNS = 120;
 
 /**
@@ -410,6 +412,16 @@ export function App({
    */
   const recall = (dir: -1 | 1) => {
     if (palette || cmdMode) return false;
+    // inside queue editing the arrows walk the queue
+    if (queuePick !== null) {
+      setQueuePick(Math.max(0, Math.min(session.queued.length - 1, queuePick + dir)));
+      return true;
+    }
+    // ↑ on an empty prompt with something queued edits the queue; history recall otherwise
+    if (dir === -1 && input === "" && histIdx === null && session.queued.length > 0) {
+      setQueuePick(session.queued.length - 1);
+      return true;
+    }
     const h = session.history;
     if (h.length === 0) return false;
     if (dir === -1) {
@@ -428,7 +440,7 @@ export function App({
   useKeyboard((key) => {
     if (key.ctrl && key.name === "c") return exit();
     // a full-column view owns the keyboard while it is up
-    if (login || shownAsk || filesView || processesView) return;
+    if (login || shownAsk || filesView || processesView || planView || doneView) return;
     if (btw && btw.key === activeKey && key.name === "escape") {
       btwN.current++; // ponytail: no cancel; a late answer is just dropped
       setBtw(null);
@@ -486,10 +498,6 @@ export function App({
           return true;
         }
       }
-      if (name === "q") {
-        setQueuePick(session.queued.length > 0 && queuePick === null ? 0 : null);
-        return true;
-      }
       if (name === "f") {
         cycleView();
         return true;
@@ -542,6 +550,10 @@ export function App({
 
     // ^j is the Jobs screen in both key schemes (vim's bare j still walks the workspaces)
     if (isCtrlJ(key) && !menuOpen) return setView((v) => (v === "processes" ? "agent" : "processes"));
+
+    // ^g the whole plan, ^q the finished tasks: both key schemes
+    if (key.ctrl && !key.meta && !menuOpen && (key.name === "g" || key.name === "q"))
+      return setView((v) => (v === (key.name === "g" ? "plan" : "done") ? "agent" : key.name === "g" ? "plan" : "done"));
 
     // ---- vim off: ctrl+<letter> commands, everything else types ----
     if (prefs.vim === "off" && key.ctrl && !key.meta && !menuOpen) {
@@ -877,13 +889,15 @@ export function App({
         "  i           type a prompt        /    commands",
         "  j k         workspace ring       p    jump: env · session · ws",
         "  f · ^j      files · jobs screen   r    (in files) rescan",
+        "  ^g · ^q     the plan · finished tasks",
         "  1-9 · 0     workspace N · main   p    jump anywhere",
         "  esc         interrupt the agent  ?    this help",
         "  u d         scroll",
         "",
         "Typing (INSERT mode)",
         "  enter       send                 shift+enter · \\+enter  new line",
-        "  up / down   prompt history       esc  clear + back to NORMAL",
+        "  up / down   prompt history (up on an empty prompt edits the queue)",
+        "              esc  clear + back to NORMAL",
       ].join("\n"),
       options: [{ id: "close", label: "Close" }],
       escapeId: "close",
@@ -1217,6 +1231,17 @@ export function App({
   }, [palette, cmdMode, jumpMatches, input, menuCtx]);
   const filesView = view === "files" && focus > 0;
   const processesView = view === "processes";
+  const planView = view === "plan";
+  const doneView = view === "done";
+  // the plan: boards per session, in this session's words (main sees all, a workspace only itself)
+  const nameOf = (key: string) => workspaces.find((w) => w.id === key)?.name ?? key;
+  const stateOf = (key: string) => {
+    const i = workspaces.findIndex((w) => w.id === key);
+    if (i < 0) return "";
+    const w = workspaces[i]!;
+    return asks.some((a) => baseOf(a.key) === key) ? "needs you" : getSession(sessions, key).busy || watched?.some((m) => baseOf(m.key) === key && m.busy) ? "working" : w.status === "stopped" ? "" : "idle";
+  };
+  const planAll = (max: number) => planRows(space?.boards ?? [], space?.messages ?? [], nameOf, activeBase, Date.now(), stateOf, max);
   // main's Jobs screen: every workspace's processes, ids prefixed so two workspaces' "p1" stay apart
   const allJobs = workspaces
     .filter((w) => w.processes?.length)
@@ -1293,6 +1318,10 @@ export function App({
               groups={focus === 0 ? allJobs : undefined}
               onClose={() => setView("agent")}
             />
+          ) : planView ? (
+            <PlanScreen rows={planAll(Infinity)} width={contentWidth} onClose={() => setView("agent")} />
+          ) : doneView ? (
+            <DoneScreen tasks={doneTasks(space?.boards ?? [], nameOf, activeBase)} main={focus === 0} onClose={() => setView("agent")} />
           ) : filesView ? (
             <Files
               root={hello().cwd}
@@ -1315,6 +1344,8 @@ export function App({
             />
             <Transcript
               width={contentWidth}
+              names={nameOf}
+              to={focus === 0 ? "main" : workspaces[focus - 1]!.name}
               keys={
                 modalOpen
                   ? "off"
@@ -1333,12 +1364,9 @@ export function App({
           )}
           {/* prompt block, opencode structure: card + strip + footer row stack
               tight; question/permission panels replace the whole block */}
-          {!filesView && !processesView && (
+          {!filesView && !processesView && !planView && !doneView && (
           <box flexDirection="column" flexShrink={0}>
-          <Work
-            rows={workRows(space?.boards?.find((b) => b.session === activeBase)?.tasks ?? [])}
-            width={contentWidth}
-          />
+          <Plan rows={planAll(10)} width={contentWidth} />
           <Queue
             messages={session.queued}
             selected={queuePick}
@@ -1437,6 +1465,8 @@ export function App({
               }
               if (id === "files") return focus > 0 ? setView("files") : undefined;
               if (id === "jobs") return setView("processes");
+              if (id === "plan") return setView("plan");
+              if (id === "done") return setView("done");
               if (id === "commands") return openCmd();
               if (id === "help") return openHelp();
               if (id === "queue") {

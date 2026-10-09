@@ -6,7 +6,7 @@ import type { QueuedMessage } from "../sessions.ts";
 
 /**
  * Messages waiting to be delivered to the running agent, newest last. Shown
- * above the prompt while a turn streams; `q` selects one to edit, `d` drops
+ * above the prompt while a turn streams; ↑ on an empty prompt selects one to edit, `d` drops
  * it. A steering message interrupts the turn, a follow-up waits for it.
  */
 export function Queue({
