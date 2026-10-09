@@ -37,6 +37,7 @@ import { homedir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { query as sdkQuery, type Options, type SDKUserMessage } from "@anthropic-ai/claude-agent-sdk";
+import { BTW_SYSTEM, btwPrompt } from "./btw.ts";
 import { TOOL_PREFIX, toClaudeEntries } from "./claude-history.ts";
 import { createToolServer, declaredTools } from "./claude-tools.ts";
 
@@ -125,7 +126,7 @@ export function claudeSignedIn(refresh = false): Promise<boolean> {
 
 type Listener = (event: any) => void;
 type Image = { type: "image"; data: string; mimeType: string };
-type QueryFn = (p: { prompt: AsyncIterable<SDKUserMessage>; options?: Options }) => AsyncIterable<any> & {
+type QueryFn = (p: { prompt: AsyncIterable<SDKUserMessage> | string; options?: Options }) => AsyncIterable<any> & {
   interrupt(): Promise<unknown>;
   setModel(model?: string): Promise<void>;
   applyFlagSettings(s: any): Promise<void>;
@@ -761,6 +762,33 @@ export function createClaudeSession(opts: ClaudeOptions) {
       if (!running && !steering.length) return send(x.text, x.images);
       steering.push(x);
       queueUpdate();
+    },
+    /** Side question: a separate one-shot query. Never touches `q`, `input`, `emit`, `record`, the
+     * listeners or pi's record, so nothing it says is saved. */
+    async btw(question: string): Promise<string> {
+      const prompt = `${BTW_SYSTEM}\n\n${btwPrompt(piSession.agent.state.messages, question, 200_000)}`;
+      const options: Options = {
+        systemPrompt: { type: "preset", preset: "claude_code" }, // billing: same reason as start()
+        tools: [],
+        settingSources: [],
+        maxTurns: 1,
+        persistSession: false,
+        cwd: opts.cwd ?? process.cwd(),
+        model,
+        env: claudeEnv(),
+        ...(thinkingOff ? { thinking: { type: "disabled" as const } } : {}),
+      };
+      const auth = (t: string) => (/log ?in|authenticat|credential|401/i.test(t) ? AUTH_MESSAGE : t);
+      try {
+        for await (const m of run({ prompt, options })) {
+          if (m.type !== "result") continue;
+          if (m.subtype === "success" && !m.is_error) return String(m.result ?? "").trim() || "(no answer)";
+          throw new Error(String(m.errors?.join?.("; ") || m.result || m.subtype || "request failed"));
+        }
+      } catch (err) {
+        throw new Error(auth(String((err as Error)?.message ?? err)));
+      }
+      return "(no answer)";
     },
     /** Held here until the turn ends, then sent as its own prompt. */
     async followUp(text: string, images?: Image[]) {

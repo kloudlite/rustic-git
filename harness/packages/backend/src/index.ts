@@ -126,6 +126,8 @@ export type SessionHandle = {
   steer(text: string, images?: Image[]): Promise<void>;
   followUp(text: string, images?: Image[]): Promise<void>;
   clearQueue(): Promise<void>;
+  /** Side question answered from the conversation so far; never recorded anywhere. */
+  btw(question: string): Promise<string>;
   abort(): Promise<void>;
   dispose(): Promise<void>;
   setModel(ref: ModelRef): Promise<void>;
