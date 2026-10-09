@@ -170,6 +170,8 @@ export function Sidebar({
               ? "working"
               : w.status === "cloning"
                 ? w.progress ?? "cloning"
+                : jobs(w)
+                ? jobs(w)
                 : !mine
                   ? w.owner
                   : "";
@@ -252,4 +254,11 @@ export function Sidebar({
       </box>}
     </box>
   );
+}
+
+/** "2 jobs" when a workspace runs background processes: the panel is two `f`s deep, and nothing
+ * else on the sidebar said there was anything there to open. */
+function jobs(w: { processes?: { status: string }[] }): string {
+  const n = w.processes?.filter((p) => p.status === "running").length ?? 0;
+  return n === 0 ? "" : n === 1 ? "1 job" : `${n} jobs`;
 }

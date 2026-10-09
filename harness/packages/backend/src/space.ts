@@ -24,8 +24,23 @@ const cursors = new Map<string, { next: number; next_err: number; lines: Line[];
 
 type Line = { text: string; err?: true };
 
+/** Every tree's processes, each stamped with its tree. `process_list` answers only the tree it
+ * is asked about (a subagent never sees main's, nor main a subagent's), so asking with no tree hid
+ * every process a subagent started. The tree names are `/healthz`'s `graphs` keys: a tree the
+ * server has served, which any tree that started a process has been. */
 async function processes(ws: string): Promise<SpaceProcess[]> {
-  const { processes } = await podPost<{ processes: Omit<SpaceProcess, "logs">[] }>(ws, "process_list", {}, POD_CAP_MS);
+  const h = await capped(podGet<{ graphs?: Record<string, unknown> }>(ws, "/healthz", POD_CAP_MS));
+  const trees = [...new Set(["main", ...Object.keys(h?.graphs ?? {})])];
+  const lists = await Promise.all(
+    trees.map(async (tree) => {
+      // main's failure is the pod's and fails the read (the field is left out); a subagent tree
+      // that went away since `/healthz` is just empty
+      const list = podPost<{ processes: Omit<SpaceProcess, "logs">[] }>(ws, "process_list", { tree }, POD_CAP_MS);
+      const r = tree === "main" ? await list : await capped(list);
+      return (r?.processes ?? []).map((p) => ({ ...p, tree }));
+    }),
+  );
+  const processes = lists.flat();
   const live = new Set(processes.map((p) => `${ws}/${p.id}`));
   for (const k of cursors.keys()) if (k.startsWith(`${ws}/`) && !live.has(k)) cursors.delete(k);
   return Promise.all(
@@ -35,7 +50,7 @@ async function processes(ws: string): Promise<SpaceProcess[]> {
       if (!c.done) {
         const o = await capped(
           podPost<{ stdout?: string; stderr?: string; next?: number; next_err?: number }>(
-            ws, "process_output", { id: p.id, since: c.next, since_err: c.next_err }, POD_CAP_MS,
+            ws, "process_output", { tree: p.tree, id: p.id, since: c.next, since_err: c.next_err }, POD_CAP_MS,
           ),
         );
         if (o) {

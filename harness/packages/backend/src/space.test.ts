@@ -139,3 +139,32 @@ test("a failing list call is unavailable, with the API's text and no token", asy
   expect(v.available).toBe(false);
   expect(v.error).toBe("error 403: forbidden");
 });
+
+test("a subagent tree's process is listed with its tree, and its logs are read from that tree", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "kl-space-"));
+  writeFileSync(join(dir, "tok"), "SECRET-TOKEN\n");
+  Object.assign(process.env, { KL_API_URL: "http://api", KL_TOOL_TOKEN_FILE: join(dir, "tok"), KL_OWNER: "me", KL_TEAM: "acme", KL_BENCH: "bench" });
+  const json = (v: unknown) => new Response(JSON.stringify(v));
+  const outputs: any[] = [];
+  globalThis.fetch = (async (u: any, init: any) => {
+    const url = String(u);
+    if (url.startsWith("http://api/v1/workspaces?")) return json([{ id: "wc", name: "cur", owner: "me", state: "ready" }]);
+    if (url.startsWith("http://api/v1/environments")) return json([]);
+    if (url.endsWith("/v1/me/environments")) return json([]);
+    if (url.endsWith("/v1/workspaces/wc/tools")) return json({ address: "10.0.0.2:7788", token: "T" });
+    if (url.endsWith("/healthz")) return json({ graphs: { main: "ready", x: "ready" } });
+    if (url.endsWith("/tools/process_list")) {
+      const body = JSON.parse(init.body);
+      return json({ processes: body.tree === "x" ? [{ id: "px", cmd: "go run .", state: "running", exit_code: null, failed: false }] : [] });
+    }
+    if (url.endsWith("/tools/process_output")) {
+      outputs.push(JSON.parse(init.body));
+      return json({ stdout: "up\n", stderr: "", next: 3, next_err: 0 });
+    }
+    return json({ error: "nope" });
+  }) as any;
+  const s = await new LocalBackend().space();
+  const p = s.workspaces[0]!.processes![0]!;
+  expect(p.tree).toBe("x");
+  expect(outputs[0]).toMatchObject({ id: "px", tree: "x" });
+});
