@@ -103,6 +103,8 @@ export function Processes({
   };
 
   useKeyboard((key) => {
+    // ^f is the cycle key when vim is off (app.tsx command()); the app's own handler is parked while this view is up
+    if (key.ctrl && key.name === "f" && !key.meta) return onCycle();
     if (key.ctrl || key.meta || key.option) return;
     if (typing) {
       if (key.name === "escape") {

@@ -814,3 +814,19 @@ test("a /btw answer that arrives after esc is dropped; an error shows in the pan
     expect(await t.frame()).toContain("no model");
   });
 });
+
+test("with vim off, ^f cycles files, then processes, then back to the chat", async () => {
+  const t = await mount({ vim: "off" });
+  t.mockInput.pressKey("k", { ctrl: true });
+  await t.frame();
+  t.mockInput.pressKey("f", { ctrl: true });
+  expect(await t.frame()).toContain("CHANGES");
+  t.mockInput.pressKey("f", { ctrl: true });
+  const proc = await t.frame();
+  expect(proc).toContain("no processes");
+  t.mockInput.pressKey("f", { ctrl: true });
+  const chat = await t.frame();
+  expect(chat).not.toContain("no processes");
+  expect(chat).not.toContain("CHANGES");
+  t.done();
+});
