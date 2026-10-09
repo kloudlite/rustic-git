@@ -274,7 +274,7 @@ pub async fn fast(c: &mut Ctx) {
     }
     c.step("bench.tunnel", TUNNEL_CEILING, |c| {
         async move {
-            // The tunnel now carries raw bytes to sshd (`BENCH_PORT`), not an HTTP API: its own
+            // The tunnel carries raw bytes to sshd, not an HTTP API: its own
             // protocol banner is the only thing to check from this end.
             let mut child = forward(c).await?;
             let mut out = child.stdout.take().ok_or_else(|| anyhow!("no stdout"))?;

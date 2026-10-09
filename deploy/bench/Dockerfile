@@ -1,4 +1,4 @@
-# The bench image: the graphcode TUI (under bun), ttyd and sshd, all supervised by runit
+# The bench image: the graphcode TUI (under bun), ttyd and the kl-host daemon, all supervised by runit
 # (pid 1 is `runsvdir`, see `bench/sv/*/run`), plus the `sessions` node service, the pod's
 # idle/readiness probe only. Built by
 # .github/workflows/image.yml, context ".", same as the root Dockerfile's stages, so it can reach
@@ -9,10 +9,10 @@
 FROM node:24-bookworm-slim
 
 # ca-certificates: the TUI and `kl` both talk TLS. runit: the pid-1 supervisor (R2/R3) —
-# a crash in ttyd/sshd/sessions restarts in place, no second pod phase to fall back to.
-# openssh-server: `sshd`, each login runs the graphcode TUI via `ForceCommand` in bench/sshd_config.
+# a crash in ttyd/kl-host/sessions restarts in place, no second pod phase to fall back to.
+# No sshd: the bench is reached over websocket/https only (gateway /tui/ and the term front door).
 RUN apt-get update && apt-get install -y --no-install-recommends \
-    ca-certificates runit openssh-server \
+    ca-certificates runit \
     && rm -rf /var/lib/apt/lists/*
 
 # ttyd: the browser terminal, one graphcode TUI per connection. No Debian release packages it
@@ -27,8 +27,8 @@ COPY --from=oven/bun:1.3.14@sha256:e10577f0db68676a7024391c6e5cb4b879ebd17188ab7
 COPY harness /opt/kl/harness
 RUN cd /opt/kl/harness && bun install --frozen-lockfile
 # Claude Code's own binary, bundled by the Agent SDK (glibc build; this base is bookworm). The
-# harness resolves it by package, and `claude auth login` over ssh (bench/term/login-shell) needs
-# it on PATH. Bun nests packages under .bun/, hence the find; the test fails the build loudly.
+# harness resolves it by package, and the daemon's Claude sign-in
+# (claudelogin.ts) runs it from PATH. Bun nests packages under .bun/, hence the find; the test fails the build loudly.
 RUN f=$(find /opt/kl/harness/node_modules -path '*claude-agent-sdk-linux-x64/claude' -type f | head -n1) \
     && ln -s "$f" /usr/local/bin/claude && test -x /usr/local/bin/claude
 
@@ -46,7 +46,7 @@ COPY bench/sessions /opt/kl/sessions
 # The browser terminal's front door (image paste from the person's clipboard, see main.ts) and the
 # `xclip` stand-in the TUI reads that image through.
 COPY bench/term /opt/kl/term
-RUN install -m 0755 /opt/kl/term/xclip /usr/local/bin/xclip && chmod 0755 /opt/kl/term/login-shell
+RUN install -m 0755 /opt/kl/term/xclip /usr/local/bin/xclip
 
 # runit service directories: each `run` script is `exec`'d last, so runit supervises the real
 # process directly (no wrapper pid to lose signals through). Owned by kl: runsv runs as uid 1000
@@ -54,16 +54,13 @@ RUN install -m 0755 /opt/kl/term/xclip /usr/local/bin/xclip && chmod 0755 /opt/k
 COPY --chown=1000:1000 bench/sv /etc/kl/sv
 RUN chmod 0755 /etc/kl/sv/*/run
 
-COPY bench/sshd_config /etc/kl/
-
 # TMPDIR: a private dir under the shared /tmp emptyDir, made by bench/sv/sessions/run.
 ENV TMPDIR=/tmp/kl
 
 # node:24-bookworm-slim ships uid/gid 1000 as `node`; rename rather than useradd a second uid 1000
 # (plan R3). Home is the workspace volume (2026-09-22 ruling): /home/kl IS the mounted volume.
-# No `tty` group: sshd runs as kl, and OpenSSH (sshpty.c pty_setowner) fatals when it cannot chown a
-# new pty to that group, dropping every `ssh -t` session right after auth. Without the group it
-# wants kl:kl 0600, which the pty already is.
+# No `tty` group: a pty opened by a non-root process cannot be chowned to that group, and without
+# the group it wants kl:kl 0600, which the pty already is (ttyd's ptys).
 RUN usermod -l kl -d /home/kl node && groupmod -n kl node && groupdel tty \
     && mkdir -p /home/kl && chown kl:kl /home/kl
 

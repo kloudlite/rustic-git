@@ -192,9 +192,9 @@ ssh to the bench goes:
 - `kl-connect bench-proxy` loses its plain (sshd) mode; `--tui` stays as the only behaviour (the
   flag is kept so the pipe argv does not change).
 - `kl-tui` loses `--ssh`; `--pipe` is the only transport.
-- The bench image loses sshd: `bench/sshd_config`, `bench/sv/sshd/`, `bench/sv/kl-host/`,
+- The bench image loses sshd: `bench/sshd_config`, `bench/sv/sshd/`,
   `bench/term/login-shell`, the `openssh-server` package and `BENCH_PORT` (pod port, gateway
-  NetworkPolicy port, `Gateway.bench_port`). The gateway's `/tunnel/{ws}` refuses a bench ticket
+  NetworkPolicy port, `Gateway.bench_port`). `bench/sv/kl-host/` is the daemon's runner and stays. The gateway's `/tunnel/{ws}` refuses a bench ticket
   (401, as `/tui/` refuses a workspace ticket).
 - **Claude login moves onto the wire.** `kl-connect claude login` ran `claude auth login` over
   `ssh -t`. It becomes a login option in the TUI's `/login` ("Claude (subscription)"): the daemon

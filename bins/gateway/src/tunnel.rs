@@ -3,8 +3,8 @@
 //! Everything the gateway decides happens BEFORE the upgrade, so a refusal is a plain HTTP status
 //! the CLI can print. After `101` the gateway is a pipe: it holds no credential, reads no ssh
 //! frame, and cannot open a session of its own — sshd still wants the user's key. A bench is a
-//! second target of the same pipe: same claims-then-resolve-then-dial shape, a different token
-//! type and a different port.
+//! second target of the same pipe, on `/tui/` only (it has no sshd): same
+//! claims-then-resolve-then-dial shape, a different token type and a different port.
 
 use crate::resolve::{resolve, resolve_bench};
 use axum::extract::ws::{Message, WebSocket, WebSocketUpgrade};
@@ -37,8 +37,6 @@ pub struct Gateway {
     pub kube: kube::Client,
     /// 22 everywhere real; a test points it at a local echo listener.
     pub ssh_port: u16,
-    /// `BENCH_PORT` everywhere real; a test points it at a local echo listener.
-    pub bench_port: u16,
     /// `BENCH_TERM_PORT` everywhere real; a test points it at a fake ttyd.
     pub term_port: u16,
     /// `BENCH_TUI_PORT` everywhere real; a test points it at a local echo listener.
@@ -62,13 +60,12 @@ pub struct Gateway {
 }
 
 impl Gateway {
-    pub fn new(jwt: Jwt, region: String, kube: kube::Client, ssh_port: u16, bench_port: u16, term_port: u16, tui_port: u16) -> Gateway {
+    pub fn new(jwt: Jwt, region: String, kube: kube::Client, ssh_port: u16, term_port: u16, tui_port: u16) -> Gateway {
         Gateway {
             jwt,
             region,
             kube,
             ssh_port,
-            bench_port,
             term_port,
             tui_port,
             used: Mutex::new(HashMap::new()),
@@ -240,7 +237,9 @@ async fn connect(gw: Arc<Gateway>, ws: String, headers: HeaderMap, upgrade: WebS
             Err(_) => return StatusCode::UNAUTHORIZED.into_response(),
         },
     };
-    if tui && matches!(ticket, Ticket::Workspace(_)) {
+    // The bench has no sshd: its doors are /tui/ (kl-tui) and ttyd, so a bench ticket on /tunnel/
+    // and a workspace ticket on /tui/ are both refused.
+    if tui != matches!(ticket, Ticket::Bench(_)) {
         return StatusCode::UNAUTHORIZED.into_response();
     }
     // A token names ONE object in ONE region. The region check is what stops a token minted
@@ -253,7 +252,7 @@ async fn connect(gw: Arc<Gateway>, ws: String, headers: HeaderMap, upgrade: WebS
     };
     let target = match &ticket {
         Ticket::Workspace(_) => resolve(&gw.kube, &ws, gw.ssh_port).await,
-        Ticket::Bench(_) => resolve_bench(&gw.kube, &ws, if tui { gw.tui_port } else { gw.bench_port }).await,
+        Ticket::Bench(_) => resolve_bench(&gw.kube, &ws, gw.tui_port).await,
     };
     let target = match target {
         Ok(t) => t,
@@ -387,7 +386,7 @@ mod tests {
 
     fn gw() -> Arc<Gateway> {
         let (client, _) = kloudlite_workspaces::kube_test::mock_client(vec![]);
-        Arc::new(Gateway::new(Jwt::new("0123456789abcdef0123456789abcdef").unwrap(), "r".into(), client, 22, 7789, 7681, 7791))
+        Arc::new(Gateway::new(Jwt::new("0123456789abcdef0123456789abcdef").unwrap(), "r".into(), client, 22, 7681, 7791))
     }
 
     fn count(map: &Mutex<HashMap<String, usize>>, key: &str) -> usize {

@@ -1,5 +1,5 @@
-//! `kl-connect` — the kloudlite laptop CLI: log in once, then ssh into a bench (`kl-connect [team]`)
-//! or a workspace through the region gateway.
+//! `kl-connect` — the kloudlite laptop CLI: log in once, then open a bench (`kl-connect [team]`, the
+//! laptop kl-tui over websocket) or ssh into a workspace through the region gateway.
 //!
 //! Hidden env vars, for tests and the e2e script only:
 //!   KL_CONFIG_DIR       where config.json and known_hosts live (default ~/.config/kl-connect)
@@ -8,7 +8,6 @@
 mod api;
 mod bench;
 mod builder;
-mod clip;
 mod config;
 mod login;
 mod proxy;
@@ -39,9 +38,6 @@ struct Cli {
     /// Only used for an unbound personal bench's first `--start` (a team's region is the team's).
     #[arg(long)]
     region: Option<String>,
-    /// Run the TUI on the bench instead of on this laptop (slower to type in; for when kl-tui misbehaves).
-    #[arg(long)]
-    remote_tui: bool,
 }
 
 #[derive(Subcommand)]
@@ -63,26 +59,12 @@ enum Cmd {
         #[command(subcommand)]
         cmd: BuilderCmd,
     },
-    /// Claude Code on the bench
-    Claude {
-        #[command(subcommand)]
-        cmd: ClaudeCmd,
-    },
-    /// ssh's ProxyCommand for `kl-connect [team]`: pump stdio to the bench's gateway tunnel
+    /// kl-tui's pipe for `kl-connect [team]`: pump stdio to the bench daemon through the gateway
     #[command(hide = true)]
     BenchProxy {
-        /// Pump to the bench daemon's TUI port instead of sshd (the laptop kl-tui's direct path)
+        /// Accepted for the argv kl-tui is started with; the TUI door is the only one
         #[arg(long)]
         tui: bool,
-        team: Option<String>,
-    },
-}
-
-#[derive(Subcommand)]
-enum ClaudeCmd {
-    /// Sign this bench's Claude Code in to your Anthropic account
-    Login {
-        #[arg(long)]
         team: Option<String>,
     },
 }
@@ -129,7 +111,7 @@ async fn main() {
     let _ = rustls::crypto::ring::default_provider().install_default();
     let cli = Cli::parse();
     let r = match &cli.cmd {
-        None => bench::bench(cli.team.as_deref(), cli.start, cli.region.as_deref(), cli.remote_tui).await,
+        None => bench::bench(cli.team.as_deref(), cli.start, cli.region.as_deref()).await,
         Some(cmd) => run(cmd).await,
     };
     if let Err(e) = r {
@@ -152,7 +134,6 @@ async fn run(cmd: &Cmd) -> Result<(), String> {
         Cmd::Builder { cmd } => match cmd {
             BuilderCmd::Status { team } => builder::status(team.as_deref()).await,
         },
-        Cmd::Claude { cmd: ClaudeCmd::Login { team } } => bench::claude_login(team.as_deref()).await,
-        Cmd::BenchProxy { team, tui } => bench::proxy(team.as_deref(), *tui).await,
+        Cmd::BenchProxy { team, tui: _ } => bench::proxy(team.as_deref()).await,
     }
 }

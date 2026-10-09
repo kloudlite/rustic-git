@@ -59,7 +59,6 @@ async fn main() {
         region,
         kube,
         22,
-        kloudlite_workspaces::k8s::BENCH_PORT,
         kloudlite_workspaces::k8s::BENCH_TERM_PORT,
         kloudlite_workspaces::k8s::BENCH_TUI_PORT,
     ));

@@ -1,7 +1,7 @@
 #!/usr/bin/env bun
-// kl-tui: the TUI on the laptop, the agent on the bench. `kl-tui --ssh <ssh argv...>` or
-// `kl-tui --pipe <command...>` (kl-connect's wss pipe); kl-connect builds the argv and
-// treats exit 3 (old bench, protocol mismatch) as "run the remote TUI".
+// kl-tui: the TUI on the laptop, the agent on the bench. `kl-tui --pipe <command...>`
+// (kl-connect's wss pipe to the bench daemon); kl-connect builds the argv and reports exit 3
+// (protocol mismatch) as "update kl-connect and kl-tui".
 import { writeSync } from "node:fs";
 import { connect } from "@kloudlite-tui/backend";
 import { boot } from "./hello.ts";
@@ -10,7 +10,7 @@ import { start } from "./start.tsx";
 
 const cmd = pipeArgv(process.argv);
 if (!cmd) {
-  process.stderr.write("usage: kl-tui --ssh <ssh arguments...> | --pipe <command...>\n");
+  process.stderr.write("usage: kl-tui --pipe <command...>\n");
   process.exit(2);
 }
 let c: Awaited<ReturnType<typeof connect>>;
@@ -29,7 +29,7 @@ const done = () => {
   if (process.stderr.isTTY) writeSync(2, "\x1b[?1049l");
   const tail = c.stderr();
   if (tail) writeSync(2, tail);
-  // neither ssh nor the pipe says anything when the bench goes away, so a bare exit 1 would explain nothing
+  // the pipe says nothing when the bench goes away, so a bare exit 1 would explain nothing
   else if (lost) writeSync(2, "kl-tui: lost the bench connection\n");
 };
 process.on("exit", done);

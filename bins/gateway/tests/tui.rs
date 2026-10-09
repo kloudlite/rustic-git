@@ -43,7 +43,7 @@ async fn serve(tui: u16) -> std::net::SocketAddr {
     let pod = serde_json::json!({ "apiVersion": "v1", "kind": "Pod",
         "metadata": { "name": "bench", "namespace": "ws-alice" }, "status": { "podIP": "127.0.0.1" } });
     let (client, _) = mock_client(vec![get(BENCH_PATH, bench), get(BENCH_POD, pod)]);
-    let gw = Arc::new(Gateway::new(jwt(), REGION.into(), client, 1, 1, 1, tui));
+    let gw = Arc::new(Gateway::new(jwt(), REGION.into(), client, 1, 1, tui));
     let l = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = l.local_addr().unwrap();
     tokio::spawn(async move { axum::serve(l, kloudlite_gateway::tunnel::app(gw)).await.unwrap() });

@@ -1,8 +1,8 @@
 //! `kl-connect [team]` — straight into a bench: your own with no argument, a team's by its name.
-//! ssh reaches the bench through `kl-connect bench-proxy [team]` as its ProxyCommand, so there is
-//! no local port and no `127.0.0.1`: each ssh gets one proxy child, one session token (one
-//! `bench_session` call, single-use, valid 60 s) and one tunnel. The token never appears in
-//! output, same rule as `proxy.rs`.
+//! It runs the laptop `kl-tui` over `kl-connect bench-proxy --tui [team]`: one session token (one
+//! `bench_session` call, single-use, valid 60 s) and one websocket to the gateway's `/tui/{bench}`
+//! per connection. The bench has no sshd. The token never appears in output, same rule as
+//! `proxy.rs`.
 
 use std::time::Duration;
 use tokio::io::{AsyncRead, AsyncWrite};
@@ -12,37 +12,14 @@ use crate::config::Config;
 
 pub const BENCH_START_WAIT: Duration = Duration::from_secs(90);
 
-/// How `kl-connect bench` reaches the bench, tried in order; exit 3 from one means "not this way"
-/// (an old bench, a refused upgrade, a protocol mismatch) and moves to the next.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum Mode {
-    /// laptop kl-tui over `bench-proxy --tui`: wss end to end, no ssh
-    Direct,
-    /// laptop kl-tui over ssh to `kl-host` (the clipboard forward rides along)
-    LaptopSsh,
-    /// the TUI runs on the bench, over `ssh -t`
-    RemoteSsh,
-}
-
-/// Direct only on request until the gateway hostnames are Cloudflare Full (strict) with the Origin
-/// CA certificate: before that, the edge-to-node hop is plain HTTP and a prompt would cross it in
-/// clear. Flipping the default is a separate change once that is live.
-fn modes(direct: bool, laptop: bool) -> Vec<Mode> {
-    match (direct, laptop) {
-        (true, true) => vec![Mode::Direct, Mode::LaptopSsh, Mode::RemoteSsh],
-        (false, true) => vec![Mode::LaptopSsh, Mode::RemoteSsh],
-        (_, false) => vec![Mode::RemoteSsh],
-    }
-}
-
 /// `region` is the `--region` flag: it only matters for an unbound personal bench (its first use
 /// binds the region), so it is sent to `create_bench` only when `team` is absent or names the
 /// caller's own handle — a team's region is the team's, not this laptop's flag.
-pub async fn bench(team: Option<&str>, start: bool, region: Option<&str>, remote_tui: bool) -> Result<(), String> {
+pub async fn bench(team: Option<&str>, start: bool, region: Option<&str>) -> Result<(), String> {
     let cfg = crate::config::load()?;
-    // The team lands in ssh's argv and in a /bin/sh-parsed ProxyCommand.
+    // The team lands in the proxy's argv.
     if let Some(t) = team.filter(|t| !crate::sshconfig::safe_name(t)) {
-        return Err(format!("team {t:?} cannot be passed to ssh"));
+        return Err(format!("team {t:?} is not a valid team name"));
     }
     if start {
         let personal = team.is_none_or(|t| t == cfg.username);
@@ -51,72 +28,45 @@ pub async fn bench(team: Option<&str>, start: bool, region: Option<&str>, remote
             .map_err(|e| e.to_string())?;
     }
     let me = std::env::current_exe().map_err(|e| e.to_string())?;
-    let known_hosts = crate::config::dir().join("bench_known_hosts");
-    let owner = team.unwrap_or(&cfg.username);
-    // Ctrl+V on the bench reads THIS laptop's clipboard (clip.rs): a local socket, forwarded by
-    // ssh. Spawned, not exec'd as before, because this process now serves that socket while ssh
-    // runs. pid-named and short: macOS caps a socket path at 104 bytes.
-    let local = crate::config::dir().join(format!("clip-{}.sock", std::process::id()));
-    let listener = crate::clip::listen(&local).map_err(|e| format!("clipboard socket {}: {e}", local.display()))?;
-    let clip = tokio::spawn(crate::clip::serve(listener));
-    let remote_clip = crate::clip::remote_path();
-    let fwd = Some((remote_clip.as_path(), local.as_path()));
-    let laptop = if remote_tui { None } else { kl_tui_beside(&me) };
-    let direct = std::env::var("KL_DIRECT").as_deref() == Ok("1");
-    let mut st: std::io::Result<std::process::ExitStatus> = Err(std::io::Error::other("no mode"));
-    let mut ssh_ran = false;
-    // 3 = not this way (the bench predates the laptop TUI, a refused upgrade, another protocol):
-    // try the next mode.
-    for (n, mode) in modes(direct, laptop.is_some()).into_iter().enumerate() {
-        if n > 0 {
-            restore_terminal(true);
-        }
-        st = match (mode, &laptop) {
-            (Mode::Direct, Some(tui)) => {
-                let mut args = vec!["--pipe".to_string(), me.display().to_string(), "bench-proxy".into(), "--tui".into()];
-                args.extend(team.map(str::to_string));
-                tokio::process::Command::new(tui).args(args).status().await
-            }
-            (Mode::LaptopSsh, Some(tui)) => {
-                let mut args = vec!["--ssh".to_string()];
-                args.extend(ssh_argv(&me, &known_hosts, owner, team, fwd, Some("kl-host"), false));
-                tokio::process::Command::new(tui).args(args).status().await
-            }
-            _ => {
-                ssh_ran = true;
-                tokio::process::Command::new("ssh")
-                    .args(ssh_argv(&me, &known_hosts, owner, team, fwd, None, true))
-                    .status()
-                    .await
-            }
-        };
-        if !matches!(&st, Ok(s) if s.code() == Some(3)) {
-            break;
-        }
-    }
-    let fallback = ssh_ran;
-    clip.abort();
-    let _ = std::fs::remove_file(&local);
+    let tui = kl_tui_beside(&me)?;
+    let st = tokio::process::Command::new(&tui)
+        .args(tui_argv(&me, team))
+        .status()
+        .await;
     // kl-tui that exited (not killed) left the alternate screen itself and printed why below it; a
     // second `?1049l` restores the cursor saved at alt-screen entry and the prompt overwrites that
     // reason (seen in tmux, 2026-10-09). Piping its stderr instead stopped it drawing at all.
-    restore_terminal(fallback || !matches!(&st, Ok(s) if s.code().is_some()));
-    let st = st.map_err(|e| format!("running ssh: {e}"))?;
+    restore_terminal(!matches!(&st, Ok(s) if s.code().is_some()));
+    let st = st.map_err(|e| format!("running {}: {e}", tui.display()))?;
+    // exit 3 = protocol mismatch between this kl-tui and the bench: report it, never retry another way
+    if st.code() == Some(3) {
+        return Err("kl-tui and the bench speak different protocols: update kl-connect and kl-tui".into());
+    }
     std::process::exit(st.code().unwrap_or(1));
 }
 
-/// The laptop TUI ships beside kl-connect (same release, same install dir); `None` means run the
-/// TUI on the bench as before.
-fn kl_tui_beside(me: &std::path::Path) -> Option<std::path::PathBuf> {
-    let p = me.with_file_name("kl-tui");
-    p.is_file().then_some(p)
+/// What kl-tui is started with: it dials the bench by running `kl-connect bench-proxy --tui` as its pipe.
+fn tui_argv(me: &std::path::Path, team: Option<&str>) -> Vec<String> {
+    let mut v = vec!["--pipe".to_string(), me.display().to_string(), "bench-proxy".into(), "--tui".into()];
+    v.extend(team.map(str::to_string));
+    v
 }
 
-/// Undo the modes the bench TUI switches on. A dropped connection kills it before its own cleanup
-/// runs, and ssh restores only the tty's line discipline, so the laptop shell was left in the
-/// alternate screen with modifyOtherKeys on (Ctrl+L arriving as `[27;5;108~`). Each sequence is a
-/// no-op when its mode is already off, so this runs after every session, clean or not.
-/// `alt_screen: false` leaves the screen to a kl-tui that exited on its own (see the caller).
+/// The laptop TUI ships beside kl-connect (same release, same install dir).
+fn kl_tui_beside(me: &std::path::Path) -> Result<std::path::PathBuf, String> {
+    let p = me.with_file_name("kl-tui");
+    if p.is_file() {
+        Ok(p)
+    } else {
+        Err(format!("{} not found: kl-tui must be installed beside kl-connect", p.display()))
+    }
+}
+
+/// Undo the modes kl-tui switches on. A killed kl-tui never runs its own cleanup, so the laptop
+/// shell was left in the alternate screen with modifyOtherKeys on (Ctrl+L arriving as
+/// `[27;5;108~`). Each sequence is a no-op when its mode is already off, so this runs after every
+/// session, clean or not. `alt_screen: false` leaves the screen to a kl-tui that exited on its own
+/// (see the caller).
 fn restore_terminal(alt_screen: bool) {
     use std::io::{IsTerminal, Write};
     let mut out = std::io::stdout();
@@ -133,102 +83,17 @@ fn restore_terminal(alt_screen: bool) {
     let _ = out.flush();
 }
 
-/// The ssh argv for the bench: `-t` when the remote runs the TUI itself (its ForceCommand needs a
-/// pty); the laptop TUI's `kl-host` speaks frames on plain pipes, so it gets none. `HostKeyAlias` pins the key per bench
-/// owner (the name ssh dials is never resolved: the ProxyCommand carries the bytes).
-/// `LogLevel=ERROR` drops the one first-contact "Permanently added" line; a changed key is still
-/// an error and still shown. The exe path is double-quoted, as in `ws.rs`: it can hold spaces.
-/// `-R` forwards the bench-side `remote` socket to the clipboard server at `local`, and `SetEnv`
-/// tells the bench's xclip shim where it is (sshd `AcceptEnv KL_CLIP`). A refused forward is not
-/// fatal (ssh's default `ExitOnForwardFailure no`): the session runs, pastes find no image.
-fn ssh_argv(
-    me: &std::path::Path,
-    known_hosts: &std::path::Path,
-    owner: &str,
-    team: Option<&str>,
-    clip: Option<(&std::path::Path, &std::path::Path)>,
-    command: Option<&str>,
-    tty: bool,
-) -> Vec<String> {
-    let proxy = match team {
-        Some(t) => format!("ProxyCommand=\"{}\" bench-proxy {t}", me.display()),
-        None => format!("ProxyCommand=\"{}\" bench-proxy", me.display()),
-    };
-    let mut v = vec![
-        "-o".to_string(),
-        "StrictHostKeyChecking=accept-new".to_string(),
-        "-o".to_string(),
-        format!("UserKnownHostsFile={}", known_hosts.display()),
-        "-o".to_string(),
-        format!("HostKeyAlias=kl-bench-{owner}"),
-        "-o".to_string(),
-        "LogLevel=ERROR".to_string(),
-        // a dead bench (pod gone, tunnel cut) sends no FIN: without probes kl-tui froze silently
-        // forever. 3 missed 15 s probes end ssh, and kl-tui reports the lost connection.
-        "-o".to_string(),
-        "ServerAliveInterval=15".to_string(),
-        "-o".to_string(),
-        "ServerAliveCountMax=3".to_string(),
-        "-o".to_string(),
-        proxy,
-    ];
-    if let Some((remote, local)) = clip {
-        v.extend([
-            "-R".to_string(),
-            format!("{}:{}", remote.display(), local.display()),
-            "-o".to_string(),
-            format!("SetEnv=KL_CLIP={}", remote.display()),
-        ]);
-    }
-    if tty {
-        v.push("-t".to_string());
-    }
-    v.push(format!("kl@bench-{owner}"));
-    // The bench's ForceCommand (bench/term/login-shell) allow-lists this word.
-    v.extend(command.map(String::from));
-    v
-}
-
-/// `kl-connect claude login`: the bench's Claude Code signs in over the same ssh path as the TUI,
-/// minus the clipboard forward (nothing to paste an image into). The bench is started first, as
-/// `--start` does, so a sleeping one wakes before ssh dials it.
-pub async fn claude_login(team: Option<&str>) -> Result<(), String> {
+/// `kl-connect bench-proxy [team]`: the pipe the laptop kl-tui runs (`kl-tui --pipe ...`), stdio
+/// pumped to the bench daemon's TUI port through the gateway's `/tui/{bench}`.
+pub async fn proxy(team: Option<&str>) -> Result<(), String> {
     let cfg = crate::config::load()?;
-    if let Some(t) = team.filter(|t| !crate::sshconfig::safe_name(t)) {
-        return Err(format!("team {t:?} cannot be passed to ssh"));
-    }
-    // No --region here: the region flag belongs to `kl-connect --start`, so personal or team alike
-    // sends none.
-    api::create_bench(&cfg, team, None)
-        .await
-        .map_err(|e| e.to_string())?;
-    let me = std::env::current_exe().map_err(|e| e.to_string())?;
-    let known_hosts = crate::config::dir().join("bench_known_hosts");
-    let owner = team.unwrap_or(&cfg.username);
-    println!(
-        "Signing in Claude Code on bench-{owner}. Open the URL it prints, sign in, paste the code back here."
-    );
-    let st = tokio::process::Command::new("ssh")
-        .args(ssh_argv(&me, &known_hosts, owner, team, None, Some("claude-login"), true))
-        .status()
-        .await;
-    restore_terminal(true);
-    let st = st.map_err(|e| format!("running ssh: {e}"))?;
-    std::process::exit(st.code().unwrap_or(1));
-}
-
-/// `kl-connect bench-proxy [--tui] [team]`. Plain: ssh's ProxyCommand, stdio pumped to the bench's
-/// sshd. `--tui`: the pipe the laptop kl-tui runs (`kl-tui --pipe ...`), stdio pumped to the bench
-/// daemon's TUI port through the gateway's `/tui/{bench}`, no ssh anywhere.
-pub async fn proxy(team: Option<&str>, tui: bool) -> Result<(), String> {
-    let cfg = crate::config::load()?;
-    serve(&cfg, team, tokio::io::stdin(), tokio::io::stdout(), tui).await
+    serve(&cfg, team, tokio::io::stdin(), tokio::io::stdout()).await
 }
 
 /// One connection's lifetime: wait for the bench to be `Ready` (re-asking every 1 s while it
-/// answers `Waking`; the state goes to stderr, which ssh shows), then dial its tunnel and pump.
+/// answers `Waking`; the state goes to stderr, which kl-tui shows), then dial its TUI door and pump.
 /// `r` is never read before the pump starts — bytes written while the bench slept still arrive.
-async fn serve<R, W>(cfg: &Config, team: Option<&str>, r: R, w: W, tui: bool) -> Result<(), String>
+async fn serve<R, W>(cfg: &Config, team: Option<&str>, r: R, w: W) -> Result<(), String>
 where
     R: AsyncRead + Unpin + Send + 'static,
     W: AsyncWrite + Unpin,
@@ -255,10 +120,10 @@ where
     };
     wait.stop(true).await;
     // The api hands out the /tunnel URL; the TUI door is the same gateway, same token, next route.
-    let gateway = if tui { session.gateway.replacen("/tunnel/", "/tui/", 1) } else { session.gateway.clone() };
+    let gateway = session.gateway.replacen("/tunnel/", "/tui/", 1);
     let url = crate::proxy::gateway_url(&gateway);
     let ws = crate::proxy::connect(&url, &session.token).await?;
-    crate::proxy::pump_io(ws, r, w, tui.then_some(Duration::from_secs(15))).await
+    crate::proxy::pump_io(ws, r, w, Some(Duration::from_secs(15))).await
 }
 
 /// The wait on stderr, which ssh hands straight to the terminal (it is not in raw mode until the
@@ -339,6 +204,7 @@ fn capitalise(s: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::path::Path;
     use axum::extract::ws::{Message as AxMessage, WebSocketUpgrade};
     use axum::extract::State;
     use axum::response::IntoResponse;
@@ -367,13 +233,13 @@ mod tests {
         }
     }
 
-    /// What ssh's end of the ProxyCommand pipe sees: one in-memory stream, its other half driven
+    /// What kl-tui's end of the pipe sees: one in-memory stream, its other half driven
     /// by `serve` the way `proxy` drives stdin/stdout.
     fn connection(cfg: Config) -> tokio::io::DuplexStream {
         let (ours, theirs) = tokio::io::duplex(64 * 1024);
         let (r, w) = tokio::io::split(theirs);
         tokio::spawn(async move {
-            if let Err(e) = serve(&cfg, None, r, w, false).await {
+            if let Err(e) = serve(&cfg, None, r, w).await {
                 panic!("serve: {e}");
             }
         });
@@ -399,83 +265,25 @@ mod tests {
     }
 
     #[test]
-    fn ssh_argv_matches_the_bench_ssh_invocation() {
-        let me = std::path::Path::new("/opt/kl connect/kl-connect");
-        let kh = std::path::Path::new("/home/k/.config/kl-connect/bench_known_hosts");
-        let remote = std::path::Path::new("/tmp/kl-clip-1.sock");
-        let local = std::path::Path::new("/home/k/.config/kl-connect/clip-1.sock");
-        let tail = |owner: &str, proxy: &str| {
-            vec![
-                "-o".to_string(),
-                "StrictHostKeyChecking=accept-new".to_string(),
-                "-o".to_string(),
-                "UserKnownHostsFile=/home/k/.config/kl-connect/bench_known_hosts".to_string(),
-                "-o".to_string(),
-                format!("HostKeyAlias=kl-bench-{owner}"),
-                "-o".to_string(),
-                "LogLevel=ERROR".to_string(),
-                "-o".to_string(),
-                "ServerAliveInterval=15".to_string(),
-                "-o".to_string(),
-                "ServerAliveCountMax=3".to_string(),
-                "-o".to_string(),
-                proxy.to_string(),
-                "-R".to_string(),
-                "/tmp/kl-clip-1.sock:/home/k/.config/kl-connect/clip-1.sock".to_string(),
-                "-o".to_string(),
-                "SetEnv=KL_CLIP=/tmp/kl-clip-1.sock".to_string(),
-                "-t".to_string(),
-                format!("kl@bench-{owner}"),
-            ]
-        };
-        assert_eq!(
-            ssh_argv(me, kh, "k", None, Some((remote, local)), None, true),
-            tail("k", "ProxyCommand=\"/opt/kl connect/kl-connect\" bench-proxy")
-        );
-        assert_eq!(
-            ssh_argv(me, kh, "acme", Some("acme"), Some((remote, local)), None, true),
-            tail("acme", "ProxyCommand=\"/opt/kl connect/kl-connect\" bench-proxy acme")
-        );
-    }
-
-    #[test]
-    fn login_argv_has_no_clipboard_forward_and_ends_with_the_command() {
-        let me = std::path::Path::new("/bin/kl-connect");
-        let kh = std::path::Path::new("/k/known");
-        let a = ssh_argv(me, kh, "acme", Some("acme"), None, Some("claude-login"), true);
-        assert!(!a.iter().any(|x| x == "-R" || x.starts_with("SetEnv")));
-        assert!(a.contains(&"-t".to_string()));
-        assert_eq!(a[a.len() - 2..], ["kl@bench-acme", "claude-login"]);
-    }
-
-    #[test]
-    fn ssh_argv_tty_is_optional() {
-        let p = std::path::Path::new("/x/kl-connect");
-        let k = std::path::Path::new("/x/kh");
-        let with = ssh_argv(p, k, "me", None, None, None, true);
-        let without = ssh_argv(p, k, "me", None, None, Some("kl-host"), false);
-        assert!(with.contains(&"-t".to_string()));
-        assert!(!without.contains(&"-t".to_string()));
-        assert_eq!(without.last().unwrap(), "kl-host");
-    }
-
-    #[test]
     fn kl_tui_found_beside_the_exe() {
         let dir = tempfile::tempdir().unwrap();
         let me = dir.path().join("kl-connect");
         std::fs::write(&me, b"").unwrap();
-        assert!(kl_tui_beside(&me).is_none());
+        assert!(kl_tui_beside(&me).is_err());
         std::fs::write(dir.path().join("kl-tui"), b"").unwrap();
-        assert_eq!(kl_tui_beside(&me), Some(dir.path().join("kl-tui")));
+        assert_eq!(kl_tui_beside(&me), Ok(dir.path().join("kl-tui")));
     }
 
     #[test]
-    fn modes_try_direct_only_when_asked_and_the_laptop_tui_exists() {
-        use Mode::*;
-        assert_eq!(modes(true, true), [Direct, LaptopSsh, RemoteSsh]);
-        assert_eq!(modes(false, true), [LaptopSsh, RemoteSsh]);
-        assert_eq!(modes(true, false), [RemoteSsh]);
-        assert_eq!(modes(false, false), [RemoteSsh]);
+    fn the_bench_runs_kl_tui_over_the_pipe() {
+        let argv = tui_argv(Path::new("/opt/kl/kl-connect"), Some("team-a"));
+        assert_eq!(argv, ["--pipe", "/opt/kl/kl-connect", "bench-proxy", "--tui", "team-a"]);
+    }
+
+    #[test]
+    fn a_missing_kl_tui_names_the_path() {
+        let err = kl_tui_beside(Path::new("/nowhere/kl-connect")).unwrap_err();
+        assert!(err.contains("/nowhere/kl-tui"), "{err}");
     }
 
     /// Mock api (one Ready session) plus `gw` as the gateway, env pointed at both.
@@ -510,7 +318,7 @@ mod tests {
         let (cfg, _g, _d) = harness(gw).await;
         let (_a, b) = tokio::io::duplex(64);
         let (r, w) = tokio::io::split(b);
-        serve(&cfg, None, r, w, true).await.unwrap();
+        serve(&cfg, None, r, w).await.unwrap();
         std::env::remove_var("KL_GATEWAY_OVERRIDE");
         assert_eq!(*hits.lock().unwrap(), ["tui"]);
     }
@@ -520,7 +328,7 @@ mod tests {
         let (cfg, _g, _d) = harness(Router::new()).await; // every gateway path 404s
         let (_a, b) = tokio::io::duplex(64);
         let (r, w) = tokio::io::split(b);
-        let err = serve(&cfg, None, r, w, true).await.unwrap_err();
+        let err = serve(&cfg, None, r, w).await.unwrap_err();
         std::env::remove_var("KL_GATEWAY_OVERRIDE");
         assert!(err.contains("404"), "{err}");
     }
@@ -532,7 +340,7 @@ mod tests {
         let counter = Arc::new(AtomicUsize::new(0));
         let app = Router::new()
             .route("/v1/bench/session", post(session_handler_ok))
-            .route("/tunnel/bench-1", get(tunnel_handler))
+            .route("/tui/bench-1", get(tunnel_handler))
             .with_state(counter.clone());
         let app_listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let app_port = app_listener.local_addr().unwrap().port();
@@ -600,7 +408,7 @@ mod tests {
 
         let app = Router::new()
             .route("/v1/bench/session", post(waking_then_ready))
-            .route("/tunnel/bench-1", get(tunnel_counting))
+            .route("/tui/bench-1", get(tunnel_counting))
             .with_state((counter.clone(), upgrades.clone()));
         let app_listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let app_port = app_listener.local_addr().unwrap().port();

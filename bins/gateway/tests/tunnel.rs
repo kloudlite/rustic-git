@@ -84,12 +84,8 @@ async fn echo_on(port: u16) -> u16 {
 
 /// The gateway serving on a free port; returns its base ws:// URL.
 async fn serve(routes: Vec<Route>, ssh_port: u16) -> String {
-    serve_with(routes, ssh_port, 0).await
-}
-
-async fn serve_with(routes: Vec<Route>, ssh_port: u16, bench_port: u16) -> String {
     let (client, _) = mock_client(routes);
-    let gw = Arc::new(Gateway::new(Jwt::new(SECRET).unwrap(), REGION.into(), client, ssh_port, bench_port, 0, 0));
+    let gw = Arc::new(Gateway::new(Jwt::new(SECRET).unwrap(), REGION.into(), client, ssh_port, 0, 0));
     let l = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = l.local_addr().unwrap();
     tokio::spawn(async move { axum::serve(l, kloudlite_gateway::tunnel::app(gw)).await.unwrap() });
@@ -271,44 +267,20 @@ async fn failed_dials_do_not_use_up_the_limit() {
 }
 
 #[tokio::test]
-async fn a_bench_token_opens_a_tunnel_to_the_bench_port() {
-    use futures::{SinkExt, StreamExt};
+async fn a_bench_ticket_on_the_tunnel_is_refused() {
+    // the bench has no sshd: its only doors are /tui/ (kl-tui) and ttyd
     let port = echo().await;
-    let base = serve_with(
+    let base = serve(
         vec![get(BENCH, bench("ready", Some("ws-alice/bench"))), get(BENCH_POD, pod(Some("127.0.0.1")))],
-        22,
         port,
     )
     .await;
-
-    let tok = bench_token("bench-1", REGION);
-    let mut sock = connect(&base, "bench-1", &tok).await.expect("upgrade");
-    sock.send(tungstenite::Message::binary(b"ping".to_vec())).await.unwrap();
-    let back = sock.next().await.unwrap().unwrap();
-    assert_eq!(back.into_data(), b"ping".as_slice());
-}
-
-/// A bench pod runs the same sshd as any other workspace pod, so an SSH ticket naming a bench
-/// reaches it — at the SSH port. What stays separate is the ticket kinds: this one is resolved on
-/// the ssh path, and the bench port (`bench_port` below) is never dialled with it.
-#[tokio::test]
-async fn an_ssh_token_on_a_bench_reaches_its_sshd_and_not_the_bench_port() {
-    use futures::{SinkExt, StreamExt};
-    let port = echo().await;
-    let base = serve_with(
-        vec![get(BENCH, bench("ready", Some("ws-alice/bench"))), get(BENCH_POD, pod(Some("127.0.0.1")))],
-        port,
-        // Nothing listens here: a connection to the bench port would fail the round trip below.
-        1,
-    )
-    .await;
-    let mut sock = connect(&base, "bench-1", &token("bench-1", REGION)).await.expect("upgrade");
-    sock.send(tungstenite::Message::binary(b"ping".to_vec())).await.unwrap();
-    assert_eq!(sock.next().await.unwrap().unwrap().into_data(), b"ping".as_slice());
+    let res = connect(&base, "bench-1", &bench_token("bench-1", REGION)).await;
+    assert_eq!(res.err(), Some(401));
 }
 
 #[tokio::test]
 async fn a_bench_token_for_another_region_is_refused() {
-    let base = serve_with(vec![], 22, 22).await;
+    let base = serve(vec![], 22).await;
     assert_eq!(connect(&base, "bench-1", &bench_token("bench-1", "westeurope-k3s")).await.err(), Some(401));
 }

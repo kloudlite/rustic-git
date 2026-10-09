@@ -7,11 +7,12 @@
 //! the home, 2026-09-22), so it is snapshotted, replicated and pushed with the workspace.
 //!
 //! The image runs `runsvdir` as pid 1 (R2/R3 of the 2026-10-05 bench plan, same shape as the
-//! workspace image's own `prelude`), supervising four runit services under `/etc/kl/sv`: the
-//! `ttyd` behind the `term` front door, each browser connection its own graphcode TUI, `sshd` (its
-//! host key persists at `~/.ssh-host`, each login its own TUI via `ForceCommand`) and the `sessions` node service, an
-//! idle/readiness probe: a loopback-only HTTP server on `127.0.0.1:8917` that sshd (`BENCH_PORT`) and ttyd (`BENCH_TERM_PORT`) and the daemon's TUI listener (`BENCH_TUI_PORT`) sit beside, not
-//! on. A crash in any one is restarted by runit in place — there is no second pod phase to fall
+//! workspace image's own `prelude`), supervising runit services under `/etc/kl/sv`: the
+//! `ttyd` behind the `term` front door, each browser connection its own graphcode TUI, the
+//! `kl-host` daemon and the `sessions` node service, an
+//! idle/readiness probe: a loopback-only HTTP server on `127.0.0.1:8917` that ttyd
+//! (`BENCH_TERM_PORT`) and the daemon's TUI listener (`BENCH_TUI_PORT`) sit beside, not
+//! on. There is no sshd: the bench is reached over websocket/https only. A crash in any one is restarted by runit in place — there is no second pod phase to fall
 //! back to.
 //!
 //! The pod's `restartPolicy` is the workspace's `Always`, so the idle/locked channel is per
@@ -22,8 +23,7 @@
 use super::*;
 use k8s_openapi::api::core::v1::{EnvVarSource, ExecAction, ObjectFieldSelector};
 
-pub const BENCH_PORT: u16 = 7789;
-/// ttyd's own port — a second gateway hole beside `BENCH_PORT`, same pod.
+/// ttyd's own port, a gateway hole beside `BENCH_TUI_PORT`, same pod.
 pub const BENCH_TERM_PORT: u16 = 7681;
 /// The bench daemon's TUI listener (`harness/packages/backend/src/daemon.ts` `listenTcp`): the
 /// laptop kl-tui reaches it through the gateway's `/tui/{bench}` route with no ssh in the path.
@@ -43,7 +43,7 @@ pub const BENCH_SUBDIR: &str = ".bench";
 
 
 /// The `sessions` container of a bench workspace's pod: `runsvdir` as pid 1, supervising the
-/// graphcode TUI (one per login), ttyd, sshd and the node `sessions` service (see module docs).
+/// graphcode TUI (one per connection), ttyd, the daemon and the node `sessions` service (see module docs).
 ///
 /// `resources` is `model::bench_container_resources()` and NEVER `spec.resources`: that field
 /// sizes the `workspace` container the person works in, and a bench that shrank because somebody
@@ -110,7 +110,6 @@ pub fn bench_container(
         command: Some(vec!["runsvdir".to_string(), "/etc/kl/sv".to_string()]),
         env: Some(env),
         ports: Some(vec![
-            ContainerPort { container_port: BENCH_PORT as i32, name: Some("ssh".into()), ..Default::default() },
             ContainerPort { container_port: BENCH_TERM_PORT as i32, name: Some("ttyd".into()), ..Default::default() },
             ContainerPort { container_port: BENCH_TUI_PORT as i32, name: Some("tui".into()), ..Default::default() },
         ]),
@@ -121,9 +120,6 @@ pub fn bench_container(
             VolumeMount { name: "live".to_string(), mount_path: HOME_DIR.to_string(), ..Default::default() },
             VolumeMount { name: "user-key".to_string(), mount_path: USER_KEY_PATH.to_string(), read_only: Some(true), ..Default::default() },
             VolumeMount { name: "bench-tool".to_string(), mount_path: BENCH_TOOL_PATH.to_string(), read_only: Some(true), ..Default::default() },
-            // `sshd`'s login must authenticate the same way an ordinary workspace does: the
-            // owner's own key, projected by the agent from `OwnerKeys` (see `k8s/attach.rs`).
-            VolumeMount { name: "authorized-keys".into(), mount_path: AUTHORIZED_KEYS_PATH.into(), read_only: Some(true), ..Default::default() },
             VolumeMount { name: "tmp".to_string(), mount_path: "/tmp".to_string(), ..Default::default() },
             // The same `/etc/resolv.conf` the workspace container mounts: the bench runs the
             // person's tools, so it must resolve an attached environment's services by bare name
@@ -167,7 +163,7 @@ pub fn bench_container(
 }
 
 
-/// The gateway's hole to `BENCH_PORT`, one per namespace, selecting the pair's bench pod by both
+/// The gateway's holes to ttyd and the daemon's TUI port, one per namespace, selecting the pair's bench pod by both
 /// its id and `kind=bench` — a namespace holds the person's ordinary workspaces too, and none of
 /// them listens here.
 // ponytail: AKS runs no network policy engine; the fence holds on the k3s regions where benches run
@@ -188,7 +184,6 @@ pub fn allow_gateway_bench(namespace: &str, id: &str) -> NetworkPolicy {
                         "podSelector": { "matchLabels": { "app": "kloudlite-gateway" } },
                     }],
                     "ports": [
-                        { "protocol": "TCP", "port": BENCH_PORT as i32 },
                         { "protocol": "TCP", "port": BENCH_TERM_PORT as i32 },
                         { "protocol": "TCP", "port": BENCH_TUI_PORT as i32 },
                     ],

@@ -284,7 +284,7 @@ export class Kloudlite {
       .withEnvVariable("DO_NOT_TRACK", "1")
   }
 
-  // deploy/bench/Dockerfile: the graphcode TUI (run under bun), ttyd and sshd, supervised by
+  // deploy/bench/Dockerfile: the graphcode TUI (run under bun), ttyd and the kl-host daemon, supervised by
   // runit, plus the `sessions` node service (idle/readiness probe only). The TUI's deps install in
   // their own stage so a rebuild with harness/ unchanged is a cache hit.
   private imageBench(source: Directory, built: Container): Container {
@@ -298,7 +298,7 @@ export class Kloudlite {
       .container()
       .from("node:24-bookworm-slim")
       .withExec(["sh", "-c",
-        "apt-get update && apt-get install -y --no-install-recommends ca-certificates curl runit openssh-server " +
+        "apt-get update && apt-get install -y --no-install-recommends ca-certificates curl runit " +
         "&& rm -rf /var/lib/apt/lists/*"])
       // ttyd: no Debian release packages it, so the upstream static build, pinned by digest.
       .withExec(["sh", "-c",
@@ -307,7 +307,7 @@ export class Kloudlite {
         "&& chmod 0755 /usr/local/bin/ttyd"])
       .withFile("/usr/local/bin/bun", dag.container().from(BUN_IMAGE).file("/usr/local/bin/bun"), { permissions: 0o755 })
       .withDirectory("/opt/kl/harness", harness.directory("/opt/kl/harness"))
-      // `claude` on PATH for `claude auth login` over ssh (bench/term/login-shell), same as
+      // `claude` on PATH for the daemon's Claude sign-in (claudelogin.ts), same as
       // deploy/bench/Dockerfile: the SDK's bundled binary, and the build fails if it moved.
       .withExec(["sh", "-c",
         "f=$(find /opt/kl/harness/node_modules -path '*claude-agent-sdk-linux-x64/claude' -type f | head -n1) " +
@@ -317,11 +317,10 @@ export class Kloudlite {
       .withDirectory("/opt/kl/term", source.directory("bench/term"))
       .withExec(["install", "-m", "0755", "/opt/kl/term/xclip", "/usr/local/bin/xclip"])
       .withDirectory("/etc/kl/sv", source.directory("bench/sv"), { owner: "1000:1000" })
-      .withExec(["chmod", "0755", "/etc/kl/sv/sessions/run", "/etc/kl/sv/sshd/run", "/etc/kl/sv/kl-host/run", "/etc/kl/sv/ttyd/run", "/etc/kl/sv/term/run"])
-      .withFile("/etc/kl/sshd_config", source.file("bench/sshd_config"))
+      .withExec(["chmod", "0755", "/etc/kl/sv/sessions/run", "/etc/kl/sv/kl-host/run", "/etc/kl/sv/ttyd/run", "/etc/kl/sv/term/run"])
       // Private TMPDIR, same as deploy/bench/Dockerfile.
       .withEnvVariable("TMPDIR", "/tmp/kl")
-      // `groupdel tty`: see deploy/bench/Dockerfile (sshd as kl cannot chown a pty to `tty`).
+      // `groupdel tty`: see deploy/bench/Dockerfile (ttyd's ptys as kl).
       .withExec(["sh", "-c",
         "usermod -l kl -d /home/kl node && groupmod -n kl node && groupdel tty " +
         "&& mkdir -p /home/kl && chown kl:kl /home/kl"])

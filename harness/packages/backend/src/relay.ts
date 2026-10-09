@@ -1,4 +1,4 @@
-//! What sshd's `kl-host` runs (bench/term/login-shell) and what the pod's TUI spawns: a dumb pipe
+//! What the pod's browser TUI (ttyd -> cli.tsx) spawns: a dumb pipe
 //! between this process's stdio and the bench daemon's socket (./daemon). A relay and not the
 //! backend itself because the daemon outlives every connection: one agent per session key, so one
 //! writer per session file, and a turn keeps running when this pipe goes away. The daemon may still

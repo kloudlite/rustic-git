@@ -2,8 +2,8 @@
 // bench-pod-local, never exposed off the box. `--ping` is the agent's readiness probe contract
 // (bins/agent/.../bench.rs:122): "is this bench quiesced enough to snapshot/stop", answered from
 // the same idle tracking `/idle` exposes so the probe and the UI cannot drift apart. Idle = no
-// TUI, no relay into the bench daemon (kl-tui over ssh), and no turn running in that daemon: ttyd
-// and sshd start a client per login and end it with the login, and a turn outlives its client.
+// TUI, no relay into the bench daemon, and no turn running in that daemon: ttyd starts a client
+// per connection and ends it with the connection, and a turn outlives its client.
 import http from "node:http";
 import fs from "node:fs";
 
@@ -38,7 +38,7 @@ function clients(): number {
   for (const pid of pids) {
     if (!/^\d+$/.test(pid)) continue;
     try {
-      // `bun run --cwd TUI dev` (ttyd, ssh), `bun run relay.ts` (kl-host, the laptop TUI) or an older
+      // `bun run --cwd TUI dev` (ttyd), `bun run relay.ts` (kl-host) or an older
       // `bun run serve.ts`; the argv[0] check skips ttyd, whose own argv carries the same command line.
       const argv = fs.readFileSync(`/proc/${pid}/cmdline`, "utf8").split("\0");
       if (argv[0].endsWith("bun") && (argv.includes(TUI) || argv.includes(HOST) || argv.includes(RELAY))) n++;

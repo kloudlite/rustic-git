@@ -1,5 +1,5 @@
 //! The client side: a `Backend` whose every call is a ./wire request to serve.ts in the bench daemon.
-//! Tools the TUI owns stay here — the host calls back for them; the permission gate is the daemon's (cards). ssh's
+//! Tools the TUI owns stay here — the host calls back for them; the permission gate is the daemon's (cards). The pipe's
 //! stderr (the bench-proxy's waking progress) is shown until `hello`, then buffered: after that
 //! the renderer owns the screen, so the tail is printed once the TUI exits.
 import type { Backend, BenchEvent, Hello, LoginUi, SessionHandle, SessionOpts, SessionState } from "./index.ts";

@@ -93,7 +93,7 @@ async fn fake_ttyd_ws() -> (u16, std::sync::Arc<std::sync::atomic::AtomicBool>) 
 
 async fn serve(routes: Vec<Route>, term_port: u16) -> String {
     let (client, _) = mock_client(routes);
-    let gw = Arc::new(Gateway::new(Jwt::new(SECRET).unwrap(), REGION.into(), client, 22, 7789, term_port, 7791));
+    let gw = Arc::new(Gateway::new(Jwt::new(SECRET).unwrap(), REGION.into(), client, 22, term_port, 7791));
     let l = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = l.local_addr().unwrap();
     tokio::spawn(async move { axum::serve(l, kloudlite_gateway::tunnel::app(gw)).await.unwrap() });

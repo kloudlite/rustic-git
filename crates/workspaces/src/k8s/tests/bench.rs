@@ -65,7 +65,7 @@ fn a_bench_runs_its_services_under_runit_and_pings_kl_sessions() {
         "no *_API_KEY env var of any name belongs on this container"
     );
     let ports: Vec<i32> = c.ports.unwrap().iter().map(|p| p.container_port).collect();
-    assert_eq!(ports, [BENCH_PORT as i32, BENCH_TERM_PORT as i32, BENCH_TUI_PORT as i32]);
+    assert_eq!(ports, [BENCH_TERM_PORT as i32, BENCH_TUI_PORT as i32]);
 }
 
 #[test]
@@ -77,18 +77,13 @@ fn an_empty_provider_url_stamps_no_base_url() {
 }
 
 #[test]
-fn a_bench_mounts_the_owners_authorized_keys() {
+fn a_bench_exposes_no_ssh_port() {
     let c = bench_container_for_test();
-    let m = c
-        .volume_mounts
-        .as_ref()
-        .unwrap()
-        .iter()
-        .find(|m| m.mount_path == "/etc/kloudlite/authorized_keys")
-        .expect("the bench must be able to authenticate sshd logins");
-    assert_eq!(m.read_only, Some(true));
+    let ports: Vec<i32> = c.ports.unwrap().iter().map(|p| p.container_port).collect();
+    assert!(!ports.contains(&22) && !ports.contains(&2222) && !ports.contains(&7789), "{ports:?}");
+    let mounts = c.volume_mounts.unwrap();
+    assert!(mounts.iter().all(|m| m.mount_path != "/etc/kloudlite/authorized_keys"), "no sshd to read it");
 }
-
 
 /// NOTHING in a bench pod runs a `workspace` container's prelude, so the worktree must arrive
 /// owned by the tenant: `Engine::checkout` hands a fresh subvolume to uid 1000 (2026-09-18 fix).
@@ -174,6 +169,6 @@ fn only_the_gateway_may_reach_a_bench_workspace_pod() {
         Some(IntOrString::Int(n)) => Some(n),
         _ => None,
     }).collect();
-    assert_eq!(ports, [BENCH_PORT as i32, BENCH_TERM_PORT as i32, BENCH_TUI_PORT as i32]);
+    assert_eq!(ports, [BENCH_TERM_PORT as i32, BENCH_TUI_PORT as i32]);
     assert_eq!(rule.from.as_ref().unwrap().len(), 1);
 }

@@ -1,8 +1,7 @@
-//! The bench's one agent backend, run under runit (bench/sv/kl-host). Every client — kl-tui over ssh
-//! (login-shell `kl-host` -> relay.ts) and the browser TUI (ttyd -> cli.tsx -> relay.ts) on the unix
-//! socket, the laptop kl-tui through the gateway on TCP 7791 — is a connection to it, so a turn
-//! outlives the client that started it (a quit, an ssh drop) and there is exactly one agent, and
-//! one writer of each pi session file, per key. A
+//! The bench's one agent backend, run under runit (bench/sv/kl-host). Every client — the browser TUI
+//! (ttyd -> cli.tsx -> relay.ts) on the unix socket, the laptop kl-tui through the gateway on TCP
+//! 7791 — is a connection to it, so a turn outlives the client that started it (a quit, a dropped
+//! connection) and there is exactly one agent, and one writer of each pi session file, per key. A
 //! connection speaks ./wire through one `serve`; closing it disposes that client's views only
 //! (local.ts keeps a running agent alive and settles an idle one). Console output stays on
 //! stdout/stderr, which runit sends to the container log: frames only travel on sockets.
