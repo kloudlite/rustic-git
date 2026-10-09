@@ -1241,7 +1241,7 @@ export function App({
     const w = workspaces[i]!;
     return asks.some((a) => baseOf(a.key) === key) ? "needs you" : getSession(sessions, key).busy || watched?.some((m) => baseOf(m.key) === key && m.busy) ? "working" : w.status === "stopped" ? "" : "idle";
   };
-  const planAll = (max: number) => planRows(space?.boards ?? [], space?.messages ?? [], nameOf, activeBase, Date.now(), stateOf, max);
+  const planAll = (max: number) => planRows(space?.boards ?? [], nameOf, activeBase, stateOf, max);
   // main's Jobs screen: every workspace's processes, ids prefixed so two workspaces' "p1" stay apart
   const allJobs = workspaces
     .filter((w) => w.processes?.length)
@@ -1366,7 +1366,7 @@ export function App({
               tight; question/permission panels replace the whole block */}
           {!filesView && !processesView && !planView && !doneView && (
           <box flexDirection="column" flexShrink={0}>
-          <Plan rows={planAll(10)} width={contentWidth} />
+          <Plan rows={planAll(Math.max(6, Math.floor(rows * 0.4)))} width={contentWidth} />
           <Queue
             messages={session.queued}
             selected={queuePick}
