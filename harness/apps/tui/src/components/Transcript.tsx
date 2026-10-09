@@ -639,13 +639,8 @@ export function Transcript({
       flexShrink={1}
       stickyScroll
       stickyStart="bottom"
-      // the scrollbar is the only thing that says how far back the transcript
-      // goes; arrows off, track in theme so it reads as chrome not content
-      verticalScrollbarOptions={{
-        showArrows: false,
-        trackOptions: { backgroundColor: theme.bg, foregroundColor: theme.border },
-      }}
-      horizontalScrollbarOptions={{ visible: false }}
+      // no scrollbar anywhere in the TUI (owner ruling); wheel and keys still scroll
+      scrollbarOptions={{ visible: false }}
       scrollAcceleration={wheel}
     >
       {/* opencode: one blank row above the first message */}
