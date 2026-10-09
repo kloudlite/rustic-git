@@ -20,6 +20,8 @@ try {
 boot(c.backend, c.hello);
 let lost = false;
 const done = () => {
+  // leave the alternate screen first, or kl-connect's restore wipes the reason along with it
+  if (process.stderr.isTTY) process.stderr.write("\x1b[?1049l");
   const tail = c.stderr();
   if (tail) process.stderr.write(tail);
   // ssh writes nothing when its proxy dies, so a bare exit 1 would explain nothing

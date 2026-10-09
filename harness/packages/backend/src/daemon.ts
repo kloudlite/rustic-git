@@ -6,7 +6,7 @@
 //! (local.ts keeps a running agent alive and settles an idle one). Console output stays on
 //! stdout/stderr, which runit sends to the container log: frames only travel on sockets.
 //! The socket is 0600 and lives in the user's home: the bench user is the only one who can reach it.
-import { mkdirSync, rmSync, chmodSync } from "node:fs";
+import { mkdirSync, rmSync, chmodSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
 import { createServer, type Server } from "node:net";
@@ -45,5 +45,17 @@ if (import.meta.main) {
   const { LocalBackend } = await import("./local.ts");
   const b = new LocalBackend();
   await host(b, sockPath());
+  // The idle clock (bench/sessions/main.ts) cannot see a turn whose client left; this file is how
+  // it does. Rewritten on a beat so a dead daemon's last count goes stale instead of pinning the pod.
+  const busyFile = join(homedir(), ".kl", "host.busy");
+  const beat = () => {
+    try {
+      writeFileSync(busyFile, String(b.busyCount));
+    } catch (e) {
+      console.error("host.busy", e);
+    }
+  };
+  beat();
+  setInterval(beat, 5000);
   await b.resumeAsks();
 }

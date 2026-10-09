@@ -227,6 +227,11 @@ export class LocalBackend implements Backend {
   /** Unregisters of the clients each key's views added; a closed agent has no client left. */
   #offs = new Map<string, Set<() => void>>();
 
+  /** Turns running now: the bench's idle clock must not stop a pod under one (daemon.ts). */
+  get busyCount(): number {
+    return this.#busy.size;
+  }
+
   async hello(): Promise<Hello> {
     const list = catalog();
     return {
