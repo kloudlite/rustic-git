@@ -78,10 +78,11 @@ test("connect() rejects with code 3 on a protocol mismatch", async () => {
   expect(e.code).toBe(3);
 });
 
+// Two pipes carry no order: "later" must follow hello by a beat or it can reach the stderr reader before `booted` flips.
 test("stderr passes through before hello and is buffered after", async () => {
   const c = await connect([
     "sh", "-c",
-    `echo waking >&2; read l; echo '{"re":1,"ok":true,"value":{"protocol":2}}'; echo later >&2; sleep 0.2`,
+    `echo waking >&2; read l; echo '{"re":1,"ok":true,"value":{"protocol":2}}'; sleep 0.1; echo later >&2; sleep 0.2`,
   ]);
   await c.exited;
   expect(c.stderr()).toContain("later");
