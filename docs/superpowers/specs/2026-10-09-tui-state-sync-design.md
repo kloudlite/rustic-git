@@ -1,6 +1,6 @@
 # TUI state sync: the daemon owns every session's state
 
-Date: 2026-10-09. Status: awaiting spec review.
+Date: 2026-10-09. Status: approved; §8 grants and §12 amended by the person the same day.
 
 ## What the person asked for
 
@@ -29,7 +29,7 @@ only ever flows from TUI to daemon:
 | queue, token count | each TUI | queue only via live `queue_update`; tokens summed per TUI, nothing at open |
 | names, descriptions | each TUI (`sessionNames`, `sessionDescs`) | auto-title from a stale map overwrites a name |
 | permission and question cards | the newest client of the key (`clients.ts` `route`) | the other TUI never sees the card the turn is blocked on; abort never withdraws it |
-| permission mode, always-allow | each TUI | the newest client decides for everyone, invisibly |
+| permission mode | each TUI | the newest client decides for everyone, invisibly |
 | user messages | only the TUI that sent them | `handleAgentEvent` renders assistant messages only |
 | the agent after a rebuild | the TUI that caused it | others get `session_closed`, drop the handle, go deaf until they prompt |
 | auth, model catalog | each TUI, at mount and own login | another TUI's `/login` is invisible |
@@ -128,14 +128,17 @@ list. Auto-title moves to the daemon: a client-typed prompt to a key with no nam
 
 Permission and question cards stop being requests to the newest client.
 
-- **Mode and grants in the daemon.** Permission mode (`default`, `acceptEdits`, `plan`, `bypass`)
-  and always-allow (per asking key, in memory, gone on daemon restart as it is gone on TUI restart
-  today) move into `LocalBackend`. The `gate` logic in `app.tsx` moves with them unchanged. One
-  mode for the daemon: shift+tab in any TUI changes it for all, pushed as a `perm` event
-  `{ mode }`. Ruling, not yet confirmed by the person: one TUI's always-allow applies to every TUI.
+- **Mode in the daemon, grants in the TUI.** Permission mode (`default`, `acceptEdits`, `plan`,
+  `bypass`) moves into `LocalBackend` with the `gate` logic from `app.tsx`. One mode for the
+  daemon: shift+tab in any TUI changes it for all, pushed as a `perm` event `{ mode }`.
+  Always-allow stays in each TUI process (the person: "Let always allow be in Tui"): the daemon
+  never learns of a grant. Choosing "Allow always" on a card answers the ask `once` and records the
+  tool for the asking key in that TUI's `alwaysAllow`. When an `ask` arrives for a tool that TUI
+  has granted for that key, the TUI answers it `once` at once, without showing a card. A grant in
+  one TUI therefore answers for everyone while that TUI is connected, and is gone when it quits.
 - **Asks.** A gated call that needs a person, and the `question` tool (moved from the TUI into the
-  daemon's registry), create an ask `{ id, key, kind: "permission" | "question", title, subtitle,
-  body, diff, options }`. The daemon emits `ask` on a broadcast channel to every connection. Each
+  daemon's registry), create an ask `{ id, key, kind: "permission" | "question", tool, title,
+  subtitle, body, diff, options }` (`key` is the asking key: a delegated session's caller). The daemon emits `ask` on a broadcast channel to every connection. Each
   TUI keeps the list and shows a card only for its active key, as `askFor` does now; an ask for
   another key shows as a mark on that session in the sidebar.
 - **Answer.** `ask.answer { id, choice }`. First answer wins; the daemon emits `ask_resolved { id }`
@@ -175,10 +178,38 @@ The daemon emits `fs_changed { ws?: string }` (no `ws` = the bench's own tree) o
 `tool_execution_end` of `write`, `edit`, `patch`, `bash`, `exec` in any session, debounced 500 ms
 per target. A TUI whose files view shows that target bumps `filesRefresh`.
 
+### 12. No ssh on the bench
+
+The person: "Remove ssh completely." Every bench client already has a non-ssh door: the laptop
+`kl-tui` over `kl-connect bench-proxy --tui` (wss to the daemon's TUI port), the browser over ttyd.
+ssh to the bench goes:
+
+- `kl-connect [team]` always runs `kl-tui --pipe <kl-connect> bench-proxy --tui [team]`. Gone:
+  `Mode`, `modes`, `KL_DIRECT`, the fallback loop, `ssh_argv`, `--remote-tui`, the clipboard
+  forward (`clip.rs`; the laptop TUI reads the laptop clipboard itself), `bench_known_hosts`. A
+  missing `kl-tui` beside `kl-connect` is an error naming the path. Exit 3 (protocol mismatch) is
+  reported, not retried another way.
+- `kl-connect bench-proxy` loses its plain (sshd) mode; `--tui` stays as the only behaviour (the
+  flag is kept so the pipe argv does not change).
+- `kl-tui` loses `--ssh`; `--pipe` is the only transport.
+- The bench image loses sshd: `bench/sshd_config`, `bench/sv/sshd/`, `bench/sv/kl-host/`,
+  `bench/term/login-shell`, the `openssh-server` package and `BENCH_PORT` (pod port, gateway
+  NetworkPolicy port, `Gateway.bench_port`). The gateway's `/tunnel/{ws}` refuses a bench ticket
+  (401, as `/tui/` refuses a workspace ticket).
+- **Claude login moves onto the wire.** `kl-connect claude login` ran `claude auth login` over
+  `ssh -t`. It becomes a login option in the TUI's `/login` ("Claude (subscription)"): the daemon
+  runs `claude auth login` under a pty (`script -qfec`), relays the sign-in URL as an `auth` notify
+  event and the person's pasted code as the `auth.prompt` answer, exactly as pi's OAuth logins do.
+  `kl-connect claude login` and its subcommand are deleted; `AUTH_MESSAGE` says "run /login in the
+  TUI". A finished Claude login emits `auth_changed` (§9).
+
+Not in this change (the person has not said): ssh into workspaces (`kl-connect ws ssh`, `ws ide`,
+`ssh-config`, the gateway's workspace tunnel, `authorized_keys`).
+
 ## What does not change
 
 - Keystrokes, drafts, focus, scroll, view, vim mode: per TUI (the person ruled out stroke sync).
-- How TUIs connect (direct `wss`, ttyd through `relay.ts`).
+- How TUIs connect beyond §12: direct `wss` from the laptop, ttyd through `relay.ts`.
 - One agent per key, views over it, idle dispose with no views (`#settle`).
 - Consent: what is typed through a client view counts as the person's words (`consent.ts`).
 
@@ -204,6 +235,8 @@ TUI (`apps/tui`, `bun test` per package; `sync.test.tsx` is the home):
 - A pushed `session_state` sets the footer model; the TUI sends no model on reopen.
 - `session_closed { reopen: true }` reopens and replaces entries.
 - An `ask_resolved` drops the card.
+- After "Allow always" for `bash` on key k, the next `ask` for `bash` on k is answered `once` with no
+  card; an `ask` for `bash` on another key still shows one.
 - A user `message_start` renders one row; a snapshot then the same live event renders one row.
 - A space push with `error` keeps workspaces and focus.
 
@@ -215,5 +248,5 @@ open, workspace create and delete, `/login`: the other pane shows the result wit
 ## Out of scope
 
 - Server-side `workspace_wait`.
-- Persisting always-allow across daemon restarts.
+- Persisting always-allow across TUI restarts (a grant lives as long as the TUI process that made it).
 - Sync between two benches (team bench vs personal): each daemon is its own world.
