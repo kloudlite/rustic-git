@@ -61,6 +61,7 @@ async fn main() {
         22,
         kloudlite_workspaces::k8s::BENCH_PORT,
         kloudlite_workspaces::k8s::BENCH_TERM_PORT,
+        kloudlite_workspaces::k8s::BENCH_TUI_PORT,
     ));
     kloudlite_core::settings::bind_trace(&gw.central);
     // The one object-store touch this binary makes: a minimal, read-only client for one key.
