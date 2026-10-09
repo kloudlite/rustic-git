@@ -1,6 +1,6 @@
 ---
 name: kloudlite
-description: You run on Kloudlite; "workspace", "environment", "service", "snapshot" in a request mean Kloudlite's, driven by the workspace_*/env_*/service_*/intercept/packages_* tools ("delete all workspaces" = list them with workspace_list, then workspace_delete each). Read this before any task that creates, changes, stops, deletes, lists or works inside a workspace or environment, or mentions intercept, push, restore, clone, package or build: concepts, which tool for what, and the team's conventions. Your role (main, workspace or subagent session) has its own skill beside this one; read both.
+description: You run on Kloudlite; "workspace", "environment", "service", "snapshot" in a request mean Kloudlite's, driven by the workspace_*/env_*/service_*/intercept/packages_* tools ("delete all workspaces" = list them with workspace_list, then workspace_delete each). Read this before any task that creates, changes, stops, deletes, lists or works inside a workspace or environment, or mentions intercept, push, restore, clone, package or build: concepts, permission cards, and the team's conventions. Your role (main, workspace or subagent session) has its own skill beside this one; read both.
 ---
 
 # Kloudlite
@@ -50,22 +50,17 @@ Every session is isolated: it works only in its own folder and pod. No session r
 
 **Lifecycle calls are asynchronous.** Create, start, stop, clone and restore return at once. Poll `workspace_get` / `env_get` until the state you want.
 
-## Which tool for what
+## Tools
 
-| You want to | Use |
-|---|---|
-| a new component | `workspace_create`, one workspace for it |
-| test a change against the team's real stack | `intercept` the service in the team environment, `release` when done |
-| a second branch in the same workspace | `worktree_add` |
-| a copy to experiment on | `workspace_clone` |
-| keep a named point in history | `workspace_push` (only when asked) |
-| go back to a pushed point | `workspace_restore` |
-| a new tool installed | `packages_add`, then update AGENTS.md |
-| a new service in the environment | `service_add`, image from `container_build`/`container_push` or any image |
-| see what is running | `workspace_list`, `env_list`, `workspace_get`, `env_get` |
-| see what is left | `quota` |
-| ask for more quota, access or a region | `request_create` |
-| see what was asked and decided | `requests_list` |
+Each role has a different set of tools; your role skill lists yours, with when to use each. Not every tool named above is yours: if a tool is not in your list, it is another role's job.
+
+**Every role** has `web_fetch` (read one URL) and `web_search` (search the web).
+
+**Permission cards.** Some calls stop and show the person a card to approve or deny:
+- always: `workspace_stop`, `workspace_delete`, `worktree_drop`, `env_stop`, `env_delete`, `env_restore_in_place`, `service_update`, `service_remove`, `volume_delete`, `snapshot_delete`, `packages_remove`, `intercept`, `container_build`, `container_push`;
+- unless the sandbox and network fence hold: `exec`, `bash`, `web_fetch`.
+
+These calls take a `because` field. Put the person's exact words in `asked` only when this turn they literally asked for this action and named its target; then the card is skipped. Otherwise write one sentence in `reason` on why the task needs it. A denied card is the person's answer: do not retry the call or reach the same result another way.
 
 ## Conventions
 

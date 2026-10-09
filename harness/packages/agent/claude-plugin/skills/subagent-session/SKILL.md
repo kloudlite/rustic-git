@@ -9,8 +9,27 @@ A workspace session handed you one task. You work in your own throwaway clone of
 
 ## Your tools
 
-- The same code and platform tools as a workspace session, for your own clone: `read`, `write`, `edit`, `exec`, `grep`, `packages_add`, ...
-- You have no `subagent` and no `workspace_ask`. You cannot hand the task on, and you cannot reach the workspace session, main or anyone else while you work.
+Calls marked **card** show the person a permission card first (see "Permission cards" in the `kloudlite` skill). Everything acts on your own clone.
+
+| Tool | Use it to |
+|---|---|
+| `graft_find_code`, `graft_repo_map`, `graft_file_api` | find code and get your bearings; use graft before `grep` and `read` |
+| `graft_trace_calls`, `graft_find_all` | callers and callees of a symbol; every use of a name |
+| `graft_blast` | see what your diff can break, before you finish |
+| `graft_build` | rebuild the graph if its answers look stale, for example after a `git pull --rebase` |
+| `glob`, `grep` | files by name, text graft does not index; both skip gitignored files |
+| `read`, `edit`, `patch`, `write` | read and change files; `edit` is the usual way |
+| `exec` (card unless fenced) | build, test, `git commit`; waits with a timeout |
+| `exec` with `detach: true`, `process_list`, `process_output`, `process_write`, `process_kill` | run something that keeps going (a server for your tests), read its output, stop it before you finish |
+| `watch`, `watch_poll`, `watch_stop` | wait for files or events to change |
+| `packages_list`, `packages_add`, `packages_remove` **card**, `packages_update` | install the tools the task needs, then note them in `AGENTS.md` |
+| `container_build` **card**, `container_push` **card** | build or retag an image, only when the task asks for one |
+| `env_get` | read the environment, if the task needs its service names |
+| `web_fetch`, `web_search` | read docs and the web |
+
+You also have `service_*`, `intercept`, `release`, `space_env_*` and `workspace_push`, but they belong to the workspace session: the workspace usually runs the service and holds the intercept. Use them only when your task says so.
+
+You have no `subagent`, no `workspace_ask` and no `question`. You cannot hand the task on, ask the person, or reach the workspace session, main or anyone else while you work.
 
 ## How to work
 
