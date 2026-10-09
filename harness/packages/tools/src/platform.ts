@@ -207,8 +207,9 @@ export function platformTools(kind: "main" | "workspace", wsId?: string): ToolDe
       cur.some((s) => s.name === a.service?.name) ? cur.map((s) => (s.name === a.service.name ? withServiceDefaults(a.service) : s)) : `error: no such service: ${a.service?.name}`),
     services("service_remove", "Remove a service by name from an environment." + ASYNC, { name: S }, ["name"], (cur, a) =>
       cur.some((s) => s.name === a.name) ? cur.filter((s) => s.name !== a.name) : `error: no such service: ${a.name}`),
-    envTool("intercept", "Route an environment service's traffic to a workspace." + ASYNC, { service: S, workspace: S, ports: { type: "array", items: { type: "object", properties: { service: N, workspace: N } } } }, ["service", ...(ws ? [] : ["workspace"])], (env, a) =>
-      api("POST", `/v1/environments/${env}/intercepts`, strip({ service: a.service, workspace: a.workspace ?? wsId, ports: a.ports }))),
+    // a workspace session intercepts for itself only: no `workspace` param to aim it at another workspace
+    envTool("intercept", (ws ? "Route an environment service's traffic to this workspace." : "Route an environment service's traffic to a workspace.") + ASYNC, { service: S, ...(ws ? {} : { workspace: S }), ports: { type: "array", items: { type: "object", properties: { service: N, workspace: N } } } }, ["service", ...(ws ? [] : ["workspace"])], (env, a) =>
+      api("POST", `/v1/environments/${env}/intercepts`, strip({ service: a.service, workspace: ws ? wsId : a.workspace, ports: a.ports }))),
     envTool("release", "Release an intercepted service back to its own pod.", { service: S }, ["service"], (env, a) => api("DELETE", `/v1/environments/${env}/intercepts/${seg(a.service)}`)),
   ];
   if (ws) return shared;

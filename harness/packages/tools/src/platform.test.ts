@@ -89,6 +89,10 @@ test("workspace sessions default env through /v1/me/environments", async () => {
   expect(calls.at(-1)!.url).toBe("/v1/environments/e9");
   await tool(t, "intercept").run({ service: "web" });
   expect(calls.at(-1)!.body).toEqual({ service: "web", workspace: "w1" });
+  // no aiming it at another workspace
+  expect((tool(t, "intercept").inputSchema as any).properties.workspace).toBeUndefined();
+  await tool(t, "intercept").run({ service: "web", workspace: "w2" });
+  expect(calls.at(-1)!.body).toEqual({ service: "web", workspace: "w1" });
   routes["GET /v1/me/environments"] = json([{ team: "other", environment: "x" }]);
   await expect(tool(t, "env_get").run({})).rejects.toThrow("this workspace's space follows no environment");
   expect(t.some((x) => x.name === "workspace_create" || x.name === "workspace_stop")).toBe(false);
