@@ -13,6 +13,7 @@
 import { randomBytes } from "node:crypto";
 import type { ToolDef } from "@kloudlite-tui/tools";
 import type { PermissionRequest, Decision, SessionHandle, SessionOpts } from "./index.ts";
+import { blockers, ready, readTasks, tasksFile, updateTask } from "./tasks.ts";
 import { asksDir, dropAsk, listAsks, saveAsk, type PendingAsk } from "./asks.ts";
 
 export type DelegateDeps = {
@@ -30,6 +31,8 @@ export type DelegateDeps = {
   /** ws keys that already sent done/blocked during the current ask: the final answer is then not
    * delivered a second time. */
   reported?: Set<string>;
+  /** Where the task board lives; tests pass a temp file. */
+  tasks?: string;
 };
 
 /** A workspace pod's source folder (crates/workspaces/src/k8s/mod.rs WORKSPACE_DIR). */
@@ -106,8 +109,20 @@ async function deliver(
   }
 }
 
-/** Task board stub: Task 2 turns this into the "next ready tasks" note appended to a done/blocked tell. */
-const boardNote = (..._: unknown[]) => "";
+/** A done/blocked tell moves its task on the board and tells main what that frees: the workspace's
+ * next task and the dependants that just became ready. Main still decides; this only saves it a
+ * task_list. */
+function boardNote(deps: DelegateDeps, ws: string, i: { kind: string; task?: string; text: string }): string {
+  if (!i.task) return "";
+  const file = deps.tasks ?? tasksFile();
+  if (!readTasks(file).some((t) => t.id === i.task)) return `\nboard: no task ${i.task}`;
+  const state = i.kind === "done" ? "done" : "blocked";
+  updateTask(file, i.task, { state, note: i.text.slice(0, 200) });
+  const ts = readTasks(file);
+  const next = ready(ts, ws)[0];
+  const freed = state === "done" ? ts.filter((t) => t.state === "queued" && t.dependsOn.includes(i.task!) && !blockers(ts, t).length) : [];
+  return `\nboard: ${i.task} ${state}${next ? `; next for ${ws}: ${next.id} ${next.title}` : ""}${freed.length ? `; now ready: ${freed.map((t) => t.id).join(", ")}` : ""}`;
+}
 
 /** Run one ask to its delivery. Saved BEFORE the workspace is opened and dropped right before the
  * reply is delivered: a restart between the drop and the caller's session file loses one reply
@@ -131,7 +146,11 @@ export async function dispatchAsk(deps: DelegateDeps, a: PendingAsk): Promise<vo
   // final answer would be a second copy of it
   const told = deps.reported?.delete(a.key) ?? false;
   dropAsk(dir, a.id);
-  if (!told) await deliver(deps, a.callerKey, a, reply, a.key);
+  if (!told) {
+    // the workspace answered without closing its task: main is the one who moves it on
+    if (a.task && readTasks(deps.tasks ?? tasksFile()).find((t) => t.id === a.task)?.state === "running") reply += `\n(${a.task} is still running on the board; task_update it)`;
+    await deliver(deps, a.callerKey, a, reply, a.key);
+  }
   // our own view goes only after its answer was delivered
   if (h) await h.dispose().catch(() => {});
 }
@@ -178,16 +197,26 @@ export function delegateTools(kind: "main" | "workspace", ws: string | undefined
   const ask: ToolDef = {
     name: "workspace_ask",
     description:
-      "Hand a workspace's own session a goal: the person's words plus context only you have (environment, decisions, facts from another workspace's answer), never paths, libraries or steps. Returns at once; the workspace's answer arrives later as a `[from <ws>] ...` message. Never wait or poll for it. The only way main gets work done in a workspace.",
-    inputSchema: { type: "object", properties: { workspace: { type: "string" }, request: { type: "string" } }, required: ["workspace", "request"] },
-    async run(input: { workspace: string; request: string }) {
+      "Hand a workspace's own session a goal: the person's words plus context only you have (environment, decisions, facts from another workspace's answer), never paths, libraries or steps. Pass task (a board id) to mark it running there; refused while its dependencies are not done. Returns at once; the workspace's answer arrives later as a `[from <ws>] ...` message. Never wait or poll for it. The only way main gets work done in a workspace.",
+    inputSchema: { type: "object", properties: { workspace: { type: "string" }, request: { type: "string" }, task: { type: "string" } }, required: ["workspace", "request"] },
+    async run(input: { workspace: string; request: string; task?: string }) {
       const key = input.workspace;
+      const file = deps.tasks ?? tasksFile();
+      if (input.task) {
+        const ts = readTasks(file);
+        const t = ts.find((x) => x.id === input.task);
+        if (!t) return `error: unknown task ${input.task}`;
+        const w = blockers(ts, t);
+        if (w.length) return `error: ${t.id} waits on ${w.join(", ")}`;
+        updateTask(file, t.id, { state: "running", workspace: key });
+      }
       // Not awaited: main must stay free for the person while the workspace works.
       void dispatchAsk(deps, {
         id: hex(),
         callerKey,
         key,
-        text: `[from main session] ${input.request}`,
+        text: `[from main session]${input.task ? ` [task ${input.task}]` : ""} ${input.request}`,
+        task: input.task,
         tries: 0,
         model: caller.model,
         codemode: caller.codemode,

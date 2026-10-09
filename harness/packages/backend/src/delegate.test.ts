@@ -5,6 +5,7 @@ import { join } from "node:path";
 import { delegateTools, dispatchAsk, resumeAsks } from "./delegate.ts";
 import type { DelegateDeps } from "./delegate.ts";
 import type { SessionHandle, SessionOpts } from "./index.ts";
+import { addTask, readTasks } from "./tasks.ts";
 
 const caller = { model: { provider: "p", id: "m" }, tools: [] } as unknown as SessionOpts;
 const asks = mkdtempSync(join(tmpdir(), "kl-asks-"));
@@ -238,4 +239,48 @@ test("a delegated session's permission request goes to the caller's key and name
   await given.permission!({ name: "bash", args: {} }, new AbortController().signal);
   await given.permission!({ name: "bash", args: {}, session: "ws-a:agent-1" }, new AbortController().signal);
   expect(seen).toEqual([["main", "ws-a"], ["main", "ws-a:agent-1"]]);
+});
+
+const board = () => join(mkdtempSync(join(tmpdir(), "kl-board-")), "tasks.json");
+
+test("workspace_ask with a blocked task is refused and opens nothing", async () => {
+  const tasks = board();
+  addTask(tasks, { title: "a" });
+  addTask(tasks, { title: "b", dependsOn: ["T1"] });
+  let opened = 0;
+  const [ask] = delegateTools("main", undefined, D({ tasks, open: async () => (opened++, null as never) }), caller);
+  expect(await ask!.run({ workspace: "w", request: "x", task: "T2" })).toBe("error: T2 waits on T1");
+  expect(await ask!.run({ workspace: "w", request: "x", task: "T9" })).toBe("error: unknown task T9");
+  await flush();
+  expect(opened).toBe(0);
+  expect(readTasks(tasks)[1]!.state).toBe("queued");
+});
+
+test("workspace_ask with a ready task marks it running there and carries the task id", async () => {
+  const tasks = board();
+  addTask(tasks, { title: "a" });
+  const ws = fake("partial");
+  const main = fake();
+  const [ask] = delegateTools("main", undefined, D({ tasks, open: route(ws, main) }), caller);
+  await ask!.run({ workspace: "w", request: "x", task: "T1" });
+  expect(readTasks(tasks)[0]).toMatchObject({ state: "running", workspace: "w" });
+  await flush();
+  expect(ws.sent).toEqual(["prompt:[from main session] [task T1] x"]);
+  expect(main.sent[0]).toContain("T1 is still running on the board");
+});
+
+test("main_tell done with a task marks it done and names the next and newly ready tasks", async () => {
+  const tasks = board();
+  addTask(tasks, { title: "first", workspace: "w" });
+  addTask(tasks, { title: "second", workspace: "w", dependsOn: ["T1"] });
+  addTask(tasks, { title: "third", dependsOn: ["T1"] });
+  const main = fake();
+  const tell = tellOf(D({ tasks, open: route(fake(), main) }), "w");
+  await tell.run({ kind: "done", task: "T1", text: "shipped" });
+  await flush();
+  expect(readTasks(tasks)[0]).toMatchObject({ state: "done", note: "shipped" });
+  expect(main.sent[0]).toBe("prompt:[from w] [task T1] done: shipped\nboard: T1 done; next for w: T2 second; now ready: T2, T3");
+  await tell.run({ kind: "blocked", task: "T9", text: "x" });
+  await flush();
+  expect(main.sent[1]).toContain("board: no task T9");
 });

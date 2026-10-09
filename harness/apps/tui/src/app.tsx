@@ -1362,6 +1362,7 @@ const PERM_MODES: PermMode[] = ["default", "acceptEdits", "plan", "bypass"];
       snapshot={environment?.snapshot}
       envOwner={environment && environment.owner !== user ? environment.owner : undefined}
       user={user}
+      tasks={space?.tasks ?? []}
       unavailable={space && !space.available ? space.error ?? "unknown error" : undefined}
       focus={focus}
       width={prefs.sidebarWidth}

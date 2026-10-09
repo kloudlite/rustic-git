@@ -14,6 +14,8 @@ export type PendingAsk = {
   /** The workspace asked. */
   key: string;
   text: string;
+  /** Board task this ask carries; kept so a resend still marks and quotes it. */
+  task?: string;
   /** Resends so far; resumeAsks gives up after two. */
   tries: number;
   /** The caller's session settings, to reopen it for the reply after a restart. */

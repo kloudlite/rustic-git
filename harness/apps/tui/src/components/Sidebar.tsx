@@ -1,5 +1,7 @@
 import { TextAttributes } from "@opentui/core";
 import { theme } from "../theme.ts";
+import type { BoardTask } from "@kloudlite-tui/backend";
+import { taskGroups } from "../tasks.ts";
 import { clip } from "../ui/text.ts";
 import { type Service, type Workspace } from "../workspaces.ts";
 import { useWheelAccel } from "../wheel.ts";
@@ -72,6 +74,7 @@ export function Sidebar({
   snapshot,
   running,
   waiting,
+  tasks = [],
   focus,
   width,
   onFocus,
@@ -91,6 +94,8 @@ export function Sidebar({
   running: boolean[];
   /** Per-workspace: a permission card or question is waiting for the user */
   waiting: boolean[];
+  /** Main's task board; the section is hidden when empty. */
+  tasks?: BoardTask[];
   /** 0 = the session, 1..N = workspace */
   focus: number;
   width: number;
@@ -101,6 +106,7 @@ export function Sidebar({
   const wheel = useWheelAccel();
   // the tree counts workspaces, not their ephemeral tasks
   const count = workspaces.filter((w) => !w.parent).length;
+  const board = taskGroups(tasks);
 
   return (
     <box flexDirection="column" width={width} height="100%" flexShrink={0} backgroundColor={theme.sidebarBg}>
@@ -200,6 +206,37 @@ export function Sidebar({
               />
             );
           })}
+          {tasks.length > 0 && (
+            <>
+              <Heading width={width - 2}>Tasks</Heading>
+              {board.groups.map((g) => (
+                <box key={g.workspace ?? "unassigned"} flexDirection="column" flexShrink={0}>
+                  <Row left={<span fg={theme.fg} attributes={TextAttributes.BOLD}>{clip(g.workspace ?? "unassigned", inner)}</span>} />
+                  {g.current && (
+                    <Row
+                      left={
+                        <span fg={g.current.state === "blocked" ? theme.warning : theme.accent}>
+                          {clip(`▸ ${g.current.id} ${g.current.title}${g.current.state === "blocked" ? " blocked" : ""}`, inner - 2)}
+                        </span>
+                      }
+                    />
+                  )}
+                  {g.queue.map((t) => (
+                    <Row
+                      key={t.id}
+                      left={
+                        <span>
+                          <span fg={t.state === "failed" ? theme.warning : theme.fg}>{clip(`  ${t.id} ${t.title}${t.state === "failed" ? " failed" : ""}`, inner - 2)}</span>
+                          {t.waits.length > 0 && <span fg={theme.muted}>{` waits on ${t.waits.join(", ")}`}</span>}
+                        </span>
+                      }
+                    />
+                  ))}
+                </box>
+              ))}
+              {board.done > 0 && <Row left={<span fg={theme.muted}>{board.done} done</span>} />}
+            </>
+          )}
         </box>
       </scrollbox>
 

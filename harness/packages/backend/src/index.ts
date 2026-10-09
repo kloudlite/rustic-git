@@ -54,6 +54,8 @@ export type SpaceEnvironment = {
   state: string;
   services: { name: string; ports: number[]; interceptedBy?: string }[];
 };
+export type TaskState = "queued" | "running" | "blocked" | "done" | "failed";
+export type BoardTask = { id: string; title: string; workspace?: string; priority: number; dependsOn: string[]; state: TaskState; note?: string; created: number };
 export type SpaceView = {
   available: boolean;
   error?: string;
@@ -62,6 +64,8 @@ export type SpaceView = {
   environments: SpaceEnvironment[];
   /** The environment the space follows (`GET /v1/me/environments`). */
   connected?: string;
+  /** Main's task board; only the local backend fills it. */
+  tasks?: BoardTask[];
 };
 export type ToolSpec = Pick<ToolDef, "name" | "description" | "inputSchema">;
 

@@ -30,9 +30,10 @@ import * as git from "./git.ts";
 import { BECAUSE_SCHEMA, TurnWords, consented } from "./consent.ts";
 import { toolDiff } from "./diff.ts";
 import { podfs } from "./podfs.ts";
-import { space } from "./space.ts";
+import { space as spaceView } from "./space.ts";
+import { readTasks, taskTools, tasksFile } from "./tasks.ts";
 import { PROTOCOL } from "./wire.ts";
-import type { Backend, CatalogModel, Hello, SessionEvent, SessionHandle, SessionOpts } from "./index.ts";
+import type { Backend, CatalogModel, Hello, SessionEvent, SessionHandle, SessionOpts, SpaceView } from "./index.ts";
 
 /** House actions: they change what the person owns (or the registry), so they ask whatever walls hold. */
 export const ALWAYS_ASK = new Set([
@@ -133,7 +134,7 @@ function forgetting(t: ToolDef, deps: DelegateDeps): ToolDef {
 export async function registryFor(k: SessionKind, deps: DelegateDeps, opts: SessionOpts, key = "main"): Promise<Registry> {
   const r = new Registry();
   if (k.kind === "main")
-    return r.add(...[webFetch, webSearch, ...platformTools("main").map((t) => (t.name === "workspace_delete" ? forgetting(t, deps) : t)), ...delegateTools("main", undefined, deps, opts, key), ...scratchTools(scratchRoot(key)), ...opts.tools].map(asking));
+    return r.add(...[webFetch, webSearch, ...platformTools("main").map((t) => (t.name === "workspace_delete" ? forgetting(t, deps) : t)), ...delegateTools("main", undefined, deps, opts, key), ...taskTools(deps.tasks ?? tasksFile()), ...scratchTools(scratchRoot(key)), ...opts.tools].map(asking));
   // the self-stop is the one call that never asks: it only snapshots and parks the workspace
   // that is already finished, and carries no `because` for a card to quote
   return r.add(...[webFetch, webSearch, ...(await podTools(k.ws)), ...platformTools("workspace", k.ws), ...delegateTools("workspace", k.ws, deps, opts), ...opts.tools].map((t) => (t.name === "workspace_stop" ? t : asking(t))));
@@ -310,7 +311,7 @@ export class LocalBackend implements Backend {
       sessions: listSessions(),
       cwd: process.cwd(),
       home: homedir(),
-      tools: [webFetch.name, webSearch.name, ...platformTools("main").map((t) => t.name), "workspace_ask", "bash", "read", "write"],
+      tools: [webFetch.name, webSearch.name, ...platformTools("main").map((t) => t.name), "workspace_ask", "task_add", "task_update", "task_list", "bash", "read", "write"],
     };
   }
 
@@ -452,7 +453,7 @@ export class LocalBackend implements Backend {
     clear: async (key: string) => clearSessionHistory(key),
   };
 
-  space = space;
+  space = async (): Promise<SpaceView> => ({ ...(await spaceView()), tasks: readTasks(tasksFile()) });
 
   settings = { write: async (patch: Parameters<typeof writeSettings>[0]) => writeSettings(patch) };
 
