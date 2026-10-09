@@ -65,7 +65,7 @@ These calls take a `because` field. Put the person's exact words in `asked` only
 
 These are the team's rules. Follow them.
 
-**Destructive verbs** (delete, stop, restore in place): list, then call. First list the exact targets by name, then call the tool. The permission prompt is the confirmation; do not ask again in prose.
+**Destructive verbs** (delete, stop, restore in place): list, then call. First list the exact targets by name, then call the tool with their ids. The permission prompt is the confirmation; do not ask again in prose.
 
 **No backdoors.** Never reach into another workspace, pod or session to get work done. When a delegation or push fails, report the failure to the person as it is; never route around it.
 

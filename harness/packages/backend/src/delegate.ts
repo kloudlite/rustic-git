@@ -198,7 +198,7 @@ export function delegateTools(kind: "main" | "workspace", ws: string | undefined
     name: "workspace_ask",
     description:
       "Hand a workspace's own session a goal: the person's words plus context only you have (environment, decisions, facts from another workspace's answer), never paths, libraries or steps. Pass task (a board id) to mark it running there; refused while its dependencies are not done. Returns at once; the workspace's answer arrives later as a `[from <ws>] ...` message. Never wait or poll for it. The only way main gets work done in a workspace.",
-    inputSchema: { type: "object", properties: { workspace: { type: "string" }, request: { type: "string" }, task: { type: "string" } }, required: ["workspace", "request"] },
+    inputSchema: { type: "object", properties: { workspace: { type: "string", description: "workspace id (`ws-…`, the `id` from workspace_list), never its name" }, request: { type: "string" }, task: { type: "string" } }, required: ["workspace", "request"] },
     async run(input: { workspace: string; request: string; task?: string }) {
       const key = input.workspace;
       const file = deps.tasks ?? tasksFile();

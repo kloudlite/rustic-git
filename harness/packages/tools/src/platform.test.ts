@@ -174,3 +174,12 @@ test("service_logs reads the build gate's logs port, defaulting env in a workspa
     delete process.env.KL_LOGS_URL;
   }
 });
+
+test("every workspace and env param says it takes the id, not the name", () => {
+  for (const kind of ["main", "workspace"] as const)
+    for (const t of platformTools(kind, "ws-1"))
+      for (const k of ["workspace", "env"]) {
+        const p = (t.inputSchema.properties as any)[k];
+        if (p) expect(`${t.name}.${k}: ${p.description ?? ""}`).toContain("id (");
+      }
+});
