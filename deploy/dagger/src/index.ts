@@ -372,12 +372,19 @@ export class Kloudlite {
   // ship.sh's per-image loop, plus the web image (docs/product copied into the web build context
   // exactly as ship.sh does it — on the Directory, so the laptop tree is never touched). Every
   // image is now built by the image* methods above, never dag.container().build().
+  //
+  // `only` (comma list of image names, web included as "kloudlite-web") builds just those. pin.sh
+  // pins all nine to ONE sha and refuses a tag that does not exist, so every image NOT built is
+  // copied forward from `carryFrom` (the currently pinned sha) to `tag` — same layers, new name.
+  // Web is pinned by its own sha, so an unbuilt web is simply skipped, never carried.
   @func()
   async publish(
     @argument({ ignore: IGNORE }) source: Directory,
     tag: string,
     ghcrUser: string,
     ghcrToken: Secret,
+    only: string = "",
+    carryFrom: string = "",
   ): Promise<string> {
     const built = this.compiled(source)
     const refs: string[] = []
@@ -394,14 +401,26 @@ export class Kloudlite {
       [() => this.imageInterceptProxy(built), "kloudlite-intercept-proxy"],
     ]
 
+    const want = new Set(only.split(",").map((x) => x.trim()).filter(Boolean))
+    const known = [...IMAGE_BUILDERS.map(([, i]) => i), "kloudlite-web"]
+    const unknown = [...want].filter((i) => !known.includes(i))
+    if (unknown.length) throw new Error(`--only: unknown image ${unknown.join(", ")}; known: ${known.join(", ")}`)
+    if (want.size && !carryFrom) throw new Error("--only needs --carry-from <pinned sha> for the images it does not build")
+    const builds = (image: string) => want.size === 0 || want.has(image)
+
     for (const [make, image] of IMAGE_BUILDERS) {
-      const ctr = make().withRegistryAuth("ghcr.io", ghcrUser, ghcrToken)
+      // Auth before `from`: a carried pull needs it as much as the push does.
+      const ctr = builds(image)
+        ? make().withRegistryAuth("ghcr.io", ghcrUser, ghcrToken)
+        : dag.container().withRegistryAuth("ghcr.io", ghcrUser, ghcrToken).from(`ghcr.io/kloudlite/${image}:${carryFrom}`)
       for (const t of [tag, "latest"]) {
         const ref = `ghcr.io/kloudlite/${image}:${t}`
         await ctr.publish(ref)
         refs.push(ref)
       }
     }
+
+    if (!builds("kloudlite-web")) return refs.join("\n")
 
     // web/apps/web/content/docs is git-ignored and read at runtime (lib/docs.ts); ship.sh
     // populates it by copying docs/product in before the build — done here on the Directory.
@@ -426,9 +445,11 @@ export class Kloudlite {
     tag: string,
     ghcrUser: string,
     ghcrToken: Secret,
+    only: string = "",
+    carryFrom: string = "",
   ): Promise<string> {
     await this.check(source)
     await this.checkWeb(source)
-    return this.publish(source, tag, ghcrUser, ghcrToken)
+    return this.publish(source, tag, ghcrUser, ghcrToken, only, carryFrom)
   }
 }

@@ -3,16 +3,21 @@
 # dagger CLI drives the dagger-engine sidecar in the dev pod (deploy/dev/builder.yaml) over
 # kubectl exec, and the laptop worktree is the source Dagger uploads.
 #
-# usage: deploy/dev/dagger-ship.sh [--no-gate] [--source DIR]
+# usage: deploy/dev/dagger-ship.sh [--no-gate] [--source DIR] [--only img,img...]
+#
+# --only builds just the named images (kloudlite-agent,kloudlite-web,...); the other Rust images
+# are copied forward from the sha deploy/kloudlite.yaml pins today, so pin.sh still pins one sha.
 set -euo pipefail
 
 NO_GATE=0
 SRC=""
+ONLY=""
 while [ $# -gt 0 ]; do
   case "$1" in
     --no-gate) NO_GATE=1; shift ;;
     --source) SRC=$2; shift 2 ;;
-    *) echo "usage: deploy/dev/dagger-ship.sh [--no-gate] [--source DIR]" >&2; exit 2 ;;
+    --only) ONLY=$2; shift 2 ;;
+    *) echo "usage: deploy/dev/dagger-ship.sh [--no-gate] [--source DIR] [--only img,img...]" >&2; exit 2 ;;
   esac
 done
 [ -n "$SRC" ] || SRC=$(git rev-parse --show-toplevel)
@@ -43,17 +48,27 @@ export GHCR_TOKEN=${DECODED#*:}
 VERB=ship
 [ "$NO_GATE" = 1 ] && VERB=publish
 
+SUBSET=()
+if [ -n "$ONLY" ]; then
+  CARRY=$(sed -n 's#.*ghcr\.io/kloudlite/kloudlite:\([0-9a-f]\{40\}\).*#\1#p' "$SRC/deploy/kloudlite.yaml" | head -1)
+  [ -n "$CARRY" ] || { echo "--only: no 40-hex kloudlite pin in deploy/kloudlite.yaml to carry from" >&2; exit 2; }
+  echo "only: $ONLY (rest carried from $CARRY)"
+  SUBSET=(--only "$ONLY" --carry-from "$CARRY")
+fi
+
 # Interactive: dagger's own step tree. Piped to a file: one line per step with its output
 # (`--progress plain -v`), not the bare "N steps running" heartbeat plain mode prints alone.
 PROGRESS=(); [ -t 1 ] || PROGRESS=(--progress plain -v)
 
 cd "$SRC"
 dagger "${PROGRESS[@]}" -m deploy/dagger call "$VERB" \
-  --source "$SRC" --tag "$TAG" --ghcr-user "$GHCR_USER" --ghcr-token env://GHCR_TOKEN
+  --source "$SRC" --tag "$TAG" --ghcr-user "$GHCR_USER" --ghcr-token env://GHCR_TOKEN "${SUBSET[@]}"
 
 unset GHCR_TOKEN
 
 echo
 echo "shipped $TAG — on the laptop:"
-echo "  deploy/pin.sh $TAG $TAG"
+WEB=$TAG
+[ -z "$ONLY" ] || [[ ",$ONLY," == *,kloudlite-web,* ]] || WEB=""
+echo "  deploy/pin.sh $TAG $WEB"
 echo "  deploy/roll.sh"
