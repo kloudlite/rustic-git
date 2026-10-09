@@ -29,6 +29,7 @@ export class RemoteBackend implements Backend {
     });
     peer.onEvent((ev, key, event) => {
       if (ev === "session") for (const cb of this.#subs.get(key) ?? []) cb(event);
+      else if (ev === "sessions") for (const cb of this.#watchers) cb(event as any);
       else if (ev === "auth") this.#logins.get(key)?.notify(event as any);
     });
   }
@@ -82,7 +83,20 @@ export class RemoteBackend implements Backend {
   #ops = <T extends Record<string, any>>(group: string, names: (keyof T)[]): T =>
     Object.fromEntries(names.map((n) => [n, (...args: unknown[]) => this.peer.request(`${group}.${String(n)}`, args)])) as T;
 
-  sessions = this.#ops<Backend["sessions"]>("sessions", ["list", "name", "describe", "clear"]);
+  #watchers = new Set<(l: any[]) => void>();
+  sessions: Backend["sessions"] = {
+    ...this.#ops<Omit<Backend["sessions"], "watch">>("sessions", ["list", "name", "describe", "clear"]),
+    watch: async (cb) => {
+      this.#watchers.add(cb);
+      try {
+        await this.peer.request("sessions.watch", null);
+      } catch (e) {
+        this.#watchers.delete(cb); // an old bench: "unknown op"
+        throw e;
+      }
+      return () => void this.#watchers.delete(cb);
+    },
+  };
   fs = this.#ops<Backend["fs"]>("fs", ["isGitRepo", "changes", "fileDiff", "fullFile", "listDir", "grep"]);
   podfs = this.#ops<Backend["podfs"]>("podfs", ["isGitRepo", "changes", "fileDiff", "fullFile", "listDir"]);
   settings = { write: (patch: any) => this.peer.request<void>("settings.write", patch) };

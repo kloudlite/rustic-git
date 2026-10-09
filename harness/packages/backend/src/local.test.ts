@@ -269,3 +269,37 @@ test("the gate skips the card for words the person typed, else shows the reason"
   await no.pi.agent.beforeToolCall(call({ reason: "cleanup after test" }));
   expect(no.reqs[1].reason).toBe("cleanup after test");
 });
+
+test("sessions.watch answers at once and on every change, and stops after off", async () => {
+  process.env.KLOUDLITE_CONFIG_DIR = mkdtempSync(join(tmpdir(), "kl-cfg-"));
+  delete process.env.KL_API_URL;
+  const { models } = await import("@kloudlite-tui/agent");
+  const pick = models.getModels().find((x: any) => x.provider !== "anthropic") as any;
+  const o: any = { model: { provider: pick.provider, id: pick.id }, fresh: true, tools: [], permission: async () => ({}) };
+  const b = new LocalBackend();
+  const lists: any[][] = [];
+  const off = await b.sessions.watch((l) => lists.push(l));
+  expect(lists.length).toBe(1);
+  const h = await b.session("main", o);
+  expect(lists.length).toBeGreaterThan(1); // opened
+  const n = lists.length;
+  await b.sessions.name("main", "renamed");
+  expect(lists.length).toBe(n + 1);
+  expect(lists.at(-1)!.find((m) => m.key === "main")?.name).toBe("renamed");
+  await h.dispose();
+  await new Promise((r) => setTimeout(r, 10));
+  expect(lists.length).toBeGreaterThan(n + 1); // closed
+  const m = lists.length;
+  off();
+  await b.sessions.name("main", "again");
+  expect(lists.length).toBe(m);
+}, 20000);
+
+test("baseHandle reports turn start and end to its change hook", () => {
+  const agent = fakeAgent();
+  let changes = 0;
+  baseHandle(agent, "main", { busy: new Set(), onEnd() {}, onDispose() {}, onChange: () => void changes++ });
+  agent.emit({ type: "agent_start" });
+  agent.emit({ type: "agent_end", messages: [] });
+  expect(changes).toBe(2);
+});

@@ -50,7 +50,17 @@ export function serve(backend: Backend, peer: Peer) {
     ["fs", backend.fs],
     ["podfs", backend.podfs],
   ] as const)
-    for (const [name, fn] of Object.entries(ops)) peer.handle(`${group}.${name}`, (args: unknown[]) => (fn as any)(...args));
+    for (const [name, fn] of Object.entries(ops)) {
+      if (group === "sessions" && name === "watch") continue; // a stream, not a call: below
+      peer.handle(`${group}.${name}`, (args: unknown[]) => (fn as any)(...args));
+    }
+
+  // One watch per connection, however often the client asks; the list goes out as an event.
+  let unwatch: (() => void) | undefined;
+  peer.handle("sessions.watch", async () => {
+    unwatch ??= await backend.sessions.watch((list) => peer.emit("sessions", "*", list));
+    return true;
+  });
 
   peer.handle("settings.write", (patch) => backend.settings.write(patch));
   peer.handle("space", () => backend.space());
@@ -67,6 +77,7 @@ export function serve(backend: Backend, peer: Peer) {
 
   return {
     async dispose() {
+      unwatch?.();
       await Promise.allSettled([...open.values()].map((h) => h.dispose()));
       open.clear();
     },

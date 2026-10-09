@@ -26,6 +26,7 @@ export { connect, RemoteBackend } from "./remote.ts";
 
 export type Settings = ReturnType<typeof readSettings>;
 export type SessionMeta = ReturnType<typeof listSessions>[number];
+export type LiveSessionMeta = SessionMeta & { busy: boolean };
 export type LoginOption = ReturnType<typeof loginOptions>[number];
 export type ProviderAuth = Awaited<ReturnType<typeof providerAuth>>[number];
 export type LoginType = Parameters<typeof loginProvider>[1];
@@ -141,6 +142,10 @@ export interface Backend {
   session(key: string, opts: SessionOpts): Promise<SessionHandle>;
   sessions: {
     list(prefix?: string): Promise<SessionMeta[]>;
+    /** Pushed list with live busy: `cb` runs once before this resolves, then on every open,
+     * close, turn start, turn end, name, describe and clear. Rejects on a bench without the op
+     * (the caller keeps fetching `list`). Resolves with the unsubscribe. */
+    watch(cb: (list: LiveSessionMeta[]) => void): Promise<() => void>;
     name(key: string, name: string): Promise<void>;
     describe(key: string, description: string): Promise<void>;
     clear(key: string): Promise<void>;

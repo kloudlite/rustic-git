@@ -124,3 +124,25 @@ test("a TCP client leaving disposes its views", async () => {
   expect(disposed).toEqual(["main"]);
   server.close();
 });
+
+test("sessions.watch over the wire: answered at once, pushed after; an old bench rejects", async () => {
+  let cb: ((l: any[]) => void) | undefined;
+  const { b } = fakeBackend();
+  (b as any).sessions = { watch: async (f: any) => ((cb = f), f([{ key: "main", busy: false }]), () => {}) };
+  const server = await listenTcp(b, 0, "127.0.0.1");
+  const c = tcpClient((server.address() as any).port);
+  const got: any[][] = [];
+  await c.backend.sessions.watch((l) => got.push(l));
+  await new Promise((r) => setTimeout(r, 50));
+  cb!([{ key: "main", busy: true }]);
+  await new Promise((r) => setTimeout(r, 50));
+  expect(got.map((l) => l[0].busy)).toEqual([false, true]);
+  c.close();
+  server.close();
+
+  const old = await listenTcp(fakeBackend().b, 0, "127.0.0.1"); // no sessions.watch handler
+  const o = tcpClient((old.address() as any).port);
+  await expect(o.backend.sessions.watch(() => {})).rejects.toThrow();
+  o.close();
+  old.close();
+});

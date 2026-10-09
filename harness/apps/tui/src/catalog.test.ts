@@ -10,7 +10,8 @@ import { catalog, modelLabel, refreshCatalog } from "./models.ts";
 // never-refreshed catalog is pinned to whatever shipped in dist. This is the
 // bug that stranded us on `deepseek-v4-flash`, an id DeepSeek stopped serving.
 test("every provider is dynamic, so the seed is never the whole story", () => {
-  const providers = models.getProviders();
+  // claude-bridge is ours, registered when any test mounts the app first (file order is not fixed)
+  const providers = models.getProviders().filter((p) => p.id !== "claude-bridge");
   expect(providers.length).toBeGreaterThan(0);
   // if pi ever ships a static provider, refresh silently skips it
   const dynamic = providers.filter(

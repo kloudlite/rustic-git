@@ -34,7 +34,7 @@ import { podfs } from "./podfs.ts";
 import { space as spaceView } from "./space.ts";
 import { readTasks, taskTools, tasksFile } from "./tasks.ts";
 import { PROTOCOL } from "./wire.ts";
-import type { Backend, CatalogModel, Hello, SessionEvent, SessionHandle, SessionOpts, SpaceView } from "./index.ts";
+import type { Backend, CatalogModel, Hello, LiveSessionMeta, SessionEvent, SessionHandle, SessionOpts, SpaceView } from "./index.ts";
 
 /** House actions: they change what the person owns (or the registry), so they ask whatever walls hold. */
 export const ALWAYS_ASK = new Set([
@@ -225,13 +225,14 @@ export function shareable(base: SessionHandle, onZero: () => void): { view: () =
 export function baseHandle(
   agent: any,
   key: string,
-  hooks: { busy: Set<string>; onEnd(): void; onDispose(): void },
+  hooks: { busy: Set<string>; onEnd(): void; onDispose(): void; onChange?(): void },
 ): SessionHandle {
   const subs = new Set<(e: SessionEvent) => void>();
   let closed = false;
   const unsub = agent.subscribe((event: any) => {
     if (event.type === "agent_start") hooks.busy.add(key);
     else if (event.type === "agent_end") hooks.busy.delete(key);
+    if (event.type === "agent_start" || event.type === "agent_end") hooks.onChange?.();
     const e = event.type === "tool_execution_start" ? { ...event, diff: toolDiff(event.toolName, event.args) ?? undefined } : event;
     for (const cb of [...subs]) {
       try {
@@ -281,6 +282,20 @@ export class LocalBackend implements Backend {
   /** Open sessions (the agents' base handles), for workspace_ask to reach a running one. */
   #live = new Map<string, SessionHandle>();
   #busy = new Set<string>();
+  #watchers = new Set<(list: LiveSessionMeta[]) => void>();
+  #live_list = () => listSessions().map((m) => ({ ...m, busy: this.#busy.has(m.key) }));
+  /** Every view's sidebar: the stored list with which keys are mid-turn right now. */
+  #changed() {
+    if (this.#watchers.size === 0) return;
+    const list = this.#live_list();
+    for (const cb of [...this.#watchers]) {
+      try {
+        cb(list);
+      } catch (err) {
+        console.error("sessions watcher failed", err);
+      }
+    }
+  }
   #shared = new Map<string, ReturnType<typeof shareable>>();
   /** What each live agent was built with: a later opener that needs more rebuilds it. */
   #built = new Map<string, { claude: boolean; codemode: boolean; tools: Set<string>; agent: any }>();
@@ -427,6 +442,7 @@ export class LocalBackend implements Backend {
     const handle: SessionHandle = baseHandle(agent, key, {
       busy: this.#busy,
       onEnd: () => void setTimeout(() => this.#settle(key), 0),
+      onChange: () => this.#changed(),
       onDispose: () => {
         if (this.#live.get(key) !== handle) return;
         this.#live.delete(key);
@@ -435,6 +451,8 @@ export class LocalBackend implements Backend {
         this.#rebuild.delete(key);
         for (const off of this.#offs.get(key) ?? []) off();
         this.#offs.delete(key);
+        // dispose clears busy right after this hook, so report once that has happened
+        queueMicrotask(() => this.#changed());
       },
     });
     handle.subscribe((e) => {
@@ -445,14 +463,20 @@ export class LocalBackend implements Backend {
     this.#built.set(key, { claude: "isClaude" in agent, codemode: !!opts.codemode, tools: new Set(opts.tools.map((t) => t.name)), agent });
     const made = shareable(handle, () => this.#settle(key));
     this.#shared.set(key, made);
+    this.#changed();
     return this.#attach(key, opts, made.view());
   }
 
   sessions = {
     list: async (prefix?: string) => listSessions(prefix),
-    name: async (key: string, name: string) => nameSession(key, name),
-    describe: async (key: string, d: string) => describeSession(key, d),
-    clear: async (key: string) => clearSessionHistory(key),
+    name: async (key: string, name: string) => (await nameSession(key, name), this.#changed()),
+    describe: async (key: string, d: string) => (await describeSession(key, d), this.#changed()),
+    clear: async (key: string) => (await clearSessionHistory(key), this.#changed()),
+    watch: async (cb: (list: LiveSessionMeta[]) => void) => {
+      this.#watchers.add(cb);
+      cb(this.#live_list());
+      return () => void this.#watchers.delete(cb);
+    },
   };
 
   space = async (): Promise<SpaceView> => ({ ...(await spaceView()), tasks: readTasks(tasksFile()) });

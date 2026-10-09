@@ -24,6 +24,7 @@ import type {
   SessionEvent,
   SessionHandle,
   SessionMeta,
+  LiveSessionMeta,
   ThinkingLevel,
 } from "@kloudlite-tui/backend";
 import type { SpaceView } from "@kloudlite-tui/backend";
@@ -278,10 +279,29 @@ export function App({
   // sessions belong to the context you are in: the environment's, or this
   // workspace's own
   const activeBase = focus === 0 ? "main" : workspaces[focus - 1]!.id;
-  const [baseSessions, setBaseSessions] = useState<SessionMeta[]>([]);
+  // Pushed by the bench when it can (`sessions.watch`): every view's list and busy marks move the
+  // moment any view opens, names or runs a session. `undefined` = not answered yet, `null` = an
+  // old bench, which keeps today's fetch.
+  const [watched, setWatched] = useState<LiveSessionMeta[] | null | undefined>(undefined);
   useEffect(() => {
-    backend().sessions.list(activeBase).then(setBaseSessions).catch(() => {});
-  }, [activeBase, sessionNames, sessionDescs]);
+    let off: (() => void) | undefined;
+    let gone = false;
+    backend()
+      .sessions.watch((l) => !gone && setWatched(l))
+      .then((f) => (gone ? f() : (off = f)))
+      .catch(() => !gone && setWatched(null));
+    return () => {
+      gone = true;
+      off?.();
+    };
+  }, []);
+  const [fetched, setFetched] = useState<SessionMeta[]>([]);
+  useEffect(() => {
+    if (watched !== null) return;
+    backend().sessions.list(activeBase).then(setFetched).catch(() => {});
+  }, [watched, activeBase, sessionNames, sessionDescs]);
+  // same filter as the bench's listSessions(prefix)
+  const baseSessions = watched ? watched.filter((m) => m.key.startsWith(activeBase)) : fetched;
   const activeKey = sessionKey(
     focus === 0 ? undefined : workspaces[focus - 1]!.id,
     sessionId[activeBase] ?? "main",
@@ -1389,7 +1409,7 @@ const PERM_MODES: PermMode[] = ["default", "acceptEdits", "plan", "bypass"];
       unavailable={space && !space.available ? space.error ?? "unknown error" : undefined}
       focus={focus}
       width={prefs.sidebarWidth}
-      running={workspaces.map((w) => getSession(sessions, w.id).busy)}
+      running={workspaces.map((w) => getSession(sessions, w.id).busy || !!watched?.find((m) => m.key === w.id)?.busy)}
       waiting={workspaces.map((w) => asks.some((a) => baseOf(a.key) === w.id))}
       onFocus={(f) => {
         setFocus(f);
