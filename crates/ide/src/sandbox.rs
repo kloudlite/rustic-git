@@ -4,7 +4,8 @@
 //! Wrapping each exec — never the server, which must see every tree to serve them — is what closes
 //! that. What the command sees: its own tree read-write, the Nix store and profile read-only, a
 //! fresh `/tmp`, the pod's network, and nothing else — not the workspace root, not another tree,
-//! not the home, not the token, not `kl`.
+//! not the home, not the token, not `kl`. The owner's SSH key file is the one credential inside, so
+//! `git push` works through exec.
 //!
 //! The tree is bound at THE SAME PATH inside and out. That is deliberate: §3.5 concedes that `pwd`
 //! inside an exec leaks one string, and rewriting the path would make it two — the real one and a
@@ -45,7 +46,10 @@ const BINDS: [&str; 3] = ["/nix", "/etc/passwd", "/etc/resolv.conf"];
 /// here is the platform's git ignore, bound alone: HOME is the tree's own `.home`, so the person's
 /// `~/.config/git/ignore` is invisible inside and a session's `git add -A` committed three thousand
 /// files of `.home/` go cache and telemetry (2026-10-09). `GIT_IGNORE` below points git at it.
-const OPTIONAL_BINDS: [&str; 8] = [
+/// The owner's SSH key is bound alone too, so a session can `git push` its clone's work to its
+/// workspace with plain git through exec (owner, 2026-10-09: "push wont become tool. it will be
+/// available via exec and git"); the tokens beside it (`workspace-token`, `registry-token`) never are.
+const OPTIONAL_BINDS: [&str; 9] = [
     "/etc/ssl",
     "/etc/ca-certificates",
     "/etc/pki",
@@ -54,10 +58,14 @@ const OPTIONAL_BINDS: [&str; 8] = [
     "/etc/group",
     "/etc/localtime",
     GIT_IGNORE,
+    SSH_KEY,
 ];
 
 /// `deploy/workspace-image/gitignore-global`, as the image places it.
 const GIT_IGNORE: &str = "/etc/kloudlite/gitignore-global";
+
+/// The key file alone, never `/etc/kloudlite/ssh/`: the tokens live in that directory.
+const SSH_KEY: &str = "/etc/kloudlite/ssh/id_ed25519";
 
 /// The cert-bundle variables a userland reads, passed through when the image sets them. Nix images
 /// point these at a store path rather than at `/etc/ssl`, and a store path is already bound with
@@ -455,8 +463,12 @@ mod tests {
         // The token dir is the one path under /etc that must NEVER be bound: reading it is
         // exactly what the wrapper exists to prevent. The git ignore file alone is the exception.
         assert!(
-            !sources.iter().any(|s| s.starts_with("/etc/kloudlite") && *s != GIT_IGNORE),
+            !sources.iter().any(|s| s.starts_with("/etc/kloudlite") && *s != GIT_IGNORE && *s != SSH_KEY),
             "the workspace token is inside the sandbox: {sources:?}"
+        );
+        assert!(
+            !sources.iter().any(|s| s.contains("workspace-token") || s.contains("registry-token") || *s == "/etc/kloudlite/ssh"),
+            "a token or the ssh directory is inside the sandbox: {sources:?}"
         );
         // Every optional bind that exists on THIS machine is bound, and every one that does not is
         // skipped — a missing source is what bwrap refuses to start on.
