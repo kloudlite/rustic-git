@@ -354,7 +354,7 @@ pub const CATALOGUE: &[Slo] = &[
     // than a `run-{id}` object: left Running with no client, it sleeps between runs.
     Slo { id: "bench.create", feature: "Benches", sli: "`POST /v1/bench` answers, and a second POST names the same id", target: avail(99.9), suite: Suite::Fast, stage: "5 · Workspace" },
     Slo { id: "bench.start.p95", feature: "Benches", sli: "A started bench reaches phase `ready`", target: p95(90_000), suite: Suite::Fast, stage: "5 · Workspace" },
-    Slo { id: "bench.tunnel", feature: "Benches", sli: "A bench token opens the tunnel, port 7789's SSH banner reads back, and the gateway's term route answers 200", target: bound(20_000), suite: Suite::Fast, stage: "5 · Workspace" },
+    Slo { id: "bench.tunnel", feature: "Benches", sli: "A bench token opens the kl-tui tunnel (`bench-proxy`), a `hello` request reads back an `ok` reply at protocol 1, and the gateway's term route answers 200", target: bound(20_000), suite: Suite::Fast, stage: "5 · Workspace" },
     // Hourly, like the intercept journey: the build itself waits on the gate starting a pod,
     // which is too much to pay every five minutes, and the builder must be Stopped going in or
     // the sample is timing someone else's cold start.

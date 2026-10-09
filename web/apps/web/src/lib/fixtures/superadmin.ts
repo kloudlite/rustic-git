@@ -496,7 +496,7 @@ export const CATALOGUE: [string, string, string, string, string, string][] = [
   ["env.quota.refused", "Workspaces", "A restore, a clone and a push are each refused with 409 when the owner's limit is below what the run occupies or holds", "99.9 %", "fast", "5 · Workspace"],
   ["bench.create", "Benches", "`POST /v1/bench` answers, and a second POST names the same id", "99.9 %", "fast", "5 · Workspace"],
   ["bench.start.p95", "Benches", "A started bench reaches phase `ready`", "95 % ≤ 90000 ms", "fast", "5 · Workspace"],
-  ["bench.tunnel", "Benches", "A bench token opens the tunnel, port 7789's SSH banner reads back, and the gateway's term route answers 200", "99.9 % ≤ 20000 ms", "fast", "5 · Workspace"],
+  ["bench.tunnel", "Benches", "A bench token opens the kl-tui tunnel (`bench-proxy`), a `hello` request reads back an `ok` reply at protocol 1, and the gateway's term route answers 200", "99.9 % ≤ 20000 ms", "fast", "5 · Workspace"],
   ["ws.build.p95", "Workspaces", "`kl container build` of a two-line Dockerfile in the probe workspace, from a non-login exec, is pushed to the probe owner's own image and its manifest is readable through `/v2`; the builder was Stopped before the step", "95 % ≤ 180000 ms", "hourly", "5 · Workspace"],
   ["ws.build.promote", "Workspaces", "`kl container push` copies the probe's just-built image to a second tag and `docker buildx imagetools inspect` reads that tag's digest back", "99.9 % ≤ 30000 ms", "hourly", "5 · Workspace"],
   ["ws.kl.pkg.add", "Workspaces", "`kl pkg add cowsay` inside the probe workspace exits 0 and `GET /v1/workspaces/{id}` then declares the package", "99.9 % ≤ 20000 ms", "hourly", "5 · Workspace"],
