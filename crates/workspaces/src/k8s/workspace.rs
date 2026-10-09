@@ -154,6 +154,10 @@ pub(super) fn git_ssh_url(host: &str, port: &str) -> String {
 /// `receive.denyCurrentBranch updateInstead`: a workspace clone's pod pushes straight
 /// onto this pod's checked-out branch over SSH (spec §4), which plain git refuses by default —
 /// safe here because main never holds uncommitted edits when a push lands.
+/// A workspace made without a repo (no seed clone) gets `git init -b main` and an empty first
+/// commit, so it can start empty and push later, and a subagent has a branch to clone and merge
+/// back onto. Only when `.git` is absent: a seeded clone or a restored volume keeps its own.
+/// Best effort: a failed init logs `prelude.git.init.failed` and the pod still starts.
 ///
 /// The person's terminal (ttyd) starts here too, as `kl` — no more shell sidecar (owner ruling
 /// 2026-09-25: "no need to have shell as sidecar we can run it directly in workspace container").
@@ -194,6 +198,7 @@ pub(super) fn prelude(_name: &str) -> String {
          mkdir -p $H/workspace $H/.cargo $H/.config/fish $H/.config/zsh $H/.config/git $H/.local/state\n\
          grep -qF '# kloudlite: derived state' $H/.config/git/ignore 2>/dev/null || cat /etc/kloudlite/gitignore-global >> $H/.config/git/ignore\n\
          git config --global receive.denyCurrentBranch updateInstead\n\
+         [ -e $H/workspace/.git ] || (cd $H/workspace && git init -q -b main && n=$(git config user.name || echo kl) && e=$(git config user.email || echo kl@kloudlite.local) && git -c user.name=\"$n\" -c user.email=\"$e\" commit -q --allow-empty -m 'Start workspace') || echo prelude.git.init.failed\n\
          [ -e $H/.config/zsh/.zshrc ] || {seed} > $H/.config/zsh/.zshrc\n\
          [ -e $H/.config/fish/config.fish ] || printf 'set -gx PATH {path}\\nset -gx LS_COLORS (dircolors -b | string match -r \"LS_COLORS=.([^\\047]*)\")[2]\\nalias ls=\"ls --color=auto\"\\nalias grep=\"grep --color=auto\"\\nstarship init fish | source\\n' > $H/.config/fish/config.fish\n\
          SEED\n\

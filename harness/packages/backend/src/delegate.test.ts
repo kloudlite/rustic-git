@@ -144,7 +144,7 @@ test("resumeAsks resends a fresh ask with a prefix and tries+1; the third restar
 // ---- subagent in its own clone ----
 
 type Rig = ReturnType<typeof rig>;
-function rig(o: { branch?: string; head?: string; pushes?: { code: number; stderr: string }[]; clone?: string[]; ready?: boolean } = {}) {
+function rig(o: { bare?: boolean; branch?: string; head?: string; pushes?: { code: number; stderr: string }[]; clone?: string[]; ready?: boolean } = {}) {
   const calls: string[] = [];
   const execs: { ws: string; cmd: string }[] = [];
   const clone = [...(o.clone ?? ['{"id":"ws-c1"}'])];
@@ -169,6 +169,8 @@ function rig(o: { branch?: string; head?: string; pushes?: { code: number; stder
   const exec = async (ws: string, cmd: string) => {
     execs.push({ ws, cmd });
     const ok = (stdout = "") => ({ code: 0, stdout, stderr: "" });
+    if (cmd.includes("--abbrev-ref") && o.bare && !execs.some((e) => e.cmd.includes("--allow-empty")))
+      return { code: 128, stdout: "", stderr: "fatal: not a git repository (or any of the parent directories): .git" };
     if (cmd.includes("--abbrev-ref")) return ok(`${o.branch ?? "main"}\nbasesha\n`);
     if (cmd.includes("git push")) return { stdout: "", ...pushes.shift()! };
     if (cmd.includes("rev-parse --short")) return ok("abc1234\n");
@@ -211,6 +213,15 @@ test("clone with no changes: no push, clone deleted", async () => {
   expect(await r.run()).toBe("did it\n\nno code changes");
   expect(r.execs.some((e) => e.cmd.includes("git push"))).toBe(false);
   expect(deleted(r)).toBe(true);
+});
+
+test("a workspace with no git yet gets a repo and a first commit, then the clone goes ahead", async () => {
+  const r = rig({ bare: true });
+  expect(await r.run()).toContain("pushed");
+  const start = r.execs.find((e) => e.cmd.includes("--allow-empty"))!;
+  expect(start.ws).toBe("P");
+  expect(start.cmd).toContain("git init -q -b main");
+  expect(r.calls.some((c) => c.endsWith("/clone"))).toBe(true);
 });
 
 test("detached HEAD in the parent: error and no clone", async () => {

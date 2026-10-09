@@ -55,6 +55,12 @@ const commitCmd = (task: string) =>
   `cd ${WS} && git add -A && (git diff --cached --quiet || { n=$(git config user.name); e=$(git config user.email); ` +
   `git -c user.name="\${n:-kl subagent}" -c user.email="\${e:-subagent@kloudlite.local}" commit -q -m ${sq(task.split("\n")[0]!.slice(0, 72) || "subagent changes")}; })`;
 
+/** `git init -b main` unless already a repo, then an empty first commit so there is a branch and a
+ * HEAD to clone from and merge back onto. Same identity fallbacks as `commitCmd`. */
+const startCmd =
+  `cd ${WS} && (git rev-parse --git-dir >/dev/null 2>&1 || git init -q -b main) && n=$(git config user.name); e=$(git config user.email); ` +
+  `git -c user.name="\${n:-kl subagent}" -c user.email="\${e:-subagent@kloudlite.local}" commit -q --allow-empty -m 'Start workspace'`;
+
 const textOf = (m: any): string =>
   (typeof m?.content === "string" ? [{ type: "text", text: m.content }] : Array.isArray(m?.content) ? m.content : [])
     .filter((b: any) => b?.type === "text")
@@ -117,7 +123,15 @@ async function runInClone(P: string, task: string, deps: DelegateDeps, opts: (ke
     }
   };
 
-  const base = await exec(P, `cd ${WS} && git rev-parse --abbrev-ref HEAD && git rev-parse HEAD`);
+  const HEAD = `cd ${WS} && git rev-parse --abbrev-ref HEAD && git rev-parse HEAD`;
+  let base = await exec(P, HEAD);
+  // A workspace made without a repo has no git yet, or an unborn branch: start one here rather
+  // than refuse (its pod start does the same since then; this covers the workspaces made before)
+  if (base.code === 128 || /not a git repository/.test(base.stderr)) {
+    const s = await exec(P, startCmd);
+    if (s.code !== 0) return `error: could not start a git repo in ${WS} of ${P}: ${tail(s.stderr, 5)}`;
+    base = await exec(P, HEAD);
+  }
   const [branch, baseSha] = base.stdout.trim().split("\n");
   if (base.code !== 0 && base.code !== 128 && !/not a git repository/.test(base.stderr)) return `error: ${base.stderr.trim()}`;
   if (base.code !== 0 || !branch || branch === "HEAD" || !baseSha) return `error: subagent needs a git branch checked out in ${WS} of ${P}`;
