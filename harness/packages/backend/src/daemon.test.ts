@@ -1,8 +1,8 @@
 import { expect, test } from "bun:test";
 import { join } from "node:path";
 import { randomBytes } from "node:crypto";
-import { host } from "./daemon.ts";
-import { connect } from "./remote.ts";
+import { host, listenTcp } from "./daemon.ts";
+import { connect, RemoteBackend } from "./remote.ts";
 import { connect as netConnect } from "node:net";
 import { Peer } from "./wire.ts";
 import type { Backend } from "./index.ts";
@@ -94,5 +94,33 @@ test("session.open refuses a tool without an object inputSchema", async () => {
   );
   await open({ name: "t", description: "", inputSchema: { type: "object", properties: {} } });
   conn.destroy();
+  server.close();
+});
+
+/** A client on the daemon's TCP port, the way the gateway pump reaches it. */
+function tcpClient(port: number) {
+  const conn = netConnect({ host: "127.0.0.1", port });
+  const peer = new Peer((line) => void conn.write(line));
+  conn.on("data", (c: Buffer) => peer.feed(c));
+  return { backend: new RemoteBackend(peer), close: () => conn.destroy() };
+}
+
+test("the TCP listener speaks the same wire as host.sock", async () => {
+  const server = await listenTcp(fakeBackend().b, 0, "127.0.0.1");
+  const port = (server.address() as any).port;
+  const c = tcpClient(port);
+  expect((await c.backend.hello()).protocol).toBe(1);
+  c.close();
+  server.close();
+});
+
+test("a TCP client leaving disposes its views", async () => {
+  const { b, disposed } = fakeBackend();
+  const server = await listenTcp(b, 0, "127.0.0.1");
+  const c = tcpClient((server.address() as any).port);
+  await c.backend.session("main", { model: { provider: "x", id: "y" }, tools: [] });
+  c.close();
+  await new Promise((r) => setTimeout(r, 50));
+  expect(disposed).toEqual(["main"]);
   server.close();
 });
