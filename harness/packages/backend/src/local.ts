@@ -109,14 +109,16 @@ function forgetting(t: ToolDef, deps: DelegateDeps): ToolDef {
 }
 
 /** Who gets which hands: main reaches the platform, delegates and has a confined scratch folder (bash, read, write); a workspace session has the
- * pod's code tools and its own slice of the platform; a subagent the same hands as a workspace session in its own clone, except it cannot start another subagent. */
+ * pod's code tools and its own slice of the platform; a subagent the same hands as a workspace session in its own clone, except it cannot start another subagent
+ * and cannot intercept: the workspace session runs the service and holds the intercept, a subagent works on its code. */
 export async function registryFor(k: SessionKind, deps: DelegateDeps, opts: SessionOpts, key = "main"): Promise<Registry> {
   const r = new Registry();
   if (k.kind === "main")
     return r.add(...[webFetch, webSearch, ...platformTools("main").map((t) => (t.name === "workspace_delete" ? forgetting(t, deps) : t)), ...delegateTools("main", undefined, deps, opts, key), ...scratchTools(scratchRoot(key)), ...opts.tools].map(asking));
   if (k.kind === "workspace")
     return r.add(...[webFetch, webSearch, ...(await podTools(k.ws)), ...platformTools("workspace", k.ws), ...delegateTools("workspace", k.ws, deps, opts), ...opts.tools].map(asking));
-  return r.add(...[webFetch, webSearch, ...(await podTools(k.ws)), ...platformTools("workspace", k.ws), ...opts.tools].map(asking));
+  const workspaceOnly = new Set(["intercept", "release"]);
+  return r.add(...[webFetch, webSearch, ...(await podTools(k.ws)), ...platformTools("workspace", k.ws).filter((t) => !workspaceOnly.has(t.name)), ...opts.tools].map(asking));
 }
 
 /** The permission gate, on both doors a call comes through: `agent.beforeToolCall` for a

@@ -96,6 +96,9 @@ test("registry per session kind", async () => {
   expect(sub).toContain("question");
   expect(sub).not.toContain("workspace_create");
   expect(sub).not.toContain("subagent");
+  expect(sub).not.toContain("intercept");
+  expect(sub).not.toContain("release");
+  expect(ws).toContain("intercept");
 });
 
 test(":agent- sessions are hidden from sessions.list", async () => {

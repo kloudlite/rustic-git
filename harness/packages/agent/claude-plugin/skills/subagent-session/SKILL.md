@@ -27,9 +27,9 @@ Calls marked **card** show the person a permission card first (see "Permission c
 | `env_get` | read the environment, if the task needs its service names |
 | `web_fetch`, `web_search` | read docs and the web |
 
-You also have `service_*`, `intercept`, `release`, `space_env_*` and `workspace_push`, but they belong to the workspace session: the workspace usually runs the service and holds the intercept. Use them only when your task says so.
+You work on the code you were given. Running the service and intercepting it is the workspace session's job: you have no `intercept` or `release`. You also have `service_*`, `space_env_*` and `workspace_push`; use them only when your task says so.
 
-You have no `subagent`, no `workspace_ask` and no `question`. You cannot hand the task on, ask the person, or reach the workspace session, main or anyone else while you work.
+You have no `subagent`, no `workspace_ask`, no `intercept` and no `question`. You cannot hand the task on, ask the person, or reach the workspace session, main or anyone else while you work.
 
 ## How to work
 

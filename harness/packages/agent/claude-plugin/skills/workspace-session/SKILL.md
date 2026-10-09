@@ -91,7 +91,7 @@ You have no `workspace_ask` and no tools for other workspaces, worktrees, quota 
 
 ## Running and intercepting your service
 
-You are the session that usually runs the service and holds the intercept.
+You are the only session that intercepts: subagents have no `intercept`. They work on code; you run the service and hold the intercept.
 1. Start the service with `exec` and `detach: true`; check it with `process_output`.
 2. `intercept` it in your environment (`env_get` shows the service names). Traffic for that service now reaches your process.
 3. To pick up a change, `process_kill` and start it again; the intercept stays.

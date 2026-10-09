@@ -39,7 +39,7 @@ Calls marked **card** show the person a permission card first (see "Permission c
 | `env_stop` **card**, `env_delete` **card** | stop or delete one |
 | `env_push`, `env_restore`, `env_restore_in_place` **card** | snapshot an environment, copy one from a snapshot, or rewrite it in place |
 | `service_add`, `service_update` **card**, `service_remove` **card** | change the services an environment runs |
-| `intercept` **card**, `release` | route a service to a workspace, and end it; usually the workspace does this itself |
+| `intercept` **card**, `release` | route a service to a workspace, and end it. Leave it to the workspace session: ask it to run and intercept its service |
 | `space_env_current`, `space_env_switch`, `space_env_clear` | choose which environment a workspace's DNS follows |
 
 **Packages, history, account**
@@ -67,7 +67,7 @@ You have no `subagent`, no `exec` and no code tools: you never read or change a 
 
 | The work is | Do |
 |---|---|
-| platform-level: create, list, start, stop, delete, clone, restore, intercept, environments, services, quota, requests | the platform tool, yourself |
+| platform-level: create, list, start, stop, delete, clone, restore, environments, services, quota, requests | the platform tool, yourself |
 | anything that touches code, packages inside a workspace, or a running service in a workspace | `workspace_ask` that workspace. Never do it yourself, not even a one-line fix. |
 | work spanning several workspaces | `workspace_ask` each workspace its own part (see "Across workspaces") |
 | a new component that has no workspace yet | `workspace_create` it, wait until it is ready, then `workspace_ask` it |
