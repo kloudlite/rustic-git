@@ -17,6 +17,10 @@ export function serve(backend: Backend, peer: Peer) {
   peer.handle("hello", () => backend.hello());
 
   peer.handle("session.open", async ({ key, tools, ...o }: { key: string; tools: ToolSpec[] } & any) => {
+    // Claude Code drops the WHOLE tool server when one tool has no object schema: the session then
+    // runs with no tools and says nothing (a drill client sent `parameters` and lost all 53)
+    const bad = tools.find((t: ToolSpec) => (t?.inputSchema as any)?.type !== "object");
+    if (bad) throw new Error(`tool ${bad?.name} needs an inputSchema of type "object"`);
     await open.get(key)?.dispose();
     open.delete(key);
     const h = await backend.session(key, {

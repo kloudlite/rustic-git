@@ -117,6 +117,12 @@ fn ssh_argv(
         format!("HostKeyAlias=kl-bench-{owner}"),
         "-o".to_string(),
         "LogLevel=ERROR".to_string(),
+        // a dead bench (pod gone, tunnel cut) sends no FIN: without probes kl-tui froze silently
+        // forever. 3 missed 15 s probes end ssh, and kl-tui reports the lost connection.
+        "-o".to_string(),
+        "ServerAliveInterval=15".to_string(),
+        "-o".to_string(),
+        "ServerAliveCountMax=3".to_string(),
         "-o".to_string(),
         proxy,
     ];
@@ -358,6 +364,10 @@ mod tests {
                 format!("HostKeyAlias=kl-bench-{owner}"),
                 "-o".to_string(),
                 "LogLevel=ERROR".to_string(),
+                "-o".to_string(),
+                "ServerAliveInterval=15".to_string(),
+                "-o".to_string(),
+                "ServerAliveCountMax=3".to_string(),
                 "-o".to_string(),
                 proxy.to_string(),
                 "-R".to_string(),

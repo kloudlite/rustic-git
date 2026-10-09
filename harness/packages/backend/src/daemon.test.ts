@@ -80,3 +80,19 @@ test("closing a connection disposes the views that connection opened, not others
   keep.destroy();
   server.close();
 });
+
+test("session.open refuses a tool without an object inputSchema", async () => {
+  const s = sock();
+  const { b } = fakeBackend();
+  const server = await host(b, s);
+  const conn = netConnect(s);
+  const peer = new Peer((l) => void conn.write(l));
+  conn.on("data", (c: Buffer) => peer.feed(c));
+  const open = (tool: any) => peer.request("session.open", { key: "k", model: { provider: "p", id: "m" }, tools: [tool] });
+  await expect(open({ name: "t", description: "", parameters: { type: "object" } })).rejects.toThrow(
+    'tool t needs an inputSchema of type "object"',
+  );
+  await open({ name: "t", description: "", inputSchema: { type: "object", properties: {} } });
+  conn.destroy();
+  server.close();
+});

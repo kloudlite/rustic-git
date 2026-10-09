@@ -50,7 +50,7 @@ test("session round trip: messages, permission, TUI tool, events with Error", as
   const events: any[] = [];
   const h = await remote.session("k", {
     model: { provider: "p", id: "m" },
-    tools: [{ name: "question", description: "", inputSchema: {}, run: async (i: any) => `answered ${i.q}` }],
+    tools: [{ name: "question", description: "", inputSchema: { type: "object" }, run: async (i: any) => `answered ${i.q}` }],
     permission: async (req) => ({ block: req.args.command === "rm" }),
   });
   expect(h.messages).toEqual([{ role: "user", content: "earlier" }] as any);
