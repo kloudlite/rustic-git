@@ -871,7 +871,7 @@ export function App({
   const GATED = new Set([
     "bash", "write", "edit", "patch", "exec", "web_fetch",
     "workspace_stop", "workspace_delete", "worktree_drop", "env_delete", "env_stop", "env_restore_in_place",
-    "service_remove", "volume_delete", "snapshot_delete",
+    "service_remove", "volume_delete", "snapshot_delete", "container_push",
   ]);
   /** Tools that only mutate the workspace's files — what acceptEdits waves through. */
   const EDITS = new Set(["write", "edit", "patch"]);

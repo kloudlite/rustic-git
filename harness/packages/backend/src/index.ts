@@ -96,7 +96,7 @@ export type SessionOpts = {
   codemode?: boolean;
   /** Tools the TUI owns; their `run` executes in the TUI process. */
   tools: ToolDef[];
-  /** Called only for gated tools (bash, write, edit, web_fetch). Absent on internal opens (a
+  /** Called only for gated tools: house actions always; bash, exec and web_fetch unless the fence holds (`mustAsk`); never write, edit, patch. Absent on internal opens (a
    * view opened to deliver a reply): cards then go to whichever client holds the session (./clients). */
   permission?(req: PermissionRequest, signal: AbortSignal): Promise<Decision>;
 };

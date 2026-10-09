@@ -14,8 +14,23 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 pub async fn list(State(app): State<Arc<App>>) -> Json<Value> {
-    Json(json!({ "tools": app.registry.tools().into_iter().map(|t| json!({
-        "name": t.name, "description": t.description, "schema": t.schema })).collect::<Vec<_>>() }))
+    // The harness auto-approves exec only behind both walls, so it reads them here rather than
+    // guessing: a missing or unusable bwrap runs exec unwrapped, and the pod's network is open
+    // until the egress fence is up. Anything but "active"/"fenced" makes it ask.
+    let sandbox = app.tree(None).ok().is_some_and(|t| crate::sandbox::usable(&t).is_some());
+    Json(json!({
+        "tools": app.registry.tools().into_iter().map(|t| json!({
+            "name": t.name, "description": t.description, "schema": t.schema })).collect::<Vec<_>>(),
+        "fence": fence(sandbox, std::env::var("KLOUDLITE_EGRESS").ok().as_deref()),
+    }))
+}
+
+/// Pure so a test needs no env: the network is fenced only when the egress switch says so.
+fn fence(sandbox: bool, egress: Option<&str>) -> Value {
+    json!({
+        "sandbox": if sandbox { "active" } else { "unavailable" },
+        "network": if egress == Some("fenced") { "fenced" } else { "open" },
+    })
 }
 
 pub async fn call(
@@ -60,6 +75,13 @@ fn with_tree(mut args: Value, tree: Option<&String>) -> Value {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_network_is_open_unless_the_egress_switch_says_fenced() {
+        assert_eq!(fence(true, None), json!({"sandbox": "active", "network": "open"}));
+        assert_eq!(fence(false, Some("open")), json!({"sandbox": "unavailable", "network": "open"}));
+        assert_eq!(fence(true, Some("fenced"))["network"], "fenced");
+    }
 
     #[test]
     fn the_body_wins_and_the_query_fills_in() {

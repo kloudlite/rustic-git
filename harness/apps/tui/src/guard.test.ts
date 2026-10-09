@@ -11,8 +11,8 @@ test("remote.tsx bundles no agent", async () => {
 });
 
 test("TUI keeps the backend's gate sets", async () => {
-  const { GATED, EDITS } = await import("@kloudlite-tui/backend/local");
+  const { ALWAYS_ASK, ASK_UNLESS_FENCED, EDITS } = await import("@kloudlite-tui/backend/local");
   const app = await Bun.file(join(import.meta.dir, "app.tsx")).text();
-  for (const t of GATED) expect(app).toContain(`"${t}"`);
+  for (const t of [...ALWAYS_ASK, ...ASK_UNLESS_FENCED]) expect(app).toContain(`"${t}"`);
   expect([...EDITS]).toEqual(["write", "edit", "patch"]);
 });

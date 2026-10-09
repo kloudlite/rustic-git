@@ -2,7 +2,7 @@ import { expect, test } from "bun:test";
 import { mkdtempSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { LocalBackend, GATED, baseHandle, shareable, EDITS, installGate, registryFor, sessionCwd, sessionKind } from "./local.ts";
+import { LocalBackend, ALWAYS_ASK, baseHandle, mustAsk, shareable, installGate, registryFor, sessionCwd, sessionKind } from "./local.ts";
 import { toolDiff } from "./diff.ts";
 import { PROTOCOL } from "./wire.ts";
 
@@ -31,11 +31,24 @@ test("fs wraps git.ts", async () => {
   expect(Array.isArray(await b.fs.listDir(process.cwd(), ""))).toBe(true);
 });
 
-test("gate set covers code writes and destructive platform verbs", () => {
-  for (const n of ["bash", "write", "edit", "patch", "exec", "web_fetch", "workspace_stop", "workspace_delete", "worktree_drop", "env_delete", "env_stop", "env_restore_in_place", "service_remove", "volume_delete", "snapshot_delete"])
-    expect(GATED.has(n)).toBe(true);
-  expect(GATED.size).toBe(15);
-  expect([...EDITS].sort()).toEqual(["edit", "patch", "write"]);
+test("house actions always ask; file edits never do", () => {
+  const house = ["workspace_stop", "workspace_delete", "worktree_drop", "env_delete", "env_stop", "env_restore_in_place", "service_remove", "volume_delete", "snapshot_delete", "container_push"];
+  expect(ALWAYS_ASK.size).toBe(10);
+  const walls = { sandbox: "active", network: "fenced" };
+  for (const n of house) expect([mustAsk(n, walls, "fenced"), mustAsk(n)]).toEqual([true, true]);
+  for (const n of ["write", "edit", "patch", "read"]) expect(mustAsk(n)).toBe(false);
+});
+
+test("exec asks unless the pod reports both walls", () => {
+  expect(mustAsk("exec")).toBe(true);
+  expect(mustAsk("exec", {})).toBe(true);
+  expect(mustAsk("exec", { sandbox: "unavailable", network: "fenced" })).toBe(true);
+  expect(mustAsk("exec", { sandbox: "active", network: "open" })).toBe(true);
+  expect(mustAsk("exec", { sandbox: "active", network: "fenced" })).toBe(false);
+});
+
+test("bash and web_fetch ask unless KLOUDLITE_EGRESS is fenced", () => {
+  for (const n of ["bash", "web_fetch"]) expect([mustAsk(n, undefined, undefined), mustAsk(n, undefined, "open"), mustAsk(n, undefined, "fenced")]).toEqual([true, true, false]);
 });
 
 test("pod edit ({old,new}) has no local diff; pi edit still does", () => {

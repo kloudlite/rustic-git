@@ -22,7 +22,7 @@ import {
   writeSettings,
   type ModelRef,
 } from "@kloudlite-tui/agent";
-import { Registry, platformTools, podTools, scratchRoot, scratchTools, webFetch, webSearch, type ToolDef } from "@kloudlite-tui/tools";
+import { Registry, platformTools, podFence, podTools, type PodFence, scratchRoot, scratchTools, webFetch, webSearch, type ToolDef } from "@kloudlite-tui/tools";
 import { Clients } from "./clients.ts";
 import { WORKSPACE_DIR, delegateTools, resumeAsks, type DelegateDeps } from "./delegate.ts";
 import { forgetSessions } from "./forget.ts";
@@ -33,14 +33,28 @@ import { space } from "./space.ts";
 import { PROTOCOL } from "./wire.ts";
 import type { Backend, CatalogModel, Hello, SessionEvent, SessionHandle, SessionOpts } from "./index.ts";
 
-/** Tools that ask before they run. */
-export const GATED = new Set([
-  "bash", "write", "edit", "patch", "exec", "web_fetch",
+/** House actions: they change what the person owns (or the registry), so they ask whatever walls hold. */
+export const ALWAYS_ASK = new Set([
   "workspace_stop", "workspace_delete", "worktree_drop", "env_delete", "env_stop", "env_restore_in_place",
-  "service_remove", "volume_delete", "snapshot_delete",
+  "service_remove", "volume_delete", "snapshot_delete", "container_push",
 ]);
-/** Tools that only mutate the workspace's files — what acceptEdits waves through. */
+/** Run code or reach the network: they ask unless the fence holds (see `mustAsk`). */
+export const ASK_UNLESS_FENCED = new Set(["bash", "exec", "web_fetch"]);
+/** Tools that only mutate the workspace's files — never asked: `paths::confine` / the scratch folder keep them in the tree. */
 export const EDITS = new Set(["write", "edit", "patch"]);
+
+/**
+ * Whether a call needs a card. exec is behind a wall only when its pod's tool server reports both
+ * a live sandbox and a fenced network; a missing field (older server, failed fetch) reads as open.
+ * bash and web_fetch run in the bench process, whose network is fenced when KLOUDLITE_EGRESS says
+ * so (bash's scratch sandbox already fails closed).
+ */
+export function mustAsk(name: string, fence?: PodFence, egress = process.env.KLOUDLITE_EGRESS): boolean {
+  if (ALWAYS_ASK.has(name)) return true;
+  if (!ASK_UNLESS_FENCED.has(name)) return false;
+  if (name === "exec") return !(fence?.sandbox === "active" && fence?.network === "fenced");
+  return egress !== "fenced";
+}
 
 export type SessionKind = { kind: "main" } | { kind: "workspace"; ws: string } | { kind: "subagent"; ws: string };
 
@@ -90,10 +104,10 @@ export async function registryFor(k: SessionKind, deps: DelegateDeps, opts: Sess
  * model's own calls (pi's loop and Claude's tool server both call it), and the pi session's
  * `_beforeToolCall` for calls a codemode script makes, which pi's nested runner sends straight
  * there with the parent's id and no signal. Gated once per call: top level has no parent id. */
-export function installGate(agent: any, permission: SessionOpts["permission"]): void {
+export function installGate(agent: any, permission: SessionOpts["permission"], fence?: () => PodFence | undefined): void {
   const ask = async (ctx: any, signal: AbortSignal) => {
     const name = ctx.toolCall.name;
-    if (!GATED.has(name)) return undefined;
+    if (!mustAsk(name, fence?.())) return undefined;
     const decision = await permission!({ name, args: ctx.args, diff: toolDiff(name, ctx.args) ?? undefined }, signal);
     return decision.block ? decision : undefined;
   };
@@ -338,7 +352,7 @@ export class LocalBackend implements Backend {
       codemode: opts.codemode,
       cwd,
     });
-    installGate(agent, (req, signal) => this.#clients.route(key, (c) => !!c.permission, (c) => c.permission!(req, signal), signal));
+    installGate(agent, (req, signal) => this.#clients.route(key, (c) => !!c.permission, (c) => c.permission!(req, signal), signal), k.kind === "main" ? undefined : () => podFence(k.ws));
     const handle: SessionHandle = baseHandle(agent, key, {
       busy: this.#busy,
       onEnd: () => void setTimeout(() => this.#settle(key), 0),

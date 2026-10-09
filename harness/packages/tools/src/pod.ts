@@ -16,6 +16,12 @@ export const POD_TOOLS = [
 type Addr = { address: string; token?: string };
 type Listed = { name: string; description?: string; schema?: Record<string, unknown> };
 
+/** What the tool server says stands between exec and the world (`fence` in `GET /tools`). */
+export type PodFence = { sandbox?: string; network?: string };
+const fences = new Map<string, PodFence>();
+/** The fence `podTools(ws)` last read; undefined when the server is older or was unreachable. */
+export const podFence = (ws: string): PodFence | undefined => fences.get(ws);
+
 class NotReady extends Error {}
 
 async function lookup(ws: string): Promise<Addr> {
@@ -50,10 +56,15 @@ export async function podTools(ws: string): Promise<ToolDef[]> {
   const addr = async () => (cache ??= await lookup(ws));
 
   let listed = new Map<string, Listed>();
+  fences.delete(ws);
   try {
     const a = await addr();
     const res = await fetch(`http://${a.address}/tools`, { headers: headers(a), signal: AbortSignal.timeout(5000) });
-    if (res.ok) for (const t of ((await res.json()) as { tools: Listed[] }).tools) listed.set(t.name, t);
+    if (res.ok) {
+      const body = (await res.json()) as { tools: Listed[]; fence?: PodFence };
+      for (const t of body.tools) listed.set(t.name, t);
+      if (body.fence) fences.set(ws, body.fence);
+    }
   } catch {
     cache = undefined;
   }
