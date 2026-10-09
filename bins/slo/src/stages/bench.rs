@@ -131,7 +131,7 @@ pub(crate) async fn forward(c: &Ctx) -> Result<Child> {
     let cfg = json!({"api": c.cfg.api_url, "token": c.probe_jwt, "expires_at": "2099-01-01T00:00:00Z", "username": c.cfg.probe_user});
     std::fs::write(dir.join("config.json"), cfg.to_string())?;
     Command::new(&c.programs.kl)
-        .args(["bench-proxy", "--tui"])
+        .args(["bench-proxy"])
         .env("KL_CONFIG_DIR", &dir)
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())

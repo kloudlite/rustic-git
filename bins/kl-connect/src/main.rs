@@ -62,9 +62,6 @@ enum Cmd {
     /// kl-tui's pipe for `kl-connect [team]`: pump stdio to the bench daemon through the gateway
     #[command(hide = true)]
     BenchProxy {
-        /// Accepted for the argv kl-tui is started with; the TUI door is the only one
-        #[arg(long)]
-        tui: bool,
         team: Option<String>,
     },
 }
@@ -134,6 +131,6 @@ async fn run(cmd: &Cmd) -> Result<(), String> {
         Cmd::Builder { cmd } => match cmd {
             BuilderCmd::Status { team } => builder::status(team.as_deref()).await,
         },
-        Cmd::BenchProxy { team, tui: _ } => bench::proxy(team.as_deref()).await,
+        Cmd::BenchProxy { team } => bench::proxy(team.as_deref()).await,
     }
 }

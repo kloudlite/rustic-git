@@ -1,5 +1,5 @@
 //! `kl-connect [team]` — straight into a bench: your own with no argument, a team's by its name.
-//! It runs the laptop `kl-tui` over `kl-connect bench-proxy --tui [team]`: one session token (one
+//! It runs the laptop `kl-tui` over `kl-connect bench-proxy [team]`: one session token (one
 //! `bench_session` call, single-use, valid 60 s) and one websocket to the gateway's `/tui/{bench}`
 //! per connection. The bench has no sshd. The token never appears in output, same rule as
 //! `proxy.rs`.
@@ -45,9 +45,9 @@ pub async fn bench(team: Option<&str>, start: bool, region: Option<&str>) -> Res
     std::process::exit(st.code().unwrap_or(1));
 }
 
-/// What kl-tui is started with: it dials the bench by running `kl-connect bench-proxy --tui` as its pipe.
+/// What kl-tui is started with: it dials the bench by running `kl-connect bench-proxy` as its pipe.
 fn tui_argv(me: &std::path::Path, team: Option<&str>) -> Vec<String> {
-    let mut v = vec!["--pipe".to_string(), me.display().to_string(), "bench-proxy".into(), "--tui".into()];
+    let mut v = vec!["--pipe".to_string(), me.display().to_string(), "bench-proxy".into()];
     v.extend(team.map(str::to_string));
     v
 }
@@ -277,7 +277,7 @@ mod tests {
     #[test]
     fn the_bench_runs_kl_tui_over_the_pipe() {
         let argv = tui_argv(Path::new("/opt/kl/kl-connect"), Some("team-a"));
-        assert_eq!(argv, ["--pipe", "/opt/kl/kl-connect", "bench-proxy", "--tui", "team-a"]);
+        assert_eq!(argv, ["--pipe", "/opt/kl/kl-connect", "bench-proxy", "team-a"]);
     }
 
     #[test]
