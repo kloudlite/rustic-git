@@ -25,15 +25,15 @@ const cursors = new Map<string, { next: number; next_err: number; lines: Line[];
 type Line = { text: string; err?: true };
 
 /** Every tree's processes, each stamped with its tree. `process_list` answers only the tree it
- * is asked about (a subagent never sees main's, nor main a subagent's), so asking with no tree hid
- * every process a subagent started. The tree names are `/healthz`'s `graphs` keys: a tree the
+ * is asked about (one worktree never sees another's), so asking with no tree hid
+ * every process started in another worktree. The tree names are `/healthz`'s `graphs` keys: a tree the
  * server has served, which any tree that started a process has been. */
 async function processes(ws: string): Promise<SpaceProcess[]> {
   const h = await capped(podGet<{ graphs?: Record<string, unknown> }>(ws, "/healthz", POD_CAP_MS));
   const trees = [...new Set(["main", ...Object.keys(h?.graphs ?? {})])];
   const lists = await Promise.all(
     trees.map(async (tree) => {
-      // main's failure is the pod's and fails the read (the field is left out); a subagent tree
+      // main's failure is the pod's and fails the read (the field is left out); a worktree
       // that went away since `/healthz` is just empty
       const list = podPost<{ processes: Omit<SpaceProcess, "logs">[] }>(ws, "process_list", { tree }, POD_CAP_MS);
       const r = tree === "main" ? await list : await capped(list);

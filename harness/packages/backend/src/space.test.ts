@@ -140,7 +140,7 @@ test("a failing list call is unavailable, with the API's text and no token", asy
   expect(v.error).toBe("error 403: forbidden");
 });
 
-test("a subagent tree's process is listed with its tree, and its logs are read from that tree", async () => {
+test("a worktree's process is listed with its tree, and its logs are read from that tree", async () => {
   const dir = mkdtempSync(join(tmpdir(), "kl-space-"));
   writeFileSync(join(dir, "tok"), "SECRET-TOKEN\n");
   Object.assign(process.env, { KL_API_URL: "http://api", KL_TOOL_TOKEN_FILE: join(dir, "tok"), KL_OWNER: "me", KL_TEAM: "acme", KL_BENCH: "bench" });
