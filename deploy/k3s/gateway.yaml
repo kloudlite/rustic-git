@@ -148,7 +148,7 @@ spec:
           # code is running, and `IfNotPresent` on an immutable tag means image GC costs a
           # re-pull rather than a silent version change.
           # No imagePullSecret: the package is public, like the repository.
-          image: ghcr.io/kloudlite/kloudlite-gateway:a03b32fb4da09829366319a0320b156cf962f7c6@sha256:5945eaaf4928ca72efcbe0d62842ddee13542293dfd733656ffba6f5531fdd4e
+          image: ghcr.io/kloudlite/kloudlite-gateway:fe29790167de55a46cc55883a5002b76bcf23d26@sha256:05ed16f7065eef1a0030ec383e8a68a2abcb95ac771eeb2c8855b1ac810a0414
           imagePullPolicy: IfNotPresent
           ports:
             - name: http
