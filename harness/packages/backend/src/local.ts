@@ -142,9 +142,9 @@ function question(key: string, cards: Cards): ToolDef {
     name: "question",
     description: "Ask the user a question and wait for their answer. Use it when you need a decision or clarification. Give 2-5 short answer options.",
     inputSchema: { type: "object", properties: { question: { type: "string", description: "The question to ask." }, options: { type: "array", items: { type: "string" }, description: "The answer options that the user can select." } }, required: ["question", "options"] },
-    run: async ({ question, options }: { question: string; options: string[] }) => {
-      // ponytail: Tool.run carries no signal, so only dispose/delete (withdrawKey) ends a pending question; thread a signal through ToolDef to also end it on interrupt
-      const picked = await cards.ask({ key, kind: "question", tool: "question", title: question, options: options.map((label, i) => ({ id: String(i), label })) }, new AbortController().signal, "__withdrawn");
+    run: async ({ question, options }: { question: string; options: string[] }, signal?: AbortSignal) => {
+      // an aborted turn withdraws the card (Cards resolves it with the fallback), as dispose/delete do
+      const picked = await cards.ask({ key, kind: "question", tool: "question", title: question, options: options.map((label, i) => ({ id: String(i), label })) }, signal ?? new AbortController().signal, "__withdrawn");
       if (picked === "__withdrawn") throw new Error("the question was withdrawn (turn interrupted)");
       return options[Number(picked)] ?? picked;
     },

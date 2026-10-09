@@ -160,3 +160,22 @@ test("mode: plan answers without a card, bypass allows, acceptEdits allows edits
   expect(seen.filter((e) => e.type === "perm").map((e) => e.mode)).toEqual(["plan", "bypass", "acceptEdits"]);
   expect(seen.some((e) => e.type === "ask")).toBe(false);
 });
+
+test("aborting the turn withdraws a pending question card and every watcher hears it", async () => {
+  const ms = await models();
+  let reg: any;
+  const local = new LocalBackend({ create: (async (o: any) => ((reg = o.registry), fake(o))) as any });
+  const a = await pair(local), b = await pair(local);
+  await a.session("main", { initial: { model: { provider: ms[0].provider, id: ms[0].id } }, fresh: true, tools: [] });
+  const ea: any[] = [], eb: any[] = [];
+  await a.watch((e) => ea.push(e));
+  await b.watch((e) => eb.push(e));
+  const ac = new AbortController();
+  const p = reg.get("question").run({ question: "which?", options: ["x", "y"] }, ac.signal);
+  await Bun.sleep(10);
+  const ask = ea.find((e) => e.type === "ask")!.ask;
+  ac.abort();
+  await expect(p).rejects.toThrow("withdrawn");
+  await Bun.sleep(10);
+  for (const e of [ea, eb]) expect(e).toContainEqual({ type: "ask_resolved", id: ask.id });
+});

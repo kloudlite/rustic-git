@@ -8,7 +8,7 @@ export interface ToolDef<I = any> {
   description: string;
   /** JSON Schema for the input. Be prescriptive about *when* to call it. */
   inputSchema: Record<string, unknown>;
-  run(input: I): Promise<string>;
+  run(input: I, signal?: AbortSignal): Promise<string>;
 }
 
 /** Tools registered for a session. Empty by default. */

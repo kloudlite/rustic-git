@@ -80,8 +80,8 @@ export function adaptTools(registry: Registry) {
     label: def.name,
     description: def.description,
     parameters: def.inputSchema,
-    execute: async (_toolCallId: string, args: unknown) => ({
-      content: [{ type: "text" as const, text: await def.run(args) }],
+    execute: async (_toolCallId: string, args: unknown, signal?: AbortSignal) => ({
+      content: [{ type: "text" as const, text: await def.run(args, signal) }],
     }),
   }));
 }
