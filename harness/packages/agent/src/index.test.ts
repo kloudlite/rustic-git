@@ -48,6 +48,18 @@ test("systemAppends: kloudlite always, codemode only when on", async () => {
   expect(systemAppends(true)).toHaveLength(2);
 });
 
+test("systemAppends: each role gets exactly its own role skill", async () => {
+  const { systemAppends } = await import("./index.ts");
+  const roles = ["main", "workspace", "subagent"] as const;
+  for (const role of roles) {
+    const texts = systemAppends(false, role);
+    expect(texts).toHaveLength(2);
+    expect(texts[1]).toContain(`name: ${role}-session`);
+    for (const other of roles.filter((r) => r !== role)) expect(texts.join("\n")).not.toContain(`name: ${other}-session`);
+  }
+  expect(systemAppends(true, "main")).toHaveLength(3);
+});
+
 function harness(execute: (id: string, params: any, signal: any, onUpdate: any) => Promise<any>) {
   const tools: Record<string, any> = {};
   const pi = { registerTool: (t: any) => (tools[t.name] = t) };

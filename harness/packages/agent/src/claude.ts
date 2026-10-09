@@ -41,10 +41,13 @@ import { TOOL_PREFIX, toClaudeEntries } from "./claude-history.ts";
 import { createToolServer, declaredTools } from "./claude-tools.ts";
 
 // Claude sessions run Claude Code's loop, which never sees pi's skills; ours reach it as a local
-// plugin: `kl:kloudlite` (platform context) in every session, `kl:codemode` only while codemode is a tool.
+// plugin: `kl:kloudlite` (platform context) in every session, plus the session role's own skill
+// (`kl:main-session` / `kl:workspace-session` / `kl:subagent-session`), `kl:codemode` only while codemode is a tool.
 const KL_PLUGIN = fileURLToPath(new URL("../claude-plugin", import.meta.url));
 export const CODEMODE_SKILL = join(KL_PLUGIN, "skills", "codemode");
 export const KLOUDLITE_SKILL = join(KL_PLUGIN, "skills", "kloudlite");
+export type Role = "main" | "workspace" | "subagent";
+export const roleSkill = (role: Role) => join(KL_PLUGIN, "skills", `${role}-session`);
 
 export const AUTH_MESSAGE = "Not signed in to Claude. On your laptop run: kl-connect claude login";
 
@@ -144,6 +147,8 @@ export type ClaudeOptions = {
   key: string;
   model: { id: string };
   thinkingLevel?: Level;
+  /** Which role skill the session loads beside `kl:kloudlite`. */
+  role?: Role;
   /** The pi session whose tools, prompt and record this one runs on. */
   pi: PiHost;
   cwd?: string;
@@ -631,7 +636,7 @@ export function createClaudeSession(opts: ClaudeOptions) {
       // the workspace's CLAUDE.md and .claude/, loaded by Claude Code itself
       settingSources: ["project"],
       plugins: [{ type: "local" as const, path: KL_PLUGIN }],
-      skills: codemode ? ["kl:kloudlite", "kl:codemode"] : ["kl:kloudlite"],
+      skills: ["kl:kloudlite", ...(opts.role ? [`kl:${opts.role}-session`] : []), ...(codemode ? ["kl:codemode"] : [])],
       cwd,
       model,
       extraArgs: { "thinking-display": "summarized" },

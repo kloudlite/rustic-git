@@ -98,6 +98,15 @@ test("every session loads the kl plugin with the kloudlite skill; codemode adds 
   }
 });
 
+test("a role adds exactly its own role skill after kloudlite", async () => {
+  const f = fake((_n, push) => text("x").forEach(push));
+  const s = createClaudeSession({ key: "k", model: { id: "m" }, role: "workspace", pi: piHost().host, query: f.query });
+  await s.prompt("a");
+  await tick();
+  expect(f.calls[0].options.skills).toEqual(["kl:kloudlite", "kl:workspace-session"]);
+  s.dispose();
+});
+
 test("two prompts are two turns on ONE query", async () => {
   const f = fake((n, push) => text(n === 1 ? "hi" : "bye").forEach(push));
   const { s, events } = run(f);

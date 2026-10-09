@@ -12,7 +12,7 @@ import {
 } from "@earendil-works/pi-coding-agent";
 import type { Api, AuthInteraction, AuthType, Credential, Model } from "@earendil-works/pi-ai";
 import type { Registry } from "@kloudlite-tui/tools";
-import { CODEMODE_SKILL, KLOUDLITE_SKILL, claudeSignedIn, createClaudeSession, type ClaudeSession } from "./claude.ts";
+import { CODEMODE_SKILL, KLOUDLITE_SKILL, roleSkill, type Role, claudeSignedIn, createClaudeSession, type ClaudeSession } from "./claude.ts";
 
 export { claudeSignedIn, type ClaudeSession };
 
@@ -375,9 +375,9 @@ export function dropSessions(ws: string): void {
     if (d === own || d.startsWith(`${own}_`)) rmSync(join(CONFIG_DIR, "sessions", d), { recursive: true, force: true });
 }
 
-/** Skill texts inlined into every pi session's system prompt; codemode's only while it is a tool. */
-export function systemAppends(codemode?: boolean): string[] {
-  return [KLOUDLITE_SKILL, ...(codemode ? [CODEMODE_SKILL] : [])].map((d) => readFileSync(join(d, "SKILL.md"), "utf8"));
+/** Skill texts inlined into every pi session's system prompt: kloudlite, the role's, codemode's only while it is a tool. */
+export function systemAppends(codemode?: boolean, role?: Role): string[] {
+  return [KLOUDLITE_SKILL, ...(role ? [roleSkill(role)] : []), ...(codemode ? [CODEMODE_SKILL] : [])].map((d) => readFileSync(join(d, "SKILL.md"), "utf8"));
 }
 
 export async function createSession({
@@ -388,6 +388,7 @@ export async function createSession({
   thinkingLevel,
   autoCompact,
   codemode,
+  role,
   cwd = process.cwd(),
 }: {
   key: string;
@@ -401,6 +402,8 @@ export async function createSession({
   autoCompact?: boolean;
   /** Let the model write a script that calls tools, instead of one call per turn. */
   codemode?: boolean;
+  /** main, workspace or subagent: picks the role skill loaded beside kloudlite. */
+  role?: Role;
   /** Working directory the model is told and Claude spawns in (default: this process's). */
   cwd?: string;
 }): Promise<AgentSession | ClaudeSession> {
@@ -429,7 +432,7 @@ export async function createSession({
     // rules prepended to its description (CODEMODE_NOTE) now carry that.
     ...(codemode ? { extensionFactories: [{ name: "codemode", factory: withCodemodeExtras(createCodemodeExtension({ mode: "on" })) }] } : {}),
     // the same skills Claude sessions get through the plugin (claude.ts)
-    appendSystemPrompt: systemAppends(codemode),
+    appendSystemPrompt: systemAppends(codemode, role),
   });
   await resourceLoader.reload();
   const { session } = await createAgentSession({
@@ -453,7 +456,7 @@ export async function createSession({
   // prompt and transcript (spec 2026-10-08-claude-tool-host). pi's own loop
   // never starts for them.
   if (model.provider === "anthropic") {
-    const claude = createClaudeSession({ key, model, thinkingLevel, cwd, pi: session as never });
+    const claude = createClaudeSession({ key, model, thinkingLevel, role, cwd, pi: session as never });
     if (autoCompact !== undefined) claude.setAutoCompactionEnabled(autoCompact);
     return claude;
   }

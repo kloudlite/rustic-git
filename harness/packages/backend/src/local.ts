@@ -391,6 +391,7 @@ export class LocalBackend implements Backend {
       thinkingLevel: opts.thinkingLevel,
       autoCompact: opts.autoCompact,
       codemode: opts.codemode,
+      role: k.kind,
       cwd,
     });
     installGate(agent, (req, signal) => this.#clients.route(key, (c) => !!c.permission, (c) => c.permission!(req, signal), signal), k.kind === "main" ? undefined : () => podFence(k.ws), () => ({ typed: this.#words(key).get(), self: k.kind === "main" ? undefined : k.ws }));
