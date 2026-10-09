@@ -70,7 +70,12 @@ enum Cmd {
     },
     /// ssh's ProxyCommand for `kl-connect [team]`: pump stdio to the bench's gateway tunnel
     #[command(hide = true)]
-    BenchProxy { team: Option<String> },
+    BenchProxy {
+        /// Pump to the bench daemon's TUI port instead of sshd (the laptop kl-tui's direct path)
+        #[arg(long)]
+        tui: bool,
+        team: Option<String>,
+    },
 }
 
 #[derive(Subcommand)]
@@ -148,6 +153,6 @@ async fn run(cmd: &Cmd) -> Result<(), String> {
             BuilderCmd::Status { team } => builder::status(team.as_deref()).await,
         },
         Cmd::Claude { cmd: ClaudeCmd::Login { team } } => bench::claude_login(team.as_deref()).await,
-        Cmd::BenchProxy { team } => bench::proxy(team.as_deref()).await,
+        Cmd::BenchProxy { team, tui } => bench::proxy(team.as_deref(), *tui).await,
     }
 }

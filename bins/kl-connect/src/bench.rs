@@ -12,6 +12,29 @@ use crate::config::Config;
 
 pub const BENCH_START_WAIT: Duration = Duration::from_secs(90);
 
+/// How `kl-connect bench` reaches the bench, tried in order; exit 3 from one means "not this way"
+/// (an old bench, a refused upgrade, a protocol mismatch) and moves to the next.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Mode {
+    /// laptop kl-tui over `bench-proxy --tui`: wss end to end, no ssh
+    Direct,
+    /// laptop kl-tui over ssh to `kl-host` (the clipboard forward rides along)
+    LaptopSsh,
+    /// the TUI runs on the bench, over `ssh -t`
+    RemoteSsh,
+}
+
+/// Direct only on request until the gateway hostnames are Cloudflare Full (strict) with the Origin
+/// CA certificate: before that, the edge-to-node hop is plain HTTP and a prompt would cross it in
+/// clear. Flipping the default is a separate change once that is live.
+fn modes(direct: bool, laptop: bool) -> Vec<Mode> {
+    match (direct, laptop) {
+        (true, true) => vec![Mode::Direct, Mode::LaptopSsh, Mode::RemoteSsh],
+        (false, true) => vec![Mode::LaptopSsh, Mode::RemoteSsh],
+        (_, false) => vec![Mode::RemoteSsh],
+    }
+}
+
 /// `region` is the `--region` flag: it only matters for an unbound personal bench (its first use
 /// binds the region), so it is sent to `create_bench` only when `team` is absent or names the
 /// caller's own handle — a team's region is the team's, not this laptop's flag.
@@ -39,23 +62,39 @@ pub async fn bench(team: Option<&str>, start: bool, region: Option<&str>, remote
     let remote_clip = crate::clip::remote_path();
     let fwd = Some((remote_clip.as_path(), local.as_path()));
     let laptop = if remote_tui { None } else { kl_tui_beside(&me) };
-    let mut st = match &laptop {
-        Some(tui) => {
-            let mut args = vec!["--ssh".to_string()];
-            args.extend(ssh_argv(&me, &known_hosts, owner, team, fwd, Some("kl-host"), false));
-            tokio::process::Command::new(tui).args(args).status().await
+    let direct = std::env::var("KL_DIRECT").as_deref() == Ok("1");
+    let mut st: std::io::Result<std::process::ExitStatus> = Err(std::io::Error::other("no mode"));
+    let mut ssh_ran = false;
+    // 3 = not this way (the bench predates the laptop TUI, a refused upgrade, another protocol):
+    // try the next mode.
+    for (n, mode) in modes(direct, laptop.is_some()).into_iter().enumerate() {
+        if n > 0 {
+            restore_terminal(true);
         }
-        None => Err(std::io::Error::other("no kl-tui")),
-    };
-    // 3 = the bench predates the laptop TUI (or speaks another protocol): run it there instead.
-    let fallback = laptop.is_none() || matches!(&st, Ok(s) if s.code() == Some(3));
-    if fallback {
-        restore_terminal(true);
-        st = tokio::process::Command::new("ssh")
-            .args(ssh_argv(&me, &known_hosts, owner, team, fwd, None, true))
-            .status()
-            .await;
+        st = match (mode, &laptop) {
+            (Mode::Direct, Some(tui)) => {
+                let mut args = vec!["--pipe".to_string(), me.display().to_string(), "bench-proxy".into(), "--tui".into()];
+                args.extend(team.map(str::to_string));
+                tokio::process::Command::new(tui).args(args).status().await
+            }
+            (Mode::LaptopSsh, Some(tui)) => {
+                let mut args = vec!["--ssh".to_string()];
+                args.extend(ssh_argv(&me, &known_hosts, owner, team, fwd, Some("kl-host"), false));
+                tokio::process::Command::new(tui).args(args).status().await
+            }
+            _ => {
+                ssh_ran = true;
+                tokio::process::Command::new("ssh")
+                    .args(ssh_argv(&me, &known_hosts, owner, team, fwd, None, true))
+                    .status()
+                    .await
+            }
+        };
+        if !matches!(&st, Ok(s) if s.code() == Some(3)) {
+            break;
+        }
     }
+    let fallback = ssh_ran;
     clip.abort();
     let _ = std::fs::remove_file(&local);
     // kl-tui that exited (not killed) left the alternate screen itself and printed why below it; a
@@ -178,16 +217,18 @@ pub async fn claude_login(team: Option<&str>) -> Result<(), String> {
     std::process::exit(st.code().unwrap_or(1));
 }
 
-/// `kl-connect bench-proxy [team]`, ssh's ProxyCommand: pumps this process's stdio to the bench.
-pub async fn proxy(team: Option<&str>) -> Result<(), String> {
+/// `kl-connect bench-proxy [--tui] [team]`. Plain: ssh's ProxyCommand, stdio pumped to the bench's
+/// sshd. `--tui`: the pipe the laptop kl-tui runs (`kl-tui --pipe ...`), stdio pumped to the bench
+/// daemon's TUI port through the gateway's `/tui/{bench}`, no ssh anywhere.
+pub async fn proxy(team: Option<&str>, tui: bool) -> Result<(), String> {
     let cfg = crate::config::load()?;
-    serve(&cfg, team, tokio::io::stdin(), tokio::io::stdout()).await
+    serve(&cfg, team, tokio::io::stdin(), tokio::io::stdout(), tui).await
 }
 
 /// One connection's lifetime: wait for the bench to be `Ready` (re-asking every 1 s while it
 /// answers `Waking`; the state goes to stderr, which ssh shows), then dial its tunnel and pump.
 /// `r` is never read before the pump starts — bytes written while the bench slept still arrive.
-async fn serve<R, W>(cfg: &Config, team: Option<&str>, r: R, w: W) -> Result<(), String>
+async fn serve<R, W>(cfg: &Config, team: Option<&str>, r: R, w: W, tui: bool) -> Result<(), String>
 where
     R: AsyncRead + Unpin + Send + 'static,
     W: AsyncWrite + Unpin,
@@ -213,9 +254,11 @@ where
         }
     };
     wait.stop(true).await;
-    let url = crate::proxy::gateway_url(&session.gateway);
+    // The api hands out the /tunnel URL; the TUI door is the same gateway, same token, next route.
+    let gateway = if tui { session.gateway.replacen("/tunnel/", "/tui/", 1) } else { session.gateway.clone() };
+    let url = crate::proxy::gateway_url(&gateway);
     let ws = crate::proxy::connect(&url, &session.token).await?;
-    crate::proxy::pump_io(ws, r, w).await
+    crate::proxy::pump_io(ws, r, w, tui.then_some(Duration::from_secs(15))).await
 }
 
 /// The wait on stderr, which ssh hands straight to the terminal (it is not in raw mode until the
@@ -330,7 +373,7 @@ mod tests {
         let (ours, theirs) = tokio::io::duplex(64 * 1024);
         let (r, w) = tokio::io::split(theirs);
         tokio::spawn(async move {
-            if let Err(e) = serve(&cfg, None, r, w).await {
+            if let Err(e) = serve(&cfg, None, r, w, false).await {
                 panic!("serve: {e}");
             }
         });
@@ -424,6 +467,62 @@ mod tests {
         assert!(kl_tui_beside(&me).is_none());
         std::fs::write(dir.path().join("kl-tui"), b"").unwrap();
         assert_eq!(kl_tui_beside(&me), Some(dir.path().join("kl-tui")));
+    }
+
+    #[test]
+    fn modes_try_direct_only_when_asked_and_the_laptop_tui_exists() {
+        use Mode::*;
+        assert_eq!(modes(true, true), [Direct, LaptopSsh, RemoteSsh]);
+        assert_eq!(modes(false, true), [LaptopSsh, RemoteSsh]);
+        assert_eq!(modes(true, false), [RemoteSsh]);
+        assert_eq!(modes(false, false), [RemoteSsh]);
+    }
+
+    /// Mock api (one Ready session) plus `gw` as the gateway, env pointed at both.
+    async fn harness(gw: Router) -> (Config, tokio::sync::MutexGuard<'static, ()>, tempfile::TempDir) {
+        let _ = rustls::crypto::ring::default_provider().install_default();
+        let guard = ENV_LOCK.lock().await;
+        let counter = Arc::new(AtomicUsize::new(0));
+        let app = Router::new()
+            .route("/v1/bench/session", post(session_handler_ok))
+            .with_state(counter)
+            .merge(gw);
+        let l = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = l.local_addr().unwrap().port();
+        tokio::spawn(async move { axum::serve(l, app).await.unwrap() });
+        let d = tempfile::tempdir().unwrap();
+        std::env::set_var("KL_CONFIG_DIR", d.path());
+        std::env::set_var("KL_GATEWAY_OVERRIDE", format!("ws://127.0.0.1:{port}"));
+        (cfg(format!("http://127.0.0.1:{port}")), guard, d)
+    }
+
+    #[tokio::test]
+    async fn tui_proxy_dials_the_tui_route() {
+        let hits = Arc::new(std::sync::Mutex::new(Vec::<String>::new()));
+        let h = hits.clone();
+        let gw = Router::new().route(
+            "/{kind}/{bench}",
+            get(move |axum::extract::Path((kind, _b)): axum::extract::Path<(String, String)>, up: WebSocketUpgrade| {
+                h.lock().unwrap().push(kind);
+                async move { up.on_upgrade(|mut s| async move { let _ = s.send(AxMessage::Close(None)).await; }) }
+            }),
+        );
+        let (cfg, _g, _d) = harness(gw).await;
+        let (_a, b) = tokio::io::duplex(64);
+        let (r, w) = tokio::io::split(b);
+        serve(&cfg, None, r, w, true).await.unwrap();
+        std::env::remove_var("KL_GATEWAY_OVERRIDE");
+        assert_eq!(*hits.lock().unwrap(), ["tui"]);
+    }
+
+    #[tokio::test]
+    async fn a_refused_upgrade_names_the_status() {
+        let (cfg, _g, _d) = harness(Router::new()).await; // every gateway path 404s
+        let (_a, b) = tokio::io::duplex(64);
+        let (r, w) = tokio::io::split(b);
+        let err = serve(&cfg, None, r, w, true).await.unwrap_err();
+        std::env::remove_var("KL_GATEWAY_OVERRIDE");
+        assert!(err.contains("404"), "{err}");
     }
 
     #[tokio::test]
