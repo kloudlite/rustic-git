@@ -22,9 +22,9 @@ fn obj(props: Value, required: &[&str]) -> Value {
 impl ToolSet for WatchTools {
     fn tools(&self) -> Vec<Tool> {
         vec![
-            Tool { name: "watch", description: "Start a watch and answer {id}. Either paths[] (file-system changes under them, recursive) or cmd (a command whose output lines are events, filtered by the regex pattern when given). once:true ends the watch at the first event. Read with watch_poll or GET /stream/watch/{id}.", schema: obj(json!({ "paths": {"type":"array","items":{"type":"string"}}, "cmd": {}, "pattern": {"type":"string"}, "once": {"type":"boolean"}, "tree": {"type":"string"} }), &[]) },
-            Tool { name: "watch_poll", description: "Events since an index (0 = from the start; the ring keeps the last 1000). Answers events, next, dropped, state.", schema: obj(json!({ "id": {"type":"string"}, "since": {"type":"integer"} }), &["id"]) },
-            Tool { name: "watch_stop", description: "Stop a watch (and its command, if any).", schema: obj(json!({ "id": {"type":"string"} }), &["id"]) },
+            Tool { name: "watch", description: "Start a watch and return `{id}`. Give either `paths[]` or `cmd`. With `paths[]`, the events are file-system changes under the paths (recursive). With `cmd`, the events are the output lines of the command. When `pattern` is given, it filters the lines as a regex. `once:true` ends the watch at the first event. Read the events with `watch_poll` or `GET /stream/watch/{id}`.", schema: obj(json!({ "paths": {"type":"array","items":{"type":"string"}}, "cmd": {}, "pattern": {"type":"string"}, "once": {"type":"boolean"}, "tree": {"type":"string"} }), &[]) },
+            Tool { name: "watch_poll", description: "Get the events since an index (0 = from the start). The ring keeps the last 1000. It returns `events`, `next`, `dropped`, and `state`.", schema: obj(json!({ "id": {"type":"string"}, "since": {"type":"integer"} }), &["id"]) },
+            Tool { name: "watch_stop", description: "Stop a watch and its command, if it has one.", schema: obj(json!({ "id": {"type":"string"} }), &["id"]) },
         ]
     }
 
