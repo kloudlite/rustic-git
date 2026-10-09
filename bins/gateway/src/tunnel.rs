@@ -230,18 +230,15 @@ async fn connect(gw: Arc<Gateway>, ws: String, headers: HeaderMap, upgrade: WebS
     // business only insofar as "get a new token", and saying more distinguishes a real workspace
     // from an invented one for someone holding a token for neither.
     let token = kloudlite_core::httpx::bearer_token(&headers).unwrap_or_default();
-    let ticket = match gw.jwt.verify_ssh_session(token) {
-        Ok(c) => Ticket::Workspace(c),
-        Err(_) => match gw.jwt.verify_bench_session(token) {
-            Ok(c) => Ticket::Bench(c),
-            Err(_) => return StatusCode::UNAUTHORIZED.into_response(),
-        },
+    // Each door verifies ONE token kind: /tui/ bench tokens, /tunnel/ workspace ssh tokens. The
+    // bench has no sshd, so a bench token never reaches the ssh verifier, and a workspace token
+    // is never tried against the bench one.
+    let ticket = if tui {
+        gw.jwt.verify_bench_session(token).map(Ticket::Bench)
+    } else {
+        gw.jwt.verify_ssh_session(token).map(Ticket::Workspace)
     };
-    // The bench has no sshd: its doors are /tui/ (kl-tui) and ttyd, so a bench ticket on /tunnel/
-    // and a workspace ticket on /tui/ are both refused.
-    if tui != matches!(ticket, Ticket::Bench(_)) {
-        return StatusCode::UNAUTHORIZED.into_response();
-    }
+    let Ok(ticket) = ticket else { return StatusCode::UNAUTHORIZED.into_response() };
     // A token names ONE object in ONE region. The region check is what stops a token minted
     // for another region's gateway being replayed here against an object that shares an id.
     if ticket.id() != ws || ticket.region() != gw.region {
