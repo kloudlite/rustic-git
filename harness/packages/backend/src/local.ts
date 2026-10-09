@@ -509,6 +509,8 @@ export class LocalBackend implements Backend {
       busy: this.#busy,
       open: (key, o) => this.session(key, o),
       permit: (key, req, signal) => this.permit(key, req, signal),
+      typed: (k) => [...this.#words(k).get()],
+      lend: (k, ws) => ws.forEach((t) => this.#words(k).add(t)),
       cards: this.#cards,
       changed: () => this.#changed(),
     };

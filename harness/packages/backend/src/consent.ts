@@ -2,7 +2,8 @@
 //! himself ask to do something then there is no need to ask for permission again". A teller does what
 //! you ask at the counter and phones you, with the reason, when someone else asks in your name. Only
 //! text typed through a client view counts (`TurnWords`, fed by LocalBackend); a goal another session
-//! wrote, a web page, a file or a tool result never does.
+//! wrote, a web page, a file or a tool result never does. Words the person typed into the caller this turn
+//! travel with a `workspace_ask` to the turn it starts; the caller's request text itself never counts.
 
 /** The argument every gated tool requires; the gate reads it and the tool never sees it. */
 export const BECAUSE_SCHEMA = {

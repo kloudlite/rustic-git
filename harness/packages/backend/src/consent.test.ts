@@ -82,3 +82,11 @@ test("a quote cut mid-name fails, a sentence-closing period does not", () => {
   expect(consented("workspace_delete", { workspace: "foo" }, { asked: "delete workspace foo" }, ["delete workspace foo."])).toBe(true);
   expect(consented("web_fetch", { url: "https://example.com/x" }, { asked: "fetch example.com" }, ["fetch example.com.evil.io"])).toBe(false);
 });
+
+test("a quote counts from lent words and not from the relayed request text", () => {
+  const w = new TurnWords();
+  const call = { asked: "delete workspace foo" };
+  expect(consented("workspace_delete", { workspace: "foo" }, call, w.get())).toBe(false); // only main's request said it
+  w.add("please delete workspace foo");
+  expect(consented("workspace_delete", { workspace: "foo" }, call, w.get())).toBe(true);
+});

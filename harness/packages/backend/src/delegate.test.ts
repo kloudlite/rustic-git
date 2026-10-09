@@ -284,3 +284,12 @@ test("main_tell done with a task marks it done and names the next and newly read
   await flush();
   expect(main.sent[1]).toContain("board: no task T9");
 });
+
+test("workspace_ask lends the caller's typed words to the workspace key before prompting", async () => {
+  const lent: [string, string[]][] = [];
+  const ws = fake("ok");
+  const [ask] = delegateTools("main", undefined, D({ open: route(ws, fake()), typed: (k) => (k === "main" ? ["run it on port 3000"] : []), lend: (k, w) => lent.push([k, w]) }), caller);
+  await ask!.run({ workspace: "w1", request: "start it" });
+  await flush();
+  expect(lent).toEqual([["w1", ["run it on port 3000"]]]);
+});

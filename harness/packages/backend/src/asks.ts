@@ -14,6 +14,8 @@ export type PendingAsk = {
   /** The workspace asked. */
   key: string;
   text: string;
+  /** What the caller's person typed in its current turn: lent to the workspace turn so a quote of it counts as asked (consent.ts). */
+  words?: string[];
   /** Board task this ask carries; kept so a resend still marks and quotes it. */
   task?: string;
   /** Resends so far; resumeAsks gives up after two. */

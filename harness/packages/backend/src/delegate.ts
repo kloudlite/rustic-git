@@ -36,6 +36,10 @@ export type DelegateDeps = {
   reported?: Set<string>;
   /** Where the task board lives; tests pass a temp file. */
   tasks?: string;
+  /** Snapshot of the words the person typed into `key` (consent.ts TurnWords). */
+  typed?(key: string): string[];
+  /** Add words to the turn of `key` as if typed there; a relayed ask lends the caller's. */
+  lend?(key: string, words: string[]): void;
 };
 
 /** A workspace pod's source folder (crates/workspaces/src/k8s/mod.rs WORKSPACE_DIR). */
@@ -145,6 +149,8 @@ export async function dispatchAsk(deps: DelegateDeps, a: PendingAsk): Promise<vo
   try {
     h = await deps.open(a.key, askOpts(deps, a.callerKey, a, a.key));
     const s = h;
+    // the person typed these into the caller, not here; without them a quote of the person is "not in your messages"
+    deps.lend?.(a.key, a.words ?? []);
     reply = `[from ${a.key}] ${await answer(s, a.text, () => (deps.busy.has(a.key) ? s.followUp(a.text) : s.prompt(a.text)))}`;
   } catch (err) {
     reply = `[from ${a.key}] failed: ${err instanceof Error ? err.message : String(err)}`;
@@ -224,6 +230,7 @@ export function delegateTools(kind: "main" | "workspace", ws: string | undefined
         key,
         text: `[from main session]${input.task ? ` [task ${input.task}]` : ""} ${input.request}`,
         task: input.task,
+        words: deps.typed?.(callerKey) ?? [],
         tries: 0,
         ...callerSettings(deps, callerKey, caller),
       });
