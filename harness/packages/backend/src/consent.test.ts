@@ -76,3 +76,9 @@ test("service_update and intercept name their service", () => {
   expect(consented("service_update", { service: { name: "web", image: "x" } }, { asked: "update the web service" }, ["update the web service"])).toBe(true);
   expect(consented("intercept", { service: "api" }, { asked: "intercept api into here" }, ["intercept api into here"])).toBe(true);
 });
+
+test("a quote cut mid-name fails, a sentence-closing period does not", () => {
+  expect(consented("workspace_delete", { workspace: "foo" }, { asked: "delete workspace foo" }, ["delete workspace foo-old"])).toBe(false);
+  expect(consented("workspace_delete", { workspace: "foo" }, { asked: "delete workspace foo" }, ["delete workspace foo."])).toBe(true);
+  expect(consented("web_fetch", { url: "https://example.com/x" }, { asked: "fetch example.com" }, ["fetch example.com.evil.io"])).toBe(false);
+});

@@ -75,11 +75,16 @@ export function target(name: string, args: any, self?: string): string | string[
  * names the call's target. Case and whitespace are normalised on both sides. */
 export function consented(name: string, args: any, because: Because | undefined, typed: string[], self?: string): boolean {
   const q = typeof because?.asked === "string" ? norm(because.asked) : "";
-  if (q.length < 8 || !typed.some((t) => norm(t).includes(q))) return false;
+  // whole words on both checks: a quote cut mid-word ("delete workspace foo" out of "... foo-old")
+  // would otherwise name a different object than the person did
+  if (q.length < 8 || !typed.some((t) => word(q).test(norm(t)))) return false;
   const t = target(name, args, self);
   const all = (Array.isArray(t) ? t : [t]).filter((x): x is string => typeof x === "string" && x.length > 0);
-  return all.length > 0 && all.length === (Array.isArray(t) ? t.length : 1) && all.every((x) => q.includes(norm(x)));
+  return all.length > 0 && all.length === (Array.isArray(t) ? t.length : 1) && all.every((x) => word(norm(x)).test(q));
 }
+
+/** `s` not inside a longer name (letters, digits, `_`, `.`, `-`); a sentence's closing `.` still ends it. */
+const word = (s: string) => new RegExp(`(?<![\\w.-])${s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}(?![\\w-]|\\.[\\w-])`);
 
 /** What the person typed, for the turn it feeds. `start` at agent_start marks what that turn read;
  * `end` at agent_end drops it, so a followUp typed mid-turn still counts for the next turn.
