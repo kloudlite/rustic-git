@@ -236,8 +236,7 @@ export async function providerAuth(): Promise<ProviderAuth[]> {
 
 type LoginOption = {
   provider: string;
-  /** "claude_code": sign-in happens in Claude Code (`kl-connect claude login`), not through pi. */
-  type: AuthType | "claude_code";
+  type: AuthType;
   label: string;
 };
 
@@ -245,9 +244,10 @@ type LoginOption = {
 export function loginOptions(): LoginOption[] {
   const out: LoginOption[] = [];
   for (const p of models.getProviders()) {
-    // Claude only through the Agent SDK: no pi oauth, and no api key (that would route through pi)
+    // Claude only through the Agent SDK: no pi oauth, and no api key (that would route through pi).
+    // The daemon drives `claude auth login` itself (backend claudelogin.ts), shown as an oauth flow.
     if (p.id === "anthropic") {
-      out.push({ provider: p.id, type: "claude_code", label: "Claude Code" });
+      out.push({ provider: "claude-subscription", type: "oauth", label: "Claude (subscription)" });
       continue;
     }
     if (p.auth.oauth)

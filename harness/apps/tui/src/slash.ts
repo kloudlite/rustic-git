@@ -36,7 +36,7 @@ export const MENU_MAX = 8;
 
 /** Menu for the current input: command list, or the typed command's options. */
 function loginHint(type: string, prefix: string): string {
-  return prefix + (type === "oauth" ? "oauth" : type === "claude_code" ? "claude code" : "api key");
+  return prefix + (type === "oauth" ? "oauth" : "api key");
 }
 
 export function menuItems(input: string, ctx: MenuContext): MenuItem[] {

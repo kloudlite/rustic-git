@@ -1020,7 +1020,7 @@ export function App({
       if (provider)
         setLogin({
           provider,
-          type: type === "api_key" || type === "claude_code" ? type : "oauth",
+          type: type === "api_key" ? type : "oauth",
         });
       return;
     }

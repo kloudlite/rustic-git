@@ -25,6 +25,7 @@ import {
 } from "@kloudlite-tui/agent";
 import { Registry, platformTools, podFence, podTools, type PodFence, scratchRoot, scratchTools, webFetch, webSearch, type ToolDef } from "@kloudlite-tui/tools";
 import { Cards } from "./cards.ts";
+import { claudeLogin } from "./claudelogin.ts";
 import { WORKSPACE_DIR, delegateTools, resumeAsks, type DelegateDeps } from "./delegate.ts";
 import { forgetSessions } from "./forget.ts";
 import { SpaceWatch } from "./spacewatch.ts";
@@ -697,7 +698,9 @@ export class LocalBackend implements Backend {
   auth = {
     providers: () => providerAuth(),
     login: async (provider: string, type: any, ui: any) => {
-      await loginProvider(provider, type, ui);
+      if (provider === "claude-subscription")
+        await claudeLogin((e) => ui.notify(e), (message) => ui.prompt({ type: "manual_code", message, signal: ui.signal }));
+      else await loginProvider(provider, type, ui);
       // an agent built before the sign-in holds the old (missing) credentials
       for (const key of [...this.#live.keys()])
         if (this.#state.get(key)?.model.provider === "anthropic" && !this.#busy.has(key)) await this.#rebuild(key).catch(() => {});

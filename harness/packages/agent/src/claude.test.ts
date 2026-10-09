@@ -487,7 +487,7 @@ test("an auth failure names the laptop command", async () => {
   await s.prompt("a");
   await tick();
   const err = events.find((e) => e.type === "message_end" && e.message.stopReason === "error");
-  expect(err.message.errorMessage).toBe("Not signed in to Claude. On your laptop run: kl-connect claude login");
+  expect(err.message.errorMessage).toBe("Claude is not signed in on this bench — run /login in the TUI and pick Claude (subscription).");
   s.dispose();
 });
 
@@ -747,5 +747,5 @@ test("btw maps a failed result to its error and a login failure to the sign-in m
   const failing = (m: any) => (() => (async function* () { yield m; })()) as any;
   const mk = (m: any) => createClaudeSession({ key: "k", model: { id: "m" }, pi: piHost().host, query: failing(m) });
   await expect(mk({ type: "result", subtype: "error_max_turns", errors: ["too long"] }).btw("q")).rejects.toThrow("too long");
-  await expect(mk({ type: "result", subtype: "error_during_execution", is_error: true, result: "401 unauthorized" }).btw("q")).rejects.toThrow("Not signed in");
+  await expect(mk({ type: "result", subtype: "error_during_execution", is_error: true, result: "401 unauthorized" }).btw("q")).rejects.toThrow("not signed in");
 });

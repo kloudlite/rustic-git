@@ -2,8 +2,8 @@
  * Claude models, through Claude Code.
  *
  * Ruling: Claude in the harness runs ONLY through the Claude Agent SDK, signed
- * in by Claude Code's own login (`claude auth login`, run over ssh by
- * `kl-connect claude login`). Never through pi-ai's anthropic OAuth, which
+ * in by Claude Code's own login (`claude auth login`, run by the daemon
+ * under a pty: backend `claudelogin.ts`). Never through pi-ai's anthropic OAuth, which
  * spoofs Claude Code headers. So `provider === "anthropic"` models are served
  * here, every other provider by pi (`index.ts`).
  *
@@ -50,7 +50,7 @@ export const KLOUDLITE_SKILL = join(KL_PLUGIN, "skills", "kloudlite");
 export type Role = "main" | "workspace";
 export const roleSkill = (role: Role) => join(KL_PLUGIN, "skills", `${role}-session`);
 
-export const AUTH_MESSAGE = "Not signed in to Claude. On your laptop run: kl-connect claude login";
+export const AUTH_MESSAGE = "Claude is not signed in on this bench — run /login in the TUI and pick Claude (subscription).";
 
 type Level = "off" | "minimal" | "low" | "medium" | "high" | "xhigh" | "max";
 type Effort = NonNullable<Options["effort"]>;

@@ -22,45 +22,10 @@ export function Login(props: {
   type: LoginType;
   onDone: (ok: boolean) => void;
 }) {
-  return props.type === "claude_code" ? <ClaudeLogin {...props} /> : <PiLogin {...props} />;
+  return <PiLogin {...props} />;
 }
 
-export type LoginType = "oauth" | "api_key" | "claude_code";
-
-/**
- * Claude signs in through Claude Code, not through pi: the sign-in runs over
- * ssh from the laptop (`kl-connect claude login`), so this screen only waits
- * for it to land (`claude auth status`, polled) and offers Esc.
- */
-function ClaudeLogin({ provider, onDone }: { provider: string; onDone: (ok: boolean) => void }) {
-  useEffect(() => {
-    let live = true;
-    const poll = setInterval(() => {
-      backend().auth.claudeSignedIn(true)
-        .then((ok) => live && ok && onDone(true))
-        .catch(() => {});
-    }, 3000);
-    return () => {
-      live = false;
-      clearInterval(poll);
-    };
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, []);
-  useKeyboard((key) => {
-    if (key.name === "escape") onDone(false);
-  });
-  return (
-    <box flexDirection="column" flexGrow={1} paddingLeft={1} paddingRight={1} paddingTop={1} gap={1}>
-      <text fg={theme.fg}>
-        <b>Login</b> · <span fg={theme.accent}>{provider}</span>{" "}
-        <span fg={theme.muted}>Claude Code</span>
-      </text>
-      <text fg={theme.fg}>Claude signs in through Claude Code, not here.</text>
-      <text fg={theme.accent}>On your laptop run: kl-connect claude login</text>
-      <text fg={theme.muted}>It opens a browser sign-in for this bench. Esc to go back.</text>
-    </box>
-  );
-}
+export type LoginType = "oauth" | "api_key";
 
 function PiLogin({
   provider,
