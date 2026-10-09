@@ -4,6 +4,7 @@ import { TextAttributes, type ScrollBoxRenderable } from "@opentui/core";
 import { theme } from "../theme.ts";
 import { SplitBorder } from "../ui/border.ts";
 import { SPECIAL } from "./Input.tsx";
+import { uptime } from "../tasks.ts";
 import type { Process } from "../workspaces.ts";
 import { useWheelAccel } from "../wheel.ts";
 
@@ -11,17 +12,7 @@ type Row = { kind: "header"; label: string; extra: string } | { kind: "proc"; pr
 
 const stopped = (p: Process) => p.status === "exited" || p.status === "crashed";
 
-/** `<1m`, `4m`, `1h 12m`, `2d 3h`; empty when the start time is unknown. */
-export function uptime(startedAt: string | undefined, now: number): string {
-  const t = startedAt ? Date.parse(startedAt) : NaN;
-  if (Number.isNaN(t)) return "";
-  const m = Math.max(0, Math.floor((now - t) / 60_000));
-  if (m < 1) return "<1m";
-  if (m < 60) return `${m}m`;
-  const h = Math.floor(m / 60);
-  if (h < 24) return `${h}h ${m % 60}m`;
-  return `${Math.floor(h / 24)}d ${h % 24}h`;
-}
+export { uptime };
 
 /** RUNNING then STOPPED, filtered by name or command; a section with no rows is not drawn. */
 function buildRows(processes: Process[], filter: string): Row[] {

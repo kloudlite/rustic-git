@@ -9,6 +9,8 @@ import { Transcript, type Entry } from "./components/Transcript.tsx";
 import { foldRetries, foldRetry } from "./retry.ts";
 import { Prompt } from "./components/Prompt.tsx";
 import { Sidebar } from "./components/Sidebar.tsx";
+import { Work } from "./components/Work.tsx";
+import { workRows } from "./tasks.ts";
 import { HintBar } from "./components/HintBar.tsx";
 import { Files } from "./components/Files.tsx";
 import { Processes } from "./components/Processes.tsx";
@@ -1237,7 +1239,6 @@ export function App({
       snapshot={environment?.snapshot}
       envOwner={environment && environment.owner !== user ? environment.owner : undefined}
       user={user}
-      tasks={space?.tasks ?? []}
       unavailable={space && !space.available ? space.error ?? "unknown error" : undefined}
       focus={focus}
       width={prefs.sidebarWidth}
@@ -1328,6 +1329,10 @@ export function App({
               tight; question/permission panels replace the whole block */}
           {!filesView && !processesView && (
           <box flexDirection="column" flexShrink={0}>
+          <Work
+            rows={workRows(space?.tasks ?? [], activeBase === "main" ? [] : workspaces.find((w) => w.id === activeBase)?.processes ?? [], activeBase === "main" ? undefined : activeBase)}
+            width={contentWidth}
+          />
           <Queue
             messages={session.queued}
             selected={queuePick}

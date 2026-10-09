@@ -1,7 +1,5 @@
 import { TextAttributes } from "@opentui/core";
 import { theme } from "../theme.ts";
-import type { BoardTask } from "@kloudlite-tui/backend";
-import { taskGroups } from "../tasks.ts";
 import { clip } from "../ui/text.ts";
 import { type Service, type Workspace } from "../workspaces.ts";
 import { useWheelAccel } from "../wheel.ts";
@@ -13,7 +11,7 @@ import { useWheelAccel } from "../wheel.ts";
  * Section label: bold title-case, then a hairline across the rest of the row —
  * the same separator the session title bar uses, instead of SHOUTING CAPS.
  */
-function Heading({ children, count, width, flush }: { children: string; count?: number; width: number; flush?: boolean }) {
+export function Heading({ children, count, width, flush }: { children: string; count?: number; width: number; flush?: boolean }) {
   const label = count === undefined ? children : `${children}  ${count}`;
   return (
     <box paddingLeft={1} paddingRight={1} height={1} marginTop={flush ? 0 : 1}>
@@ -60,8 +58,8 @@ function Row({
 }
 
 /**
- * Session header, WORKSPACES (each with its ephemeral tasks under a guide
- * rail), and a pinned Environment block at the bottom — the connected
+ * Session header, WORKSPACES (each with its ephemeral workspaces under a guide
+ * rail; the task plan lives in the Work panel of the session, not here), and a pinned Environment block at the bottom — the connected
  * environment with the services that belong to it directly under it.
  */
 export function Sidebar({
@@ -74,7 +72,6 @@ export function Sidebar({
   snapshot,
   running,
   waiting,
-  tasks = [],
   focus,
   width,
   onFocus,
@@ -94,8 +91,6 @@ export function Sidebar({
   running: boolean[];
   /** Per-workspace: a permission card or question is waiting for the user */
   waiting: boolean[];
-  /** Main's task board; the section is hidden when empty. */
-  tasks?: BoardTask[];
   /** 0 = the session, 1..N = workspace */
   focus: number;
   width: number;
@@ -104,9 +99,8 @@ export function Sidebar({
 }) {
   const inner = width - 4; // padding + row padding
   const wheel = useWheelAccel();
-  // the tree counts workspaces, not their ephemeral tasks
+  // the tree counts workspaces, not their ephemeral children
   const count = workspaces.filter((w) => !w.parent).length;
-  const board = taskGroups(tasks);
 
   return (
     <box flexDirection="column" width={width} height="100%" flexShrink={0} backgroundColor={theme.sidebarBg}>
@@ -139,7 +133,7 @@ export function Sidebar({
             const click = onFocus && mine ? () => onFocus(i + 1) : undefined;
 
             if (w.parent) {
-              // last task of its workspace closes the branch
+              // last child of its workspace closes the branch
               const last = !workspaces.some((o, j) => j > i && o.parent === w.parent);
               // an ephemeral workspace: branch glyph, short name, and the
               // same one state word its parent gets — these are running agents,
@@ -206,37 +200,6 @@ export function Sidebar({
               />
             );
           })}
-          {tasks.length > 0 && (
-            <>
-              <Heading width={width - 2}>Tasks</Heading>
-              {board.groups.map((g) => (
-                <box key={g.workspace ?? "unassigned"} flexDirection="column" flexShrink={0}>
-                  <Row left={<span fg={theme.fg} attributes={TextAttributes.BOLD}>{clip(g.workspace ?? "unassigned", inner)}</span>} />
-                  {g.current && (
-                    <Row
-                      left={
-                        <span fg={g.current.state === "blocked" ? theme.warning : theme.accent}>
-                          {clip(`▸ ${g.current.id} ${g.current.title}${g.current.state === "blocked" ? " blocked" : ""}`, inner - 2)}
-                        </span>
-                      }
-                    />
-                  )}
-                  {g.queue.map((t) => (
-                    <Row
-                      key={t.id}
-                      left={
-                        <span>
-                          <span fg={t.state === "failed" ? theme.warning : theme.fg}>{clip(`  ${t.id} ${t.title}${t.state === "failed" ? " failed" : ""}`, inner - 2)}</span>
-                          {t.waits.length > 0 && <span fg={theme.muted}>{` waits on ${t.waits.join(", ")}`}</span>}
-                        </span>
-                      }
-                    />
-                  ))}
-                </box>
-              ))}
-              {board.done > 0 && <Row left={<span fg={theme.muted}>{board.done} done</span>} />}
-            </>
-          )}
         </box>
       </scrollbox>
 
