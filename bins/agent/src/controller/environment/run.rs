@@ -565,11 +565,15 @@ pub(crate) fn running_status(
 /// Pods in `ns` that can still be WRITING. A Succeeded or Failed pod holds no file handles and is
 /// never collected on its own, so counting every pod in the namespace waits for something that
 /// will not happen — a restore would hang forever behind a job that finished days ago. A pod that
-/// is already terminating still counts: it has not exited yet.
+/// is already terminating still counts: it has not exited yet. Intercept pods are not counted
+/// either: they forward traffic to a workspace, mount nothing of the environment's volume, and live
+/// as long as the intercept does — counting them hung every restore and stop of an intercepted
+/// environment at `Draining` (2026-10-10).
 pub(crate) async fn writing_pods(ns: &str, ctx: &Arc<Ctx>) -> Result<usize, ReconcileErr> {
     let pods: Api<Pod> = Api::namespaced(ctx.client.clone(), ns);
+    let not_intercept = format!("{}!=intercept", k8s::KIND_LABEL);
     Ok(pods
-        .list(&kube::api::ListParams::default())
+        .list(&kube::api::ListParams::default().labels(&not_intercept))
         .await?
         .items
         .into_iter()
