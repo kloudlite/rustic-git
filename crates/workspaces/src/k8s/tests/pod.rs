@@ -517,13 +517,14 @@ pub(crate) fn no_profile_d_script_exits_the_shell_that_sources_it() {
     assert!(exits.is_empty(), "{exits:?}");
 }
 
-/// The global git ignore: appended to the person's own file exactly once, never a per-repo line.
+/// The global git ignore: each missing line appended to the person's own file, never a per-repo line.
+/// Per line, not per block: a home that took the block before `.home/` joined it must still get it.
 #[test]
 pub(crate) fn the_prelude_appends_the_global_git_ignore_once() {
     let prelude = prelude("ws-1");
-    assert!(prelude.contains("grep -qF '# kloudlite: derived state' $H/.config/git/ignore 2>/dev/null || cat /etc/kloudlite/gitignore-global >> $H/.config/git/ignore"), "{prelude}");
+    assert!(prelude.contains("touch $H/.config/git/ignore; while IFS= read -r l; do grep -qxF \"$l\" $H/.config/git/ignore || echo \"$l\" >> $H/.config/git/ignore; done < /etc/kloudlite/gitignore-global"), "{prelude}");
     let shipped = std::fs::read_to_string(concat!(env!("CARGO_MANIFEST_DIR"), "/../../deploy/workspace-image/gitignore-global")).unwrap();
-    assert_eq!(shipped, "# kloudlite: derived state the platform places inside a workspace directory\n.cache/\ngraft/\n.direnv/\n.bench/\n.agents/\n");
+    assert_eq!(shipped, "# kloudlite: derived state the platform places inside a workspace directory\n.cache/\ngraft/\n.direnv/\n.bench/\n.agents/\n.home/\n");
     // The last line is not a hand-written string: subagent trees are nested subvolumes the node
     // agent puts under this exact name, and an un-ignored one shows up in every `git status` the
     // moment somebody dispatches an agent.

@@ -11,7 +11,7 @@ set -e
 export PATH=/nix/profile/current/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
 H=/home/kl
 mkdir -p $H/workspace $H/.cargo $H/.config/fish $H/.config/zsh $H/.config/git $H/.local/state
-grep -qF '# kloudlite: derived state' $H/.config/git/ignore 2>/dev/null || cat /etc/kloudlite/gitignore-global >> $H/.config/git/ignore
+touch $H/.config/git/ignore; while IFS= read -r l; do grep -qxF "$l" $H/.config/git/ignore || echo "$l" >> $H/.config/git/ignore; done < /etc/kloudlite/gitignore-global
 git config --global receive.denyCurrentBranch updateInstead
 [ -e $H/workspace/.git ] || (cd $H/workspace && git init -q -b main && n=$(git config user.name || echo kl) && e=$(git config user.email || echo kl@kloudlite.local) && git -c user.name="$n" -c user.email="$e" commit -q --allow-empty -m 'Start workspace') || echo prelude.git.init.failed
 [ -e $H/.config/zsh/.zshrc ] || printf 'export PATH=/nix/profile/current/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin\neval "$(dircolors -b)"\nzstyle ":completion:*" list-colors "${(s.:.)LS_COLORS}"\nalias ls="ls --color=auto" grep="grep --color=auto"\neval "$(starship init zsh)"\n' > $H/.config/zsh/.zshrc

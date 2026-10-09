@@ -41,8 +41,11 @@ const BINDS: [&str; 3] = ["/nix", "/etc/passwd", "/etc/resolv.conf"];
 /// image somewhere.
 ///
 /// `/etc/kloudlite` is deliberately NOT here and must never be: the workspace token lives there,
-/// and the whole point of the wrapper is that an exec cannot read it.
-const OPTIONAL_BINDS: [&str; 7] = [
+/// and the whole point of the wrapper is that an exec cannot read it. The one file of it that IS
+/// here is the platform's git ignore, bound alone: HOME is the tree's own `.home`, so the person's
+/// `~/.config/git/ignore` is invisible inside and a session's `git add -A` committed three thousand
+/// files of `.home/` go cache and telemetry (2026-10-09). `GIT_IGNORE` below points git at it.
+const OPTIONAL_BINDS: [&str; 8] = [
     "/etc/ssl",
     "/etc/ca-certificates",
     "/etc/pki",
@@ -50,7 +53,11 @@ const OPTIONAL_BINDS: [&str; 7] = [
     "/etc/nsswitch.conf",
     "/etc/group",
     "/etc/localtime",
+    GIT_IGNORE,
 ];
+
+/// `deploy/workspace-image/gitignore-global`, as the image places it.
+const GIT_IGNORE: &str = "/etc/kloudlite/gitignore-global";
 
 /// The cert-bundle variables a userland reads, passed through when the image sets them. Nix images
 /// point these at a store path rather than at `/etc/ssl`, and a store path is already bound with
@@ -120,6 +127,13 @@ pub fn bwrap_argv_with_cwd(tree: &TreeCtx, cmd: &[String], env: &[(String, Strin
     ]);
     // The trust store's own variables, and then the caller's: both explicit, so nothing the child
     // is promised depends on what bwrap chooses to pass through.
+    // `GIT_CONFIG_*`, not a gitconfig in `.home`: the tree's own config stays the agent's, and
+    // this cannot be edited away from inside.
+    if std::path::Path::new(GIT_IGNORE).exists() {
+        for (k, v) in [("GIT_CONFIG_COUNT", "1"), ("GIT_CONFIG_KEY_0", "core.excludesFile"), ("GIT_CONFIG_VALUE_0", GIT_IGNORE)] {
+            a.extend(["--setenv".to_string(), k.into(), v.into()]);
+        }
+    }
     for k in CERT_VARS {
         if let Ok(v) = std::env::var(k) {
             a.extend(["--setenv".to_string(), k.into(), v]);
@@ -439,9 +453,9 @@ mod tests {
         let sources: Vec<&String> = argv.windows(3).filter(|w| w[0] == "--ro-bind").map(|w| &w[1]).collect();
 
         // The token dir is the one path under /etc that must NEVER be bound: reading it is
-        // exactly what the wrapper exists to prevent.
+        // exactly what the wrapper exists to prevent. The git ignore file alone is the exception.
         assert!(
-            !sources.iter().any(|s| s.starts_with("/etc/kloudlite")),
+            !sources.iter().any(|s| s.starts_with("/etc/kloudlite") && *s != GIT_IGNORE),
             "the workspace token is inside the sandbox: {sources:?}"
         );
         // Every optional bind that exists on THIS machine is bound, and every one that does not is
@@ -452,6 +466,10 @@ mod tests {
         }
         // `/etc/ssl` is in the list at all — the bind the outage was about.
         assert!(OPTIONAL_BINDS.contains(&"/etc/ssl"));
+        assert!(!OPTIONAL_BINDS.contains(&"/etc/kloudlite"));
+        // Git is pointed at the ignore exactly when it is bound.
+        let pointed = argv.windows(3).any(|w| w[0] == "--setenv" && w[1] == "GIT_CONFIG_VALUE_0" && w[2] == GIT_IGNORE);
+        assert_eq!(pointed, std::path::Path::new(GIT_IGNORE).exists());
     }
 
     /// The preflight asks about the trust store from INSIDE, and the paths it asks about are ones

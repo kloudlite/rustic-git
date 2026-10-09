@@ -196,7 +196,7 @@ pub(super) fn prelude(_name: &str) -> String {
          export PATH={path}\n\
          H=/home/{SSH_USER}\n\
          mkdir -p $H/workspace $H/.cargo $H/.config/fish $H/.config/zsh $H/.config/git $H/.local/state\n\
-         grep -qF '# kloudlite: derived state' $H/.config/git/ignore 2>/dev/null || cat /etc/kloudlite/gitignore-global >> $H/.config/git/ignore\n\
+         touch $H/.config/git/ignore; while IFS= read -r l; do grep -qxF \"$l\" $H/.config/git/ignore || echo \"$l\" >> $H/.config/git/ignore; done < /etc/kloudlite/gitignore-global\n\
          git config --global receive.denyCurrentBranch updateInstead\n\
          [ -e $H/workspace/.git ] || (cd $H/workspace && git init -q -b main && n=$(git config user.name || echo kl) && e=$(git config user.email || echo kl@kloudlite.local) && git -c user.name=\"$n\" -c user.email=\"$e\" commit -q --allow-empty -m 'Start workspace') || echo prelude.git.init.failed\n\
          [ -e $H/.config/zsh/.zshrc ] || {seed} > $H/.config/zsh/.zshrc\n\
