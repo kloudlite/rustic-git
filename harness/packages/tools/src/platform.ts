@@ -218,7 +218,7 @@ export function platformTools(kind: "main" | "workspace", wsId?: string): ToolDe
       const t = await teamOf(a);
       return "err" in t ? t.err : api("DELETE", `/v1/me/environments/${seg(t.team)}`);
     }),
-    envTool("env_get", "Read an environment's services, state and intercepts. Each services[] entry carries ready (and message) from service_status; poll ready, not the spec." + (ws ? " Defaults to the environment this workspace's space follows." : ""), {}, [], async (env) => withReady(await api("GET", `/v1/environments/${env}`))),
+    envTool("env_get", "Read an environment's services, state and intercepts. Each services[] entry carries ready (and message) from service_status; poll ready, not the spec. state is creating|running|stopped|error|deleted; stop polling on error or deleted." + (ws ? " Defaults to the environment this workspace's space follows." : ""), {}, [], async (env) => withReady(await api("GET", `/v1/environments/${env}`))),
     services("service_add", "Add one service to an environment; fails if the name exists." + ASYNC, { service: SERVICE }, ["service"], (cur, a) =>
       cur.some((s) => s.name === a.service?.name) ? `error: service exists: ${a.service?.name}` : [...cur, withServiceDefaults(a.service)]),
     services("service_update", "Replace one existing service (matched by name) in an environment." + ASYNC, { service: SERVICE }, ["service"], (cur, a) =>
@@ -241,7 +241,7 @@ export function platformTools(kind: "main" | "workspace", wsId?: string): ToolDe
 
   return [
     def("workspace_list", "List the person's workspaces, optionally for one team.", { team: S }, [], async (a) => api("GET", `/v1/workspaces${qs({ team: a.team })}`)),
-    def("workspace_get", "Read one workspace's state; poll this after any lifecycle call.", { workspace: WS }, ["workspace"], async (a) => api("GET", `/v1/workspaces/${seg(a.workspace)}`)),
+    def("workspace_get", "Read one workspace's state; poll this after any lifecycle call. state is creating|ready|stopped|error|deleted: ready means up (a workspace is never 'running'); stop polling on error or deleted.", { workspace: WS }, ["workspace"], async (a) => api("GET", `/v1/workspaces/${seg(a.workspace)}`)),
     def("workspace_create", "Create a workspace in a region." + ASYNC, { name: S, region: S, quota_gb: N, image: S, repo: S, branch: S, packages: SL, team: S }, ["name", "region", "quota_gb"], async (a) =>
       api("POST", "/v1/workspaces", strip({ team: a.team, name: a.name, region: a.region, quota_gb: a.quota_gb, image: a.image, repo: a.repo, branch: a.branch, packages: a.packages }))),
     def("workspace_clone", "Clone a workspace's current state into a new workspace." + ASYNC, { workspace: WS, name: S, task: { type: "string", description: "what the clone is for, at most 200 characters" } }, ["workspace", "name"], async (a) => api("POST", `/v1/workspaces/${seg(a.workspace)}/clone`, strip({ name: a.name, task: a.task }))),
@@ -255,7 +255,7 @@ export function platformTools(kind: "main" | "workspace", wsId?: string): ToolDe
     def("worktree_drop", "Drop a worktree from a workspace." + ASYNC, { workspace: WS, name: S }, ["workspace", "name"], async (a) => api("DELETE", `/v1/workspaces/${seg(a.workspace)}/trees/${seg(a.name)}`)),
     of("packages_list"),
     def("env_list", "List environments, optionally for one team.", { team: S }, [], async (a) => api("GET", `/v1/environments${qs({ owner: a.team })}`)),
-    def("env_get", "Read one environment's services, state and intercepts; poll this after any env call. Each services[] entry carries ready (and message) from service_status; poll ready, not the spec.", { env: ENV }, ["env"], async (a) => withReady(await api("GET", `/v1/environments/${seg(a.env)}`))),
+    def("env_get", "Read one environment's services, state and intercepts; poll this after any env call. Each services[] entry carries ready (and message) from service_status; poll ready, not the spec. state is creating|running|stopped|error|deleted; stop polling on error or deleted.", { env: ENV }, ["env"], async (a) => withReady(await api("GET", `/v1/environments/${seg(a.env)}`))),
     of("service_logs"),
     def("env_delete", "Delete an environment for good.", { env: ENV }, ["env"], async (a) => api("DELETE", `/v1/environments/${seg(a.env)}`)),
     def("env_start", "Start a stopped environment." + ASYNC, { env: ENV }, ["env"], async (a) => api("POST", `/v1/environments/${seg(a.env)}/start`)),
