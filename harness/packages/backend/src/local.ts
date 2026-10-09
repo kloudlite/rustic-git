@@ -27,6 +27,7 @@ import { Registry, platformTools, podFence, podTools, type PodFence, scratchRoot
 import { Cards } from "./cards.ts";
 import { WORKSPACE_DIR, delegateTools, resumeAsks, type DelegateDeps } from "./delegate.ts";
 import { forgetSessions } from "./forget.ts";
+import { SpaceWatch } from "./spacewatch.ts";
 import * as git from "./git.ts";
 import { BECAUSE_SCHEMA, TurnWords, consented } from "./consent.ts";
 import { toolDiff } from "./diff.ts";
@@ -130,7 +131,7 @@ function forgetting(t: ToolDef, deps: DelegateDeps): ToolDef {
     ...t,
     async run(input: { workspace: string }) {
       const r = await t.run(input);
-      if (typeof r === "string" && !r.startsWith("error") && !r.startsWith("platform tools unavailable")) await forgetSessions(input.workspace, deps.live);
+      if (typeof r === "string" && !r.startsWith("error") && !r.startsWith("platform tools unavailable")) await forgetSessions(input.workspace, deps.live, deps.changed ?? (() => {}));
       return r;
     },
   };
@@ -469,9 +470,23 @@ export class LocalBackend implements Backend {
     return choice === "reject" ? { block: true, reason: "The user rejected this tool call." } : {};
   }
 
+  #space = new SpaceWatch(() => this.space(), (view) => this.#broadcast({ type: "space", view }));
+  #fsTimers = new Map<string, ReturnType<typeof setTimeout>>();
+  /** Coalesce a burst of file-touching tools into one push per workspace. */
+  #fsChanged(ws?: string) {
+    const t = ws ?? "";
+    if (this.#fsTimers.has(t)) return;
+    this.#fsTimers.set(t, setTimeout(() => { this.#fsTimers.delete(t); this.#broadcast(ws ? { type: "fs_changed", ws } : { type: "fs_changed" }); }, 500));
+  }
   async watch(cb: (e: BenchEvent) => void): Promise<() => void> {
     this.#bench.add(cb);
-    return () => void this.#bench.delete(cb);
+    this.#space.start();
+    const last = this.#space.last();
+    if (last) cb({ type: "space", view: last });
+    return () => {
+      this.#bench.delete(cb);
+      if (this.#bench.size === 0) this.#space.stop();
+    };
   }
   asks: Backend["asks"] = { answer: async (id, choice) => this.#cards.answer(id, choice) };
   mode: Backend["mode"] = {
@@ -494,6 +509,7 @@ export class LocalBackend implements Backend {
       open: (key, o) => this.session(key, o),
       permit: (key, req, signal) => this.permit(key, req, signal),
       cards: this.#cards,
+      changed: () => this.#changed(),
     };
   }
 
@@ -610,7 +626,17 @@ export class LocalBackend implements Backend {
     });
     handle.subscribe((e) => {
       if (e.type === "agent_start") this.#words(key).start();
-      else if (e.type === "agent_end") this.#words(key).end();
+      else if (e.type === "agent_end") {
+        this.#words(key).end();
+        this.#space.poke();
+      } else if ((e as any).type === "tool_execution_end") {
+        const name: string = (e as any).toolName ?? "";
+        if (/^(workspace|environment|service|intercept)_/.test(name)) this.#space.poke();
+        if (["write", "edit", "patch", "bash", "exec"].includes(name)) {
+          const base = key.split(":")[0]!;
+          this.#fsChanged(base === "main" ? undefined : base);
+        }
+      }
     });
     this.#live.set(key, handle);
     this.#built.set(key, { tools: new Set(opts.tools.map((t) => t.name)), agent });
@@ -656,6 +682,7 @@ export class LocalBackend implements Backend {
           else await this.#rebuild(key).catch(() => {});
         }
       }
+      this.#broadcast({ type: "settings", settings: readSettings() });
       return out;
     },
   };
@@ -674,6 +701,7 @@ export class LocalBackend implements Backend {
       // an agent built before the sign-in holds the old (missing) credentials
       for (const key of [...this.#live.keys()])
         if (this.#state.get(key)?.model.provider === "anthropic" && !this.#busy.has(key)) await this.#rebuild(key).catch(() => {});
+      this.#broadcast({ type: "auth_changed" });
     },
     claudeSignedIn: async (fresh?: boolean) => claudeSignedIn(fresh),
   };

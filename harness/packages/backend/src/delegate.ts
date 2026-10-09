@@ -25,6 +25,8 @@ export type DelegateDeps = {
   permit(key: string, req: PermissionRequest, signal: AbortSignal): Promise<Decision>;
   /** The daemon's cards: the `question` tool raises them. Absent in tests that never ask. */
   cards?: Cards;
+  /** Tell the sessions watchers the stored list moved (a forgotten workspace's sessions). */
+  changed?: () => void;
   /** Where pending asks live; tests pass a temp dir. */
   asks?: string;
   /** ws key -> key of the session that last asked it: where its `main_tell` goes. */

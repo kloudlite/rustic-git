@@ -179,3 +179,43 @@ test("aborting the turn withdraws a pending question card and every watcher hear
   await Bun.sleep(10);
   for (const e of [ea, eb]) expect(e).toContainEqual({ type: "ask_resolved", id: ask.id });
 });
+
+test("settings.write reaches every TUI", async () => {
+  await models();
+  const local = new LocalBackend({ create: fake });
+  const a = await pair(local), b = await pair(local);
+  const eb: any[] = [];
+  const off = await b.watch((e) => eb.push(e));
+  await a.settings.write({ thinkingLevel: "high" });
+  await Bun.sleep(10);
+  expect(eb.find((e) => e.type === "settings")?.settings.thinkingLevel).toBe("high");
+  await off();
+});
+
+test("forgetSessions tells its caller the list changed", async () => {
+  const { forgetSessions } = await import("./forget");
+  let n = 0;
+  await forgetSessions("ws-9", new Map(), () => n++);
+  expect(n).toBe(1);
+});
+
+test("a file-touching tool pushes fs_changed once per burst, with the workspace", async () => {
+  const ms = await models();
+  const m = ms[0];
+  let emit!: (e: any) => void;
+  const create = (async () => ({
+    messages: [], agent: {}, subscribe: (f: any) => ((emit = f), () => {}),
+    setModel: async () => {}, setThinkingLevel() {}, setAutoCompactionEnabled() {}, dispose() {},
+  })) as any;
+  const local = new LocalBackend({ create });
+  const a = await pair(local);
+  const ev: any[] = [];
+  const off = await a.watch((e) => ev.push(e));
+  const h = await a.session("ws-1", { initial: { model: { provider: m.provider, id: m.id } }, fresh: true, tools: [] });
+  emit({ type: "tool_execution_end", toolName: "write" });
+  emit({ type: "tool_execution_end", toolName: "edit" });
+  await Bun.sleep(700);
+  expect(ev.filter((e) => e.type === "fs_changed")).toEqual([{ type: "fs_changed", ws: "ws-1" }]);
+  await off();
+  await h.dispose().catch(() => {});
+}, 20000);

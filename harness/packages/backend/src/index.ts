@@ -106,7 +106,11 @@ export type Ask = {
 export type BenchEvent =
   | { type: "ask"; ask: Ask }
   | { type: "ask_resolved"; id: string }
-  | { type: "perm"; mode: PermMode };
+  | { type: "perm"; mode: PermMode }
+  | { type: "settings"; settings: Settings }
+  | { type: "auth_changed" }
+  | { type: "fs_changed"; ws?: string }
+  | { type: "space"; view: SpaceView };
 
 export type PermissionRequest = {
   name: string;

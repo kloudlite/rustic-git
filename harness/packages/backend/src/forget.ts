@@ -5,7 +5,8 @@ import type { SessionHandle } from "./index.ts";
 
 /** Sessions live on the bench, the workspace on its pod: the platform deletes first, and only a
  * delete it accepted closes the workspace's open sessions and drops their history here. */
-export const forgetSessions = async (ws: string, live: Map<string, SessionHandle>) => {
+export const forgetSessions = async (ws: string, live: Map<string, SessionHandle>, changed: () => void) => {
   for (const [key, h] of [...live]) if (key === ws || key.startsWith(`${ws}:`)) await h.dispose();
   dropSessions(ws);
+  changed();
 };
