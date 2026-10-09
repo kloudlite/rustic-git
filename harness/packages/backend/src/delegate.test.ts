@@ -144,7 +144,7 @@ test("resumeAsks resends a fresh ask with a prefix and tries+1; the third restar
 // ---- subagent in its own clone ----
 
 type Rig = ReturnType<typeof rig>;
-function rig(o: { bare?: boolean; branch?: string; head?: string; pushes?: { code: number; stderr: string }[]; clone?: string[]; ready?: boolean } = {}) {
+function rig(o: { bare?: boolean; branch?: string; head?: string; pushes?: { code: number; stderr: string }[]; clone?: string[]; ready?: boolean; main?: SessionHandle } = {}) {
   const calls: string[] = [];
   const execs: { ws: string; cmd: string }[] = [];
   const clone = [...(o.clone ?? ['{"id":"ws-c1"}'])];
@@ -182,8 +182,9 @@ function rig(o: { bare?: boolean; branch?: string; head?: string; pushes?: { cod
   const opened: string[] = [];
   const forgot: string[] = [];
   const bodies: any[] = [];
-  const deps = { ...D(), open: async (k: string) => (opened.push(k), child), api, exec, sleep: async () => {}, forget: async (ws: string) => void forgot.push(ws) };
-  const [, sub] = delegateTools("main", undefined, deps, caller);
+  const deps = { ...D(), open: async (k: string) => (opened.push(k), k === "main" && o.main ? o.main : child), api, exec, sleep: async () => {}, forget: async (ws: string) => void forgot.push(ws) };
+  // workspace sessions wait for the answer; main's runs in the background (its own test)
+  const [sub] = o.main ? delegateTools("main", undefined, deps, caller).slice(1) : delegateTools("workspace", "P", deps, caller);
   return { calls, execs, child, opened, forgot, bodies, run: (task = "fix the bug\nmore") => sub!.run({ workspace: "P", task }) as Promise<string>, setHead: (h: string) => (head = h) };
 }
 const deleted = (r: Rig) => r.calls.includes("DELETE /v1/workspaces/ws-c1");
@@ -206,6 +207,15 @@ test("clone happy path: ready, session on the clone, commit, push to the parent 
   expect(out).not.toContain("SECRET");
   expect(r.child.disposed).toBe(1);
   expect(r.forgot).toEqual(["ws-c1"]);
+});
+
+test("main's subagent returns at once; the clone's answer arrives in main as a message", async () => {
+  const main = fake();
+  const r = rig({ main });
+  expect(await r.run()).toContain("subagent started in a clone of P");
+  for (let i = 0; i < 20 && !main.sent.length; i++) await flush();
+  expect(main.sent).toEqual(["prompt:[from P subagent] did it\n\npushed abc1234 to main in P:\na.ts\nb.ts"]);
+  expect(deleted(r)).toBe(true);
 });
 
 test("clone with no changes: no push, clone deleted", async () => {
