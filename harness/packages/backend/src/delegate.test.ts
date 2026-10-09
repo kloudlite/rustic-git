@@ -26,24 +26,21 @@ function fake(reply = "done") {
   return h as unknown as SessionHandle & { sent: string[]; disposed: number };
 }
 
-test("workspace_ask follows up a busy session, prompts an idle one, disposes only what it opened", async () => {
-  const live = new Map<string, SessionHandle>();
+test("workspace_ask follows up a busy session, prompts an idle one, disposes its own view", async () => {
   const busy = new Set<string>();
-  const h = fake("ok");
-  live.set("w1", h);
-  const [ask] = delegateTools("main", undefined, { live, busy, open: async () => fake() }, caller);
+  const idle = fake("ok");
+  const [ask] = delegateTools("main", undefined, { live: new Map(), busy, open: async () => idle }, caller);
   await ask!.run({ workspace: "w1", request: "a" });
   await flush();
+  expect(idle.sent).toEqual(["prompt:[from main session] a"]);
+  expect(idle.disposed).toBe(1);
   busy.add("w1");
-  await ask!.run({ workspace: "w1", request: "b" });
+  const hot = fake("ok");
+  const [ask2] = delegateTools("main", undefined, { live: new Map(), busy, open: async () => hot }, caller);
+  await ask2!.run({ workspace: "w1", request: "b" });
   await flush();
-  expect(h.sent).toEqual(["prompt:[from main session] a", "followUp:[from main session] b"]);
-  expect(h.disposed).toBe(0);
-  const opened = fake();
-  const [ask2] = delegateTools("main", undefined, { live: new Map(), busy: new Set(), open: async () => opened }, caller);
-  await ask2!.run({ workspace: "w2", request: "c" });
-  await flush();
-  expect(opened.disposed).toBe(1);
+  expect(hot.sent).toEqual(["followUp:[from main session] b"]);
+  expect(hot.disposed).toBe(1);
 });
 
 test("workspace_ask returns before the workspace finishes, then delivers [from ws] into the caller", async () => {

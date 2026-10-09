@@ -114,10 +114,38 @@ export function sessionCwd(k: { kind: string }): string | undefined {
   return k.kind === "main" ? undefined : WORKSPACE_DIR;
 }
 
+/**
+ * One agent per key per process, many views of it. The TUI and workspace_ask may hold one session
+ * at once; a view going away must not end the other's turn, so only the last dispose runs `onLast`.
+ */
+export function shareable(base: SessionHandle, onLast: () => Promise<void>): () => SessionHandle {
+  let count = 0;
+  return () => {
+    count++;
+    const unsubs = new Set<() => void>();
+    let gone = false;
+    return {
+      ...base,
+      subscribe: (cb) => {
+        const u = base.subscribe(cb);
+        unsubs.add(u);
+        return u;
+      },
+      dispose: async () => {
+        if (gone) return;
+        gone = true;
+        for (const u of unsubs) u();
+        if (--count === 0) await onLast();
+      },
+    };
+  };
+}
+
 export class LocalBackend implements Backend {
   /** Open sessions, for workspace_ask to reach a running one; `busy` = mid-turn. */
   #live = new Map<string, SessionHandle>();
   #busy = new Set<string>();
+  #views = new Map<string, () => SessionHandle>();
 
   async hello(): Promise<Hello> {
     const list = catalog();
@@ -137,7 +165,11 @@ export class LocalBackend implements Backend {
   async session(key: string, opts: SessionOpts): Promise<SessionHandle> {
     const model = resolveModel(opts.model);
     if (!model) throw new Error(`unknown model ${opts.model.provider}/${opts.model.id}`);
-    await this.#live.get(key)?.dispose();
+    const live = this.#live.get(key);
+    const view = this.#views.get(key);
+    // ponytail: a second opener inherits the first's tools/permission/model; rebuild the registry per view if the TUI's own tools must reach a session main opened.
+    if (live && view && !opts.fresh) return view();
+    await live?.dispose();
     const k = sessionKind(key);
     const deps = { live: this.#live, busy: this.#busy, open: (key: string, o: SessionOpts) => this.session(key, o) };
     const registry = await registryFor(k, deps, opts, key);
@@ -168,7 +200,10 @@ export class LocalBackend implements Backend {
       clearQueue: async () => void agent.clearQueue(),
       abort: async () => agent.abort(),
       dispose: async () => {
-        if (this.#live.get(key) === handle) this.#live.delete(key);
+        if (this.#live.get(key) === handle) {
+          this.#live.delete(key);
+          this.#views.delete(key);
+        }
         this.#busy.delete(key);
         agent.dispose();
       },
@@ -189,7 +224,9 @@ export class LocalBackend implements Backend {
         ),
     };
     this.#live.set(key, handle);
-    return handle;
+    const make = shareable(handle, () => handle.dispose());
+    this.#views.set(key, make);
+    return make();
   }
 
   sessions = {

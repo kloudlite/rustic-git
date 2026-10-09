@@ -2,7 +2,7 @@ import { expect, test } from "bun:test";
 import { mkdtempSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { LocalBackend, GATED, EDITS, installGate, registryFor, sessionCwd, sessionKind } from "./local.ts";
+import { LocalBackend, GATED, shareable, EDITS, installGate, registryFor, sessionCwd, sessionKind } from "./local.ts";
 import { toolDiff } from "./diff.ts";
 import { PROTOCOL } from "./wire.ts";
 
@@ -124,4 +124,19 @@ test("the gate asks for a codemode script's nested gated call, once for a top-le
   await pi.agent.beforeToolCall(call("bash"));
   expect(asked).toEqual(["exec", "bash"]);
   expect(seen).toEqual(["pi", "pi"]);
+});
+
+test("shareable: a view going away leaves the others; only the last runs onLast", async () => {
+  let subs = 0, unsubs = 0, last = 0;
+  const base = { subscribe: () => (subs++, () => void unsubs++) } as any;
+  const make = shareable(base, async () => void last++);
+  const a = make(), b = make();
+  a.subscribe(() => {});
+  b.subscribe(() => {});
+  await a.dispose();
+  expect([subs, unsubs, last]).toEqual([2, 1, 0]);
+  await a.dispose();
+  expect([unsubs, last]).toEqual([1, 0]);
+  await b.dispose();
+  expect([unsubs, last]).toEqual([2, 1]);
 });

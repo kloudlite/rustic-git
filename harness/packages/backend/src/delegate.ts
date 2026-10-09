@@ -217,21 +217,20 @@ export function delegateTools(kind: "main" | "workspace", ws: string | undefined
       const text = `[from main session] ${input.request}`;
       // Not awaited: main must stay free for the person while the workspace works.
       void (async () => {
-        const existing = deps.live.get(key);
         let h: SessionHandle | undefined;
         let reply: string;
         try {
-          h = existing ?? (await deps.open(key, opts(key)));
+          h = await deps.open(key, opts(key));
           const s = h;
-          reply = `[from ${key}] ${await answer(s, () => (existing && deps.busy.has(key) ? s.followUp(text) : s.prompt(text)))}`;
+          reply = `[from ${key}] ${await answer(s, () => (deps.busy.has(key) ? s.followUp(text) : s.prompt(text)))}`;
         } catch (err) {
           reply = `[from ${key}] failed: ${err instanceof Error ? err.message : String(err)}`;
         }
         // the caller may be gone; the workspace view still has the transcript. Not awaited: a prompt may last the caller's whole turn.
         const c = deps.live.get(callerKey);
         if (c) void (deps.busy.has(callerKey) ? c.followUp(reply) : c.prompt(reply)).catch(() => {});
-        // a session opened for this ask goes only after its answer was delivered
-        if (h && !existing) await h.dispose().catch(() => {});
+        // our own view goes only after its answer was delivered
+        if (h) await h.dispose().catch(() => {});
       })();
       return `sent to ${key}; its session is working on it. Its answer will arrive here as a message from ${key}; do not wait or poll for it.`;
     },
