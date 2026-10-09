@@ -146,3 +146,19 @@ test("sessions.watch over the wire: answered at once, pushed after; an old bench
   o.close();
   old.close();
 });
+
+test("a second sessions.watch on one connection is answered at once and holds one subscription", async () => {
+  let adds = 0;
+  let offs = 0;
+  const { b } = fakeBackend();
+  (b as any).sessions = { watch: async (f: any) => (adds++, f([{ key: "main", busy: false }]), () => void offs++) };
+  const server = await listenTcp(b, 0, "127.0.0.1");
+  const c = tcpClient((server.address() as any).port);
+  await c.backend.sessions.watch(() => {});
+  const second: any[][] = [];
+  await c.backend.sessions.watch((l) => second.push(l));
+  expect(second.length).toBe(1); // answered before the promise resolved
+  expect(adds - offs).toBe(1);
+  c.close();
+  server.close();
+});

@@ -1409,7 +1409,7 @@ const PERM_MODES: PermMode[] = ["default", "acceptEdits", "plan", "bypass"];
       unavailable={space && !space.available ? space.error ?? "unknown error" : undefined}
       focus={focus}
       width={prefs.sidebarWidth}
-      running={workspaces.map((w) => getSession(sessions, w.id).busy || !!watched?.find((m) => m.key === w.id)?.busy)}
+      running={workspaces.map((w) => getSession(sessions, w.id).busy || !!watched?.some((m) => baseOf(m.key) === w.id && m.busy))}
       waiting={workspaces.map((w) => asks.some((a) => baseOf(a.key) === w.id))}
       onFocus={(f) => {
         setFocus(f);

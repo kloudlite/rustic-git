@@ -283,11 +283,11 @@ export class LocalBackend implements Backend {
   #live = new Map<string, SessionHandle>();
   #busy = new Set<string>();
   #watchers = new Set<(list: LiveSessionMeta[]) => void>();
-  #live_list = () => listSessions().map((m) => ({ ...m, busy: this.#busy.has(m.key) }));
+  #list = () => listSessions().map((m) => ({ ...m, busy: this.#busy.has(m.key) }));
   /** Every view's sidebar: the stored list with which keys are mid-turn right now. */
   #changed() {
     if (this.#watchers.size === 0) return;
-    const list = this.#live_list();
+    const list = this.#list();
     for (const cb of [...this.#watchers]) {
       try {
         cb(list);
@@ -474,7 +474,7 @@ export class LocalBackend implements Backend {
     clear: async (key: string) => (await clearSessionHistory(key), this.#changed()),
     watch: async (cb: (list: LiveSessionMeta[]) => void) => {
       this.#watchers.add(cb);
-      cb(this.#live_list());
+      cb(this.#list());
       return () => void this.#watchers.delete(cb);
     },
   };

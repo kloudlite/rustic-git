@@ -58,7 +58,8 @@ export function serve(backend: Backend, peer: Peer) {
   // One watch per connection, however often the client asks; the list goes out as an event.
   let unwatch: (() => void) | undefined;
   peer.handle("sessions.watch", async () => {
-    unwatch ??= await backend.sessions.watch((list) => peer.emit("sessions", "*", list));
+    unwatch?.();
+    unwatch = await backend.sessions.watch((list) => peer.emit("sessions", "*", list));
     return true;
   });
 
