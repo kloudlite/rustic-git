@@ -88,6 +88,12 @@ test("a user message_start renders one row from shown", () => {
   expect(userRow({ type: "message_start", message: { role: "assistant", timestamp: 9 } })).toBeNull();
 });
 
+test("user rows carry the image count from the message's image blocks", () => {
+  const content = [{ type: "text", text: "see" }, { type: "image", data: "x", mimeType: "image/png" }, { type: "image", data: "y", mimeType: "image/png" }];
+  expect((userRow({ type: "message_start", message: { role: "user", timestamp: 4, content } }) as any).images).toBe(2);
+  expect((transcript([{ role: "user", timestamp: 4, content }], false, sum).entries[0] as any).images).toBe(2);
+});
+
 test("pushed session_state sets model, tokens and queue", () => {
   const p = applyState({ type: "session_state", model: { provider: "openai", id: "x" }, thinkingLevel: "low", autoCompact: true, codemode: true, queued: { steering: ["a"], followUp: ["b"] }, tokens: 12 });
   expect(p).toEqual({ model: { provider: "openai", id: "x" }, tokens: 12, queued: [{ text: "a", kind: "steer" }, { text: "b", kind: "followUp" }] });

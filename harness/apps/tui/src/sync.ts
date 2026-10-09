@@ -4,6 +4,7 @@ import type { Ask, SessionState, SpaceView } from "@kloudlite-tui/backend";
 import type { Entry } from "./components/Transcript.tsx";
 import { fromSpace } from "./workspaces";
 
+const images = (m: any) => (m.content ?? []).filter((b: any) => b.type === "image").length || undefined;
 const text = (m: any) => (m.content ?? []).filter((b: any) => b.type === "text").map((b: any) => b.text).join("\n");
 
 /** A transcript from an open's snapshot, with the ids the live path uses so later events update rows. */
@@ -14,7 +15,7 @@ export function transcript(messages: any[], busy: boolean, toolSummary: (name: s
     if (m.role === "user") {
       const t = text(m);
       if (t) {
-        entries.push({ kind: "user", id: `u${m.timestamp}`, text: t } as Entry);
+        entries.push({ kind: "user", id: `u${m.timestamp}`, text: t, images: images(m) } as Entry);
         history.push(t);
       }
     } else if (m.role === "assistant") {
@@ -38,7 +39,7 @@ export function transcript(messages: any[], busy: boolean, toolSummary: (name: s
 
 export function userRow(e: any): Entry | null {
   if (e?.type !== "message_start" || e.message?.role !== "user") return null;
-  return { kind: "user", id: `u${e.message.timestamp}`, text: e.shown ?? text(e.message) } as Entry;
+  return { kind: "user", id: `u${e.message.timestamp}`, text: e.shown ?? text(e.message), images: images(e.message) } as Entry;
 }
 
 export function upsertById(entries: Entry[], e: Entry): Entry[] {
