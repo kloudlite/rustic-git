@@ -591,6 +591,12 @@ export function App({
       case "agent_start":
         setSessions((map) => patchSession(map, key, { busy: true }));
         break;
+      case "session_closed":
+        // the daemon disposed this agent (rebuilt, or idle): the handle is dead, so the next
+        // prompt reopens it. No reopen here — nobody is waiting on it. The dead entry is removed by
+        // ensureAgent's own listener, which knows which promise it belongs to.
+        setSessions((map) => patchSession(map, key, { busy: false }));
+        break;
       case "agent_end":
         setSessions((map) => patchSession(map, key, { busy: false }));
         void refreshRef.current(); // a create / stop / intercept the turn made shows now, not at the next beat
@@ -749,7 +755,12 @@ export function App({
         }),
       )
       .then((agent) => {
-        agent.subscribe((event) => handleAgentEvent(key, event));
+        agent.subscribe((event) => {
+          if (event.type === "session_closed" && agents.current.get(key) === created) agents.current.delete(key);
+          handleAgentEvent(key, event);
+        });
+        // a turn that outlived the previous client is still going: show it as such
+        if (agent.busy) setSessions((map) => patchSession(map, key, { busy: true }));
         if (!opts?.fresh) restoreTranscript(key, agent);
         return agent;
       });

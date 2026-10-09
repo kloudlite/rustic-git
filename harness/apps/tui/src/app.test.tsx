@@ -2,11 +2,16 @@ import { expect, test } from "bun:test";
 import { testRender } from "@opentui/react/test-utils";
 import type { ToolDef } from "@kloudlite-tui/tools";
 import { setCopier } from "./clipboard.ts";
+import { LocalBackend } from "@kloudlite-tui/backend/local";
 import { backend, boot, hello } from "./hello.ts";
 
 // App reads its settings from hello() once at mount, so tests seed them by re-booting.
+// A fresh backend each time: a turn left pending by the previous test (no auth, it never ends)
+// would otherwise open the next test's session as busy, which the app now honours.
 function writeSettings(patch: Record<string, unknown>) {
-  boot(backend(), { ...hello(), settings: { ...hello().settings, ...patch } });
+  const fresh = new LocalBackend();
+  fresh.space = backend().space;
+  boot(fresh, { ...hello(), settings: { ...hello().settings, ...patch } });
 }
 import { App } from "./app.tsx";
 
@@ -549,6 +554,43 @@ test("toggling codemode rebuilds the open session with the new value", async () 
   for (let i = 0; i < 50 && seen.length < 3; i++) await tick();
   await setup.renderOnce();
   expect(seen).toEqual(["open true", "dispose", "open false"]);
+  setup.renderer.destroy();
+  boot(real, hello());
+});
+
+// The daemon disposes an idle or rebuilt agent and tells the client; the dead handle must not be
+// reused, so the next prompt opens a fresh one.
+test("session_closed makes the next prompt reopen the session", async () => {
+  const real = backend();
+  let opens = 0;
+  let fire: (e: any) => void = () => {};
+  const wrap = <T extends object>(t: T, over: Partial<T>) =>
+    new Proxy(t, {
+      get: (o: any, p) => (p in over ? (over as any)[p] : typeof o[p] === "function" ? o[p].bind(o) : o[p]),
+    }) as T;
+  boot(
+    wrap(real, {
+      session: async (key, opts) => {
+        opens++;
+        const h = await real.session(key, opts);
+        return wrap(h, { subscribe: (cb) => ((fire = cb as any), h.subscribe(cb)) });
+      },
+    }),
+    { ...hello(), settings: { ...hello().settings, vim: "on" } },
+  );
+  const setup = await testRender(<App />, { width: COLS, height: ROWS, kittyKeyboard: true });
+  for (let i = 0; i < 10 && opens < 1; i++) await tick();
+  await tick();
+  expect(opens).toBe(1);
+  fire({ type: "session_closed" });
+  await tick();
+  setup.mockInput.pressKey("i");
+  await tick();
+  await setup.mockInput.typeText("hello");
+  await tick();
+  setup.mockInput.pressKey("RETURN");
+  for (let i = 0; i < 50 && opens < 2; i++) await tick();
+  expect(opens).toBe(2);
   setup.renderer.destroy();
   boot(real, hello());
 });

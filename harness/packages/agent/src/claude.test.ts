@@ -110,7 +110,7 @@ test("two prompts are two turns on ONE query", async () => {
   expect(events.filter((e) => e.type === "agent_end").length).toBe(2);
   const updates = events.filter((e) => e.type === "message_update");
   expect(updates.some((e) => e.message.content.some((b: any) => b.type === "thinking" && b.thinking === "hm"))).toBe(true);
-  const ends = events.filter((e) => e.type === "message_end");
+  const ends = events.filter((e) => e.type === "message_end" && e.message.role === "assistant");
   expect(ends.map((e) => e.message.content.find((b: any) => b.type === "text").text)).toEqual(["hi", "bye"]);
   expect(ends[0].message.usage.totalTokens).toBe(7);
   // unique per message: the TUI keys entries on it
@@ -521,7 +521,7 @@ test("token total counts cache reads and writes", async () => {
   const { s, events } = run(f);
   await s.prompt("a");
   await tick();
-  const end = events.find((e) => e.type === "message_end");
+  const end = events.find((e) => e.type === "message_end" && e.message.role === "assistant");
   expect(end.message.usage).toMatchObject({ input: 3, output: 4, cacheRead: 10, cacheWrite: 5, totalTokens: 22 });
   s.dispose();
 });
@@ -549,7 +549,7 @@ test("a steer is held until a tool result or the turn end, and clearQueue drops 
   expect(events.filter((e) => e.type === "queue_update").at(-1)).toMatchObject({ steering: [] });
   // record order: the tool call, its result, then the steer
   expect(p.recorded.map((m) => m.role)).toEqual(["user", "assistant", "toolResult", "user"]);
-  expect(events.filter((e) => e.type === "message_start" && e.message.role === "user").map((e) => e.message.content.at(-1).text)).toEqual(["keep me"]);
+  expect(events.filter((e) => e.type === "message_start" && e.message.role === "user").map((e) => e.message.content.at(-1).text)).toEqual(["go", "keep me"]);
   pushOut({ type: "result", subtype: "success" });
   s.dispose();
 });

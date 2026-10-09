@@ -1,6 +1,9 @@
-//! The agent in-process behind the `Backend` interface: the pod's own TUI (cli.tsx) and the
-//! remote host (serve.ts) both use it. The permission gate lives here as a hook that asks
-//! `opts.permission`; the decision itself is the TUI's (modes, always-allow, the card).
+//! The agent in-process behind the `Backend` interface. The bench daemon (daemon.ts) holds the one
+//! instance; every client (kl-tui over ssh, the browser TUI) is a connection to it, so an agent
+//! outlives the client that started it and there is exactly one writer per session file.
+//! One agent per key, many VIEWS of it (`shareable`): a view going away never ends a turn; an idle
+//! agent with no views is disposed (`#settle`). The permission gate and the TUI's own tools route by
+//! session key to the newest connected client (clients.ts); the decision itself is the TUI's.
 import { mkdirSync } from "node:fs";
 import { homedir } from "node:os";
 import {
@@ -20,14 +23,15 @@ import {
   type ModelRef,
 } from "@kloudlite-tui/agent";
 import { Registry, platformTools, podTools, scratchRoot, scratchTools, webFetch, webSearch, type ToolDef } from "@kloudlite-tui/tools";
-import { WORKSPACE_DIR, delegateTools, type DelegateDeps } from "./delegate.ts";
+import { Clients } from "./clients.ts";
+import { WORKSPACE_DIR, delegateTools, resumeAsks, type DelegateDeps } from "./delegate.ts";
 import { forgetSessions } from "./forget.ts";
 import * as git from "./git.ts";
 import { toolDiff } from "./diff.ts";
 import { podfs } from "./podfs.ts";
 import { space } from "./space.ts";
 import { PROTOCOL } from "./wire.ts";
-import type { Backend, CatalogModel, Hello, SessionHandle, SessionOpts } from "./index.ts";
+import type { Backend, CatalogModel, Hello, SessionEvent, SessionHandle, SessionOpts } from "./index.ts";
 
 /** Tools that ask before they run. */
 export const GATED = new Set([
@@ -90,7 +94,7 @@ export function installGate(agent: any, permission: SessionOpts["permission"]): 
   const ask = async (ctx: any, signal: AbortSignal) => {
     const name = ctx.toolCall.name;
     if (!GATED.has(name)) return undefined;
-    const decision = await permission({ name, args: ctx.args, diff: toolDiff(name, ctx.args) ?? undefined }, signal);
+    const decision = await permission!({ name, args: ctx.args, diff: toolDiff(name, ctx.args) ?? undefined }, signal);
     return decision.block ? decision : undefined;
   };
   const inner = agent.agent.beforeToolCall;
@@ -114,18 +118,27 @@ export function sessionCwd(k: { kind: string }): string | undefined {
   return k.kind === "main" ? undefined : WORKSPACE_DIR;
 }
 
+/** A copy of `src` whose live fields stay live: a spread would freeze `busy` and `messages` at the
+ * moment the view was made, and a client reconnecting to a running agent reads both. */
+function derive(src: SessionHandle, over: Partial<SessionHandle>): SessionHandle {
+  return Object.defineProperties({ ...src, ...over }, {
+    busy: { get: () => src.busy, enumerable: true },
+    messages: { get: () => src.messages, enumerable: true },
+  }) as SessionHandle;
+}
+
 /**
  * One agent per key per process, many views of it. The TUI and workspace_ask may hold one session
- * at once; a view going away must not end the other's turn, so only the last dispose runs `onLast`.
+ * at once; a view going away must not end the other's turn, so views never dispose the agent:
+ * `onZero` runs (not awaited) whenever the last one is gone and the owner decides (`#settle`).
  */
-export function shareable(base: SessionHandle, onLast: () => Promise<void>): () => SessionHandle {
+export function shareable(base: SessionHandle, onZero: () => void): { view: () => SessionHandle; count: () => number } {
   let count = 0;
-  return () => {
+  const view = () => {
     count++;
     const unsubs = new Set<() => void>();
     let gone = false;
-    return {
-      ...base,
+    return derive(base, {
       subscribe: (cb) => {
         const u = base.subscribe(cb);
         unsubs.add(u);
@@ -135,17 +148,84 @@ export function shareable(base: SessionHandle, onLast: () => Promise<void>): () 
         if (gone) return;
         gone = true;
         for (const u of unsubs) u();
-        if (--count === 0) await onLast();
+        if (--count === 0) onZero();
       },
-    };
+    });
+  };
+  return { view, count: () => count };
+}
+
+/**
+ * The agent's own handle. ONE `agent.subscribe` fans out to `subs`, so disposing the agent can tell
+ * every subscriber (`session_closed`): a dispose drops the agent's listeners and no `agent_end`
+ * follows, which left workspace_ask waiting forever on a turn that was gone.
+ */
+export function baseHandle(
+  agent: any,
+  key: string,
+  hooks: { busy: Set<string>; onEnd(): void; onDispose(): void },
+): SessionHandle {
+  const subs = new Set<(e: SessionEvent) => void>();
+  let closed = false;
+  const unsub = agent.subscribe((event: any) => {
+    if (event.type === "agent_start") hooks.busy.add(key);
+    else if (event.type === "agent_end") hooks.busy.delete(key);
+    const e = event.type === "tool_execution_start" ? { ...event, diff: toolDiff(event.toolName, event.args) ?? undefined } : event;
+    for (const cb of [...subs]) {
+      try {
+        cb(e);
+      } catch (err) {
+        console.error("session subscriber failed", key, err);
+      }
+    }
+    if (event.type === "agent_end") hooks.onEnd();
+  });
+  return {
+    get messages() {
+      return agent.messages;
+    },
+    get busy() {
+      return hooks.busy.has(key);
+    },
+    isClaude: "isClaude" in agent,
+    prompt: async (text, o) => agent.prompt(text, o),
+    steer: async (text, images) => agent.steer(text, images),
+    followUp: async (text, images) => agent.followUp(text, images),
+    clearQueue: async () => void agent.clearQueue(),
+    abort: async () => agent.abort(),
+    dispose: async () => {
+      if (closed) return;
+      closed = true;
+      for (const cb of [...subs]) cb({ type: "session_closed" });
+      subs.clear();
+      hooks.onDispose();
+      hooks.busy.delete(key);
+      if (typeof unsub === "function") unsub();
+      agent.dispose();
+    },
+    setModel: async (ref) => {
+      const m = resolveModel(ref);
+      if (!m) throw new Error(`unknown model ${ref.provider}/${ref.id}`);
+      await agent.setModel(m);
+    },
+    setThinkingLevel: async (level) => void agent.setThinkingLevel(level),
+    setAutoCompactionEnabled: async (on) => void agent.setAutoCompactionEnabled(on),
+    subscribe: (cb) => (subs.add(cb), () => void subs.delete(cb)),
   };
 }
 
 export class LocalBackend implements Backend {
-  /** Open sessions, for workspace_ask to reach a running one; `busy` = mid-turn. */
+  /** Open sessions (the agents' base handles), for workspace_ask to reach a running one. */
   #live = new Map<string, SessionHandle>();
   #busy = new Set<string>();
-  #views = new Map<string, () => SessionHandle>();
+  #shared = new Map<string, ReturnType<typeof shareable>>();
+  /** What each live agent was built with: a later opener that needs more rebuilds it. */
+  #built = new Map<string, { claude: boolean; codemode: boolean; tools: Set<string>; agent: any }>();
+  /** Keys to rebuild at their next `agent_end` (an opener needed a different build mid-turn). */
+  #rebuild = new Set<string>();
+  #clients = new Clients();
+  /** Unregisters of the clients each key's views added; a closed agent has no client left. */
+  #offs = new Map<string, Set<() => void>>();
 
   async hello(): Promise<Hello> {
     const list = catalog();
@@ -162,17 +242,80 @@ export class LocalBackend implements Backend {
     };
   }
 
+  #deps(): DelegateDeps {
+    return {
+      live: this.#live,
+      busy: this.#busy,
+      open: (key, o) => this.session(key, o),
+      permit: (key, req, signal) => this.#clients.route(key, (c) => !!c.permission, (c) => c.permission!(req, signal), signal),
+    };
+  }
+
+  /** Boot: resend the asks a restart interrupted. Returns once they are started, not finished. */
+  async resumeAsks(): Promise<void> {
+    void Promise.allSettled(resumeAsks(this.#deps()));
+  }
+
+  /** Dispose the agent when no turn runs and nobody views it (or it is due a rebuild). Called from
+   * the last view going away and, a tick after `agent_end`, from the agent itself: the tick lets
+   * `answer()` see the `agent_end` first and lets Claude start a queued followUp (busy again). */
+  #settle(key: string) {
+    const base = this.#live.get(key);
+    const sh = this.#shared.get(key);
+    if (!base || !sh || this.#busy.has(key)) return;
+    if (sh.count() === 0 || this.#rebuild.has(key)) void base.dispose();
+  }
+
+  /** Register this view's client (card callback + TUI tools) for its key; the view's dispose removes it. */
+  #attach(key: string, opts: SessionOpts, v: SessionHandle): SessionHandle {
+    if (!opts.permission && opts.tools.length === 0) return v;
+    const off = this.#clients.add(key, { permission: opts.permission, tools: new Map(opts.tools.map((t) => [t.name, t.run as (input: unknown) => Promise<string>])) });
+    let offs = this.#offs.get(key);
+    if (!offs) this.#offs.set(key, (offs = new Set()));
+    offs.add(off);
+    return derive(v, {
+      dispose: async () => {
+        off();
+        offs.delete(off);
+        await v.dispose();
+      },
+    });
+  }
+
   async session(key: string, opts: SessionOpts): Promise<SessionHandle> {
     const model = resolveModel(opts.model);
     if (!model) throw new Error(`unknown model ${opts.model.provider}/${opts.model.id}`);
     const live = this.#live.get(key);
-    const view = this.#views.get(key);
-    // ponytail: a second opener inherits the first's tools/permission/model; rebuild the registry per view if the TUI's own tools must reach a session main opened.
-    if (live && view && !opts.fresh) return view();
-    await live?.dispose();
+    const sh = this.#shared.get(key);
+    const built = this.#built.get(key);
+    if (live && sh && built && !opts.fresh) {
+      const needsRebuild =
+        (opts.model.provider === "anthropic") !== built.claude ||
+        !!opts.codemode !== built.codemode ||
+        opts.tools.some((t) => !built.tools.has(t.name));
+      if (!needsRebuild) {
+        const cur = built.agent.model;
+        if (cur && (cur.provider !== opts.model.provider || cur.id !== opts.model.id)) await live.setModel(opts.model);
+        if (opts.thinkingLevel && opts.thinkingLevel !== built.agent.thinkingLevel) await live.setThinkingLevel(opts.thinkingLevel);
+        return this.#attach(key, opts, sh.view());
+      }
+      if (live.busy) {
+        // rebuilt at its agent_end; until then this opener sees the old agent
+        this.#rebuild.add(key);
+        return this.#attach(key, opts, sh.view());
+      }
+    }
+    await live?.dispose(); // other views get session_closed
     const k = sessionKind(key);
-    const deps = { live: this.#live, busy: this.#busy, open: (key: string, o: SessionOpts) => this.session(key, o) };
-    const registry = await registryFor(k, deps, opts, key);
+    // the TUI's own tools run in whichever client is connected to this key NOW, not the opener
+    const routed: SessionOpts = {
+      ...opts,
+      tools: opts.tools.map((t) => ({
+        ...t,
+        run: (input: unknown) => this.#clients.route(key, (c) => c.tools.has(t.name), (c) => c.tools.get(t.name)!(input)),
+      })),
+    };
+    const registry = await registryFor(k, this.#deps(), routed, key);
     const cwd = sessionCwd(k);
     // best effort: off the bench (a laptop running the backend) / is not writable, and only Claude spawns there
     if (cwd) try { mkdirSync(cwd, { recursive: true }); } catch {}
@@ -186,47 +329,25 @@ export class LocalBackend implements Backend {
       codemode: opts.codemode,
       cwd,
     });
-    installGate(agent, opts.permission);
-    agent.subscribe((e: any) => {
-      if (e.type === "agent_start") this.#busy.add(key);
-      else if (e.type === "agent_end") this.#busy.delete(key);
+    installGate(agent, (req, signal) => this.#clients.route(key, (c) => !!c.permission, (c) => c.permission!(req, signal), signal));
+    const handle: SessionHandle = baseHandle(agent, key, {
+      busy: this.#busy,
+      onEnd: () => void setTimeout(() => this.#settle(key), 0),
+      onDispose: () => {
+        if (this.#live.get(key) !== handle) return;
+        this.#live.delete(key);
+        this.#shared.delete(key);
+        this.#built.delete(key);
+        this.#rebuild.delete(key);
+        for (const off of this.#offs.get(key) ?? []) off();
+        this.#offs.delete(key);
+      },
     });
-    const handle: SessionHandle = {
-      messages: agent.messages,
-      isClaude: "isClaude" in agent,
-      prompt: async (text, o) => agent.prompt(text, o),
-      steer: async (text, images) => agent.steer(text, images),
-      followUp: async (text, images) => agent.followUp(text, images),
-      clearQueue: async () => void agent.clearQueue(),
-      abort: async () => agent.abort(),
-      dispose: async () => {
-        if (this.#live.get(key) === handle) {
-          this.#live.delete(key);
-          this.#views.delete(key);
-        }
-        this.#busy.delete(key);
-        agent.dispose();
-      },
-      setModel: async (ref) => {
-        const m = resolveModel(ref);
-        if (!m) throw new Error(`unknown model ${ref.provider}/${ref.id}`);
-        await agent.setModel(m);
-      },
-      setThinkingLevel: async (level) => void agent.setThinkingLevel(level),
-      setAutoCompactionEnabled: async (on) => void agent.setAutoCompactionEnabled(on),
-      subscribe: (cb) =>
-        agent.subscribe((event: any) =>
-          cb(
-            event.type === "tool_execution_start"
-              ? { ...event, diff: toolDiff(event.toolName, event.args) ?? undefined }
-              : event,
-          ),
-        ),
-    };
     this.#live.set(key, handle);
-    const make = shareable(handle, () => handle.dispose());
-    this.#views.set(key, make);
-    return make();
+    this.#built.set(key, { claude: "isClaude" in agent, codemode: !!opts.codemode, tools: new Set(opts.tools.map((t) => t.name)), agent });
+    const made = shareable(handle, () => this.#settle(key));
+    this.#shared.set(key, made);
+    return this.#attach(key, opts, made.view());
   }
 
   sessions = {

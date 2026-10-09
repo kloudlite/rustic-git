@@ -1,7 +1,8 @@
-//! The bench side of the laptop TUI: sshd runs this as `kl-host` (bench/term/login-shell) and the
-//! laptop's kl-tui speaks ./wire over its stdio. stdout carries frames ONLY: anything else that
-//! writes there (pi, a library's console.log) is rerouted to stderr, which ssh shows the laptop
-//! after the TUI exits. stdin EOF = the laptop went away: dispose every session and exit.
+//! The bench side of a TUI: one `serve` per client connection to the bench daemon (./daemon),
+//! speaking ./wire over that connection's socket. The agents live in the daemon's one backend, so
+//! the connection closing disposes this client's VIEWS (`dispose` below), never the agents: a
+//! running turn survives a quit or an ssh drop and a reconnecting client finds it still going
+//! (`session.open` reports `busy`).
 import type { Backend, SessionHandle, ToolSpec } from "./index.ts";
 import { Peer } from "./wire.ts";
 
@@ -25,7 +26,7 @@ export function serve(backend: Backend, peer: Peer) {
     });
     open.set(key, h);
     h.subscribe((event) => peer.emit("session", key, event));
-    return { messages: h.messages, isClaude: h.isClaude };
+    return { messages: h.messages, isClaude: h.isClaude, busy: h.busy };
   });
 
   peer.handle("session.call", async ({ key, method, args }: { key: string; method: string; args: unknown[] }) => {
@@ -65,22 +66,4 @@ export function serve(backend: Backend, peer: Peer) {
       open.clear();
     },
   };
-}
-
-if (import.meta.main) {
-  const out = process.stdout.write.bind(process.stdout);
-  const toErr = (...a: unknown[]) => process.stderr.write(a.map(String).join(" ") + "\n");
-  console.log = console.info = console.warn = console.debug = toErr;
-  process.stdout.write = ((chunk: any, ...rest: any[]) => process.stderr.write(chunk, ...rest)) as any;
-  if (process.env.KL_SERVE_TEST_NOISE) console.log("noise");
-
-  const { LocalBackend } = await import("./local.ts");
-  const peer = new Peer((line) => void out(line));
-  const server = serve(new LocalBackend(), peer);
-  for await (const chunk of Bun.stdin.stream()) peer.feed(chunk);
-  // EOF: let in-flight handlers reply (bounded 2 s), then tear down.
-  for (let t = 0; t < 200 && !peer.idle; t++) await Bun.sleep(10);
-  peer.close();
-  await server.dispose();
-  process.exit(0);
 }

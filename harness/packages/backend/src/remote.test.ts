@@ -1,5 +1,4 @@
 import { expect, test } from "bun:test";
-import { join } from "node:path";
 import { connect, RemoteBackend } from "./remote.ts";
 import { serve } from "./serve.ts";
 import { Peer } from "./wire.ts";
@@ -21,7 +20,7 @@ function fake(): Backend & { seen: string[] } {
         messages: [{ role: "user", content: "earlier" }] as any,
         isClaude: false,
         prompt: async (text: string) => {
-          const d = await opts.permission({ name: "bash", args: { command: text } }, new AbortController().signal);
+          const d = await opts.permission!({ name: "bash", args: { command: text } }, new AbortController().signal);
           seen.push(`decision:${d.block ? "block" : "allow"}`);
           seen.push(`tool:${await opts.tools[0]!.run({ q: text })}`);
           for (const s of subs) s({ type: "agent_end", error: new Error("e") });
@@ -32,7 +31,7 @@ function fake(): Backend & { seen: string[] } {
       };
     },
     // a permission call that never answers until aborted
-    _hang: (signal: AbortSignal) => opts.permission({ name: "bash", args: {} }, signal),
+    _hang: (signal: AbortSignal) => opts.permission!({ name: "bash", args: {} }, signal),
     sessions: {}, fs: {}, podfs: {}, settings: {}, models: {}, auth: {}, space: async () => ({ available: false, error: "x", user: "u", workspaces: [], environments: [] }),
   };
   return b;
@@ -91,13 +90,6 @@ test("disconnect rejects pending calls", async () => {
   await Bun.sleep(5);
   client.close();
   await expect(p).rejects.toThrow("disconnected");
-});
-
-test("connect() over a real child: hello from serve.ts", async () => {
-  const c = await connect(["bun", "run", "--silent", join(import.meta.dir, "serve.ts")]);
-  expect(c.hello.protocol).toBe(1);
-  expect(c.hello.cwd).toBe(process.cwd());
-  expect(await c.backend.fs.isGitRepo(process.cwd())).toBeTypeOf("boolean");
 });
 
 test("connect() rejects with code 3 when the command exits before hello", async () => {

@@ -96,17 +96,22 @@ export type SessionOpts = {
   codemode?: boolean;
   /** Tools the TUI owns; their `run` executes in the TUI process. */
   tools: ToolDef[];
-  /** Called only for gated tools (bash, write, edit, web_fetch). */
-  permission(req: PermissionRequest, signal: AbortSignal): Promise<Decision>;
+  /** Called only for gated tools (bash, write, edit, web_fetch). Absent on internal opens (a
+   * view opened to deliver a reply): cards then go to whichever client holds the session (./clients). */
+  permission?(req: PermissionRequest, signal: AbortSignal): Promise<Decision>;
 };
 
 type Image = Parameters<AgentSession["steer"]>[1] extends (infer I)[] | undefined ? I : never;
-export type SessionEvent = AgentSessionEvent & { diff?: FileDiff };
+/** `session_closed`: the agent behind this handle was disposed (rebuilt, or idle with no views);
+ * the handle is dead and the client reopens on its next action. */
+export type SessionEvent = (AgentSessionEvent & { diff?: FileDiff }) | { type: "session_closed" };
 
 export type SessionHandle = {
   /** Snapshot taken when the session opened; restoreTranscript reads it. */
   messages: AgentSession["messages"];
   isClaude: boolean;
+  /** A turn is running right now (live: a client that reconnects mid-turn sees it). */
+  readonly busy: boolean;
   prompt(text: string, o?: { images?: Image[] }): Promise<void>;
   steer(text: string, images?: Image[]): Promise<void>;
   followUp(text: string, images?: Image[]): Promise<void>;

@@ -8,14 +8,19 @@
 //! key is in the clone's pod). A moved parent branch gets ONE rebase round through the same child
 //! session; a push that still fails keeps the clone so the commits are not lost. The clone is
 //! deleted on every other exit. Needs the bench/main token: a workspace token cannot clone.
-//! Delegated sessions use the CALLER's permission callback, but each request names the delegated
-//! session (`PermissionRequest.session`), so the TUI shows the card in that workspace's view.
+//! Delegated sessions ask through `deps.permit`, which routes to whichever client is connected to the
+//! CALLER's session now (clients.ts), but each request names the delegated session
+//! (`PermissionRequest.session`), so the TUI shows the card in that workspace's view.
 //! The answer is the last assistant text seen before `agent_end`: Claude sessions emit
-//! `agent_end` with an empty message list, so the events are tracked instead.
+//! `agent_end` with an empty message list, so the events are tracked instead. It only counts after
+//! the asked user message was seen (a busy Claude ends its CURRENT run before the followUp runs).
+//! A `workspace_ask` is saved to disk (asks.ts) while it is in flight and resent after a bench
+//! restart (`resumeAsks`), at most twice.
 import { randomBytes } from "node:crypto";
 import { api, podExec, type ExecResult, type ToolDef } from "@kloudlite-tui/tools";
-import type { SessionHandle, SessionOpts } from "./index.ts";
+import type { PermissionRequest, Decision, SessionHandle, SessionOpts } from "./index.ts";
 import { forgetSessions } from "./forget.ts";
+import { asksDir, dropAsk, listAsks, saveAsk, type PendingAsk } from "./asks.ts";
 
 export type DelegateDeps = {
   /** Open sessions by key (LocalBackend's map). */
@@ -23,6 +28,10 @@ export type DelegateDeps = {
   /** Keys mid-turn right now. */
   busy: Set<string>;
   open(key: string, opts: SessionOpts): Promise<SessionHandle>;
+  /** Ask the client connected to `key` (the caller's session) for a decision; waits for one. */
+  permit(key: string, req: PermissionRequest, signal: AbortSignal): Promise<Decision>;
+  /** Where pending asks live; tests pass a temp dir. */
+  asks?: string;
   /** Platform API (tools' `api`) and pod exec; injectable so tests run on fakes. */
   api?: (method: string, path: string, body?: unknown) => Promise<string>;
   exec?: (ws: string, cmd: string, timeoutMs?: number) => Promise<ExecResult>;
@@ -47,19 +56,29 @@ const commitCmd = (task: string) =>
   `git -c user.name="\${n:-kl subagent}" -c user.email="\${e:-subagent@kloudlite.local}" commit -q -m ${sq(task.split("\n")[0]!.slice(0, 72) || "subagent changes")}; })`;
 
 const textOf = (m: any): string =>
-  (Array.isArray(m?.content) ? m.content : [])
+  (typeof m?.content === "string" ? [{ type: "text", text: m.content }] : Array.isArray(m?.content) ? m.content : [])
     .filter((b: any) => b?.type === "text")
     .map((b: any) => b.text)
     .join("\n")
     .trim();
 
-/** Send, then resolve at the next `agent_end` with the last assistant text. */
-function answer(h: SessionHandle, send: () => Promise<void>): Promise<string> {
+/** Send `text`, then resolve at the `agent_end` of the run that answered IT. Armed only by the user
+ * message carrying `text`: a busy Claude emits `agent_end` for its CURRENT run first and only then
+ * runs a followUp, so an earlier end would hand back the wrong turn's text. A disposed session
+ * (`session_closed`) never ends a turn, so it resolves too. */
+function answer(h: SessionHandle, text: string, send: () => Promise<void>): Promise<string> {
   return new Promise((resolve, reject) => {
     let last = "";
+    let armed = false;
+    const want = text.trim();
     const off = h.subscribe((e: any) => {
-      if (e.type === "message_end" && e.message?.role === "assistant") last = textOf(e.message) || last;
-      if (e.type === "agent_end") {
+      if (e.type === "session_closed") {
+        off();
+        resolve("(session closed before answering)");
+      } else if (!armed) {
+        armed = e.type === "message_end" && e.message?.role === "user" && textOf(e.message).includes(want);
+      } else if (e.type === "message_end" && e.message?.role === "assistant") last = textOf(e.message) || last;
+      else if (e.type === "agent_end") {
         off();
         resolve(last || "(no answer)");
       }
@@ -141,7 +160,7 @@ async function runInClone(P: string, task: string, deps: DelegateDeps, opts: (ke
     const sk = `${C}:agent-${hex()}`;
     h = await deps.open(sk, opts(sk, { fresh: true }));
     const prompt = `${task}\n\nYou are in your own clone of the workspace; your code is in ${WS} on branch ${branch}. Commit your work there; do not push, the platform pushes it.`;
-    const reply = await answer(h, () => h!.prompt(prompt));
+    const reply = await answer(h, prompt, () => h!.prompt(prompt));
 
     const commit = async () => {
       const r = await exec(C, commitCmd(task));
@@ -160,7 +179,8 @@ async function runInClone(P: string, task: string, deps: DelegateDeps, opts: (ke
 
     let r = await push();
     if (r.code !== 0 && MOVED.test(r.stderr)) {
-      await answer(h, () => h!.prompt(`The parent's branch moved. Run \`git pull --rebase ${remote} ${branch}\` in ${WS}, resolve any conflict, commit, and reply done.`));
+      const rebase = `The parent's branch moved. Run \`git pull --rebase ${remote} ${branch}\` in ${WS}, resolve any conflict, commit, and reply done.`;
+      await answer(h, rebase, () => h!.prompt(rebase));
       await commit();
       r = await push();
     }
@@ -180,16 +200,82 @@ async function runInClone(P: string, task: string, deps: DelegateDeps, opts: (ke
   }
 }
 
+/** What a workspace opened for an ask gets: the caller's model and settings, none of the TUI's own
+ * tools, and cards routed to whoever is connected to the CALLER's session (named for the workspace). */
+function askOpts(deps: DelegateDeps, callerKey: string, a: PendingAsk, key: string): SessionOpts {
+  return {
+    model: a.model,
+    thinkingLevel: a.thinkingLevel,
+    autoCompact: a.autoCompact,
+    codemode: a.codemode,
+    tools: [],
+    permission: (req, s) => deps.permit(callerKey, { ...req, session: req.session ?? key }, s),
+  };
+}
+
+/** Hand `reply` to the caller's session: a view of the live one, or (after a bench restart, when
+ * nobody has it open) a freshly opened one. Prompt when idle, followUp when busy; main can start a
+ * turn between the check and the call, so a refused prompt retries as a followUp instead of losing
+ * the reply. Not awaited: a prompt lasts the caller's whole turn. */
+async function deliver(deps: DelegateDeps, a: PendingAsk, reply: string): Promise<void> {
+  try {
+    const c = await deps.open(a.callerKey, { model: a.model, thinkingLevel: a.thinkingLevel, autoCompact: a.autoCompact, codemode: a.codemode, tools: [] });
+    void (deps.busy.has(a.callerKey) ? c.followUp(reply) : c.prompt(reply))
+      .catch(() => c.followUp(reply))
+      .catch((e) => console.error("workspace_ask reply lost", a.callerKey, a.key, e))
+      .finally(() => void c.dispose());
+  } catch (e) {
+    console.error("workspace_ask reply lost", a.callerKey, a.key, e);
+  }
+}
+
+/** Run one ask to its delivery. Saved BEFORE the workspace is opened and dropped right before the
+ * reply is delivered: a restart between the drop and the caller's session file loses one reply
+ * (accepted); a restart before it resends the ask. */
+export async function dispatchAsk(deps: DelegateDeps, a: PendingAsk): Promise<void> {
+  const dir = deps.asks ?? asksDir();
+  saveAsk(dir, a);
+  let h: SessionHandle | undefined;
+  let reply: string;
+  try {
+    h = await deps.open(a.key, askOpts(deps, a.callerKey, a, a.key));
+    const s = h;
+    reply = `[from ${a.key}] ${await answer(s, a.text, () => (deps.busy.has(a.key) ? s.followUp(a.text) : s.prompt(a.text)))}`;
+  } catch (err) {
+    reply = `[from ${a.key}] failed: ${err instanceof Error ? err.message : String(err)}`;
+  }
+  dropAsk(dir, a.id);
+  await deliver(deps, a, reply);
+  // our own view goes only after its answer was delivered
+  if (h) await h.dispose().catch(() => {});
+}
+
+/** Boot: resend what a restart interrupted. `tries` counts resends; the third restart reports the
+ * loss to the caller instead. Returns the in-flight dispatches (the daemon does not await them). */
+export function resumeAsks(deps: DelegateDeps): Promise<void>[] {
+  const dir = deps.asks ?? asksDir();
+  return listAsks(dir).map(async (a) => {
+    if (a.tries >= 2) {
+      dropAsk(dir, a.id);
+      return deliver(deps, a, `[from ${a.key}] failed: lost in ${a.tries + 1} bench restarts; ask again if it still matters`);
+    }
+    const text = a.text.startsWith("[resent after restart] ") ? a.text : `[resent after restart] ${a.text}`;
+    return dispatchAsk(deps, { ...a, tries: a.tries + 1, text });
+  });
+}
+
 export function delegateTools(kind: "main" | "workspace", ws: string | undefined, deps: DelegateDeps, caller: SessionOpts, callerKey = "main"): ToolDef[] {
   // same model, same gate; nothing of the TUI's own tools goes along
   // the request carries the delegated session's key so the TUI files the card under that workspace
   const opts = (key: string, extra: Partial<SessionOpts> = {}): SessionOpts => ({
     ...caller,
     tools: [],
-    permission: (req, s) => caller.permission({ ...req, session: req.session ?? key }, s),
+    permission: (req, s) => deps.permit(callerKey, { ...req, session: req.session ?? key }, s),
     ...extra,
   });
 
+  // ponytail: a bench restart mid-subagent leaves its `sub-*` clone (it may hold the work) and the
+  // caller sees "Tool call was interrupted"; upgrade = persist the clone id and report it on boot.
   const subagent: ToolDef = {
     name: "subagent",
     description:
@@ -214,24 +300,18 @@ export function delegateTools(kind: "main" | "workspace", ws: string | undefined
     inputSchema: { type: "object", properties: { workspace: { type: "string" }, request: { type: "string" } }, required: ["workspace", "request"] },
     async run(input: { workspace: string; request: string }) {
       const key = input.workspace;
-      const text = `[from main session] ${input.request}`;
       // Not awaited: main must stay free for the person while the workspace works.
-      void (async () => {
-        let h: SessionHandle | undefined;
-        let reply: string;
-        try {
-          h = await deps.open(key, opts(key));
-          const s = h;
-          reply = `[from ${key}] ${await answer(s, () => (deps.busy.has(key) ? s.followUp(text) : s.prompt(text)))}`;
-        } catch (err) {
-          reply = `[from ${key}] failed: ${err instanceof Error ? err.message : String(err)}`;
-        }
-        // the caller may be gone; the workspace view still has the transcript. Not awaited: a prompt may last the caller's whole turn.
-        const c = deps.live.get(callerKey);
-        if (c) void (deps.busy.has(callerKey) ? c.followUp(reply) : c.prompt(reply)).catch(() => {});
-        // our own view goes only after its answer was delivered
-        if (h) await h.dispose().catch(() => {});
-      })();
+      void dispatchAsk(deps, {
+        id: hex(),
+        callerKey,
+        key,
+        text: `[from main session] ${input.request}`,
+        tries: 0,
+        model: caller.model,
+        codemode: caller.codemode,
+        thinkingLevel: caller.thinkingLevel,
+        autoCompact: caller.autoCompact,
+      });
       return `sent to ${key}; its session is working on it. Its answer will arrive here as a message from ${key}; do not wait or poll for it.`;
     },
   };

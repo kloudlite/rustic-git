@@ -317,7 +317,7 @@ export class Kloudlite {
       .withDirectory("/opt/kl/term", source.directory("bench/term"))
       .withExec(["install", "-m", "0755", "/opt/kl/term/xclip", "/usr/local/bin/xclip"])
       .withDirectory("/etc/kl/sv", source.directory("bench/sv"), { owner: "1000:1000" })
-      .withExec(["chmod", "0755", "/etc/kl/sv/sessions/run", "/etc/kl/sv/sshd/run", "/etc/kl/sv/ttyd/run", "/etc/kl/sv/term/run"])
+      .withExec(["chmod", "0755", "/etc/kl/sv/sessions/run", "/etc/kl/sv/sshd/run", "/etc/kl/sv/kl-host/run", "/etc/kl/sv/ttyd/run", "/etc/kl/sv/term/run"])
       .withFile("/etc/kl/sshd_config", source.file("bench/sshd_config"))
       // Private TMPDIR, same as deploy/bench/Dockerfile.
       .withEnvVariable("TMPDIR", "/tmp/kl")

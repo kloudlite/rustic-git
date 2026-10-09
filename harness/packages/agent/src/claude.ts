@@ -677,8 +677,10 @@ export function createClaudeSession(opts: ClaudeOptions) {
     queueUpdate();
   }
 
-  /** `announce`: a steer has no TUI echo of its own, so it is emitted as the user message it now is. */
-  function pushUser(text: string, images?: Image[], announce = false) {
+  /** `announce` is kept for the call sites; every user message is announced now, as pi's loop does
+   * for a prompt and a followUp: workspace_ask arms its answer on the asked message's `message_end`
+   * (delegate.ts), so a prompt or a queued followUp must emit one too. The TUI ignores user ones. */
+  function pushUser(text: string, images?: Image[], _announce = false) {
     const content: any = images?.length
       ? [
           ...images.map((i) => ({ type: "image", source: { type: "base64", media_type: i.mimeType, data: i.data } })),
@@ -686,9 +688,9 @@ export function createClaudeSession(opts: ClaudeOptions) {
         ]
       : text;
     const msg = { role: "user", content: [{ type: "text", text }, ...(images ?? [])], timestamp: stamp() };
-    if (announce) emit({ type: "message_start", message: msg });
+    emit({ type: "message_start", message: msg });
     record(msg);
-    if (announce) emit({ type: "message_end", message: msg });
+    emit({ type: "message_end", message: msg });
     input!.push({ type: "user", message: { role: "user", content }, parent_tool_use_id: null });
   }
 

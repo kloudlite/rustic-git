@@ -2,7 +2,7 @@ import { expect, test } from "bun:test";
 import { mkdtempSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { LocalBackend, GATED, shareable, EDITS, installGate, registryFor, sessionCwd, sessionKind } from "./local.ts";
+import { LocalBackend, GATED, baseHandle, shareable, EDITS, installGate, registryFor, sessionCwd, sessionKind } from "./local.ts";
 import { toolDiff } from "./diff.ts";
 import { PROTOCOL } from "./wire.ts";
 
@@ -58,7 +58,7 @@ test("workspace and subagent sessions run in the pod's folder, main does not", (
 
 test("registry per session kind", async () => {
   delete process.env.KL_API_URL; // pod tools fall back to the fixed names
-  const deps = { live: new Map(), busy: new Set<string>(), open: async () => null as never };
+  const deps = { live: new Map(), busy: new Set<string>(), open: async () => null as never, permit: async () => ({}) };
   const opts: any = { tools: [{ name: "question", description: "", inputSchema: {}, run: async () => "" }] };
   const main = (await registryFor({ kind: "main" }, deps, opts)).names();
   expect(main).toContain("workspace_create");
@@ -126,17 +126,51 @@ test("the gate asks for a codemode script's nested gated call, once for a top-le
   expect(seen).toEqual(["pi", "pi"]);
 });
 
-test("shareable: a view going away leaves the others; only the last runs onLast", async () => {
-  let subs = 0, unsubs = 0, last = 0;
+test("shareable: a view going away leaves the others; onZero runs each time the count drops to 0", async () => {
+  let subs = 0, unsubs = 0, zero = 0;
   const base = { subscribe: () => (subs++, () => void unsubs++) } as any;
-  const make = shareable(base, async () => void last++);
-  const a = make(), b = make();
+  const { view, count } = shareable(base, () => void zero++);
+  const a = view(), b = view();
   a.subscribe(() => {});
   b.subscribe(() => {});
+  expect(count()).toBe(2);
   await a.dispose();
-  expect([subs, unsubs, last]).toEqual([2, 1, 0]);
+  expect([subs, unsubs, zero, count()]).toEqual([2, 1, 0, 1]);
   await a.dispose();
-  expect([unsubs, last]).toEqual([1, 0]);
+  expect([unsubs, zero]).toEqual([1, 0]);
   await b.dispose();
-  expect([unsubs, last]).toEqual([2, 1]);
+  expect([unsubs, zero]).toEqual([2, 1]);
+  view();
+  await view().dispose();
+  expect(zero).toBe(1);
+});
+
+function fakeAgent() {
+  const subs = new Set<(e: any) => void>();
+  return {
+    messages: [],
+    disposed: 0,
+    subscribe: (cb: any) => (subs.add(cb), () => void subs.delete(cb)),
+    dispose() { this.disposed++; },
+    emit: (e: any) => subs.forEach((s) => s(e)),
+  };
+}
+
+test("baseHandle: events reach every subscriber and track busy; dispose says session_closed once", () => {
+  const agent = fakeAgent();
+  const busy = new Set<string>();
+  let ends = 0, disposes = 0;
+  const h = baseHandle(agent, "k", { busy, onEnd: () => void ends++, onDispose: () => void disposes++ });
+  const a: string[] = [], b: string[] = [];
+  h.subscribe((e) => a.push(e.type));
+  h.subscribe((e) => b.push(e.type));
+  agent.emit({ type: "agent_start" });
+  expect(h.busy).toBe(true);
+  agent.emit({ type: "agent_end" });
+  expect([h.busy, ends]).toEqual([false, 1]);
+  void h.dispose();
+  void h.dispose();
+  expect(a).toEqual(["agent_start", "agent_end", "session_closed"]);
+  expect(b).toEqual(a);
+  expect([agent.disposed, disposes]).toEqual([1, 1]);
 });

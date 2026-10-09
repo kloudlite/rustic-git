@@ -1,4 +1,4 @@
-//! The laptop side: a `Backend` whose every call is a ./wire request to serve.ts on the bench.
+//! The client side: a `Backend` whose every call is a ./wire request to serve.ts in the bench daemon.
 //! Tools the TUI owns and the permission gate stay here — the host calls back for them. ssh's
 //! stderr (the bench-proxy's waking progress) is shown until `hello`, then buffered: after that
 //! the renderer owns the screen, so the tail is printed once the TUI exits.
@@ -20,7 +20,7 @@ export class RemoteBackend implements Backend {
     peer.handle("permission", async ({ key, req }, signal) => {
       const o = this.#opts.get(key);
       if (!o) return { block: true, reason: "session closed" };
-      return o.permission(req, signal);
+      return o.permission!(req, signal);
     });
     peer.handle("auth.prompt", async ({ lid, prompt }) => {
       const ui = this.#logins.get(String(lid));
@@ -42,16 +42,25 @@ export class RemoteBackend implements Backend {
     this.#opts.set(key, opts);
     const subs = new Set<(e: any) => void>();
     this.#subs.set(key, subs);
-    const { messages, isClaude } = await this.peer.request<{ messages: any; isClaude: boolean }>("session.open", {
+    const { messages, isClaude, busy } = await this.peer.request<{ messages: any; isClaude: boolean; busy: boolean }>("session.open", {
       key,
       ...rest,
       tools: tools.map(({ name, description, inputSchema }) => ({ name, description, inputSchema })),
+    });
+    // kept current from the stream: a client that reconnects mid-turn starts out busy
+    let running = !!busy;
+    subs.add((e) => {
+      if (e.type === "agent_start") running = true;
+      else if (e.type === "agent_end" || e.type === "session_closed") running = false;
     });
     const call = (method: string) => (...args: unknown[]) =>
       this.peer.request<void>("session.call", { key, method, args });
     return {
       messages,
       isClaude,
+      get busy() {
+        return running;
+      },
       prompt: call("prompt"),
       steer: call("steer"),
       followUp: call("followUp"),

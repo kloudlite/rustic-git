@@ -1,0 +1,6 @@
+#!/bin/sh
+# The one agent backend of this bench. Every client, kl-tui over ssh (login-shell kl-host ->
+# relay.ts) and the browser TUI (ttyd -> cli.tsx -> relay.ts), is a connection to it, so a turn
+# outlives the client that started it. runit restarts it on a crash; it has the pod env, so the KL_*
+# platform variables are here without sshd's SetEnv.
+cd ~ && exec bun run --silent /opt/kl/harness/packages/backend/src/daemon.ts
