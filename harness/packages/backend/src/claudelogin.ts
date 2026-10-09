@@ -5,7 +5,7 @@
 //! Probe (macOS claude, isolated config; the Linux flags differ only in `script`): no method menu.
 //! "Opening browser to sign in…", then the URL wrapped in an OSC 8 hyperlink and blue SGR (so it
 //! appears twice, escapes included), then "Paste code here if prompted > " with no newline. The
-//! success line was not seen (a login would have been real); "success" is the guess.
+//! success line, seen on a real login: "Login successful." right after the prompt.
 import type { AuthEvent } from "@kloudlite-tui/agent";
 
 // OSC (hyperlinks, titles) and CSI (colours) sequences: the URL regex must see plain text
@@ -34,7 +34,7 @@ export async function claudeLogin(
     }
     const code = await p.exited;
     const text = buf.replace(ESCAPES, "");
-    if (code !== 0 || !/success/i.test(text)) throw new Error(`claude login failed: ${text.trim().split(/\r?\n/).at(-1) ?? code}`);
+    if (code !== 0 || !/Login successful\./.test(text)) throw new Error(`claude login failed: ${text.trim().split(/\r?\n/).at(-1) ?? code}`);
   } catch (e) {
     p.kill?.(); // cancelled prompt or read error: never leave the login waiting on a pty
     throw e;

@@ -5,7 +5,7 @@ import { claudeLogin } from "./claudelogin";
 const URL = "https://claude.com/cai/oauth/authorize?code=true&client_id=x&state=y";
 const URL_LINE = `Opening browser to sign in…\r\nIf the browser didn't open, visit: \x1b]8;;${URL}\x07\x1b[94m${URL}\x1b[39m\x1b]8;;\x07\r\n`;
 const CODE_PROMPT = "Paste code here if prompted > ";
-const DONE_LINE = "Login successful."; // placeholder: the real success line was not observed
+const DONE_LINE = "Login successful."; // seen on a real login, right after the code prompt
 
 test("relays the URL, answers the code prompt, resolves on success", async () => {
   const written: string[] = [];
