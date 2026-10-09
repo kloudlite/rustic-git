@@ -109,3 +109,57 @@ test("Allow always answers the next ask for that tool on that key only", () => {
   expect(autoAnswer(ask("other", "bash"), g)).toBeNull();
   expect(autoAnswer({ ...ask("k", "bash"), kind: "question" }, g)).toBeNull();
 });
+
+function sessionStub(msgs: any[]) {
+  const listeners = new Set<(e: any) => void>();
+  const noop = async () => {};
+  const handle: any = new Proxy(
+    {
+      get messages() { return msgs; },
+      isClaude: false,
+      busy: false,
+      state: { type: "session_state", model: hello().defaultModel, tokens: 0, thinkingLevel: "medium", autoCompact: true, codemode: true, queued: { steering: [], followUp: [] } },
+      subscribe: (cb: any) => (listeners.add(cb), () => listeners.delete(cb)),
+    },
+    { get: (o: any, k) => (k in o ? o[k] : k === "then" ? undefined : noop) },
+  );
+  return { handle, emit: (e: any) => listeners.forEach((cb) => cb(e)) };
+}
+
+test("an ask_resolved drops the card; an ask for a granted tool is answered without a card", async () => {
+  const answered: [string, string][] = [];
+  const b: any = new LocalBackend();
+  b.space = backend().space;
+  let push!: (e: any) => void;
+  b.watch = async (cb: any) => ((push = cb), () => {});
+  b.asks = { answer: async (id: string, c: string) => void answered.push([id, c]) };
+  const ui = await mount(b);
+  const ask = (id: string) => ({ type: "ask", ask: { id, key: "main", kind: "permission", tool: "bash", title: "Permission required", options: [{ id: "once", label: "Allow once" }, { id: "always", label: "Allow always" }, { id: "reject", label: "Reject" }] } });
+  push(ask("a1"));
+  expect(await ui.frame()).toContain("Permission required");
+  push({ type: "ask_resolved", id: "a1" });
+  expect(await ui.frame()).not.toContain("Permission required");
+  expect(answered).toEqual([]);
+  ui.done();
+});
+
+test("/clear in another view empties this view's transcript", async () => {
+  const msgs: any[] = [
+    { role: "user", timestamp: 1, content: [{ type: "text", text: "old words" }] },
+    { role: "assistant", timestamp: 2, content: [{ type: "text", text: "old reply" }] },
+  ];
+  const stub = sessionStub(msgs);
+  const b: any = new LocalBackend();
+  b.space = backend().space;
+  b.session = async () => stub.handle;
+  const ui = await mount(b);
+  expect(await ui.frame()).toContain("old words");
+  // another view's /clear: the daemon archives, then tells every view to reopen
+  msgs.length = 0;
+  stub.emit({ type: "session_closed", reopen: true });
+  await ui.frame();
+  const f = await ui.frame();
+  expect(f).not.toContain("old words");
+  expect(f).not.toContain("old reply");
+  ui.done();
+});

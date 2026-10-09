@@ -464,10 +464,12 @@ test("shift+tab cycles the permission mode and shows it in the hint bar", async 
   await tick();
   await t.renderOnce();
   expect(t.captureCharFrame()).toContain("acceptEdits");
-  await t.mockInput.pressKey("TAB", { shift: true });
-  await t.mockInput.pressKey("TAB", { shift: true });
-  await tick();
-  await t.renderOnce();
+  // the mode is the daemon's: each press waits for the push back before the next cycles from it
+  for (let i = 0; i < 2; i++) {
+    await t.mockInput.pressKey("TAB", { shift: true });
+    await tick();
+    await t.renderOnce();
+  }
   expect(t.captureCharFrame()).toContain("bypass");
   t.done();
 });
@@ -520,24 +522,20 @@ test("ctrl+s submits the prompt without clearing it twice", async () => {
   t.done();
 });
 
-// pi fixes the tool list when a session is built, so toggling codemode has to
-// rebuild every open session — closing the old one before the new one opens,
-// since the backend keys sessions by name.
-test("toggling codemode rebuilds the open session with the new value", async () => {
+// The daemon owns the rebuild now (idle agents at once, busy ones at agent_end): the TUI only
+// writes the setting.
+test("toggling codemode writes the setting and leaves the rebuild to the daemon", async () => {
   const real = backend();
-  const seen: string[] = [];
-  // a Proxy, not a spread: the backend and its handles are class instances
+  const writes: Record<string, unknown>[] = [];
+  const opens: string[] = [];
   const wrap = <T extends object>(t: T, over: Partial<T>) =>
     new Proxy(t, {
       get: (o: any, p) => (p in over ? (over as any)[p] : typeof o[p] === "function" ? o[p].bind(o) : o[p]),
     }) as T;
   boot(
     wrap(real, {
-      session: async (key, opts) => {
-        seen.push(`open ${opts.initial?.codemode}`);
-        const h = await real.session(key, opts);
-        return wrap(h, { dispose: async () => (seen.push("dispose"), h.dispose()) });
-      },
+      settings: { write: async (p: Record<string, unknown>) => void writes.push(p) },
+      session: async (key, opts) => (opens.push(key), real.session(key, opts)),
     }),
     { ...hello(), settings: { ...hello().settings, vim: "on", codemode: "on" } },
   );
@@ -551,9 +549,11 @@ test("toggling codemode rebuilds the open session with the new value", async () 
   await tick();
   await setup.renderOnce();
   setup.mockInput.pressKey("RETURN");
-  for (let i = 0; i < 50 && seen.length < 3; i++) await tick();
-  await setup.renderOnce();
-  expect(seen).toEqual(["open true", "dispose", "open false"]);
+  for (let i = 0; i < 50 && !writes.some((w) => w.codemode === "off"); i++) await tick();
+  const before = opens.length;
+  await tick();
+  expect(writes).toContainEqual({ codemode: "off" });
+  expect(opens.length).toBe(before); // no TUI-side rebuild
   setup.renderer.destroy();
   boot(real, hello());
 });
@@ -668,7 +668,9 @@ test("a long codemode script's expander counts the script's hidden rows, not jus
 // down, and an empty space must not crash the environment guards.
 async function sidebarWith(view: Record<string, unknown>) {
   const real = backend();
-  boot(new Proxy(real, { get: (o: any, p) => (p === "space" ? async () => view : typeof o[p] === "function" ? o[p].bind(o) : o[p]) }) as any, hello());
+  // the space arrives as a push now: the first thing the bench stream says
+  const watch = async (cb: any) => (cb({ type: "space", view }), () => {});
+  boot(new Proxy(real, { get: (o: any, p) => (p === "space" ? async () => view : p === "watch" ? watch : typeof o[p] === "function" ? o[p].bind(o) : o[p]) }) as any, hello());
   const setup = await testRender(<App />, { width: COLS, height: ROWS, kittyKeyboard: true });
   let f = "";
   for (let i = 0; i < 10; i++) {
@@ -728,6 +730,7 @@ function btwSession(calls: { btw: string[]; abort: number; prompt: string[] }, r
       messages: [],
       isClaude: false,
       busy: false,
+      state: { type: "session_state", model: hello().defaultModel, tokens: 0, thinkingLevel: "medium", autoCompact: true, codemode: true, queued: { steering: [], followUp: [] } },
       subscribe: () => () => {},
       btw: async (q: string) => (calls.btw.push(q), reply()),
       abort: async () => void calls.abort++,

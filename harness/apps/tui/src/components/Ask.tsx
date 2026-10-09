@@ -8,6 +8,8 @@ import { DiffView } from "./Diff.tsx";
 import type { FileDiff } from "../diff.ts";
 
 export type Ask = {
+  /** the daemon's card id; absent on local panels (help) */
+  id?: string;
   /** key of the session that asks; the card shows only in that workspace's view */
   key: string;
   /** e.g. "Permission required" or the question text */

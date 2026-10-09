@@ -18,9 +18,10 @@ import { fromSpace, wsPath } from "./workspaces.ts";
 import { setTheme, theme, themeNames } from "./theme.ts";
 import { catalog, findModel, loadProviderAuth, modelLabel, refreshCatalog } from "./models.ts";
 import type {
-  Decision,
+  Ask as BenchAsk,
+  BenchEvent,
   ModelRef,
-  PermissionRequest,
+  PermMode,
   SessionEvent,
   SessionHandle,
   SessionMeta,
@@ -29,6 +30,7 @@ import type {
 } from "@kloudlite-tui/backend";
 import type { SpaceView } from "@kloudlite-tui/backend";
 import { backend, hello } from "./hello.ts";
+import { applyState, autoAnswer, grant, keepFocus, transcript, upsertById, userRow } from "./sync.ts";
 
 /** pi's reasoning budgets, least to most; a model may support only a prefix. */
 const THINKING_LEVELS = [
@@ -180,30 +182,8 @@ export function App({
   // the workspace it was on (by id), or clamp when that one is gone.
   const live = useRef({ focus, workspaces });
   live.current = { focus, workspaces };
-  const inflight = useRef(false);
-  const refreshRef = useRef<() => Promise<void>>(async () => {});
-  refreshRef.current = async () => {
-    if (inflight.current) return; // pod reads can outlast the beat; never stack them
-    inflight.current = true;
-    let v: SpaceView;
-    try {
-      v = await backend().space();
-    } catch (e: any) {
-      v = { available: false, error: String(e?.message ?? e).slice(0, 200), user: "", workspaces: [], environments: [] };
-    } finally {
-      inflight.current = false;
-    }
-    const { focus: f, workspaces: old } = live.current;
-    const next = fromSpace(v).workspaces;
-    const at = f > 0 ? next.findIndex((w) => w.id === old[f - 1]?.id) : -1;
-    setSpace(v);
-    if (f > 0) setFocus(at >= 0 ? at + 1 : Math.min(f, next.length));
-  };
-  useEffect(() => {
-    void refreshRef.current();
-    const t = setInterval(() => void refreshRef.current(), 5000);
-    return () => clearInterval(t);
-  }, []);
+  // the newest view of state that a long-lived session listener needs (it closes over the render it was made in)
+  const latest = useRef({ sessions: {} as SessionMap, activeKey: "" });
   const [palette, setPalette] = useState(false);
   const [view, setView] = useState<ViewId>("agent");
   const [filesRefresh, setFilesRefresh] = useState(0);
@@ -227,14 +207,6 @@ export function App({
   // name cache so the UI can label them.
   const [sessionId, setSessionId] = useState<Record<string, string>>({});
 
-  const [sessionNames, setSessionNames] = useState<Record<string, string>>(() =>
-    Object.fromEntries(hello().sessions.flatMap((m) => (m.name ? [[m.key, m.name]] : []))),
-  );
-  const [sessionDescs, setSessionDescs] = useState<Record<string, string>>(() =>
-    Object.fromEntries(
-      hello().sessions.flatMap((m) => (m.description ? [[m.key, m.description]] : [])),
-    ),
-  );
   // index into the active session's queue while editing it, else null
   const [queuePick, setQueuePick] = useState<number | null>(null);
   // the /btw panel: never in a transcript, closed by esc. `n` numbers requests so a late answer for a
@@ -263,14 +235,14 @@ export function App({
   // ↑/↓ recall position in the active session's history; null = live input
   const [histIdx, setHistIdx] = useState<number | null>(null);
   // interactive prompts (permissions, model questions), oldest first
-  const [asks, setAsks] = useState<Ask[]>([]);
+  // a daemon card carries its backend id; the help popup and other local panels have none
+  const [asks, setAsks] = useState<Ask[]>(() => hello().asks.map(cardFor));
+  const [defaultModel, setDefaultModel] = useState<ModelRef>(() => hello().defaultModel);
   // tools granted "always allow" per session key
   const alwaysAllow = useRef(new Map<string, Set<string>>());
   // Permission mode is per-process and resets on restart: a forgotten "bypass"
   // persisted across launches is the one failure worth not having.
-  const [permMode, setPermMode] = useState<PermMode>("default");
-  const modeRef = useRef<PermMode>("default");
-  modeRef.current = permMode;
+  const [permMode, setPermMode] = useState<PermMode>(() => hello().mode);
 
   const environment = envs[env]; // undefined until the space has an environment
   const mainBase = "main";
@@ -295,11 +267,80 @@ export function App({
       off?.();
     };
   }, []);
+  // Everything the daemon says outside a session: cards, mode, settings, logins, files, the space.
+  useEffect(() => {
+    let off: (() => void) | undefined;
+    let gone = false;
+    backend()
+      .watch(onBench)
+      .then((f) => (gone ? f() : (off = f)))
+      .catch(() => {});
+    return () => {
+      gone = true;
+      off?.();
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+  /** A daemon card as a panel: choosing answers the daemon, and the card leaves on `ask_resolved`. */
+  function cardFor(a: BenchAsk): Ask {
+    const card: Ask = {
+      ...a,
+      escapeId: a.kind === "permission" ? "reject" : undefined,
+      resolve: (choice) => {
+        if (choice === "always") grant(alwaysAllow.current, a);
+        void backend().asks.answer(a.id, choice === "always" ? "once" : choice).catch(() => {});
+      },
+    };
+    return card;
+  }
+  function onBench(e: BenchEvent) {
+    switch (e.type) {
+      case "ask": {
+        const auto = autoAnswer(e.ask, alwaysAllow.current);
+        if (auto) void backend().asks.answer(e.ask.id, auto).catch(() => {});
+        else setAsks((l) => (l.some((a) => a.id === e.ask.id) ? l : [...l, cardFor(e.ask)]));
+        break;
+      }
+      case "ask_resolved":
+        setAsks((l) => l.filter((a) => a.id !== e.id));
+        break;
+      case "perm":
+        setPermMode(e.mode);
+        break;
+      case "settings": {
+        // the shared knobs only; vim, theme and the layout stay this person's own per view
+        const st = e.settings;
+        setPrefs((p) => ({
+          ...p,
+          thinkingLevel: st.thinkingLevel ?? p.thinkingLevel,
+          autoCompact: st.autoCompact ?? p.autoCompact,
+          codemode: st.codemode ?? p.codemode,
+        }));
+        if (st.defaultModel) setDefaultModel(st.defaultModel);
+        break;
+      }
+      case "auth_changed":
+        loadProviderAuth().then(setAuth).catch(() => {});
+        refreshCatalog().then(setModels).catch(() => {});
+        break;
+      case "fs_changed": {
+        const { focus: f, workspaces: ws } = live.current;
+        if (f > 0 && ws[f - 1]?.id === e.ws) setFilesRefresh((n) => n + 1);
+        break;
+      }
+      case "space": {
+        const f = keepFocus({ focus: live.current.focus, ids: live.current.workspaces.map((w) => w.id) }, e.view);
+        setSpace(e.view);
+        setFocus(f);
+        break;
+      }
+    }
+  }
   const [fetched, setFetched] = useState<SessionMeta[]>([]);
   useEffect(() => {
     if (watched !== null) return;
     backend().sessions.list(activeBase).then(setFetched).catch(() => {});
-  }, [watched, activeBase, sessionNames, sessionDescs]);
+  }, [watched, activeBase]);
   // same filter as the bench's listSessions(prefix)
   const baseSessions = watched ? watched.filter((m) => m.key.startsWith(activeBase)) : fetched;
   const activeKey = sessionKey(
@@ -307,6 +348,7 @@ export function App({
     sessionId[activeBase] ?? "main",
   );
   const session = getSession(sessions, activeKey);
+  latest.current = { sessions, activeKey };
   // the card on screen: only an ask from this view's workspace, so another
   // workspace's permission never blocks typing here
   const shownAsk = askFor(asks, activeKey);
@@ -504,7 +546,7 @@ export function App({
     // shift+tab cycles the permission mode in both key schemes; plain tab keeps
     // cycling workspaces in NORMAL
     if (key.name === "tab" && key.shift && !menuOpen)
-      return setPermMode((m) => PERM_MODES[(PERM_MODES.indexOf(m) + 1) % PERM_MODES.length]!);
+      return void backend().mode.set(PERM_MODES[(PERM_MODES.indexOf(permMode) + 1) % PERM_MODES.length]!).catch(() => {});
     if (key.name === "tab" && !menuOpen && keyMode === "normal") return cycle(1);
     // enter in the queue pulls the picked message back into the prompt
     if (key.name === "return" && queuePick !== null && !menuOpen) {
@@ -622,15 +664,22 @@ export function App({
         setSessions((map) => patchSession(map, key, { busy: true }));
         break;
       case "session_closed":
-        // the daemon disposed this agent (rebuilt, or idle): the handle is dead, so the next
-        // prompt reopens it. No reopen here — nobody is waiting on it. The dead entry is removed by
-        // ensureAgent's own listener, which knows which promise it belongs to.
+        // the daemon disposed this agent: the handle is dead (ensureAgent's own listener already
+        // dropped the entry). `reopen` means it was rebuilt or cleared and every view must reload
+        // the snapshot; one nobody is looking at stays closed until its next prompt.
         setSessions((map) => patchSession(map, key, { busy: false }));
+        if (event.reopen && (key === latest.current.activeKey || latest.current.sessions[key]?.entries.length))
+          ensureAgent(key).catch(() => {});
         break;
       case "agent_end":
         setSessions((map) => patchSession(map, key, { busy: false }));
-        void refreshRef.current(); // a create / stop / intercept the turn made shows now, not at the next beat
         break;
+      case "message_start": {
+        // the person's prompt arrives from the daemon, so every view shows it
+        const row = userRow(event);
+        if (row) setSessions((map) => patchSession(map, key, (s) => ({ entries: upsertById(s.entries, row) })));
+        break;
+      }
       case "message_update":
       case "message_end": {
         const msg = event.message as any;
@@ -656,9 +705,6 @@ export function App({
           .join("");
         if (text) upsert(key, mid, () => ({ kind: "agent", id: mid, text }));
         if (event.type !== "message_end") break;
-        const used = msg.usage?.totalTokens ?? 0;
-        if (used)
-          setSessions((map) => patchSession(map, key, (s) => ({ tokens: s.tokens + used })));
         const m = msg;
         if (m.role === "assistant" && (m.stopReason === "error" || m.stopReason === "aborted")) {
           append(key, {
@@ -719,15 +765,8 @@ export function App({
         }));
         break;
       }
-      case "queue_update":
-        setSessions((map) =>
-          patchSession(map, key, {
-            queued: [
-              ...(event.steering ?? []).map((text: string) => ({ text, kind: "steer" as const })),
-              ...(event.followUp ?? []).map((text: string) => ({ text, kind: "followUp" as const })),
-            ],
-          }),
-        );
+      case "session_state":
+        setSessions((map) => patchSession(map, key, applyState(event)));
         break;
       case "compaction_start":
         append(key, { kind: "info", text: "compacting context…" });
@@ -765,33 +804,28 @@ export function App({
   /** Get or lazily open the backend session behind a session key. */
   function ensureAgent(
     key: string,
-    opts?: { fresh?: boolean; model?: ModelRef; codemode?: boolean; after?: Promise<unknown> },
+    opts?: { fresh?: boolean },
   ): Promise<SessionHandle> {
     const existing = agents.current.get(key);
     if (existing) return existing;
-    // `after` is the old session's dispose: the backend keys sessions by name, so
-    // a dispose landing after this open would close the new one instead
-    const created = (opts?.after ?? Promise.resolve())
-      .then(() =>
-        backend().session(key, {
-          initial: {
-            model: opts?.model ?? getSession(sessions, key).model,
-            thinkingLevel: prefs.thinkingLevel,
-            autoCompact: prefs.autoCompact === "on",
-            codemode: opts?.codemode ?? prefs.codemode === "on",
-          },
-          fresh: opts?.fresh,
-          // the daemon owns the permission gate and the question tool now (cards); Task 7 moves the UI
-          tools: tuiTools,
-        }),
-      )
+    const created = backend()
+      .session(key, {
+        initial: {
+          model: getSession(sessions, key).model ?? defaultModel,
+          thinkingLevel: prefs.thinkingLevel,
+          autoCompact: prefs.autoCompact === "on",
+          codemode: prefs.codemode === "on",
+        },
+        fresh: opts?.fresh,
+        tools: tuiTools,
+      })
       .then((agent) => {
         agent.subscribe((event) => {
           if (event.type === "session_closed" && agents.current.get(key) === created) agents.current.delete(key);
           handleAgentEvent(key, event);
         });
         // a turn that outlived the previous client is still going: show it as such
-        if (agent.busy) setSessions((map) => patchSession(map, key, { busy: true }));
+        setSessions((map) => patchSession(map, key, { ...applyState(agent.state), busy: agent.busy }));
         if (!opts?.fresh) restoreTranscript(key, agent);
         return agent;
       });
@@ -801,17 +835,6 @@ export function App({
       setSessions((map) => patchSession(map, key, { restored: true }));
     });
     return created;
-  }
-
-  /** Rebuild open sessions whose build-time state changed; each comes back with its transcript. */
-  function reopen(keys: string[], opts?: { codemode?: boolean }) {
-    for (const k of keys) {
-      const old = agents.current.get(k);
-      if (!old) continue;
-      agents.current.delete(k);
-      const after = old.then((a) => a.dispose()).catch(() => {});
-      ensureAgent(k, { ...opts, after }).catch(() => {});
-    }
   }
 
   /** Show an interactive prompt and resolve with the chosen option id. */
@@ -829,16 +852,6 @@ export function App({
   }
   const pushAskRef = useRef(pushAsk);
   pushAskRef.current = pushAsk;
-
-  async function askQuestion(key: string, { question, options }: { question: string; options: string[] }) {
-    const picked = await pushAskRef.current({
-      key,
-      title: question,
-      options: options.map((label, i) => ({ id: String(i), label })),
-    });
-    return options[Number(picked)] ?? picked;
-  }
-
 
   /** One key for "what does the column show": chat › files › processes. */
   function cycleView(): void {
@@ -873,129 +886,18 @@ export function App({
     }).catch(() => {});
   }
 
-  /** Tools that only mutate the workspace's files — what acceptEdits waves through. */
-  const EDITS = new Set(["write", "edit", "patch"]);
+  /** Shift+tab cycles these in order. */
+  const PERM_MODES: PermMode[] = ["default", "acceptEdits", "plan", "bypass"];
 
-/** Shift+tab cycles these in order. */
-type PermMode = "default" | "acceptEdits" | "plan" | "bypass";
-const PERM_MODES: PermMode[] = ["default", "acceptEdits", "plan", "bypass"];
-
-  /**
-   * The permission decision for one gated tool call. The backend calls this only for GATED
-   * tools; the mode is read from a ref at call time because it changes under a running session.
-   */
-  async function gate(key: string, { name, args, diff, session, reason, claimed }: PermissionRequest, _signal: AbortSignal): Promise<Decision> {
-    // a delegated session asks through its caller's gate; the grant and the card belong to it
-    const asker = session ?? key;
-    const granted = alwaysAllow.current.get(asker) ?? new Set<string>();
-    const mode = modeRef.current;
-    // plan mode answers rather than asks: a refusal the model can read and
-    // work around beats a permission card the user has to reject every turn
-    if (mode === "plan")
-      return {
-        block: true,
-        reason: `Plan mode: ${name} is not available. Research and explain what you would do; the user will leave plan mode when they want it done.`,
-      };
-    if (mode === "bypass" || (mode === "acceptEdits" && EDITS.has(name)) || granted.has(name)) return {};
-    const why = reason
-      ? `Why: ${reason}`
-      : claimed
-        ? `Says you asked: “${claimed}”, which is not in your messages this turn`
-        : "No reason given";
-    const choice = await pushAskRef.current({
-      key: asker,
-      title: "Permission required",
-      subtitle:
-        name === "bash"
-          ? "Shell command"
-          : name === "web_fetch"
-            ? "Fetch a URL"
-            : EDITS.has(name)
-              ? `${name === "write" ? "Write" : "Edit"} ${args?.path ?? "file"}`
-              : `Run ${name}`,
-      body: [
-        why,
-        name === "bash"
-          ? `$ ${args?.command ?? ""}`
-          : name === "web_fetch"
-            ? String(args?.url ?? "")
-            : diff
-              ? undefined
-              : toolSummary(name, args),
-      ]
-        .filter(Boolean)
-        .join("\n\n"),
-      diff,
-      options: [
-        { id: "once", label: "Allow once" },
-        { id: "always", label: "Allow always" },
-        { id: "reject", label: "Reject" },
-      ],
-      escapeId: "reject",
-    });
-    if (choice === "always") {
-      granted.add(name);
-      alwaysAllow.current.set(asker, granted);
-    } else if (choice === "reject") {
-      return { block: true, reason: "The user rejected this tool call." };
-    }
-    return {};
-  }
-
-  /** Rebuild the transcript + prompt history from a restored session. */
+  /** Rebuild the transcript + prompt history from the daemon's messages; always replaces the entries. */
   function restoreTranscript(key: string, agent: SessionHandle) {
-    const messages = agent.messages;
-    const markRestored = () =>
-      setSessions((map) => patchSession(map, key, { restored: true }));
-    if (messages.length === 0) return markRestored();
-    const entries: Entry[] = [];
-    const history: string[] = [];
-    for (const m of messages as any[]) {
-      if (m.role === "user") {
-        const text = (m.content ?? [])
-          .filter((b: any) => b.type === "text")
-          .map((b: any) => b.text)
-          .join("\n");
-        if (text) {
-          entries.push({ kind: "user", text });
-          history.push(text);
-        }
-      } else if (m.role === "assistant") {
-        for (const b of m.content ?? []) {
-          if (b.type === "thinking" && b.thinking.trim())
-            entries.push({ kind: "thinking", text: b.thinking, done: true });
-          if (b.type === "text" && b.text.trim())
-            entries.push({ kind: "agent", text: b.text });
-          if (b.type === "toolCall")
-            entries.push({
-              kind: "tool",
-              id: b.id,
-              name: b.name,
-              summary: toolSummary(b.name, b.arguments),
-              status: "ok",
-            });
-        }
-      } else if (m.role === "toolResult") {
-        // same fold as tool_execution_end, so a reopened session shows what each tool returned
-        const i = entries.findIndex((e) => e.kind === "tool" && e.id === m.toolCallId);
-        if (i === -1) continue;
-        const text = (m.content ?? [])
-          .filter((b: any) => b.type === "text")
-          .map((b: any) => b.text)
-          .join("\n");
-        entries[i] = {
-          ...(entries[i] as Entry & { kind: "tool" }),
-          status: m.isError ? "error" : "ok",
-          output: text || undefined,
-          error: m.isError ? text.split("\n")[0] : undefined,
-          display: m.details?.display,
-        };
-      }
-    }
+    const { entries, history } = transcript(agent.messages, agent.busy, toolSummary);
     setSessions((map) =>
-      patchSession(map, key, (s) =>
-        s.entries.length === 0 ? { entries: foldRetries(entries), history, restored: true } : { restored: true },
-      ),
+      patchSession(map, key, (s) => ({
+        entries: foldRetries(entries),
+        history: s.history.length ? s.history : history,
+        restored: true,
+      })),
     );
   }
 
@@ -1056,19 +958,8 @@ const PERM_MODES: PermMode[] = ["default", "acceptEdits", "plan", "bypass"];
       return;
     }
     if (trimmed === "/clear") {
-      // start a brand-new persisted session: drop the live agent and its
-      // restored history, so the cleared state survives a restart
-      const key = activeKey;
-      agents.current.get(key)?.then((a) => a.dispose()).catch(() => {});
-      agents.current.delete(key);
-      setSessions((map) =>
-        patchSession(map, key, { entries: [], history: [], tokens: 0, queued: [], busy: false }),
-      );
-      // archive persisted transcripts, then open the fresh session behind them
-      backend()
-        .sessions.clear(key)
-        .then(() => ensureAgent(key, { fresh: true }))
-        .catch(() => {});
+      // the daemon archives the transcript and tells every view (this one included) to reopen empty
+      void backend().sessions.clear(activeKey).catch((e) => append(activeKey, { kind: "error", text: String(e.message ?? e) }));
       return;
     }
     if (trimmed.startsWith("/session")) {
@@ -1078,12 +969,10 @@ const PERM_MODES: PermMode[] = ["default", "acceptEdits", "plan", "bypass"];
       if (verb === "name" && arg) {
         // name the session in use, so it can be found in the list later
         backend().sessions.name(activeKey, arg).catch((e) => append(activeKey, { kind: "error", text: String(e.message ?? e) }));
-        setSessionNames((n) => ({ ...n, [activeKey]: arg }));
         return append(activeKey, { kind: "info", text: `session named "${arg}"` });
       }
       if ((verb === "desc" || verb === "describe") && arg) {
         backend().sessions.describe(activeKey, arg).catch((e) => append(activeKey, { kind: "error", text: String(e.message ?? e) }));
-        setSessionDescs((d) => ({ ...d, [activeKey]: arg }));
         return append(activeKey, { kind: "info", text: `session described "${arg}"` });
       }
       if (verb === "use" && arg) {
@@ -1121,25 +1010,8 @@ const PERM_MODES: PermMode[] = ["default", "acceptEdits", "plan", "bypass"];
         const id = ref.slice(slash + 1);
         setSessions((map) => patchSession(map, activeKey, { model: { provider, id } }));
         backend().settings.write({ defaultModel: { provider, id } }).catch(() => {}); // persists across restarts
-        const cur = agents.current.get(activeKey);
-        if (cur) {
-          // Claude and pi share one transcript (pi's file): a switch across
-          // the two rebuilds the session for this key from that file
-          cur
-            .then(async (a) => {
-              if (a.isClaude !== (provider === "anthropic")) {
-                agents.current.delete(activeKey);
-                await a.dispose();
-                await ensureAgent(activeKey, { model: { provider, id } });
-              } else {
-                await a.setModel({ provider, id });
-                // pi re-derives the level on a model switch (its own default, or
-                // the level clamped by the last model), so restate the user's
-                await a.setThinkingLevel(prefs.thinkingLevel);
-              }
-            })
-            .catch(() => {});
-        }
+        setDefaultModel({ provider, id });
+        agents.current.get(activeKey)?.then((a) => a.setModel({ provider, id })).catch(() => {});
       }
       return;
     }
@@ -1178,21 +1050,10 @@ const PERM_MODES: PermMode[] = ["default", "acceptEdits", "plan", "bypass"];
         for (const agent of agents.current.values())
           agent.then((a) => a.setAutoCompactionEnabled(value === "on")).catch(() => {});
       }
-      // pi fixes the tool list when the session is built, so unlike
-      // thinkingLevel and autoCompact this cannot be pushed into a live session:
-      // every open one is rebuilt instead, its transcript restored from pi's file
+      // the daemon rebuilds idle agents now and busy ones at agent_end
       if (key === "codemode" && (value === "on" || value === "off")) {
-        const running = [...agents.current.keys()].filter((k) => getSession(sessions, k).busy);
-        if (running.length) {
-          append(activeKey, {
-            kind: "error",
-            text: `codemode unchanged — a turn is running in ${running.join(", ")}; let it finish or interrupt it first`,
-          });
-          return;
-        }
         setPrefs((p) => ({ ...p, codemode: value }));
         backend().settings.write({ codemode: value }).catch(() => {});
-        reopen([...agents.current.keys()], { codemode: value === "on" });
         append(activeKey, { kind: "info", text: `codemode ${value} — every open session now runs with it` });
       }
       if (key === "vim" && (value === "on" || value === "off")) {
@@ -1216,19 +1077,12 @@ const PERM_MODES: PermMode[] = ["default", "acceptEdits", "plan", "bypass"];
     // be looking at a different session than the one they are prompting.
     const key = activeKey;
     const streaming = getSession(sessions, key).busy;
-    // an unnamed session takes its title from the first thing asked of it
-    if (!sessionNames[key]) {
-      const title = trimmed.replace(/\s+/g, " ").slice(0, 40);
-      backend().sessions.name(key, title).catch((e) => append(key, { kind: "error", text: String(e.message ?? e) }));
-      setSessionNames((n) => ({ ...n, [key]: title }));
-    }
     const sent = images;
     setImages([]);
     pasted.current = 0;
     // the tokens go to the model too: they are how it tells one attachment
     // from another, and a message that is only an image would otherwise be
     // empty text with the images silently dropped alongside it
-    append(key, { kind: "user", text: trimmed, images: sent.length });
     setSessions((map) =>
       patchSession(map, key, (s) => ({ history: [...s.history, trimmed] })),
     );
@@ -1337,7 +1191,7 @@ const PERM_MODES: PermMode[] = ["default", "acceptEdits", "plan", "bypass"];
         })),
       ],
     }),
-    [auth, models, prefs, envs, env, focus, environment, activeBase, sessionId, sessionNames, baseSessions],
+    [auth, models, prefs, envs, env, focus, environment, activeBase, sessionId, baseSessions],
   );
   const jumpMatches = useMemo(
     () =>
@@ -1419,10 +1273,6 @@ const PERM_MODES: PermMode[] = ["default", "acceptEdits", "plan", "bypass"];
                 onDone={(ok) => {
                   setLogin(null);
                   if (ok) {
-                    // a Claude child spawned signed out keeps its old credentials,
-                    // so idle Claude sessions are rebuilt to spawn a fresh one
-                    for (const [k, a] of agents.current)
-                      a.then((h) => h.isClaude && !getSession(sessions, k).busy && reopen([k])).catch(() => {});
                     loadProviderAuth().then(setAuth).catch(() => {});
                     refreshCatalog().then(setModels).catch(() => {});
                   }
@@ -1451,7 +1301,7 @@ const PERM_MODES: PermMode[] = ["default", "acceptEdits", "plan", "bypass"];
               // the main session is the working session, a workspace session is
               // the workspace, an ephemeral one is its own agent name
               title={focus === 0 ? "Working Session" : workspaces[focus - 1]!.name}
-              description={sessionDescs[activeKey]}
+              description={watched?.find((m) => m.key === activeKey)?.description}
               busy={busy}
               width={contentWidth}
               onOpen={() => openCmd("session ")}
