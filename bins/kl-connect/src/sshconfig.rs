@@ -10,7 +10,7 @@ fn home() -> PathBuf {
 
 /// The name goes into `Host {name}` verbatim, so a newline in one would append arbitrary
 /// keywords — a `ProxyCommand` under `Host *` runs on THIS machine for every ssh anywhere. The
-/// api refuses such a name (`model::valid_ws_name`), and this is the second half of the same
+/// api refuses such a name (`model::valid_name`), and this is the second half of the same
 /// rule: an object written before that check, or by any other path, is skipped rather than
 /// rendered. Duplicated rather than shared because the CLI depends on no server crate.
 ///

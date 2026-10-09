@@ -304,19 +304,19 @@ async fn removing_the_wish_restores_the_real_service_and_deletes_the_slice() {
 /// A workspace serving TWO of an environment's services that releases ONE of them: only that
 /// service's egress grant goes, and the workspace-side ingress stays, because the other service is
 /// still being served. The env side is per (workspace, service) and the ws side per workspace, so
-/// a skip keyed on the workspace alone leaked `intercept-ws-1-api` forever.
+/// a skip keyed on the workspace alone leaked `intercept-ws-1-cart` forever.
 #[tokio::test]
 async fn releasing_one_of_two_intercepts_deletes_only_that_services_grant() {
     let tmp = env_tmp();
-    let api_policy = "/apis/networking.k8s.io/v1/namespaces/env-1/networkpolicies/intercept-ws-1-api";
+    let api_policy = "/apis/networking.k8s.io/v1/namespaces/env-1/networkpolicies/intercept-ws-1-cart";
     let routes = intercept_routes(vec![
         kloudlite_workspaces::kube_test::get(WS_OBJ, attached_ws("running", Some("env-1"), 600)),
         kloudlite_workspaces::kube_test::get("/api/v1/namespaces/ws-alice/pods/ws-1-0", ready_pod(600)),
-        Route { method: "PATCH", path: "/apis/apps/v1/namespaces/env-1/statefulsets/api".into(), status: 200, body: serde_json::json!({"kind": "StatefulSet"}) },
-        Route { method: "PATCH", path: "/api/v1/namespaces/env-1/services/api".into(), status: 200, body: serde_json::json!({"kind": "Service"}) },
-        Route { method: "DELETE", path: "/apis/discovery.k8s.io/v1/namespaces/env-1/endpointslices/api-intercept".into(), status: 200, body: serde_json::json!({"kind": "Status"}) },
+        Route { method: "PATCH", path: "/apis/apps/v1/namespaces/env-1/statefulsets/cart".into(), status: 200, body: serde_json::json!({"kind": "StatefulSet"}) },
+        Route { method: "PATCH", path: "/api/v1/namespaces/env-1/services/cart".into(), status: 200, body: serde_json::json!({"kind": "Service"}) },
+        Route { method: "DELETE", path: "/apis/discovery.k8s.io/v1/namespaces/env-1/endpointslices/cart-intercept".into(), status: 200, body: serde_json::json!({"kind": "Status"}) },
         Route { method: "DELETE", path: api_policy.into(), status: 200, body: serde_json::json!({"kind": "Status"}) },
-        Route { method: "DELETE", path: "/api/v1/namespaces/env-1/pods/intercept-api".into(), status: 200, body: serde_json::json!({"kind": "Status"}) },
+        Route { method: "DELETE", path: "/api/v1/namespaces/env-1/pods/intercept-cart".into(), status: 200, body: serde_json::json!({"kind": "Status"}) },
         Route { method: "DELETE", path: WS_POLICY.into(), status: 200, body: serde_json::json!({"kind": "Status"}) },
     ]);
     let (ctx, rec) = intercept_ctx(tmp.path(), routes);
@@ -324,11 +324,11 @@ async fn releasing_one_of_two_intercepts_deletes_only_that_services_grant() {
     // `web` is still wished and in force; `api`'s wish is gone and status is the only record of it.
     let mut e = intercept_env(one_intercept(), Some("ws-1"));
     let mut api = e.spec.services[0].clone();
-    api.name = "api".into();
+    api.name = "cart".into();
     api.ports = vec![8080];
     e.spec.services.push(api);
     e.status.as_mut().unwrap().service_status.push(serde_json::from_value(
-        serde_json::json!({"name": "api", "ready": true, "interceptedBy": "ws-1"}),
+        serde_json::json!({"name": "cart", "ready": true, "interceptedBy": "ws-1"}),
     ).unwrap());
 
     kloudlite_agent::controller::apply_environment(&e, &ctx).await.unwrap();

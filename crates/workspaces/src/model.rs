@@ -242,14 +242,8 @@ pub fn validate_mount(m: &Mount) -> Result<(), String> {
 /// are checked here for the same reason — the API server, not this code, is what rejects a port 0
 /// or a `FOO-BAR` env name, and it does so one requeue at a time.
 pub fn validate_service(s: &Service) -> Result<(), String> {
-    let n = s.name.as_bytes();
-    let label = !n.is_empty()
-        && n.len() <= 63
-        && n[0].is_ascii_lowercase()
-        && n[n.len() - 1] != b'-'
-        && n.iter().all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || *b == b'-');
-    if !label {
-        return Err(format!("service name {:?} must be a lowercase DNS label starting with a letter", s.name));
+    if !valid_name(&s.name) {
+        return Err(format!("service {:?}: {NAME_RULE}", s.name));
     }
     if s.ports.contains(&0) {
         return Err(format!("service {:?}: port must be 1-65535", s.name));
@@ -277,19 +271,33 @@ pub fn validate_services(services: &[Service]) -> Result<(), String> {
     Ok(())
 }
 
-/// A workspace name is written VERBATIM into generated ssh config — `Host {name}` in
-/// `bins/kl/src/sshconfig.rs` and in the web's copy block. A newline in it appends arbitrary
-/// keywords (`ProxyCommand`, `Host *`) to a teammate's `~/.ssh` on the next `kl ws ssh-config`,
-/// so this is a security boundary and not a tidiness rule. Same alphabet as `valid_segment`,
-/// capped at 63 so a name can never be the reason a DNS label has to be truncated.
-pub fn valid_ws_name(name: &str) -> bool {
-    // The name identifies the workspace's own volume, mounted whole as the home
-    // (source at `~/workspace` inside it), so `.` and `..` — otherwise legal by the character
-    // rule — would collide with reserved path segments.
-    !name.is_empty()
-        && name.len() <= 63
-        && name.bytes().all(|b| b.is_ascii_alphanumeric() || matches!(b, b'.' | b'_' | b'-'))
-        && name.bytes().any(|b| b != b'.')
+pub const NAME_RULE: &str = "name must be 1-40 lowercase letters, digits or '-', start with a letter, end with a letter or digit, no '--', and not be reserved (ws, env, api, admin, system, kl, bld-*) or look like an id";
+
+/// `{prefix}-` + 16 lowercase hex: the shape `rid` mints for object names.
+pub fn is_id(s: &str, prefix: &str) -> bool {
+    s.strip_prefix(prefix)
+        .and_then(|r| r.strip_prefix('-'))
+        .is_some_and(|h| h.len() == 16 && h.bytes().all(|b| matches!(b, b'0'..=b'9' | b'a'..=b'f')))
+}
+
+/// The one naming rule for workspaces, environments and services. A workspace name is written
+/// VERBATIM into generated ssh config (`Host {name}` in `bins/kl/src/sshconfig.rs` and the web's
+/// copy block): a newline appends arbitrary keywords (`ProxyCommand`, `Host *`) to a teammate's
+/// `~/.ssh`, so this is a security boundary. Service names become `{svc}.{ns}` hostnames and
+/// `{svc}-0` pod names, hence 40 and not 63. Id-shaped names are refused so a name can never be
+/// mistaken for an id by the resolver (`api/scope.rs`).
+pub fn valid_name(name: &str) -> bool {
+    let n = name.as_bytes();
+    !n.is_empty()
+        && n.len() <= 40
+        && n[0].is_ascii_lowercase()
+        && n[n.len() - 1] != b'-'
+        && n.iter().all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || *b == b'-')
+        && !name.contains("--")
+        && !is_id(name, "ws")
+        && !is_id(name, "env")
+        && !matches!(name, "ws" | "env" | "api" | "admin" | "system" | "kl")
+        && !name.starts_with("bld-")
 }
 
 /// A segment that also has to survive being patched verbatim into a label VALUE (63 chars, the
@@ -307,7 +315,7 @@ pub fn valid_segment_label(s: &str) -> bool {
 /// splice these into a root `/bin/sh -c` prelude and into `{pool}/vol/{id}`. Same rule, same
 /// reason, as `git_init_container`'s repo/branch re-check.
 pub fn validate_ws_spec(spec: &crate::crd::WorkspaceSpec) -> Result<(), String> {
-    if !valid_ws_name(&spec.name) {
+    if !valid_name(&spec.name) {
         return Err(format!("workspace name {:?} is not a name", spec.name));
     }
     validate_owner(&spec.owner)?;
@@ -475,22 +483,27 @@ mod tests {
 
     #[test]
     fn a_workspace_name_cannot_carry_ssh_config() {
-        for ok in ["dev", "my-ws.2", "a_b", &"x".repeat(63)] {
-            assert!(super::valid_ws_name(ok), "name {ok:?} must be allowed");
+        for ok in ["dev", "my-ws-2", "a", &format!("a{}", "x".repeat(39)), "ws-1", "env-abc"] {
+            assert!(super::valid_name(ok), "name {ok:?} must be allowed");
         }
-        // The newline cases are the injection; the rest are the alphabet and the length.
+        // The newline cases are the injection; the rest are the rule.
         for bad in [
-            "",
-            "x\n  ProxyCommand /bin/sh -c curl|sh\nHost *",
-            "a b",
-            "a\tb",
-            "a/b",
-            "a*",
-            "a\r",
-            &"x".repeat(64), ".", "..", "...",
+            "", "x\n  ProxyCommand /bin/sh -c curl|sh\nHost *", "a b", "a\tb", "a/b", "a*", "a\r",
+            &format!("a{}", "x".repeat(40)), ".", "..", "My", "a_b", "a.b", "1a", "-a", "a-", "a--b",
+            "ws-0123456789abcdef", "env-0123456789abcdef", "ws", "env", "api", "admin", "system", "kl",
+            "bld-x",
         ] {
-            assert!(!super::valid_ws_name(bad), "name {bad:?} must be refused");
+            assert!(!super::valid_name(bad), "name {bad:?} must be refused");
         }
+    }
+
+    #[test]
+    fn is_id_is_exact() {
+        assert!(super::is_id("ws-0123456789abcdef", "ws"));
+        assert!(!super::is_id("ws-0123456789abcde", "ws"));
+        assert!(!super::is_id("ws-0123456789abcdeF", "ws"));
+        assert!(!super::is_id("ws-0123456789abcdef", "env"));
+        assert!(!super::is_id("ws-0123456789abcdefg", "ws"));
     }
 
     #[test]

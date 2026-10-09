@@ -199,26 +199,26 @@ async fn a_kept_sibling_keeps_its_port_on_the_shared_target_and_grant() {
         kloudlite_workspaces::kube_test::get(PROXY_POD, proxy_pod(true)),
     ]);
     routes.extend([
-        Route { method: "PATCH", path: "/apis/apps/v1/namespaces/env-1/statefulsets/api".into(), status: 200, body: serde_json::json!({"kind": "StatefulSet"}) },
-        Route { method: "PATCH", path: "/api/v1/namespaces/env-1/services/api".into(), status: 200, body: serde_json::json!({"kind": "Service"}) },
+        Route { method: "PATCH", path: "/apis/apps/v1/namespaces/env-1/statefulsets/cart".into(), status: 200, body: serde_json::json!({"kind": "StatefulSet"}) },
+        Route { method: "PATCH", path: "/api/v1/namespaces/env-1/services/cart".into(), status: 200, body: serde_json::json!({"kind": "Service"}) },
     ]);
     let (ctx, rec) = intercept_ctx(tmp.path(), routes);
 
     let mut e = intercept_env(
         serde_json::json!([
-            {"service": "api", "workspace": "ws-1", "ports": [{"service": 8080, "workspace": 3001}]},
+            {"service": "cart", "workspace": "ws-1", "ports": [{"service": 8080, "workspace": 3001}]},
             {"service": "web", "workspace": "ws-1", "ports": [{"service": 80, "workspace": 3000}]},
         ]),
         Some("ws-1"),
     );
     let mut api = e.spec.services[0].clone();
-    api.name = "api".into();
+    api.name = "cart".into();
     api.ports = vec![8080];
     e.spec.services.insert(0, api);
     // Both were in force last pass; `api`'s record is the only thing that says so this pass.
     e.status.as_mut().unwrap().service_status.insert(
         0,
-        serde_json::from_value(serde_json::json!({"name": "api", "ready": true, "interceptedBy": "ws-1", "proxy": "ready"})).unwrap(),
+        serde_json::from_value(serde_json::json!({"name": "cart", "ready": true, "interceptedBy": "ws-1", "proxy": "ready"})).unwrap(),
     );
 
     kloudlite_agent::controller::apply_environment(&e, &ctx).await.unwrap();

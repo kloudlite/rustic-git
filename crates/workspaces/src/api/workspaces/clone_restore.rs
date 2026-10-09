@@ -58,7 +58,7 @@ pub(crate) async fn clone_ws(
     Json(body): Json<CloneBody>,
 ) -> Result<Response, Response> {
     let owner = caller_for(&s, &headers, &method, uri.path()).await?;
-    check_ws_name(&body.name)?;
+    check_name(&body.name)?;
     let task = check_task(body.task.as_deref())?;
     let src = my_ws(&s, &owner, &id).await?;
     refuse_taken_name(kube(&s)?, &owner, &src.spec.team, &body.name).await?;
@@ -167,7 +167,7 @@ pub(crate) async fn restore_ws(
 ) -> Result<Response, Response> {
     let owner = caller_for(&s, &headers, &method, uri.path()).await?;
     let c = kube(&s)?;
-    check_ws_name(&body.name)?;
+    check_name(&body.name)?;
     // Restore-to-new IS a clone at a named snapshot: under the snapshot model there is no
     // registry to fetch from any more, so this resolves the request's `snapshot_id` — a `Snapshot`
     // CR name — straight against the CRD, and the new workspace's source becomes

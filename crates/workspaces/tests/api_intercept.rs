@@ -373,11 +373,11 @@ fn svc(name: &str) -> Value {
 #[tokio::test]
 async fn the_services_patch_writes_the_whole_list() {
     let s = server(patch_routes(json!([]))).await;
-    assert_eq!(patch_services(&s, json!([svc("api"), svc("cache")])).await.status(), 200);
+    assert_eq!(patch_services(&s, json!([svc("web"), svc("cache")])).await.status(), 200);
     let sent = patched(&s);
     assert_eq!(sent.len(), 1, "{sent:?}");
     let names: Vec<&str> = sent[0]["spec"]["services"].as_array().unwrap().iter().map(|s| s["name"].as_str().unwrap()).collect();
-    assert_eq!(names, ["api", "cache"]);
+    assert_eq!(names, ["web", "cache"]);
     assert!(sent[0]["spec"].get("intercepts").is_none(), "one field only: {}", sent[0]);
 }
 
@@ -386,7 +386,7 @@ async fn the_services_patch_writes_the_whole_list() {
 #[tokio::test]
 async fn a_traversing_mount_is_refused_and_nothing_is_written() {
     let s = server(patch_routes(json!([]))).await;
-    let mut bad = svc("api");
+    let mut bad = svc("web");
     bad["mounts"] = json!([{"folder": "../etc", "path": "/data"}]);
     assert_eq!(patch_services(&s, json!([bad])).await.status(), 400);
     assert!(patched(&s).is_empty(), "nothing written");

@@ -4,7 +4,7 @@
 use super::scope::{caller_owners, denial, find_env, in_scope, may_act_on, may_allocate_for, mine, my_ws, owned_by, resolve_new_owner, scope_refusal};
 use super::volumes::{find_snapshot, volume_region};
 use super::workspaces::{
-    check_ws_name, clamp_quota, interrupted, interrupted_409, node_dead_warning, pushed_volumes,
+    check_name, clamp_quota, interrupted, interrupted_409, node_dead_warning, pushed_volumes,
     set_desired, storage_quota, CloneBody,
 };
 use super::{caller_for, check_region, environment_cost, guard_alloc, guard_fill, kube, kube_err, not_found, not_ready, phase, rid, ApiState, Caller};
@@ -170,7 +170,7 @@ pub(crate) async fn create_env(
     // joined onto the env's subvolume by a root agent, so it is a security boundary, not a
     // formality — see `validate_mount`. Checked before anything is written, deliberately.
     check_services(&body.services)?;
-    check_ws_name(&body.name)?;
+    check_name(&body.name)?;
     check_region(&s, &body.region).await?;
     let owner = resolve_new_owner(&s, &caller_id, body.owner).await?;
     let c = kube(&s)?;
@@ -244,7 +244,7 @@ pub(crate) async fn restore_env(
     }
     // Named before anything is written, like `create_env`'s: an environment with no name is a row
     // nobody can tell apart from another.
-    check_ws_name(&body.name)?;
+    check_name(&body.name)?;
     // The record's own region needs no check — it was checked when the environment was created,
     // and it is the one region guaranteed to hold these bytes. A caller's choice is checked like
     // a create's.

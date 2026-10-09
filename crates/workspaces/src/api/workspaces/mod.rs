@@ -222,17 +222,17 @@ pub(super) async fn lock_for(
 
 
 /// The one gate on a workspace or environment name, on every route that accepts one. The name ends up verbatim
-/// in generated ssh config on a TEAMMATE's machine (`model::valid_ws_name`), so it is checked
+/// in generated ssh config on a TEAMMATE's machine (`model::valid_name`), so it is checked
 /// where it enters the system rather than at each renderer — the renderers refuse too, but a
 /// stored bad name would already have made every listing of that team unusable.
-pub(crate) fn check_ws_name(name: &str) -> Result<(), Response> {
-    if valid_ws_name(name) {
+pub(crate) fn check_name(name: &str) -> Result<(), Response> {
+    if valid_name(name) {
         return Ok(());
     }
     Err((
         StatusCode::UNPROCESSABLE_ENTITY,
         Json(serde_json::json!({
-            "error": "name must be 1-63 characters of letters, digits, '.', '_' or '-'"
+            "error": crate::model::NAME_RULE
         })),
     )
         .into_response())
@@ -255,7 +255,7 @@ pub(crate) async fn create_ws(
     Json(body): Json<NewWorkspace>,
 ) -> Result<Response, Response> {
     let owner = caller_for(&s, &headers, &method, uri.path()).await?;
-    check_ws_name(&body.name)?;
+    check_name(&body.name)?;
     // The bench is a Workspace named `bench` in the same (owner, team), so an ordinary create
     // under that name would race it for `~/workspaces/bench` — and `refuse_taken_name` only sees
     // the collision once a bench already exists.
