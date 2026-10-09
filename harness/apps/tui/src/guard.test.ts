@@ -10,9 +10,7 @@ test("remote.tsx bundles no agent", async () => {
   expect(code).not.toContain("claude-agent-sdk");
 });
 
-test("TUI keeps the backend's gate sets", async () => {
-  const { ALWAYS_ASK, ASK_UNLESS_FENCED, EDITS } = await import("@kloudlite-tui/backend/local");
-  const app = await Bun.file(join(import.meta.dir, "app.tsx")).text();
-  for (const t of [...ALWAYS_ASK, ...ASK_UNLESS_FENCED]) expect(app).toContain(`"${t}"`);
+test("TUI keeps the backend's edit set", async () => {
+  const { EDITS } = await import("@kloudlite-tui/backend/local");
   expect([...EDITS]).toEqual(["write", "edit", "patch"]);
 });

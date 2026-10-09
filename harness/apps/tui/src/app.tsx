@@ -865,14 +865,6 @@ export function App({
     }).catch(() => {});
   }
 
-  /** Tools that require permission before running. */
-  // web_fetch leaves the machine, and the URL can come from text the model
-  // just read, so the user sees it before it goes out
-  const GATED = new Set([
-    "bash", "write", "edit", "patch", "exec", "web_fetch",
-    "workspace_stop", "workspace_delete", "worktree_drop", "env_delete", "env_stop", "env_restore_in_place",
-    "service_remove", "volume_delete", "snapshot_delete", "container_push",
-  ]);
   /** Tools that only mutate the workspace's files — what acceptEdits waves through. */
   const EDITS = new Set(["write", "edit", "patch"]);
 
@@ -884,7 +876,7 @@ const PERM_MODES: PermMode[] = ["default", "acceptEdits", "plan", "bypass"];
    * The permission decision for one gated tool call. The backend calls this only for GATED
    * tools; the mode is read from a ref at call time because it changes under a running session.
    */
-  async function gate(key: string, { name, args, diff, session }: PermissionRequest, _signal: AbortSignal): Promise<Decision> {
+  async function gate(key: string, { name, args, diff, session, reason, claimed }: PermissionRequest, _signal: AbortSignal): Promise<Decision> {
     // a delegated session asks through its caller's gate; the grant and the card belong to it
     const asker = session ?? key;
     const granted = alwaysAllow.current.get(asker) ?? new Set<string>();
@@ -897,6 +889,11 @@ const PERM_MODES: PermMode[] = ["default", "acceptEdits", "plan", "bypass"];
         reason: `Plan mode: ${name} is not available. Research and explain what you would do; the user will leave plan mode when they want it done.`,
       };
     if (mode === "bypass" || (mode === "acceptEdits" && EDITS.has(name)) || granted.has(name)) return {};
+    const why = reason
+      ? `Why: ${reason}`
+      : claimed
+        ? `Says you asked: “${claimed}”, which is not in your messages this turn`
+        : "No reason given";
     const choice = await pushAskRef.current({
       key: asker,
       title: "Permission required",
@@ -908,7 +905,8 @@ const PERM_MODES: PermMode[] = ["default", "acceptEdits", "plan", "bypass"];
             : EDITS.has(name)
               ? `${name === "write" ? "Write" : "Edit"} ${args?.path ?? "file"}`
               : `Run ${name}`,
-      body:
+      body: [
+        why,
         name === "bash"
           ? `$ ${args?.command ?? ""}`
           : name === "web_fetch"
@@ -916,6 +914,9 @@ const PERM_MODES: PermMode[] = ["default", "acceptEdits", "plan", "bypass"];
             : diff
               ? undefined
               : toolSummary(name, args),
+      ]
+        .filter(Boolean)
+        .join("\n\n"),
       diff,
       options: [
         { id: "once", label: "Allow once" },
