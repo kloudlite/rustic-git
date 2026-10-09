@@ -38,15 +38,12 @@ function Shimmer({ text, from, to }: { text: string; from: string; to: string })
 export function PlanLine({ row, width }: { row: PlanRow; width: number }) {
   const right = row.right ?? "";
   if (row.head) {
-    const name = clip(row.text, Math.max(1, width - 2 - right.length - 4));
-    const fill = Math.max(1, width - 2 - name.length - right.length - (right ? 2 : 1));
+    // a group label under the one "Tasks" heading: no rule of its own, so it never reads as a second title
+    const name = clip(row.text, Math.max(1, width - right.length - 4));
     return (
-      <box flexDirection="row" height={1} overflow="hidden" paddingLeft={1} paddingRight={1}>
-        <text fg={theme.fg}>
-          <b>{name}</b>
-        </text>
-        <text fg={theme.muted}>{` ${"─".repeat(fill)}`}</text>
-        {right ? <text fg={right === "working" ? theme.accent : right === "needs you" ? theme.warning : theme.muted}>{` ${right}`}</text> : null}
+      <box flexDirection="row" justifyContent="space-between" height={1} overflow="hidden" paddingLeft={1} paddingRight={1}>
+        <text fg={theme.muted}>{name}</text>
+        {right ? <text fg={right === "needs you" ? theme.warning : theme.muted}>{right}</text> : null}
       </box>
     );
   }
@@ -59,13 +56,16 @@ export function PlanLine({ row, width }: { row: PlanRow; width: number }) {
   );
 }
 
-/** The plan of the session on screen (rows are already folded by planRows), above the queue; nothing when empty. */
+/** The open tasks of the view (rows are already folded by planRows), above the queue; nothing when empty.
+ *  One heading; group labels only when more than one session has open work. */
 export function Plan({ rows, width }: { rows: PlanRow[]; width: number }) {
   if (rows.length === 0) return null;
+  const shown = rows.filter((r) => r.head).length > 1 ? rows : rows.filter((r) => !r.head);
+  const open = rows.filter((r) => !r.head && /^[│├└ ─]*[●○!] /.test(r.text)).length;
   return (
     <box flexDirection="column" flexShrink={0} marginBottom={1}>
-      <Heading width={width} flush>Plan</Heading>
-      {rows.map((r, i) => (
+      <Heading width={width} count={open} flush>Tasks</Heading>
+      {shown.map((r, i) => (
         <PlanLine key={i} row={r} width={width} />
       ))}
     </box>
