@@ -294,3 +294,19 @@ test("a thinking block that finishes streaming remounts with its header on its o
   expect(out).toContain("I should load");
   t.renderer.destroy();
 });
+
+test("a message from another session renders as a card with names, kind and no board line", async () => {
+  const names = (k: string) => (k === "w1" ? "todo-demo" : k);
+  const t = await testRender(
+    <Transcript entries={[{ kind: "user", text: "[from w1] done: **Todo app** built\nboard: T1 done" }]} names={names} to="main" />,
+    { width: 80, height: 12 },
+  );
+  await new Promise((r) => setTimeout(r, 30));
+  await t.renderOnce();
+  const f = t.captureCharFrame();
+  expect(f).toContain("◆ todo-demo → main · done");
+  expect(f).toContain("Todo app built");
+  expect(f).not.toContain("board:");
+  expect(f).not.toContain("[from");
+  t.renderer.destroy();
+});

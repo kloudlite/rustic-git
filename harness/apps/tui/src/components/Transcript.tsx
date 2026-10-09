@@ -1,4 +1,5 @@
 import { useEffect, useRef, useState } from "react";
+import { parseCard } from "../card.ts";
 import { useKeyboard } from "@opentui/react";
 import { SyntaxStyle, TextAttributes, type ScrollBoxRenderable } from "@opentui/core";
 import { useWheelAccel } from "../wheel.ts";
@@ -264,6 +265,8 @@ function isInlineTool(entry: Entry): boolean {
 /** Cap on rendered entries; older ones fall out of the scrollback. */
 const SCROLLBACK = 200;
 
+const kindTone = (k: string) => (k === "done" ? theme.success : k === "question" ? theme.warning : theme.error);
+
 function Row({
   entry,
   open,
@@ -271,6 +274,8 @@ function Row({
   width,
   hover,
   streaming,
+  names,
+  to,
 }: {
   entry: Entry;
   /** this entry is expanded — render every line */
@@ -282,9 +287,23 @@ function Row({
   hover?: boolean;
   /** the last entry, so markdown may still be mid-token */
   streaming?: boolean;
+  /** names of the sessions a message card is between */
+  names?: (key: string) => string;
+  to?: string;
 }) {
   switch (entry.kind) {
-    case "user":
+    case "user": {
+      const card = parseCard(entry.text);
+      if (card)
+        return (
+          <box flexDirection="column" paddingLeft={1} marginTop={1}>
+            <text fg={theme.muted}>
+              <span fg={theme.accent}>◆</span> {names?.(card.from) ?? card.from} → {to ?? "main"}
+              {card.kind ? <span fg={kindTone(card.kind)}> · {card.kind}</span> : ""}
+            </text>
+            <box paddingLeft={2}><Md text={card.body} /></box>
+          </box>
+        );
       // opencode UserMessage: native left border ┃ on the panel background
       return (
         <box
@@ -311,6 +330,7 @@ function Row({
           </box>
         </box>
       );
+    }
     case "agent": {
       // opencode TextPart: markdown, paddingLeft 3
       const body = collapseMd(entry.text, open, width - 3);
@@ -529,8 +549,13 @@ export function Transcript({
   keys = "page",
   width = 80,
   ready = true,
+  names,
+  to,
 }: {
   entries: Entry[];
+  /** session key -> name, and the name of the session this transcript belongs to: for message cards */
+  names?: (key: string) => string;
+  to?: string;
   /** false until the persisted transcript has been read — see `Session.restored` */
   ready?: boolean;
   /** content columns available — long blocks wrap, so row counts need it */
@@ -687,6 +712,8 @@ export function Transcript({
             streaming={i === visible.length - 1}
             open={open.has(key)}
             onOpen={toggle}
+            names={names}
+            to={to}
           />
         </box>
         );
