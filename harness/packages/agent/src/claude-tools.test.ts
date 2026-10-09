@@ -186,3 +186,25 @@ test("a registry tool whose run() throws reports isError with its message (direc
   expect(r.isError).toBe(true);
   expect(JSON.stringify(r.content)).toContain("422: missing field");
 });
+
+test("an interrupt reaches a registry tool's run(), so the question card is withdrawn", async () => {
+  let withdrawn = false;
+  const [tool] = adaptTools({
+    all: () => [
+      {
+        name: "question",
+        description: "ask",
+        inputSchema: { type: "object" },
+        run: (_i: unknown, signal?: AbortSignal) =>
+          new Promise<string>((resolve) => signal?.addEventListener("abort", () => ((withdrawn = true), resolve("withdrawn")))),
+      },
+    ],
+  } as any);
+  const { h, turn } = host(tool);
+  const c = await connect(h);
+  const call = c.callTool({ name: "question", arguments: {} });
+  await new Promise((r) => setTimeout(r, 20));
+  turn.abort();
+  await call;
+  expect(withdrawn).toBe(true);
+});
