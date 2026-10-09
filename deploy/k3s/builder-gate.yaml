@@ -7,6 +7,11 @@
 # once nobody has been connected for `builderIdleSecs`. Nothing about that is visible to
 # `docker build`.
 #
+# The gate also serves read-only service logs on 1235 (`GET /logs/{env}/{service}`, plain HTTP):
+# a session reads the logs of a service in an environment its own owner owns, inside the cluster
+# and never through `/v1`. The caller is the source pod IP (same index as the splice) and the rule
+# is `Environment.spec.owner == caller's owner slug`; anything else is a 404.
+#
 # In `kloudlite-system` with the gateway (the namespace already exists there; both are declared so
 # either file applies alone). The workspace and environment NetworkPolicies admit exactly
 # `app=kloudlite-builder-gate` pods in THIS namespace, so the label and the namespace are the
@@ -24,10 +29,11 @@ metadata:
   name: kloudlite-builder-gate
   namespace: kloudlite-system
 ---
-# Pods, read-only, and nothing else in the cluster. The gate's whole Kubernetes need is one
-# reflector over workspace pods, to answer "which owner is this IP?" — it writes nothing, and it
-# cannot read a Secret, a workspace or an environment. `list`/`watch` (unlike the gateway's bare
-# `get`) is the reflector: an index by pod IP cannot be built from named gets.
+# Read-only, and nothing else in the cluster. The gate's main Kubernetes need is one reflector
+# over workspace pods, to answer "which owner is this IP?" — it writes nothing and cannot read a
+# Secret or a workspace. `list`/`watch` (unlike the gateway's bare `get`) is the reflector: an
+# index by pod IP cannot be built from named gets. The logs listener adds exactly two reads:
+# `get` on one Environment (the owner check) and `get` on `pods/log`.
 apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRole
 metadata:
@@ -36,6 +42,12 @@ rules:
   - apiGroups: [""]
     resources: ["pods"]
     verbs: ["get", "list", "watch"]
+  - apiGroups: [""]
+    resources: ["pods/log"]
+    verbs: ["get"]
+  - apiGroups: ["kloudlite.io"]
+    resources: ["environments"]
+    verbs: ["get"]
 ---
 apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRoleBinding
@@ -106,6 +118,8 @@ spec:
           ports:
             - name: gate
               containerPort: 1234
+            - name: logs
+              containerPort: 1235
             - name: http
               containerPort: 8080
             - name: metrics
@@ -190,3 +204,6 @@ spec:
     - name: gate
       port: 1234
       targetPort: 1234
+    - name: logs
+      port: 1235
+      targetPort: 1235

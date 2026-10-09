@@ -23,7 +23,8 @@ pub(crate) fn only_the_builder_gate_may_be_reached_on_egress() {
     assert_eq!(ns["kubernetes.io/metadata.name"], "kloudlite-system");
     let pod = to[0].pod_selector.as_ref().unwrap().match_labels.as_ref().unwrap();
     assert_eq!(pod["app"], "kloudlite-builder-gate");
-    assert_eq!(rule.ports.as_ref().unwrap()[0].port, Some(IntOrString::Int(1234)));
+    let ports: Vec<_> = rule.ports.as_ref().unwrap().iter().map(|p| p.port.clone()).collect();
+    assert_eq!(ports, vec![Some(IntOrString::Int(1234)), Some(IntOrString::Int(1235))], "buildkit splice and logs");
 }
 
 

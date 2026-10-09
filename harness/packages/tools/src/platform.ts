@@ -191,6 +191,21 @@ export function platformTools(kind: "main" | "workspace", wsId?: string): ToolDe
     }),
     def("packages_update", "Re-resolve the workspace's package pins to their newest matching versions.", wp(), wr(), async (a) => api("POST", `${wsPath(a)}/packages/update`)),
     def("workspace_push", "Snapshot the workspace to its history." + ASYNC, wp({ message: S }), wr(), async (a) => api("POST", `${wsPath(a)}/push`, { message: a.message })),
+    envTool(
+      "service_logs",
+      "Read the recent logs of one service of an environment you own, from inside the cluster (not /v1). Read-only; tail defaults to 200 lines (max 2000), since is seconds (max 86400), previous reads the last crashed container. A service an intercept has taken answers with a note naming the workspace that runs it.",
+      { service: S, tail: N, since: N, previous: { type: "boolean" } },
+      ["service"],
+      async (env, a) => {
+        const base = (process.env.KL_LOGS_URL ?? "http://builder-gate.kloudlite-system.svc:1235").replace(/\/$/, "");
+        const q = qs({ tail: a.tail === undefined ? undefined : String(a.tail), since: a.since === undefined ? undefined : String(a.since), previous: a.previous ? "true" : undefined });
+        // no auth header: the gate identifies this pod by its source IP
+        const res = await fetch(`${base}/logs/${env}/${seg(a.service)}${q}`, { signal: AbortSignal.timeout(15_000) });
+        const text = await res.text();
+        if (res.status < 200 || res.status >= 300) throw new Error(`${res.status}: ${text}`);
+        return text;
+      },
+    ),
     def("space_env_current", "Show which environment each of the person's spaces (teams) follows.", {}, [], async () => api("GET", "/v1/me/environments")),
     def("space_env_switch", "Make every workspace of a team follow another environment." + (ws ? " Team defaults to this workspace's." : ""), { ...teamProp, env: S }, ws ? ["env"] : ["team", "env"], async (a) => {
       const t = await teamOf(a);
@@ -236,6 +251,7 @@ export function platformTools(kind: "main" | "workspace", wsId?: string): ToolDe
     ...["packages_list", "packages_add", "packages_remove", "packages_update"].map(of),
     def("env_list", "List environments, optionally for one team.", { team: S }, [], async (a) => api("GET", `/v1/environments${qs({ owner: a.team })}`)),
     def("env_get", "Read one environment's services, state and intercepts; poll this after any env call. Each services[] entry carries ready (and message) from service_status; poll ready, not the spec.", { env: S }, ["env"], async (a) => withReady(await api("GET", `/v1/environments/${seg(a.env)}`))),
+    of("service_logs"),
     def("env_delete", "Delete an environment for good.", { env: S }, ["env"], async (a) => api("DELETE", `/v1/environments/${seg(a.env)}`)),
     def("env_start", "Start a stopped environment." + ASYNC, { env: S }, ["env"], async (a) => api("POST", `/v1/environments/${seg(a.env)}/start`)),
     def("env_stop", "Stop a running environment." + ASYNC, { env: S }, ["env"], async (a) => api("POST", `/v1/environments/${seg(a.env)}/stop`)),

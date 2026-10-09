@@ -295,6 +295,11 @@ pub fn allow_bench_tools(ns: &str, owner: &str, owner_ref: &OwnerReference) -> N
 /// beyond DNS, the gateway and the public internet.
 pub(super) const BUILDER_GATE_PORT: i32 = 1234;
 
+/// The gate's second listener: read-only service logs over HTTP (`bins/builder-gate/src/logs.rs`).
+/// Egress only: it is another port on the same pod, so a workspace needs this one entry to
+/// reach it and nothing else changes.
+pub(super) const BUILDER_GATE_LOGS_PORT: i32 = 1235;
+
 
 /// The one hole a workspace's egress gets to reach its builder: the gate, and nothing past it. A
 /// workspace never dials buildkitd directly — `builder_gate_ingress` is what admits the gate to
@@ -313,7 +318,10 @@ pub fn builder_gate_egress(ns: &str, owner: &str, owner_ref: &OwnerReference) ->
                     "namespaceSelector": { "matchLabels": { "kubernetes.io/metadata.name": GATEWAY_NAMESPACE } },
                     "podSelector": { "matchLabels": { "app": "kloudlite-builder-gate" } },
                 }],
-                "ports": [{ "protocol": "TCP", "port": BUILDER_GATE_PORT }],
+                "ports": [
+                    { "protocol": "TCP", "port": BUILDER_GATE_PORT },
+                    { "protocol": "TCP", "port": BUILDER_GATE_LOGS_PORT },
+                ],
             }],
         }),
     )

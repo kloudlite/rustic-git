@@ -134,3 +134,31 @@ test("request_create sends only the kind's own payload; requests_list filters by
   await tool(t, "requests_list").run({ owner: "acme" });
   expect(calls.at(-1)!.url).toBe("/v1/requests?owner=acme");
 });
+
+test("service_logs reads the build gate's logs port, defaulting env in a workspace session", async () => {
+  process.env.KL_LOGS_URL = "http://logs.test";
+  try {
+    const seen: string[] = [];
+    const inner = globalThis.fetch;
+    globalThis.fetch = (async (url: string, init: any = {}) => {
+      if (!String(url).startsWith("http://logs.test")) return inner(url as any, init);
+      seen.push(String(url).replace("http://logs.test", ""));
+      expect(init.headers?.authorization).toBeUndefined();
+      return String(url).includes("/nope") ? new Response("{\"error\":\"no such service\"}", { status: 404 }) : new Response("{\"pods\":[]}");
+    }) as any;
+    // main: env is required and goes into the path
+    const m = platformTools("main");
+    expect(await tool(m, "service_logs").run({ env: "e1", service: "web", tail: 50, previous: true })).toBe("{\"pods\":[]}");
+    expect(seen.at(-1)).toBe("/logs/e1/web?tail=50&previous=true");
+    expect((tool(m, "service_logs").inputSchema as any).required).toEqual(["env", "service"]);
+    // workspace: env defaults through /v1/me/environments
+    const t = platformTools("workspace", "w1");
+    routes["GET /v1/workspaces/w1"] = json({ team: "acme", packages: [] });
+    routes["GET /v1/me/environments"] = json([{ team: "acme", environment: "e9" }]);
+    await tool(t, "service_logs").run({ service: "web" });
+    expect(seen.at(-1)).toBe("/logs/e9/web");
+    await expect(tool(t, "service_logs").run({ service: "nope" })).rejects.toThrow('404: {"error":"no such service"}');
+  } finally {
+    delete process.env.KL_LOGS_URL;
+  }
+});

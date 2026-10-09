@@ -1,4 +1,5 @@
-//! The gate process: one plain TCP listener on 1234, and a `/healthz` on 8080 for the probes.
+//! The gate process: one plain TCP listener on 1234, a read-only service-log HTTP listener on 1235
+//! (`logs`), and a `/healthz` on 8080 for the probes.
 //!
 //! No TLS and no auth on 1234 by design — the client is buildkit's gRPC, which carries neither,
 //! and what makes the port safe is Task 6's NetworkPolicies plus the fact that the only thing on
@@ -52,7 +53,8 @@ async fn main() {
     };
 
     let pods = who::Pods::default();
-    pods.spawn(kube);
+    pods.spawn(kube.clone());
+    let logs = kloudlite_builder_gate::logs::router(Arc::new(kloudlite_builder_gate::logs::Logs::new(Arc::new(pods.clone()), kube)));
     let health = kloudlite_builder_gate::health(pods.clone());
     let gate = Arc::new(Gate {
         api: ApiClient::new(base, secret),
@@ -101,6 +103,17 @@ async fn main() {
     tokio::spawn(async move {
         if let Err(e) = axum::serve(hl, health).await {
             tracing::error!(listener = "health", error = %e, "listener.failed");
+        }
+    });
+
+    let ll = match tokio::net::TcpListener::bind("0.0.0.0:1235").await {
+        Ok(l) => l,
+        Err(e) => fatal(&format!("binding 1235: {e}")),
+    };
+    tokio::spawn(async move {
+        // `ConnectInfo` is the whole identity story: the caller is its TCP source address.
+        if let Err(e) = axum::serve(ll, logs.into_make_service_with_connect_info::<std::net::SocketAddr>()).await {
+            tracing::error!(listener = "logs", error = %e, "listener.failed");
         }
     });
 

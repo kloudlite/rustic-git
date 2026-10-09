@@ -11,6 +11,10 @@
 //! not a protocol we can put a token in, and the connection carries no identity of its own; the
 //! pod IP is the one fact the network gives us that the tenant cannot forge (the CNI assigns it,
 //! and Task 6's NetworkPolicies are what stop anything but a workspace pod reaching this port).
+//!
+//! The gate also serves read-only service logs on 1235 (`logs`): a session may read the logs of a
+//! service in an environment its own owner owns, inside the cluster and never through `/v1`; the
+//! caller is again the source pod IP, and anything not the owner's reads as a 404.
 
 // A panicking request path is a dead pod (`panic = "abort"` in the release profile), so a
 // `.unwrap()`/`.expect()` here is a decision, taken per site with an `allow` and its reason.
@@ -18,6 +22,7 @@
 #![cfg_attr(test, allow(clippy::unwrap_used, clippy::expect_used))]
 
 pub mod idle;
+pub mod logs;
 pub mod splice;
 pub mod who;
 

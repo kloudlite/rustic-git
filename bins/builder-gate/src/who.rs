@@ -15,6 +15,10 @@ use std::sync::{Arc, RwLock};
 /// `(owner, team)` — the pair, not the fold, because `owner_slug` is the one place that folds.
 pub trait Resolver: Send + Sync {
     fn resolve(&self, ip: IpAddr) -> Option<(String, String)>;
+    /// Whether `resolve` can be believed yet. Defaults to true for a fixed resolver (tests).
+    fn listed(&self) -> bool {
+        true
+    }
 }
 
 /// The fold every other tier uses: a team's builder belongs to the team, a personal one to the
@@ -32,6 +36,9 @@ pub struct Pods {
 impl Resolver for Pods {
     fn resolve(&self, ip: IpAddr) -> Option<(String, String)> {
         self.index.read().ok()?.get(&ip).cloned()
+    }
+    fn listed(&self) -> bool {
+        Pods::listed(self)
     }
 }
 
