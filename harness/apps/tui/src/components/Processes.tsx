@@ -10,6 +10,11 @@ import { useWheelAccel } from "../wheel.ts";
 
 type Row = { kind: "header"; label: string; extra: string } | { kind: "proc"; proc: Process };
 
+/** ^j. Without the kitty keyboard protocol (tmux, Terminal.app, iTerm) ctrl+j arrives as a bare LF, which
+ * opentui names "linefeed" with no ctrl flag; ESC+LF is alt, so it stays out. */
+export const isCtrlJ = (key: { name: string; ctrl: boolean; meta: boolean }) =>
+  !key.meta && ((key.ctrl && key.name === "j") || key.name === "linefeed");
+
 const stopped = (p: Process) => p.status === "exited" || p.status === "crashed";
 
 export { uptime };
@@ -99,7 +104,7 @@ export function Processes({
 
   useKeyboard((key) => {
     // ^j toggles this screen (app.tsx command()); the app's own handler is parked while it is up
-    if (key.ctrl && key.name === "j" && !key.meta) return onClose();
+    if (isCtrlJ(key)) return onClose();
     if (key.ctrl || key.meta || key.option) return;
     if (typing) {
       if (key.name === "escape") {

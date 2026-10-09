@@ -13,7 +13,7 @@ import { Work } from "./components/Work.tsx";
 import { workRows } from "./tasks.ts";
 import { HintBar } from "./components/HintBar.tsx";
 import { Files } from "./components/Files.tsx";
-import { Processes } from "./components/Processes.tsx";
+import { Processes, isCtrlJ } from "./components/Processes.tsx";
 import { Spinner } from "./components/Spinner.tsx";
 import { menuItems, placeholders } from "./slash.ts";
 import { fromSpace, wsPath } from "./workspaces.ts";
@@ -541,7 +541,7 @@ export function App({
     }
 
     // ^j is the Jobs screen in both key schemes (vim's bare j still walks the workspaces)
-    if (key.ctrl && key.name === "j" && !key.meta && !menuOpen) return setView((v) => (v === "processes" ? "agent" : "processes"));
+    if (isCtrlJ(key) && !menuOpen) return setView((v) => (v === "processes" ? "agent" : "processes"));
 
     // ---- vim off: ctrl+<letter> commands, everything else types ----
     if (prefs.vim === "off" && key.ctrl && !key.meta && !menuOpen) {

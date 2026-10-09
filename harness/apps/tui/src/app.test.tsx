@@ -1,4 +1,5 @@
 import { expect, test } from "bun:test";
+import { isCtrlJ } from "./components/Processes.tsx";
 import { testRender } from "@opentui/react/test-utils";
 import type { ToolDef } from "@kloudlite-tui/tools";
 import { setCopier } from "./clipboard.ts";
@@ -840,6 +841,13 @@ test("^j opens the jobs screen from main, grouped by workspace, and closes it", 
   t.mockInput.pressKey("j", { ctrl: true });
   expect(await t.frame()).not.toMatch(/api-gateway\s+2 running/);
   t.done();
+});
+
+test("^j counts when it arrives as a bare LF (no kitty protocol: tmux, Terminal.app), alt+LF does not", () => {
+  expect(isCtrlJ({ name: "linefeed", ctrl: false, meta: false })).toBe(true);
+  expect(isCtrlJ({ name: "j", ctrl: true, meta: false })).toBe(true);
+  expect(isCtrlJ({ name: "linefeed", ctrl: false, meta: true })).toBe(false);
+  expect(isCtrlJ({ name: "j", ctrl: false, meta: false })).toBe(false);
 });
 
 test("jobs screen in a workspace: sections, command once, running when the start is unknown", async () => {
