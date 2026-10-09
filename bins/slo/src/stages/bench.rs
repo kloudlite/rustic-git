@@ -5,15 +5,15 @@
 //! the probe owner's bench is long-lived and is left Running with no client, so it sleeps between
 //! runs and costs nothing. Its region is bound once by hand.
 //!
-//! The tunnel is the real one — `kl-connect bench-proxy`, ssh's ProxyCommand for `kl-connect`, as a
+//! The tunnel is the real one — `kl-connect bench-proxy`, the pipe kl-tui is started with, as a
 //! child on stdio, handed a config file under the run's tmp — so the probe walks exactly what a
-//! laptop's ssh walks.
+//! laptop's kl-tui walks.
 //!
 //! Everything that used to speak to the retired harness-bench HTTP server now runs INSIDE the pod
 //! by kube-exec (design 2026-10-05): `node`'s global `fetch` against `kl-sessions`
 //! (`127.0.0.1:8917`'s `/state`, `/send`, `/idle`), the same way `experience_teams::paused` already
-//! reads the pod's mounted tool token. The tunnel itself carries raw bytes to sshd now, so only
-//! `bench.tunnel`'s SSH-banner check and `shell.up`'s direct gateway `/term` GET still use it.
+//! reads the pod's mounted tool token. The tunnel is the kl-tui door (no sshd), so only
+//! `bench.tunnel`'s `hello` round trip and `shell.up`'s direct gateway `/term` GET still use it.
 //!
 //! A skipped id is NO sample and reaches the run row as `skipped`, never `passed`
 //! (`report::run_state`); the service-intercept merge found skipped ids reading as passed, which is
@@ -28,7 +28,7 @@ use k8s_openapi::api::core::v1::Pod;
 use kloudlite_workspaces::crd::{self, ClusterSettings};
 use kube::api::Api;
 use serde_json::{json, Value};
-use tokio::io::AsyncReadExt;
+use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::process::{Child, Command};
 
 use super::{api, call, get, post, raw};
@@ -124,15 +124,14 @@ pub(crate) async fn wait_phase(c: &Ctx, want: &str, cap: Duration) -> Result<()>
 }
 
 /// `kl-connect bench-proxy` with both pipes held (a closed stdin would end the pump); the child
-/// dies with the handle. Still needed by `bench.tunnel`'s raw SSH-banner check — the only thing
-/// left on this end of the tunnel now that it carries raw bytes to sshd and not an HTTP API.
+/// dies with the handle. Used by `bench.tunnel`'s `hello` round trip over the kl-tui door.
 pub(crate) async fn forward(c: &Ctx) -> Result<Child> {
     let dir = c.tmp.join("kl-bench");
     std::fs::create_dir_all(&dir)?;
     let cfg = json!({"api": c.cfg.api_url, "token": c.probe_jwt, "expires_at": "2099-01-01T00:00:00Z", "username": c.cfg.probe_user});
     std::fs::write(dir.join("config.json"), cfg.to_string())?;
     Command::new(&c.programs.kl)
-        .arg("bench-proxy")
+        .args(["bench-proxy", "--tui"])
         .env("KL_CONFIG_DIR", &dir)
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
@@ -274,15 +273,24 @@ pub async fn fast(c: &mut Ctx) {
     }
     c.step("bench.tunnel", TUNNEL_CEILING, |c| {
         async move {
-            // The tunnel carries raw bytes to sshd, not an HTTP API: its own
-            // protocol banner is the only thing to check from this end.
+            // The tunnel is the kl-tui door (/tui/): the daemon speaks JSON lines, so a `hello`
+            // request must come back `ok` with this probe's own `re` id.
             let mut child = forward(c).await?;
             let mut out = child.stdout.take().ok_or_else(|| anyhow!("no stdout"))?;
-            let mut buf = [0u8; 16];
+            let mut inp = child.stdin.take().ok_or_else(|| anyhow!("no stdin"))?;
+            inp.write_all(b"{\"id\":1,\"op\":\"hello\",\"args\":null}\n").await.context("writing hello")?;
             // 100 s: the proxy waits up to its own 90 s for a waking bench before dialling.
-            let n = tokio::time::timeout(Duration::from_secs(100), out.read(&mut buf)).await.context("reading the SSH banner")??;
-            if !buf[..n].starts_with(b"SSH-2.0-") {
-                bail!("the tunnel's first bytes were not an SSH banner: {:?}", String::from_utf8_lossy(&buf[..n]));
+            let mut line = Vec::new();
+            let mut b = [0u8; 1];
+            let read = async {
+                while out.read_exact(&mut b).await.is_ok() && b[0] != b'\n' {
+                    line.push(b[0]);
+                }
+            };
+            tokio::time::timeout(Duration::from_secs(100), read).await.context("reading the hello reply")?;
+            let reply: Value = serde_json::from_slice(&line).with_context(|| format!("not a hello reply: {:?}", String::from_utf8_lossy(&line)))?;
+            if reply["re"] != 1 || reply["ok"] != true {
+                bail!("the tunnel's hello reply was not ok: {reply}");
             }
             // ttyd, reached the browser's way: through the gateway, never the tunnel.
             let (id, token, gateway) = session_triple(c).await?;
@@ -424,7 +432,7 @@ fn skip_sessions(c: &mut Ctx, why: &str) {
 
 /// `shell.up`: the gateway's own `/term` route answers for the session token `session_triple`
 /// minted, built the way `web/apps/web/src/lib/term-url.ts`'s `termUrl` does (ruling 2, task 9 fix
-/// round 1) — the tunnel itself carries raw bytes to sshd now, so this never goes through it.
+/// round 1) — the tunnel is the kl-tui door, so this never goes through it.
 async fn shell_up(c: &mut Ctx) {
     c.step("shell.up", SHELL_CEILING, move |c| {
         async move {
