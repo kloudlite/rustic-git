@@ -371,6 +371,12 @@ data:
                   regex: apiserver_request_duration_seconds_(bucket|sum|count)|apiserver_request_total|apiserver_current_inflight_requests|etcd_request_duration_seconds_(bucket|sum|count)
 
     processors:
+      # First in every pipeline: at 256Mi this pod was OOMKilled every ~40 min on k3s (1024
+      # restarts by 2026-10-09). Shedding a batch beats losing the whole in-memory queue.
+      memory_limiter:
+        check_interval: 1s
+        limit_mib: 400
+        spike_limit_mib: 100
       # Events are rows about pods, not from them: named as their own service so the picker
       # shows `k8s-events` rather than a blank.
       resource/events:
@@ -400,11 +406,11 @@ data:
       pipelines:
         metrics:
           receivers: [k8s_cluster, prometheus/apiserver]
-          processors: [resource, batch]
+          processors: [memory_limiter, resource, batch]
           exporters: [otlphttp]
         logs:
           receivers: [k8s_events]
-          processors: [resource, resource/events, batch]
+          processors: [memory_limiter, resource, resource/events, batch]
           exporters: [otlphttp]
 ---
 apiVersion: apps/v1
@@ -522,8 +528,8 @@ spec:
           volumeMounts:
             - { name: conf, mountPath: /conf }
           resources:
-            requests: { cpu: 50m, memory: 128Mi }
-            limits: { memory: 256Mi }
+            requests: { cpu: 50m, memory: 256Mi }
+            limits: { memory: 512Mi }
           # The same four lines every other workload in this tree carries (2026-09-12 review
           # #67). The collector image already runs as uid 10001, and nothing in this config
           # writes to disk — there is no `file_storage` extension, so the sending queue is in
