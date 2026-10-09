@@ -101,6 +101,24 @@ test(":agent- sessions are hidden from sessions.list", async () => {
   await h2.dispose();
 }, 20000);
 
+test("an internal open (no TUI tools) reuses a live session without disposing it", async () => {
+  process.env.KLOUDLITE_CONFIG_DIR = mkdtempSync(join(tmpdir(), "kl-cfg-"));
+  delete process.env.KL_API_URL;
+  const { models } = await import("@kloudlite-tui/agent");
+  const ms = models.getModels().filter((x: any) => x.provider !== "anthropic") as any[];
+  const b = new LocalBackend();
+  const o: any = { model: { provider: ms[0].provider, id: ms[0].id }, fresh: true, tools: [], permission: async () => ({}) };
+  const h = await b.session("w8", o);
+  const events: string[] = [];
+  h.subscribe((e) => void events.push(e.type));
+  const other = ms.find((x) => x.id !== ms[0].id) ?? ms[0];
+  const h2 = await b.session("w8", { model: { provider: other.provider, id: other.id }, tools: [] } as any);
+  expect(events).not.toContain("session_closed");
+  expect(h2).toBeDefined();
+  await h2.dispose();
+  await h.dispose();
+}, 20000);
+
 test("the gate asks for a codemode script's nested gated call, once for a top-level one", async () => {
   const seen: string[] = [];
   const pi: any = {

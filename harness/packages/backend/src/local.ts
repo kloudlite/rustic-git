@@ -289,6 +289,10 @@ export class LocalBackend implements Backend {
     const sh = this.#shared.get(key);
     const built = this.#built.get(key);
     if (live && sh && built && !opts.fresh) {
+      // An internal open (a reply delivered to main, an ask reaching a workspace) carries none of the
+      // TUI's tools: it takes the agent as the person left it. Its model and codemode are the asker's,
+      // and applying them would undo a model switch or rebuild the session under the person's TUI.
+      if (opts.tools.length === 0) return this.#attach(key, opts, sh.view());
       const needsRebuild =
         (opts.model.provider === "anthropic") !== built.claude ||
         !!opts.codemode !== built.codemode ||

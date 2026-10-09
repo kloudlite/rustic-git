@@ -38,6 +38,8 @@ export function host(backend: Backend, sock: string): Promise<Server> {
 }
 
 if (import.meta.main) {
+  // one stray rejection must not take every session on the bench down with it
+  process.on("unhandledRejection", (e) => console.error("unhandled rejection", e));
   process.chdir(homedir());
   mkdirSync(join(homedir(), ".kl"), { recursive: true });
   const { LocalBackend } = await import("./local.ts");
