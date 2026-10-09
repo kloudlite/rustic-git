@@ -365,7 +365,7 @@ export function App({
     if (key.ctrl && key.name === "c") return exit();
     // a full-column view owns the keyboard while it is up
     if (login || shownAsk || filesView || processesView) return;
-    if (btw && key.name === "escape") {
+    if (btw && btw.key === activeKey && key.name === "escape") {
       btwN.current++; // ponytail: no cancel; a late answer is just dropped
       setBtw(null);
       return;
