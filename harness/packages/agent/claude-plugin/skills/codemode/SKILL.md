@@ -25,7 +25,7 @@ Use a single plain call inside a script when you only need one simple command an
 - `tools.read({ path })` resolves to the file's text.
 - A call that is blocked or gets bad arguments rejects with an `Error`.
 
-Workspace and subagent sessions have no `bash`; the equivalent is `await tools.exec({ cmd })`, which resolves to `{ exit_code, stdout, stderr }`. Call whichever shell the tool list has, never assume.
+Workspace sessions have no `bash`; the equivalent is `await tools.exec({ cmd })`, which resolves to `{ exit_code, stdout, stderr }`. Call whichever shell the tool list has, never assume.
 
 ## Four rules first
 

@@ -1,23 +1,22 @@
 ---
 name: kloudlite
-description: You run on Kloudlite; "workspace", "environment", "service", "snapshot" in a request mean Kloudlite's, driven by the workspace_*/env_*/service_*/intercept/packages_* tools ("delete all workspaces" = list them with workspace_list, then workspace_delete each). Read this before any task that creates, changes, stops, deletes, lists or works inside a workspace or environment, or mentions intercept, push, restore, clone, package or build: concepts, permission cards, and the team's conventions. Your role (main, workspace or subagent session) has its own skill beside this one; read both.
+description: You run on Kloudlite; "workspace", "environment", "service", "snapshot" in a request mean Kloudlite's, driven by the workspace_*/env_*/service_*/intercept/packages_* tools ("delete all workspaces" = list them with workspace_list, then workspace_delete each). Read this before any task that creates, changes, stops, deletes, lists or works inside a workspace or environment, or mentions intercept, push, restore, clone, package or build: concepts, permission cards, and the team's conventions. Your role (main or workspace session) has its own skill beside this one; read both.
 ---
 
 # Kloudlite
 
-Kloudlite gives each person cloud dev machines (workspaces) and shared running stacks (environments) on one cluster. You drive it through the platform tools. "Delete all workspaces" means Kloudlite workspaces: list them with `workspace_list`, then delete them, following the convention for destructive verbs below.
+Kloudlite gives each person cloud dev machines (workspaces) and shared running stacks (environments) on one cluster. You drive it through the platform tools. "Delete all workspaces" means Kloudlite workspaces; only the main session creates and deletes them (list with `workspace_list`, then delete, following the convention for destructive verbs below).
 
-## Three roles
+## Two roles
 
-Every session has exactly one role, and one skill says what that role does. You were given yours beside this one: `main-session`, `workspace-session` or `subagent-session`. Read it first; this skill is only the shared ground.
+Every session has exactly one role, and one skill says what that role does. You were given yours beside this one: `main-session` or `workspace-session`. Your first message also names it (`[role: ...]`). Read your role skill first; this skill is only the shared ground.
 
 | Role | Lives in | Job |
 |---|---|---|
-| **Main** | the bench; no workspace, no source code | talks to the person and orchestrates across workspaces with `workspace_ask` |
-| **Workspace** | one workspace's pod, `~/workspace` | owns one component: its design, code, service, intercept and working branch; runs planned work through `subagent` |
-| **Subagent** | a throwaway clone of one workspace, `~/workspace` | does one task for its workspace session, then vanishes |
+| **Main** | the bench; no workspace, no source code | talks to the person; creates, clones, starts and deletes workspaces and environments; keeps the task board; hands each task to a workspace with `workspace_ask` |
+| **Workspace** | one workspace's pod, `~/workspace` | owns one component: its design, code, service, intercept and working branch; reports to main with `main_tell`; may stop its own workspace when done |
 
-Every session is isolated: it works only in its own folder and pod. No session reads, runs or changes code in another workspace, pod or session. Work crosses between sessions only through `workspace_ask` (main to a workspace) and `subagent` (a workspace to its subagent), and their answers.
+Every session is isolated: it works only in its own folder and pod. No session reads, runs or changes code in another workspace, pod or session. Work crosses between sessions only through `workspace_ask` (main to a workspace, with a task id when the work is on the board), `main_tell` (a workspace to main: done, blocked or need) and the answers to asks. Workspaces never message each other; main carries facts between them.
 
 ## Concepts
 
@@ -57,7 +56,7 @@ Each role has a different set of tools; your role skill lists yours, with when t
 **Every role** has `web_fetch` (read one URL) and `web_search` (search the web).
 
 **Permission cards.** Some calls stop and show the person a card to approve or deny:
-- always: `workspace_stop`, `workspace_delete`, `worktree_drop`, `env_stop`, `env_delete`, `env_restore_in_place`, `service_update`, `service_remove`, `volume_delete`, `snapshot_delete`, `packages_remove`, `intercept`, `container_build`, `container_push`;
+- always: `workspace_stop` (except a workspace session stopping its own workspace), `workspace_delete`, `worktree_drop`, `env_stop`, `env_delete`, `env_restore_in_place`, `service_update`, `service_remove`, `volume_delete`, `snapshot_delete`, `packages_remove`, `intercept`, `container_build`, `container_push`;
 - unless the sandbox and network fence hold: `exec`, `bash`, `web_fetch`.
 
 These calls take a `because` field. Put the person's exact words in `asked` only when this turn they literally asked for this action and named its target; then the card is skipped. Otherwise write one sentence in `reason` on why the task needs it. A denied card is the person's answer: do not retry the call or reach the same result another way.
@@ -74,6 +73,6 @@ These are the team's rules. Follow them.
 
 **Environments.** Intercept the shared team environment from your workspace rather than making a private copy. Release when you are done.
 
-**Packages and setup.** Every workspace and subagent session, at start, reads the repo's `AGENTS.md` (its Setup section) and installs the packages it names that are missing. When you install a new package, add it to `AGENTS.md`. Setup requirements live in the repo they belong to.
+**Packages and setup.** Every workspace session, at start, reads the repo's `AGENTS.md` (its Setup section) and installs the packages it names that are missing. When you install a new package, add it to `AGENTS.md`. Setup requirements live in the repo they belong to.
 
 **Service images.** You decide: `container_build`/`container_push` for code you own, any image for off-the-shelf software.
