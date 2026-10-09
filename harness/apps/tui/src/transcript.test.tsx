@@ -180,6 +180,32 @@ test("a codemode call renders its script above its output", async () => {
   expect(frame).toContain("Script completed");
 }, 15000);
 
+// script and output collapse separately: 7 + 4 rows passes the cap together
+// but cuts nothing, so there is no "+0 lines" expander (2026-10-09)
+test("a codemode block that cuts nothing offers no expander", async () => {
+  const t = await testRender(
+    <Transcript
+      width={100}
+      entries={[
+        {
+          kind: "tool",
+          id: "c0",
+          name: "codemode",
+          status: "ok",
+          summary: "a\nb\nc\nd\ne\nf\ng",
+          output: "Script completed\nWall time 5.5 seconds\nOutput:\nstate: ready",
+        },
+      ]}
+    />,
+    { width: 100, height: 30 },
+  );
+  await new Promise((r) => setTimeout(r, 200));
+  await t.renderOnce();
+  const frame = t.captureCharFrame();
+  expect(frame).toContain("state: ready");
+  expect(frame).not.toContain("Click to expand");
+}, 15000);
+
 test("a codemode card shows what the script displayed, collapsed", async () => {
   const t = await testRender(
     <Transcript

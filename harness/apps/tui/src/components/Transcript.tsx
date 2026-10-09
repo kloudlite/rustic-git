@@ -127,13 +127,12 @@ function collapseMd(
  * only entries that actually collapse react to a click.
  */
 /**
- * Rows a bash/codemode block draws: the command (or the codemode script) above
- * its output. The command line is text in the block like any other and wraps
- * like any other, so leaving it out of the count sized the box short and the
- * output spilled past it — a `bun.lock` grep is one very long line.
+ * Rows the closed block actually cuts. Script and output collapse separately,
+ * so together they can pass COLLAPSE_MAX while neither is cut: that drew
+ * "… +0 lines  Click to expand" under a codemode poll (2026-10-09).
  */
-function shellRows(entry: Entry & { kind: "tool" }, width: number): number {
-  return rowCount(`${entry.summary ?? ""}\n${entry.output}`, width - 2);
+function shellHidden(entry: Entry & { kind: "tool" }, width: number): number {
+  return collapse(entry.summary, false, width - 2).hidden + collapse(entry.output, false, width - 2).hidden;
 }
 
 function collapsible(entry: Entry, width: number): boolean {
@@ -141,7 +140,7 @@ function collapsible(entry: Entry, width: number): boolean {
   if (entry.kind === "thinking")
     return !!entry.done && rowCount(entry.text, width - RAIL) > COLLAPSE_MAX;
   if (entry.kind === "tool" && (entry.name === "bash" || entry.name === "codemode"))
-    return shellRows(entry, width) > COLLAPSE_MAX;
+    return shellHidden(entry, width) > 0;
   return false;
 }
 
@@ -425,7 +424,7 @@ function Row({
               <text fg={theme.border}>{"─".repeat(Math.max(0, width - 4))}</text>
             )}
             {out.text !== "" && <text fg={theme.muted}>{out.text}</text>}
-            {shellRows(entry, width) > COLLAPSE_MAX && (
+            {shellHidden(entry, width) > 0 && (
               // a long codemode script collapses too, so its cut rows count as hidden
               <More hidden={script.hidden + out.hidden} open={open} onToggle={onOpen} hover={hover} />
             )}
