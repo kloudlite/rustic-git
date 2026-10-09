@@ -93,7 +93,7 @@ fn space_path(owner: &str, team: &str) -> String {
 }
 
 fn applied(owner: &str, team: &str) -> Route {
-    kloudlite_workspaces::kube_test::patch(space_path(owner, team), serde_json::to_value(crd::space_environment(owner, team, "env-1")).unwrap())
+    kloudlite_workspaces::kube_test::patch(space_path(owner, team), serde_json::to_value(crd::space_environment(owner, team, "env-0000000000000001")).unwrap())
 }
 
 async fn put(s: &Server, team: &str, body: Value) -> (reqwest::StatusCode, String) {
@@ -113,25 +113,25 @@ fn writes(s: &Server) -> Vec<String> {
 
 #[tokio::test]
 async fn choosing_writes_the_callers_own_space_and_nothing_else() {
-    let s = server(vec![get(format!("{API}/environments/env-1"), env("env-1", "acme", None)), applied("karthik", "acme")]).await;
-    let (st, body) = put(&s, "Acme", json!({"environment": "env-1"})).await;
+    let s = server(vec![get(format!("{API}/environments/env-0000000000000001"), env("env-0000000000000001", "acme", None)), applied("karthik", "acme")]).await;
+    let (st, body) = put(&s, "Acme", json!({"environment": "env-0000000000000001"})).await;
     assert_eq!(st, 200, "{body}");
     let sent = s.rec.sent("PATCH", &space_path("karthik", "acme"));
     assert_eq!(sent.len(), 1, "{:?}", s.rec.calls());
-    assert_eq!(sent[0]["spec"], json!({"owner": "karthik", "team": "acme", "environment": "env-1"}));
-    assert_eq!(sent[0]["metadata"]["labels"]["kloudlite.io/environment"], "env-1");
-    assert_eq!(serde_json::from_str::<Value>(&body).unwrap(), json!({"team": "acme", "environment": "env-1", "region": "centralindia"}));
+    assert_eq!(sent[0]["spec"], json!({"owner": "karthik", "team": "acme", "environment": "env-0000000000000001"}));
+    assert_eq!(sent[0]["metadata"]["labels"]["kloudlite.io/environment"], "env-0000000000000001");
+    assert_eq!(serde_json::from_str::<Value>(&body).unwrap(), json!({"team": "acme", "environment": "env-0000000000000001", "region": "centralindia"}));
 }
 
 #[tokio::test]
 async fn a_personal_space_may_choose_only_the_persons_own_environment() {
     let s = server(vec![
-        get(format!("{API}/environments/env-1"), env("env-1", "karthik", None)),
+        get(format!("{API}/environments/env-0000000000000001"), env("env-0000000000000001", "karthik", None)),
         get(format!("{API}/environments/env-team"), env("env-team", "acme", None)),
         applied("karthik", "karthik"),
     ])
     .await;
-    assert_eq!(put(&s, "karthik", json!({"environment": "env-1"})).await.0, 200);
+    assert_eq!(put(&s, "karthik", json!({"environment": "env-0000000000000001"})).await.0, 200);
     assert_eq!(s.rec.sent("PATCH", &space_path("karthik", "")).len(), 1, "the personal space is ws-karthik");
     let (st, body) = put(&s, "karthik", json!({"environment": "env-team"})).await;
     assert_eq!(st, 409, "{body}");
@@ -151,7 +151,7 @@ async fn every_refusal_writes_nothing() {
         ("acme", json!({"environment": "env-other"}), 409, "another owner's environment"),
         ("acme", json!({"environment": "bld-acme"}), 404, "the hidden builder"),
         ("acme", json!({"environment": "env-gone"}), 404, "no such environment"),
-        ("acme", json!({"environment": "env-1/../x"}), 422, "not a label value"),
+        ("acme", json!({"environment": "env-0000000000000001/../x"}), 422, "not a label value"),
     ];
     for (team, body, want, why) in cases {
         let (st, text) = put(&s, team, body).await;
@@ -162,18 +162,18 @@ async fn every_refusal_writes_nothing() {
 
 #[tokio::test]
 async fn clearing_is_idempotent_and_listing_is_the_callers_own() {
-    let mine = serde_json::to_value(crd::space_environment("karthik", "acme", "env-1")).unwrap();
-    let mut theirs = serde_json::to_value(crd::space_environment("bob", "acme", "env-1")).unwrap();
+    let mine = serde_json::to_value(crd::space_environment("karthik", "acme", "env-0000000000000001")).unwrap();
+    let mut theirs = serde_json::to_value(crd::space_environment("bob", "acme", "env-0000000000000001")).unwrap();
     theirs["metadata"]["labels"]["kloudlite.io/owner"] = json!("karthik");
     let s = server(vec![
         get(format!("{API}/spaceenvironments"), json!({"apiVersion": "kloudlite.io/v1alpha1", "kind": "SpaceEnvironmentList", "metadata": {}, "items": [mine, theirs]})),
-        get(format!("{API}/environments/env-1"), env("env-1", "acme", None)),
+        get(format!("{API}/environments/env-0000000000000001"), env("env-0000000000000001", "acme", None)),
     ])
     .await;
     let tok = token(&s.jwt, "karthik");
     let (st, body) = common::get_json(&s.base, &tok, "/v1/me/environments").await;
     assert_eq!(st, 200);
-    assert_eq!(body, json!([{"team": "acme", "environment": "env-1", "region": "centralindia"}]), "a mislabelled row is not the caller's");
+    assert_eq!(body, json!([{"team": "acme", "environment": "env-0000000000000001", "region": "centralindia"}]), "a mislabelled row is not the caller's");
     // Nothing to delete (the mock 404s) is still the state asked for.
     assert_eq!(common::delete(&s.base, &tok, "/v1/me/environments/acme").await, 204);
     assert!(s.rec.calls().contains(&format!("DELETE {}", space_path("karthik", "acme"))), "{:?}", s.rec.calls());
@@ -183,8 +183,8 @@ async fn clearing_is_idempotent_and_listing_is_the_callers_own() {
 async fn the_retired_attach_routes_answer_gone() {
     let s = server(vec![]).await;
     let tok = token(&s.jwt, "karthik");
-    for path in ["/v1/workspaces/ws-1/attach", "/v1/workspaces/ws-1/detach", "/v1/bench/attach", "/v1/bench/detach"] {
-        let r = reqwest::Client::new().post(format!("{}{path}", s.base)).bearer_auth(&tok).json(&json!({"environment": "env-1"})).send().await.unwrap();
+    for path in ["/v1/workspaces/ws-0000000000000001/attach", "/v1/workspaces/ws-0000000000000001/detach", "/v1/bench/attach", "/v1/bench/detach"] {
+        let r = reqwest::Client::new().post(format!("{}{path}", s.base)).bearer_auth(&tok).json(&json!({"environment": "env-0000000000000001"})).send().await.unwrap();
         assert_eq!(r.status(), 410, "{path}");
         assert!(r.text().await.unwrap().contains("/v1/me/environments/"), "{path}");
     }
@@ -195,19 +195,19 @@ async fn the_retired_attach_routes_answer_gone() {
 /// against spec.
 #[tokio::test]
 async fn deleting_an_environment_deletes_the_choices_naming_it() {
-    let e = env("env-1", "karthik", None);
-    let named = serde_json::to_value(crd::space_environment("karthik", "karthik", "env-1")).unwrap();
-    let mut stale_label = serde_json::to_value(crd::space_environment("karthik", "acme", "env-2")).unwrap();
-    stale_label["metadata"]["labels"]["kloudlite.io/environment"] = json!("env-1");
+    let e = env("env-0000000000000001", "karthik", None);
+    let named = serde_json::to_value(crd::space_environment("karthik", "karthik", "env-0000000000000001")).unwrap();
+    let mut stale_label = serde_json::to_value(crd::space_environment("karthik", "acme", "env-0000000000000002")).unwrap();
+    stale_label["metadata"]["labels"]["kloudlite.io/environment"] = json!("env-0000000000000001");
     let s = server(vec![
-        get(format!("{API}/environments/env-1"), e.clone()),
-        Route { method: "DELETE", path: format!("{API}/environments/env-1"), status: 200, body: e },
+        get(format!("{API}/environments/env-0000000000000001"), e.clone()),
+        Route { method: "DELETE", path: format!("{API}/environments/env-0000000000000001"), status: 200, body: e },
         get(format!("{API}/spaceenvironments"), json!({"apiVersion": "kloudlite.io/v1alpha1", "kind": "SpaceEnvironmentList", "metadata": {}, "items": [named.clone(), stale_label]})),
         Route { method: "DELETE", path: space_path("karthik", "karthik"), status: 200, body: named },
         get(format!("{API}/snapshots"), json!({"apiVersion": "kloudlite.io/v1alpha1", "kind": "SnapshotList", "metadata": {}, "items": []})),
     ])
     .await;
-    let st = common::delete(&s.base, &token(&s.jwt, "karthik"), "/v1/environments/env-1").await;
+    let st = common::delete(&s.base, &token(&s.jwt, "karthik"), "/v1/environments/env-0000000000000001").await;
     assert!(st.is_success(), "{st}");
     let calls = s.rec.calls();
     assert!(calls.iter().any(|c| c.starts_with(&format!("GET {API}/spaceenvironments")) && c.contains("environment")), "{calls:?}");
@@ -255,12 +255,12 @@ fn beat_routes(spaces: Vec<Value>, workspaces: Vec<Value>, rolled: bool, create_
     let mut r = vec![
         get(format!("{API}/spaceenvironments"), list("SpaceEnvironment", spaces)),
         get(format!("{API}/workspaces"), list("Workspace", workspaces.clone())),
-        get(format!("{API}/environments/env-1"), env("env-1", "karthik", None)),
-        get(format!("{API}/environments/env-2"), env("env-2", "karthik", None)),
+        get(format!("{API}/environments/env-0000000000000001"), env("env-0000000000000001", "karthik", None)),
+        get(format!("{API}/environments/env-0000000000000002"), env("env-0000000000000002", "karthik", None)),
         Route { method: "POST", path: format!("{API}/spaceenvironments"), status: create_status, body: if create_status == 409 {
             json!({"kind": "Status", "apiVersion": "v1", "status": "Failure", "reason": "AlreadyExists", "code": 409, "message": "exists"})
         } else {
-            serde_json::to_value(crd::space_environment("karthik", "karthik", "env-1")).unwrap()
+            serde_json::to_value(crd::space_environment("karthik", "karthik", "env-0000000000000001")).unwrap()
         } },
         agents(rolled),
     ];
@@ -277,12 +277,12 @@ fn ws_patch(rec: &Recorder, name: &str) -> Vec<Value> {
 
 #[tokio::test]
 async fn migration_writes_the_choice_and_clears_the_field_once_every_agent_reads_choices() {
-    let (s, rec) = state(beat_routes(vec![], vec![legacy_ws("ws-1", "env-1", "2026-09-14T10:00:00Z", false)], true, 201), false);
+    let (s, rec) = state(beat_routes(vec![], vec![legacy_ws("ws-0000000000000001", "env-0000000000000001", "2026-09-14T10:00:00Z", false)], true, 201), false);
     kloudlite_workspaces::api::spaces::migrate(&s).await;
     let posted = rec.sent("POST", &format!("{API}/spaceenvironments"));
     assert_eq!(posted.len(), 1, "{:?}", rec.calls());
-    assert_eq!(posted[0]["spec"]["environment"], "env-1");
-    let p = ws_patch(&rec, "ws-1");
+    assert_eq!(posted[0]["spec"]["environment"], "env-0000000000000001");
+    let p = ws_patch(&rec, "ws-0000000000000001");
     assert_eq!(p.len(), 1);
     assert!(p[0]["spec"]["attachedEnvironment"].is_null() && p[0]["spec"].is_object(), "{}", p[0]);
     assert_eq!(p[0]["metadata"]["annotations"][crd::SPACE_MIGRATED_ANNOTATION], "true");
@@ -290,10 +290,10 @@ async fn migration_writes_the_choice_and_clears_the_field_once_every_agent_reads
 
 #[tokio::test]
 async fn a_clear_is_deferred_while_an_agent_has_not_rolled_but_the_object_is_stamped() {
-    let (s, rec) = state(beat_routes(vec![], vec![legacy_ws("ws-1", "env-1", "2026-09-14T10:00:00Z", false)], false, 201), false);
+    let (s, rec) = state(beat_routes(vec![], vec![legacy_ws("ws-0000000000000001", "env-0000000000000001", "2026-09-14T10:00:00Z", false)], false, 201), false);
     kloudlite_workspaces::api::spaces::migrate(&s).await;
     assert_eq!(rec.sent("POST", &format!("{API}/spaceenvironments")).len(), 1);
-    let p = ws_patch(&rec, "ws-1");
+    let p = ws_patch(&rec, "ws-0000000000000001");
     assert_eq!(p.len(), 1);
     assert!(p[0].get("spec").is_none(), "the field stays for an old agent: {}", p[0]);
     assert_eq!(p[0]["metadata"]["annotations"][crd::SPACE_MIGRATED_ANNOTATION], "true");
@@ -302,13 +302,13 @@ async fn a_clear_is_deferred_while_an_agent_has_not_rolled_but_the_object_is_sta
 #[tokio::test]
 async fn in_a_conflict_the_newest_attach_is_the_choice() {
     let (s, rec) = state(
-        beat_routes(vec![], vec![legacy_ws("ws-old", "env-1", "2026-09-14T09:00:00Z", false), legacy_ws("ws-new", "env-2", "2026-09-14T10:00:00Z", false)], true, 201),
+        beat_routes(vec![], vec![legacy_ws("ws-old", "env-0000000000000001", "2026-09-14T09:00:00Z", false), legacy_ws("ws-new", "env-0000000000000002", "2026-09-14T10:00:00Z", false)], true, 201),
         false,
     );
     kloudlite_workspaces::api::spaces::migrate(&s).await;
     let posted = rec.sent("POST", &format!("{API}/spaceenvironments"));
     assert_eq!(posted.len(), 1, "one space, one choice");
-    assert_eq!(posted[0]["spec"]["environment"], "env-2");
+    assert_eq!(posted[0]["spec"]["environment"], "env-0000000000000002");
     assert_eq!(ws_patch(&rec, "ws-old").len(), 1, "the loser's field is cleared too");
 }
 
@@ -316,10 +316,10 @@ async fn in_a_conflict_the_newest_attach_is_the_choice() {
 /// choice, even though its space has none now (the person cleared it).
 #[tokio::test]
 async fn a_failed_clear_is_retried_without_resurrecting_a_cleared_choice() {
-    let (s, rec) = state(beat_routes(vec![], vec![legacy_ws("ws-1", "env-1", "2026-09-14T10:00:00Z", true)], true, 201), false);
+    let (s, rec) = state(beat_routes(vec![], vec![legacy_ws("ws-0000000000000001", "env-0000000000000001", "2026-09-14T10:00:00Z", true)], true, 201), false);
     kloudlite_workspaces::api::spaces::migrate(&s).await;
     assert!(rec.sent("POST", &format!("{API}/spaceenvironments")).is_empty(), "{:?}", rec.calls());
-    let p = ws_patch(&rec, "ws-1");
+    let p = ws_patch(&rec, "ws-0000000000000001");
     assert_eq!(p.len(), 1);
     assert!(p[0]["spec"]["attachedEnvironment"].is_null() && p[0]["spec"].is_object());
 }
@@ -327,8 +327,8 @@ async fn a_failed_clear_is_retried_without_resurrecting_a_cleared_choice() {
 /// A choice created between the list and the write wins: the migration creates, never applies.
 #[tokio::test]
 async fn migration_never_overwrites_a_choice_made_meanwhile() {
-    let (s, rec) = state(beat_routes(vec![], vec![legacy_ws("ws-1", "env-1", "2026-09-14T10:00:00Z", false)], true, 409), false);
+    let (s, rec) = state(beat_routes(vec![], vec![legacy_ws("ws-0000000000000001", "env-0000000000000001", "2026-09-14T10:00:00Z", false)], true, 409), false);
     kloudlite_workspaces::api::spaces::migrate(&s).await;
     assert!(!rec.calls().iter().any(|c| (c.starts_with("PATCH") || c.starts_with("PUT")) && c.contains("spaceenvironments")), "{:?}", rec.calls());
-    assert_eq!(ws_patch(&rec, "ws-1").len(), 1, "the space is settled, so the field goes");
+    assert_eq!(ws_patch(&rec, "ws-0000000000000001").len(), 1, "the space is settled, so the field goes");
 }

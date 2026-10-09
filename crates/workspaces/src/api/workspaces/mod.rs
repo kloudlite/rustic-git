@@ -1,6 +1,7 @@
 //! `/v1/workspaces` — create, list, read, delete, start/stop, attach/detach, package edits,
 //! clone and restore-to-new, plus the ssh connect ticket and the owner's platform key install.
 
+use crate::api::scope::{Named};
 use super::scope::{denial, may_act_on, may_allocate_for, mine, my_ws, owned_by, owned_in, refuse_taken_name};
 use super::{caller, caller_for, Caller, check_region, guard_alloc, is_missing, kube, kube_err, not_found, not_ready, phase, rid, workspace_cost, ApiState};
 use super::push::{clone_base, with_based_on};
@@ -12,7 +13,7 @@ use crate::packages::resolve::Refusal;
 use kube::api::{Api, DeleteParams, ListParams, Patch, PatchParams, PostParams};
 use kube::{Resource, ResourceExt};
 use axum::{
-    extract::{Path, State},
+    extract::State,
     http::StatusCode,
     response::{IntoResponse, Response},
     Json,
@@ -506,7 +507,7 @@ pub(crate) async fn get_ws(
     headers: axum::http::HeaderMap,
     method: axum::http::Method,
     uri: axum::extract::OriginalUri,
-    Path(id): Path<String>,
+    Named(id): Named,
 ) -> Result<Response, Response> {
     let owner = caller_for(&s, &headers, &method, uri.path()).await?;
     let w = my_ws(&s, &owner, &id).await?;
@@ -536,7 +537,7 @@ pub(crate) async fn ws_tools(
     headers: axum::http::HeaderMap,
     method: axum::http::Method,
     uri: axum::extract::OriginalUri,
-    Path(id): Path<String>,
+    Named(id): Named,
     axum::extract::Query(q): axum::extract::Query<ToolsQuery>,
 ) -> Result<Response, Response> {
     let owner = caller_for(&s, &headers, &method, uri.path()).await?;
@@ -628,7 +629,7 @@ pub(crate) async fn delete_ws(
     headers: axum::http::HeaderMap,
     method: axum::http::Method,
     uri: axum::extract::OriginalUri,
-    Path(id): Path<String>,
+    Named(id): Named,
 ) -> Result<Response, Response> {
     delete_as(&s, &caller_for(&s, &headers, &method, uri.path()).await?, &id).await
 }
@@ -643,6 +644,7 @@ pub(crate) async fn delete_as(
     id: &str,
 ) -> Result<Response, Response> {
     let w = my_ws(s, owner, id).await?;
+    let id = &kube::ResourceExt::name_any(&w);
     // Deleting a bench by hand would take the person's transcripts with it while their membership
     // still says they have one, and the beat would simply make a fresh empty one. The GC after a
     // removal's grace is the only thing that deletes one.
@@ -678,10 +680,11 @@ pub(crate) async fn start_ws(
     headers: axum::http::HeaderMap,
     method: axum::http::Method,
     uri: axum::extract::OriginalUri,
-    Path(id): Path<String>,
+    Named(id): Named,
 ) -> Result<Response, Response> {
     let owner = caller_for(&s, &headers, &method, uri.path()).await?;
     let w = my_ws(&s, &owner, &id).await?;
+    let id = kube::ResourceExt::name_any(&w);
     if w.status.as_ref().is_some_and(|st| interrupted(&st.conditions)) {
         return Err(interrupted_409("workspace"));
     }
@@ -726,7 +729,7 @@ pub(crate) async fn stop_ws(
     headers: axum::http::HeaderMap,
     method: axum::http::Method,
     uri: axum::extract::OriginalUri,
-    Path(id): Path<String>,
+    Named(id): Named,
 ) -> Result<Response, Response> {
     stop_as(&s, &caller_for(&s, &headers, &method, uri.path()).await?, &id).await
 }
@@ -739,6 +742,7 @@ pub(crate) async fn stop_as(
     id: &str,
 ) -> Result<Response, Response> {
     let w = my_ws(s, owner, id).await?;
+    let id = &kube::ResourceExt::name_any(&w);
     // One stop for a bench, whichever route asked: `/v1/bench/stop` and this are the same handler
     // after the facade, so the tool-token Secret is dropped either way.
     if crd::is_bench(&w) {

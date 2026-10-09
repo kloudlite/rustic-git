@@ -1,6 +1,7 @@
 //! `push` — the single mutating verb: a `Snapshot` CR, and the clone/restore machinery that grafts
 //! a new working copy onto one.
 
+use super::scope::{Named};
 use super::{caller_for, guard_alloc, kube, kube_err, not_found, not_ready, ApiState};
 use super::scope::{denial, find_env, may_allocate_for, my_ws};
 use super::workspaces::ws_volume;
@@ -9,7 +10,7 @@ use crate::crd;
 use kube::api::{Api, ListParams, PostParams};
 use kube::{Resource, ResourceExt};
 use axum::{
-    extract::{Path, State},
+    extract::State,
     http::StatusCode,
     response::{IntoResponse, Response},
     Json,
@@ -186,11 +187,12 @@ pub(crate) async fn push_ws(
     headers: axum::http::HeaderMap,
     method: axum::http::Method,
     uri: axum::extract::OriginalUri,
-    Path(id): Path<String>,
+    Named(id): Named,
     body: axum::body::Bytes,
 ) -> Result<Response, Response> {
     let owner = caller_for(&s, &headers, &method, uri.path()).await?;
     let w = my_ws(&s, &owner, &id).await?;
+    let id = kube::ResourceExt::name_any(&w);
     let msg = optional_push_message(body)?;
     let volume = ws_volume(&w).ok_or_else(not_ready)?;
     let owner_of = if w.spec.team.is_empty() { w.spec.owner.clone() } else { w.spec.team.clone() };
@@ -211,11 +213,12 @@ pub(crate) async fn push_env(
     headers: axum::http::HeaderMap,
     method: axum::http::Method,
     uri: axum::extract::OriginalUri,
-    Path(id): Path<String>,
+    Named(id): Named,
     body: axum::body::Bytes,
 ) -> Result<Response, Response> {
     let caller_id = caller_for(&s, &headers, &method, uri.path()).await?;
     let e = find_env(&s, &caller_id, &id).await?;
+    let id = kube::ResourceExt::name_any(&e);
     let msg = optional_push_message(body)?;
     let volume = env_volume(&e).ok_or_else(not_ready)?;
     // Same reasoning as `push_ws`: `find_env` admits a superadmin claim to reach any owner's

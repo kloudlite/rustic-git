@@ -127,16 +127,16 @@ fn stamped(mut v: Value, gib: u64, at: &str) -> Value {
 #[tokio::test]
 async fn quota_reports_the_default_limits_and_the_computed_use() {
     let routes = vec![
-        get(format!("{API}/workspaces"), list_of("Workspace", vec![ws_obj("ws-1", "karthik", "running"), ws_obj("ws-2", "karthik", "stopped")])),
+        get(format!("{API}/workspaces"), list_of("Workspace", vec![ws_obj("ws-0000000000000001", "karthik", "running"), ws_obj("ws-0000000000000002", "karthik", "stopped")])),
         get(format!("{API}/environments"), list_of("Environment", vec![])),
         get(
             format!("{API}/volumes"),
             list_of(
                 "Volume",
                 vec![
-                    stamped(vol_obj("ws-1", "karthik", 20), 6, "2026-09-17T04:00:00Z"),
+                    stamped(vol_obj("ws-0000000000000001", "karthik", 20), 6, "2026-09-17T04:00:00Z"),
                     // Never stamped: the floor, never free and never its 30 GB ceiling.
-                    vol_obj("ws-2", "karthik", 30),
+                    vol_obj("ws-0000000000000002", "karthik", 30),
                 ],
             ),
         ),
@@ -181,9 +181,9 @@ async fn a_team_workspace_counts_against_the_team_and_not_its_maker() {
         "status": {"phase": "ready"}
     });
     let routes = vec![
-        get(format!("{API}/workspaces"), list_of("Workspace", vec![ws_obj("ws-1", "karthik", "stopped"), team_ws])),
+        get(format!("{API}/workspaces"), list_of("Workspace", vec![ws_obj("ws-0000000000000001", "karthik", "stopped"), team_ws])),
         get(format!("{API}/environments"), list_of("Environment", vec![])),
-        get(format!("{API}/volumes"), list_of("Volume", vec![vol_obj("ws-1", "karthik", 20), team_vol])),
+        get(format!("{API}/volumes"), list_of("Volume", vec![vol_obj("ws-0000000000000001", "karthik", 20), team_vol])),
         get(format!("{API}/snapshots"), list_of("Snapshot", vec![snap])),
         not_found(format!("{API}/quotas/karthik")),
         not_found(format!("{API}/quotas/default-user")),
@@ -308,7 +308,7 @@ async fn push_and_start_are_refused_while_the_owner_is_over_the_disk_limit() {
             get(format!("{API}/workspaces"), list_of("Workspace", vec![])),
             get(format!("{API}/environments"), list_of("Environment", vec![])),
             // 101 GiB occupied against the default 100: over, not merely full.
-            get(format!("{API}/volumes"), list_of("Volume", vec![stamped(vol_obj("ws-1", "karthik", 120), 101, "2026-09-17T04:00:00Z")])),
+            get(format!("{API}/volumes"), list_of("Volume", vec![stamped(vol_obj("ws-0000000000000001", "karthik", 120), 101, "2026-09-17T04:00:00Z")])),
             get(format!("{API}/snapshots"), list_of("Snapshot", vec![])),
             not_found(format!("{API}/quotas/karthik")),
             not_found(format!("{API}/quotas/default-user")),
@@ -316,26 +316,26 @@ async fn push_and_start_are_refused_while_the_owner_is_over_the_disk_limit() {
     };
     let sentence = "diskGb: 101 of 100 in use; request more under Quota";
 
-    let mut running = ws_obj("ws-1", "karthik", "running");
-    running["status"] = json!({"phase": "ready", "nodeName": "node-a", "volumeRef": "ws-1"});
-    let mut routes = vec![get(format!("{API}/workspaces/ws-1"), running)];
+    let mut running = ws_obj("ws-0000000000000001", "karthik", "running");
+    running["status"] = json!({"phase": "ready", "nodeName": "node-a", "volumeRef": "ws-0000000000000001"});
+    let mut routes = vec![get(format!("{API}/workspaces/ws-0000000000000001"), running)];
     routes.extend(over());
     let s = server(true, routes).await;
     let resp = reqwest::Client::new()
-        .post(format!("{}/v1/workspaces/ws-1/push", s.base))
+        .post(format!("{}/v1/workspaces/ws-0000000000000001/push", s.base))
         .bearer_auth(token(&s.jwt, "karthik"))
         .send().await.unwrap();
     assert_eq!(resp.status(), 409);
     assert_eq!(resp.text().await.unwrap(), sentence);
     assert!(!s.rec.calls().iter().any(|c| c == &format!("POST {API}/snapshots")), "{:?}", s.rec.calls());
 
-    let mut stopped = ws_obj("ws-1", "karthik", "stopped");
-    stopped["status"] = json!({"phase": "stopped", "nodeName": "node-a", "volumeRef": "ws-1"});
-    let mut routes = vec![get(format!("{API}/workspaces/ws-1"), stopped)];
+    let mut stopped = ws_obj("ws-0000000000000001", "karthik", "stopped");
+    stopped["status"] = json!({"phase": "stopped", "nodeName": "node-a", "volumeRef": "ws-0000000000000001"});
+    let mut routes = vec![get(format!("{API}/workspaces/ws-0000000000000001"), stopped)];
     routes.extend(over());
     let s = server(true, routes).await;
     let resp = reqwest::Client::new()
-        .post(format!("{}/v1/workspaces/ws-1/start", s.base))
+        .post(format!("{}/v1/workspaces/ws-0000000000000001/start", s.base))
         .bearer_auth(token(&s.jwt, "karthik"))
         .send().await.unwrap();
     assert_eq!(resp.status(), 409);
@@ -343,7 +343,7 @@ async fn push_and_start_are_refused_while_the_owner_is_over_the_disk_limit() {
     // And nothing was asked to start: a refused start must not leave `desiredState: Running`. A
     // STOP is checked nowhere — taking away the one verb that frees capacity would trap an owner
     // who is over — which is why `guard_fill` is called from the start handlers alone.
-    assert!(!s.rec.calls().iter().any(|c| c == &format!("PATCH {API}/workspaces/ws-1")), "{:?}", s.rec.calls());
+    assert!(!s.rec.calls().iter().any(|c| c == &format!("PATCH {API}/workspaces/ws-0000000000000001")), "{:?}", s.rec.calls());
 }
 
 /// A push at the snapshot limit is refused, and the working copy keeps running — the refusal is
@@ -354,14 +354,14 @@ async fn a_push_at_the_snapshot_limit_is_refused_and_cuts_nothing() {
         .map(|i| json!({
             "apiVersion": "kloudlite.io/v1alpha1", "kind": "Snapshot",
             "metadata": {"name": format!("snap-{i}"), "labels": {"kloudlite.io/owner": "karthik"}},
-            "spec": {"volume": "ws-1", "owner": "karthik", "worktree": "ws-1", "transient": false},
+            "spec": {"volume": "ws-0000000000000001", "owner": "karthik", "worktree": "ws-0000000000000001", "transient": false},
             "status": {"phase": "ready"}
         }))
         .collect();
-    let mut ws = ws_obj("ws-1", "karthik", "running");
-    ws["status"] = json!({"phase": "ready", "nodeName": "node-a", "volumeRef": "ws-1"});
+    let mut ws = ws_obj("ws-0000000000000001", "karthik", "running");
+    ws["status"] = json!({"phase": "ready", "nodeName": "node-a", "volumeRef": "ws-0000000000000001"});
     let routes = vec![
-        get(format!("{API}/workspaces/ws-1"), ws),
+        get(format!("{API}/workspaces/ws-0000000000000001"), ws),
         get(format!("{API}/workspaces"), list_of("Workspace", vec![])),
         get(format!("{API}/environments"), list_of("Environment", vec![])),
         get(format!("{API}/volumes"), list_of("Volume", vec![])),
@@ -371,7 +371,7 @@ async fn a_push_at_the_snapshot_limit_is_refused_and_cuts_nothing() {
     ];
     let s = server(true, routes).await;
     let resp = reqwest::Client::new()
-        .post(format!("{}/v1/workspaces/ws-1/push", s.base))
+        .post(format!("{}/v1/workspaces/ws-0000000000000001/push", s.base))
         .bearer_auth(token(&s.jwt, "karthik"))
         .send().await.unwrap();
     assert_eq!(resp.status(), 409);

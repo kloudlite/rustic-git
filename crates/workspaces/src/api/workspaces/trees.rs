@@ -8,6 +8,7 @@
 //! Quota is deliberately NOT charged. A tree is bytes on a volume the owner already pays for and
 //! CPU in a pod already sized; what bounds it is `trees_per_workspace`, refused here at the ask.
 
+use crate::api::scope::{Named, NamedPair};
 use super::*;
 use crate::crd::{tree_name_ok, tree_path, TreeSpec};
 
@@ -92,7 +93,7 @@ pub(crate) async fn cut_tree(
     headers: axum::http::HeaderMap,
     method: axum::http::Method,
     uri: axum::extract::OriginalUri,
-    Path(id): Path<String>,
+    Named(id): Named,
     Json(body): Json<NewTree>,
 ) -> Result<Response, Response> {
     let caller_id = caller_for(&s, &headers, &method, uri.path()).await?;
@@ -146,7 +147,7 @@ pub(crate) async fn drop_tree(
     headers: axum::http::HeaderMap,
     method: axum::http::Method,
     uri: axum::extract::OriginalUri,
-    Path((id, name)): Path<(String, String)>,
+    NamedPair(id, name): NamedPair,
 ) -> Result<Response, Response> {
     let caller_id = caller_for(&s, &headers, &method, uri.path()).await?;
     for _ in 0..TREE_ATTEMPTS {

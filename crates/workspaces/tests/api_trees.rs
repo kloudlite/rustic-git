@@ -23,19 +23,19 @@ struct Server {
 fn ws_obj(trees: Value, state: &str) -> Value {
     json!({
         "apiVersion": "kloudlite.io/v1alpha1", "kind": "Workspace",
-        "metadata": {"name": "ws-1", "resourceVersion": "42", "labels": {"kloudlite.io/owner": "karthik"}},
+        "metadata": {"name": "ws-0000000000000001", "resourceVersion": "42", "labels": {"kloudlite.io/owner": "karthik"}},
         "spec": {
             "owner": "karthik", "team": "", "name": "w", "region": "centralindia", "image": "nginx:alpine",
             "storage": {"quotaGb": 20}, "desiredState": state,
             "trees": trees,
         },
-        "status": {"phase": "ready", "nodeName": "node-a", "volumeRef": "ws-1"},
+        "status": {"phase": "ready", "nodeName": "node-a", "volumeRef": "ws-0000000000000001"},
     })
 }
 
 fn routes(trees: Value, state: &str) -> Vec<Route> {
     vec![
-        get(format!("{API}/workspaces/ws-1"), ws_obj(trees.clone(), state)),
+        get(format!("{API}/workspaces/ws-0000000000000001"), ws_obj(trees.clone(), state)),
         get(
             format!("{API}/snapshots"),
             json!({"apiVersion": "kloudlite.io/v1alpha1", "kind": "SnapshotList", "metadata": {}, "items": []}),
@@ -43,7 +43,7 @@ fn routes(trees: Value, state: &str) -> Vec<Route> {
         // No `ClusterSettings/default` route: `get_opt` on a path the mock does not serve answers
         // 404, which is exactly "no admin ever set a ceiling" — the compiled-in 8 then applies,
         // and that is the number the ceiling test asserts on.
-        Route { method: "PATCH", path: format!("{API}/workspaces/ws-1"), status: 200, body: ws_obj(trees, state) },
+        Route { method: "PATCH", path: format!("{API}/workspaces/ws-0000000000000001"), status: 200, body: ws_obj(trees, state) },
     ]
 }
 
@@ -64,7 +64,7 @@ fn token(jwt: &Jwt) -> String {
 
 async fn cut(s: &Server, name: &str) -> reqwest::Response {
     reqwest::Client::new()
-        .post(format!("{}/v1/workspaces/ws-1/trees", s.base))
+        .post(format!("{}/v1/workspaces/ws-0000000000000001/trees", s.base))
         .bearer_auth(token(&s.jwt))
         .json(&json!({"name": name}))
         .send()
@@ -74,7 +74,7 @@ async fn cut(s: &Server, name: &str) -> reqwest::Response {
 
 async fn drop_tree(s: &Server, name: &str) -> reqwest::Response {
     reqwest::Client::new()
-        .delete(format!("{}/v1/workspaces/ws-1/trees/{name}", s.base))
+        .delete(format!("{}/v1/workspaces/ws-0000000000000001/trees/{name}", s.base))
         .bearer_auth(token(&s.jwt))
         .send()
         .await
@@ -85,7 +85,7 @@ async fn drop_tree(s: &Server, name: &str) -> reqwest::Response {
 /// what makes two agents asking for a tree at once lose one rather than clobber the other.
 fn written(s: &Server) -> Vec<Value> {
     s.rec
-        .sent("PATCH", &format!("{API}/workspaces/ws-1"))
+        .sent("PATCH", &format!("{API}/workspaces/ws-0000000000000001"))
         .iter()
         .map(|p| {
             let ops = p.as_array().expect("a JSON Patch is an array of ops");
@@ -190,8 +190,8 @@ async fn someone_elses_workspace_is_404() {
     ws["spec"]["owner"] = json!("other");
     ws["metadata"]["labels"]["kloudlite.io/owner"] = json!("other");
     let s = server(vec![
-        get(format!("{API}/workspaces/ws-1"), ws),
-        Route { method: "PATCH", path: format!("{API}/workspaces/ws-1"), status: 200, body: json!({}) },
+        get(format!("{API}/workspaces/ws-0000000000000001"), ws),
+        Route { method: "PATCH", path: format!("{API}/workspaces/ws-0000000000000001"), status: 200, body: json!({}) },
     ])
     .await;
     assert_eq!(cut(&s, "fix-auth").await.status(), 404);
@@ -209,11 +209,11 @@ async fn someone_elses_workspace_is_404() {
 async fn the_workspace_doc_lists_the_trees_the_node_cut() {
     let mut ws = ws_obj(json!([{"name": "fix-auth", "created": "2026-09-17T00:00:00Z"}]), "running");
     ws["status"]["trees"] = json!([
-        {"name": "fix-auth", "path": "/home/kl/workspaces/ws-1/.agents/fix-auth", "ready": true},
-        {"name": "sad", "path": "/home/kl/workspaces/ws-1/.agents/sad", "ready": false, "reason": "no space left on device"},
+        {"name": "fix-auth", "path": "/home/kl/workspaces/ws-0000000000000001/.agents/fix-auth", "ready": true},
+        {"name": "sad", "path": "/home/kl/workspaces/ws-0000000000000001/.agents/sad", "ready": false, "reason": "no space left on device"},
     ]);
     let s = server(vec![
-        get(format!("{API}/workspaces/ws-1"), ws),
+        get(format!("{API}/workspaces/ws-0000000000000001"), ws),
         get(
             format!("{API}/snapshots"),
             json!({"apiVersion": "kloudlite.io/v1alpha1", "kind": "SnapshotList", "metadata": {}, "items": []}),
@@ -221,7 +221,7 @@ async fn the_workspace_doc_lists_the_trees_the_node_cut() {
     ])
     .await;
     let doc: Value = reqwest::Client::new()
-        .get(format!("{}/v1/workspaces/ws-1", s.base))
+        .get(format!("{}/v1/workspaces/ws-0000000000000001", s.base))
         .bearer_auth(token(&s.jwt))
         .send()
         .await
@@ -232,8 +232,8 @@ async fn the_workspace_doc_lists_the_trees_the_node_cut() {
     assert_eq!(
         doc["trees"],
         json!([
-            {"name": "fix-auth", "path": "/home/kl/workspaces/ws-1/.agents/fix-auth", "ready": true},
-            {"name": "sad", "path": "/home/kl/workspaces/ws-1/.agents/sad", "ready": false, "reason": "no space left on device"},
+            {"name": "fix-auth", "path": "/home/kl/workspaces/ws-0000000000000001/.agents/fix-auth", "ready": true},
+            {"name": "sad", "path": "/home/kl/workspaces/ws-0000000000000001/.agents/sad", "ready": false, "reason": "no space left on device"},
         ]),
         "{doc}"
     );
@@ -246,7 +246,7 @@ async fn the_workspace_doc_lists_the_trees_the_node_cut() {
 async fn a_workspace_with_no_trees_omits_the_field() {
     let s = server(routes(json!([]), "running")).await;
     let doc: Value = reqwest::Client::new()
-        .get(format!("{}/v1/workspaces/ws-1", s.base))
+        .get(format!("{}/v1/workspaces/ws-0000000000000001", s.base))
         .bearer_auth(token(&s.jwt))
         .send()
         .await

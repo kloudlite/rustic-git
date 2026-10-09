@@ -172,7 +172,7 @@ async fn member_can_create_a_team_environment_owned_by_the_team() {
 async fn a_team_environment_is_listed_for_its_members() {
     let routes = vec![
         get(format!("{API}/snapshots"), list_of("Snapshot", vec![])),
-        get(format!("{API}/environments"), list_of("Environment", vec![env_obj("env-1", "acme", NODE)])),
+        get(format!("{API}/environments"), list_of("Environment", vec![env_obj("env-0000000000000001", "acme", NODE)])),
     ];
     let s = server(true, routes).await;
     let tok = token(&s.jwt, "karthik");
@@ -187,7 +187,7 @@ async fn a_team_environment_is_listed_for_its_members() {
         .await
         .unwrap();
     assert_eq!(list.len(), 1);
-    assert_eq!(list[0]["id"], "env-1");
+    assert_eq!(list[0]["id"], "env-0000000000000001");
     assert_eq!(list[0]["state"], "running");
     assert_eq!(list[0]["placement"], NODE, "the node the projection reports comes from status");
 }
@@ -195,7 +195,7 @@ async fn a_team_environment_is_listed_for_its_members() {
 #[tokio::test]
 async fn non_member_cannot_create_or_see_a_team_environment() {
     let mut routes = create_routes();
-    routes.push(get(format!("{API}/environments/env-1"), env_obj("env-1", "acme", NODE)));
+    routes.push(get(format!("{API}/environments/env-0000000000000001"), env_obj("env-0000000000000001", "acme", NODE)));
     let s = server(true, routes).await;
     let client = reqwest::Client::new();
     let stranger = token(&s.jwt, "mallory");
@@ -214,7 +214,7 @@ async fn non_member_cannot_create_or_see_a_team_environment() {
     assert!(s.rec.sent("POST", &format!("{API}/environments")).is_empty(), "a refused create writes nothing");
 
     // And an existing team environment is a 404 to them, never a 403 — they learn nothing.
-    let resp = client.get(format!("{}/v1/environments/env-1", s.base)).bearer_auth(&stranger).send().await.unwrap();
+    let resp = client.get(format!("{}/v1/environments/env-0000000000000001", s.base)).bearer_auth(&stranger).send().await.unwrap();
     assert_eq!(resp.status(), 404);
 
     let resp = client
@@ -246,8 +246,8 @@ async fn team_owner_without_a_directory_configured_is_503() {
 #[tokio::test]
 async fn member_can_clone_a_team_environment() {
     let mut routes = vec![
-        get(format!("{API}/environments/env-1"), env_obj("env-1", "acme", "node-z")),
-        not_found(format!("{API}/volumes/env-1")),
+        get(format!("{API}/environments/env-0000000000000001"), env_obj("env-0000000000000001", "acme", "node-z")),
+        not_found(format!("{API}/volumes/env-0000000000000001")),
         post(format!("{API}/environments"), env_obj("env-new", "acme", "node-z")),
     ];
     routes.extend(quota_gate_routes("acme"));
@@ -255,7 +255,7 @@ async fn member_can_clone_a_team_environment() {
     let tok = token(&s.jwt, "karthik");
 
     let resp = reqwest::Client::new()
-        .post(format!("{}/v1/environments/env-1/clone", s.base))
+        .post(format!("{}/v1/environments/env-0000000000000001/clone", s.base))
         .bearer_auth(&tok)
         .json(&json!({"name": "app-dev-clone"}))
         .send()
@@ -267,7 +267,7 @@ async fn member_can_clone_a_team_environment() {
 
     let e = s.rec.sent("POST", &format!("{API}/environments")).remove(0);
     assert_eq!(e["spec"]["owner"], "acme");
-    assert_eq!(e["spec"]["storage"]["source"]["cloneOf"]["volume"], "env-1");
+    assert_eq!(e["spec"]["storage"]["source"]["cloneOf"]["volume"], "env-0000000000000001");
     assert!(e["spec"].get("nodeName").is_none(), "locality is the claim's job now: {e}");
     // `guard_alloc` READS the volume listing for the quota check; only a WRITE would mean the
     // clone materialized its own Volume, which it must not — the child comes from the reconciler.

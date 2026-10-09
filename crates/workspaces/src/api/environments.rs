@@ -1,6 +1,7 @@
 //! `/v1/environments` — create, list, read, delete, start/stop, clone, restore-to-new and
 //! restore-in-place.
 
+use super::scope::{Named, NamedPair};
 use super::scope::{caller_owners, denial, find_env, in_scope, may_act_on, may_allocate_for, mine, my_ws, owned_by, resolve_new_owner, scope_refusal};
 use super::volumes::{find_snapshot, volume_region};
 use super::workspaces::{
@@ -108,11 +109,12 @@ pub(crate) async fn patch_env_services(
     headers: axum::http::HeaderMap,
     method: axum::http::Method,
     uri: axum::extract::OriginalUri,
-    Path(id): Path<String>,
+    Named(id): Named,
     Json(body): Json<ServicesBody>,
 ) -> Result<Response, Response> {
     let caller_id = caller_for(&s, &headers, &method, uri.path()).await?;
     let e = find_env(&s, &caller_id, &id).await?;
+    let id = kube::ResourceExt::name_any(&e);
     check_services(&body.services)?;
     let names: HashSet<&str> = body.services.iter().map(|svc| svc.name.as_str()).collect();
     // An intercept names a service by name; removing the service under one would leave a wish
@@ -151,6 +153,9 @@ async fn create_environment(
     id: &str,
     spec: crd::EnvironmentSpec,
 ) -> Result<crd::Environment, Response> {
+    if spec.system.is_none() {
+        super::scope::refuse_taken_env_name(c, &spec.owner, &spec.name).await?;
+    }
     let l = labels(&spec.owner, "environment");
     let mut e = crd::Environment::new(id, spec);
     e.metadata.labels = Some(l);
@@ -382,7 +387,7 @@ pub(crate) async fn get_env(
     headers: axum::http::HeaderMap,
     method: axum::http::Method,
     uri: axum::extract::OriginalUri,
-    Path(id): Path<String>,
+    Named(id): Named,
 ) -> Result<Response, Response> {
     let caller_id = caller_for(&s, &headers, &method, uri.path()).await?;
     let e = find_env(&s, &caller_id, &id).await?;
@@ -407,10 +412,11 @@ pub(crate) async fn start_env(
     headers: axum::http::HeaderMap,
     method: axum::http::Method,
     uri: axum::extract::OriginalUri,
-    Path(id): Path<String>,
+    Named(id): Named,
 ) -> Result<Response, Response> {
     let caller_id = caller_for(&s, &headers, &method, uri.path()).await?;
     let e = find_env(&s, &caller_id, &id).await?;
+    let id = kube::ResourceExt::name_any(&e);
     if e.status.as_ref().is_some_and(|st| interrupted(&st.conditions)) {
         return Err(interrupted_409("environment"));
     }
@@ -426,10 +432,11 @@ pub(crate) async fn stop_env(
     headers: axum::http::HeaderMap,
     method: axum::http::Method,
     uri: axum::extract::OriginalUri,
-    Path(id): Path<String>,
+    Named(id): Named,
 ) -> Result<Response, Response> {
     let caller_id = caller_for(&s, &headers, &method, uri.path()).await?;
     let e = find_env(&s, &caller_id, &id).await?;
+    let id = kube::ResourceExt::name_any(&e);
     set_desired::<crd::Environment>(kube(&s)?, &id, DesiredState::Stopped).await?;
     let pushed = pushed_volumes(&s, kube(&s)?, &e.spec.owner).await?;
     let mut doc = env_doc(&e, &pushed);
@@ -448,10 +455,11 @@ pub(crate) async fn delete_env(
     headers: axum::http::HeaderMap,
     method: axum::http::Method,
     uri: axum::extract::OriginalUri,
-    Path(id): Path<String>,
+    Named(id): Named,
 ) -> Result<Response, Response> {
     let caller_id = caller_for(&s, &headers, &method, uri.path()).await?;
     let e = find_env(&s, &caller_id, &id).await?;
+    let id = kube::ResourceExt::name_any(&e);
     let c = kube(&s)?;
     let envs: Api<crd::Environment> = Api::all(c.clone());
     envs.delete(&id, &DeleteParams::default()).await.map_err(kube_err)?;
@@ -500,7 +508,7 @@ pub(crate) async fn clone_env(
     headers: axum::http::HeaderMap,
     method: axum::http::Method,
     uri: axum::extract::OriginalUri,
-    Path(id): Path<String>,
+    Named(id): Named,
     Json(body): Json<CloneBody>,
 ) -> Result<Response, Response> {
     let caller_id = caller_for(&s, &headers, &method, uri.path()).await?;
@@ -581,11 +589,12 @@ pub(crate) async fn restore_env_in_place(
     headers: axum::http::HeaderMap,
     method: axum::http::Method,
     uri: axum::extract::OriginalUri,
-    Path(id): Path<String>,
+    Named(id): Named,
     Json(body): Json<RestoreInPlaceBody>,
 ) -> Result<Response, Response> {
     let caller_id = caller_for(&s, &headers, &method, uri.path()).await?;
     let e = find_env(&s, &caller_id, &id).await?;
+    let id = kube::ResourceExt::name_any(&e);
     let volume = env_volume(&e).ok_or_else(not_ready)?.to_string();
     // The wish names a `Snapshot` CR of this environment's OWN volume — validated Ready and
     // same-volume BEFORE the wish is written, so a bad id is a fast 4xx here rather than a silent
@@ -771,10 +780,13 @@ pub(crate) async fn set_intercept(
     headers: axum::http::HeaderMap,
     method: axum::http::Method,
     uri: axum::extract::OriginalUri,
-    Path(id): Path<String>,
+    Named(id): Named,
     Json(body): Json<crd::Intercept>,
 ) -> Result<Response, Response> {
     let caller_id = caller_for(&s, &headers, &method, uri.path()).await?;
+    // The agent reads ids: store the resolved one whatever the caller typed (name, `team/name`, id).
+    let mut body = body;
+    body.workspace = my_ws(&s, &caller_id, &body.workspace).await?.name_any();
     for _ in 0..INTERCEPT_ATTEMPTS {
         let e = find_env(&s, &caller_id, &id).await?;
         validate_intercept(&s, &caller_id, &e, &body).await?;
@@ -803,7 +815,7 @@ pub(crate) async fn clear_intercept(
     headers: axum::http::HeaderMap,
     method: axum::http::Method,
     uri: axum::extract::OriginalUri,
-    Path((id, service)): Path<(String, String)>,
+    NamedPair(id, service): NamedPair,
 ) -> Result<Response, Response> {
     let caller_id = caller_for(&s, &headers, &method, uri.path()).await?;
     for _ in 0..INTERCEPT_ATTEMPTS {

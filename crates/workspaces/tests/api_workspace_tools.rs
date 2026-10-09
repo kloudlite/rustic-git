@@ -66,54 +66,54 @@ fn pod(ip: &str) -> Value {
 
 #[tokio::test]
 async fn the_tool_address_is_the_owners_alone_and_only_while_ready() {
-    let w1 = ws_path("w1");
+    let w1 = ws_path("ws-0000000000000001");
     let pod_path = "/api/v1/namespaces/wt-alice-acme/pods/ws".to_string();
 
-    // alice GET /v1/workspaces/w1/tools -> 200, body == {"address":"10.42.0.9:7788"}
+    // alice GET /v1/workspaces/ws-0000000000000001/tools -> 200, body == {"address":"10.42.0.9:7788"}
     let t = setup(vec![
-        get(w1.clone(), ws_obj("w1", "alice", "acme", "ready", Some("wt-alice-acme/ws"))),
+        get(w1.clone(), ws_obj("ws-0000000000000001", "alice", "acme", "ready", Some("wt-alice-acme/ws"))),
         get(pod_path.clone(), pod("10.42.0.9")),
     ]);
-    let (st, body) = t.call("/v1/workspaces/w1/tools", &t.tok("alice")).await;
+    let (st, body) = t.call("/v1/workspaces/ws-0000000000000001/tools", &t.tok("alice")).await;
     assert_eq!(st, StatusCode::OK, "{body}");
     assert_eq!(body, json!({"address": "10.42.0.9:7788"}));
 
     // bob, a member of acme, same request -> 404
-    let t = setup(vec![get(w1.clone(), ws_obj("w1", "alice", "acme", "ready", Some("wt-alice-acme/ws")))]);
-    let (st, _) = t.call("/v1/workspaces/w1/tools", &t.tok("bob")).await;
+    let t = setup(vec![get(w1.clone(), ws_obj("ws-0000000000000001", "alice", "acme", "ready", Some("wt-alice-acme/ws")))]);
+    let (st, _) = t.call("/v1/workspaces/ws-0000000000000001/tools", &t.tok("bob")).await;
     assert_eq!(st, StatusCode::NOT_FOUND);
 
     // a superadmin who is not alice -> 404
-    let t = setup(vec![get(w1.clone(), ws_obj("w1", "alice", "acme", "ready", Some("wt-alice-acme/ws")))]);
-    let (st, _) = t.call("/v1/workspaces/w1/tools", &admin_token_as(&t.jwt, "root")).await;
+    let t = setup(vec![get(w1.clone(), ws_obj("ws-0000000000000001", "alice", "acme", "ready", Some("wt-alice-acme/ws")))]);
+    let (st, _) = t.call("/v1/workspaces/ws-0000000000000001/tools", &admin_token_as(&t.jwt, "root")).await;
     assert_eq!(st, StatusCode::NOT_FOUND);
 
-    // alice GET /v1/workspaces/w1/tools?team=labs -> 409, error contains "is in team acme"
-    let t = setup(vec![get(w1.clone(), ws_obj("w1", "alice", "acme", "ready", Some("wt-alice-acme/ws")))]);
-    let (st, body) = t.call("/v1/workspaces/w1/tools?team=labs", &t.tok("alice")).await;
+    // alice GET /v1/workspaces/ws-0000000000000001/tools?team=labs -> 409, error contains "is in team acme"
+    let t = setup(vec![get(w1.clone(), ws_obj("ws-0000000000000001", "alice", "acme", "ready", Some("wt-alice-acme/ws")))]);
+    let (st, body) = t.call("/v1/workspaces/ws-0000000000000001/tools?team=labs", &t.tok("alice")).await;
     assert_eq!(st, StatusCode::CONFLICT);
     assert!(body["error"].as_str().unwrap().contains("is in team acme"), "{body}");
 
     // alice ?team=acme -> 200
     let t = setup(vec![
-        get(w1.clone(), ws_obj("w1", "alice", "acme", "ready", Some("wt-alice-acme/ws"))),
+        get(w1.clone(), ws_obj("ws-0000000000000001", "alice", "acme", "ready", Some("wt-alice-acme/ws"))),
         get(pod_path.clone(), pod("10.42.0.9")),
     ]);
-    let (st, _) = t.call("/v1/workspaces/w1/tools?team=acme", &t.tok("alice")).await;
+    let (st, _) = t.call("/v1/workspaces/ws-0000000000000001/tools?team=acme", &t.tok("alice")).await;
     assert_eq!(st, StatusCode::OK);
 
     // re-seed w1 with phase Stopped; alice -> 409, error == "workspace api is stopped; start it to run tools"
-    let t = setup(vec![get(w1.clone(), ws_obj("w1", "alice", "acme", "stopped", Some("wt-alice-acme/ws")))]);
-    let (st, body) = t.call("/v1/workspaces/w1/tools", &t.tok("alice")).await;
+    let t = setup(vec![get(w1.clone(), ws_obj("ws-0000000000000001", "alice", "acme", "stopped", Some("wt-alice-acme/ws")))]);
+    let (st, body) = t.call("/v1/workspaces/ws-0000000000000001/tools", &t.tok("alice")).await;
     assert_eq!(st, StatusCode::CONFLICT);
     assert_eq!(body["error"], "workspace api is stopped; start it to run tools");
 
     // re-seed Ready with the Pod absent; alice -> 409, error contains "between pods"
     let t = setup(vec![
-        get(w1.clone(), ws_obj("w1", "alice", "acme", "ready", Some("wt-alice-acme/ws"))),
+        get(w1.clone(), ws_obj("ws-0000000000000001", "alice", "acme", "ready", Some("wt-alice-acme/ws"))),
         not_found(pod_path.clone()),
     ]);
-    let (st, body) = t.call("/v1/workspaces/w1/tools", &t.tok("alice")).await;
+    let (st, body) = t.call("/v1/workspaces/ws-0000000000000001/tools", &t.tok("alice")).await;
     assert_eq!(st, StatusCode::CONFLICT);
     assert!(body["error"].as_str().unwrap().contains("between pods"), "{body}");
 }
@@ -130,11 +130,11 @@ async fn the_tool_address_is_the_owners_alone_and_only_while_ready() {
 async fn the_tools_route_hands_over_the_token_the_pod_actually_holds() {
     let secret_path = "/api/v1/namespaces/wt-alice-acme/secrets/user-key".to_string();
     let t = setup(vec![
-        get(ws_path("w1"), ws_obj("w1", "alice", "acme", "ready", Some("wt-alice-acme/ws"))),
+        get(ws_path("ws-0000000000000001"), ws_obj("ws-0000000000000001", "alice", "acme", "ready", Some("wt-alice-acme/ws"))),
         get("/api/v1/namespaces/wt-alice-acme/pods/ws".to_string(), pod("10.42.0.9")),
         get(secret_path.clone(), secret(Some("THE-POD-TOKEN"))),
     ]);
-    let (st, body) = t.call("/v1/workspaces/w1/tools", &t.tok("alice")).await;
+    let (st, body) = t.call("/v1/workspaces/ws-0000000000000001/tools", &t.tok("alice")).await;
     assert_eq!(st, StatusCode::OK, "{body}");
     assert_eq!(body, json!({"address": "10.42.0.9:7788", "token": "THE-POD-TOKEN"}));
 }
@@ -147,21 +147,21 @@ async fn the_tools_route_hands_over_the_token_the_pod_actually_holds() {
 async fn a_token_the_beat_has_not_written_yet_is_absent_not_null() {
     for missing in [None, Some("")] {
         let t = setup(vec![
-            get(ws_path("w1"), ws_obj("w1", "alice", "acme", "ready", Some("wt-alice-acme/ws"))),
+            get(ws_path("ws-0000000000000001"), ws_obj("ws-0000000000000001", "alice", "acme", "ready", Some("wt-alice-acme/ws"))),
             get("/api/v1/namespaces/wt-alice-acme/pods/ws".to_string(), pod("10.42.0.9")),
             get("/api/v1/namespaces/wt-alice-acme/secrets/user-key".to_string(), secret(missing)),
         ]);
-        let (st, body) = t.call("/v1/workspaces/w1/tools", &t.tok("alice")).await;
+        let (st, body) = t.call("/v1/workspaces/ws-0000000000000001/tools", &t.tok("alice")).await;
         assert_eq!(st, StatusCode::OK, "{body}");
         assert_eq!(body, json!({"address": "10.42.0.9:7788"}), "{missing:?}");
     }
     // And a Secret that is not there at all: the same answer, never a 500.
     let t = setup(vec![
-        get(ws_path("w1"), ws_obj("w1", "alice", "acme", "ready", Some("wt-alice-acme/ws"))),
+        get(ws_path("ws-0000000000000001"), ws_obj("ws-0000000000000001", "alice", "acme", "ready", Some("wt-alice-acme/ws"))),
         get("/api/v1/namespaces/wt-alice-acme/pods/ws".to_string(), pod("10.42.0.9")),
         not_found("/api/v1/namespaces/wt-alice-acme/secrets/user-key"),
     ]);
-    let (st, body) = t.call("/v1/workspaces/w1/tools", &t.tok("alice")).await;
+    let (st, body) = t.call("/v1/workspaces/ws-0000000000000001/tools", &t.tok("alice")).await;
     assert_eq!(st, StatusCode::OK, "{body}");
     assert_eq!(body, json!({"address": "10.42.0.9:7788"}));
 }

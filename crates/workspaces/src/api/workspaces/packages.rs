@@ -1,6 +1,7 @@
 //! Editing a workspace's package list: locks resolved before anything is written, and the one
 //! route that re-resolves existing entries.
 
+use crate::api::scope::{Named};
 use super::*;
 
 
@@ -18,11 +19,12 @@ pub(crate) async fn patch_ws_packages(
     headers: axum::http::HeaderMap,
     method: axum::http::Method,
     uri: axum::extract::OriginalUri,
-    Path(id): Path<String>,
+    Named(id): Named,
     Json(body): Json<PackagesBody>,
 ) -> Result<Response, Response> {
     let owner = caller_for(&s, &headers, &method, uri.path()).await?;
     let w = my_ws(&s, &owner, &id).await?;
+    let id = kube::ResourceExt::name_any(&w);
     crate::packages::validate_list(&body.packages).map_err(bad_packages)?;
     let locks = lock_for(&s, &body.packages, &w.spec.locks, false).await?;
     let api: Api<crd::Workspace> = Api::all(kube(&s)?.clone());
@@ -48,10 +50,11 @@ pub(crate) async fn update_ws_packages(
     headers: axum::http::HeaderMap,
     method: axum::http::Method,
     uri: axum::extract::OriginalUri,
-    Path(id): Path<String>,
+    Named(id): Named,
 ) -> Result<Response, Response> {
     let owner = caller_for(&s, &headers, &method, uri.path()).await?;
     let w = my_ws(&s, &owner, &id).await?;
+    let id = kube::ResourceExt::name_any(&w);
     let locks = lock_for(&s, &w.spec.packages, &w.spec.locks, true).await?;
     let api: Api<crd::Workspace> = Api::all(kube(&s)?.clone());
     let patch = serde_json::json!({"spec": {"locks": locks}});

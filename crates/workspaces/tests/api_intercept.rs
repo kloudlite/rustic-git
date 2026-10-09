@@ -29,14 +29,14 @@ fn empty(kind: &str, plural: &str) -> Route {
 fn env_obj(intercepts: Value) -> Value {
     json!({
         "apiVersion": "kloudlite.io/v1alpha1", "kind": "Environment",
-        "metadata": {"name": "env-1", "resourceVersion": "42", "labels": {"kloudlite.io/owner": "karthik"}},
+        "metadata": {"name": "env-0000000000000001", "resourceVersion": "42", "labels": {"kloudlite.io/owner": "karthik"}},
         "spec": {
             "owner": "karthik", "name": "app", "region": "centralindia",
             "services": [{"name": "api", "image": "nginx", "command": [], "env": {}, "mounts": [], "ports": [8080, 9090]}],
             "storage": {"quotaGb": 20}, "desiredState": "running",
             "intercepts": intercepts,
         },
-        "status": {"phase": "ready", "nodeName": "node-a", "volumeRef": "env-1"},
+        "status": {"phase": "ready", "nodeName": "node-a", "volumeRef": "env-0000000000000001"},
     })
 }
 
@@ -78,10 +78,10 @@ fn written(s: &Server) -> Vec<Value> {
 /// SENT is what these tests assert on.
 fn routes(intercepts: Value, ws: Value) -> Vec<Route> {
     vec![
-        get(format!("{API}/environments/env-1"), env_obj(intercepts.clone())),
-        get(format!("{API}/workspaces/ws-1"), ws),
+        get(format!("{API}/environments/env-0000000000000001"), env_obj(intercepts.clone())),
+        get(format!("{API}/workspaces/ws-0000000000000001"), ws),
         empty("Snapshot", "snapshots"),
-        Route { method: "PATCH", path: format!("{API}/environments/env-1"), status: 200, body: env_obj(intercepts) },
+        Route { method: "PATCH", path: format!("{API}/environments/env-0000000000000001"), status: 200, body: env_obj(intercepts) },
     ]
 }
 
@@ -102,7 +102,7 @@ fn token(jwt: &Jwt) -> String {
 
 async fn intercept(s: &Server, body: Value) -> reqwest::Response {
     reqwest::Client::new()
-        .post(format!("{}/v1/environments/env-1/intercepts", s.base))
+        .post(format!("{}/v1/environments/env-0000000000000001/intercepts", s.base))
         .bearer_auth(token(&s.jwt))
         .json(&body)
         .send()
@@ -111,35 +111,35 @@ async fn intercept(s: &Server, body: Value) -> reqwest::Response {
 }
 
 fn good() -> Value {
-    json!({"service": "api", "workspace": "ws-1", "ports": [{"service": 8080, "workspace": 3000}]})
+    json!({"service": "api", "workspace": "ws-0000000000000001", "ports": [{"service": 8080, "workspace": 3000}]})
 }
 
 fn attached_running() -> Value {
-    ws_obj("ws-1", "karthik", Some("env-1"), "running")
+    ws_obj("ws-0000000000000001", "karthik", Some("env-0000000000000001"), "running")
 }
 
 fn patched(s: &Server) -> Vec<Value> {
-    s.rec.sent("PATCH", &format!("{API}/environments/env-1"))
+    s.rec.sent("PATCH", &format!("{API}/environments/env-0000000000000001"))
 }
 
 #[tokio::test]
 async fn a_service_the_environment_does_not_have_is_404() {
     let s = server(routes(json!([]), attached_running())).await;
-    let r = intercept(&s, json!({"service": "nope", "workspace": "ws-1"})).await;
+    let r = intercept(&s, json!({"service": "nope", "workspace": "ws-0000000000000001"})).await;
     assert_eq!(r.status(), 404);
     assert!(patched(&s).is_empty(), "nothing written");
 }
 
 #[tokio::test]
 async fn someone_elses_workspace_is_404() {
-    let s = server(routes(json!([]), ws_obj("ws-1", "other", Some("env-1"), "running"))).await;
+    let s = server(routes(json!([]), ws_obj("ws-0000000000000001", "other", Some("env-0000000000000001"), "running"))).await;
     assert_eq!(intercept(&s, good()).await.status(), 404);
     assert!(patched(&s).is_empty(), "nothing written");
 }
 
 #[tokio::test]
 async fn a_workspace_attached_elsewhere_is_409() {
-    let s = server(routes(json!([]), ws_obj("ws-1", "karthik", Some("env-2"), "running"))).await;
+    let s = server(routes(json!([]), ws_obj("ws-0000000000000001", "karthik", Some("env-0000000000000002"), "running"))).await;
     let r = intercept(&s, good()).await;
     assert_eq!(r.status(), 409);
     let body = r.text().await.unwrap();
@@ -151,9 +151,9 @@ async fn a_workspace_attached_elsewhere_is_409() {
 /// controller then refuses forever as `WorkspaceDetached` — accepted, and never honourable.
 #[tokio::test]
 async fn a_workspace_detached_in_spec_is_409_however_its_condition_still_reads() {
-    let mut ws = ws_obj("ws-1", "karthik", None, "running");
+    let mut ws = ws_obj("ws-0000000000000001", "karthik", None, "running");
     ws["status"]["conditions"] = json!([{
-        "type": "Attached", "status": "True", "reason": "Attached", "message": "env-1",
+        "type": "Attached", "status": "True", "reason": "Attached", "message": "env-0000000000000001",
         "lastTransitionTime": "2026-09-08T00:00:00Z", "observedGeneration": 1,
     }]);
     let s = server(routes(json!([]), ws)).await;
@@ -164,7 +164,7 @@ async fn a_workspace_detached_in_spec_is_409_however_its_condition_still_reads()
 
 #[tokio::test]
 async fn a_stopped_workspace_is_409() {
-    let s = server(routes(json!([]), ws_obj("ws-1", "karthik", Some("env-1"), "stopped"))).await;
+    let s = server(routes(json!([]), ws_obj("ws-0000000000000001", "karthik", Some("env-0000000000000001"), "stopped"))).await;
     assert_eq!(intercept(&s, good()).await.status(), 409);
     assert!(patched(&s).is_empty(), "nothing written");
 }
@@ -182,7 +182,7 @@ async fn a_service_another_workspace_holds_is_409_naming_it() {
 #[tokio::test]
 async fn a_port_the_service_does_not_declare_is_422() {
     let s = server(routes(json!([]), attached_running())).await;
-    let r = intercept(&s, json!({"service": "api", "workspace": "ws-1", "ports": [{"service": 1234, "workspace": 3000}]})).await;
+    let r = intercept(&s, json!({"service": "api", "workspace": "ws-0000000000000001", "ports": [{"service": 1234, "workspace": 3000}]})).await;
     assert_eq!(r.status(), 422);
     assert!(patched(&s).is_empty(), "nothing written");
 }
@@ -192,7 +192,7 @@ async fn the_same_service_port_twice_is_422() {
     let s = server(routes(json!([]), attached_running())).await;
     let r = intercept(
         &s,
-        json!({"service": "api", "workspace": "ws-1",
+        json!({"service": "api", "workspace": "ws-0000000000000001",
                "ports": [{"service": 8080, "workspace": 3000}, {"service": 8080, "workspace": 4000}]}),
     )
     .await;
@@ -207,13 +207,13 @@ async fn a_good_request_writes_one_entry_with_the_mapping() {
     assert_eq!(r.status(), 202, "{}", r.text().await.unwrap());
     assert_eq!(
         written(&s).pop().unwrap(),
-        json!([{"service": "api", "workspace": "ws-1", "ports": [{"service": 8080, "workspace": 3000}]}])
+        json!([{"service": "api", "workspace": "ws-0000000000000001", "ports": [{"service": 8080, "workspace": 3000}]}])
     );
 }
 
 #[tokio::test]
 async fn the_same_workspace_asking_again_replaces_rather_than_duplicates() {
-    let held = json!([{"service": "api", "workspace": "ws-1", "ports": [{"service": 8080, "workspace": 1111}]}]);
+    let held = json!([{"service": "api", "workspace": "ws-0000000000000001", "ports": [{"service": 8080, "workspace": 1111}]}]);
     let s = server(routes(held, attached_running())).await;
     assert_eq!(intercept(&s, good()).await.status(), 202);
     let w = written(&s).pop().unwrap();
@@ -224,7 +224,7 @@ async fn the_same_workspace_asking_again_replaces_rather_than_duplicates() {
 
 async fn release(s: &Server, service: &str) -> reqwest::Response {
     reqwest::Client::new()
-        .delete(format!("{}/v1/environments/env-1/intercepts/{service}", s.base))
+        .delete(format!("{}/v1/environments/env-0000000000000001/intercepts/{service}", s.base))
         .bearer_auth(token(&s.jwt))
         .send()
         .await
@@ -233,7 +233,7 @@ async fn release(s: &Server, service: &str) -> reqwest::Response {
 
 #[tokio::test]
 async fn a_release_removes_the_entry() {
-    let held = json!([{"service": "api", "workspace": "ws-1", "ports": []}]);
+    let held = json!([{"service": "api", "workspace": "ws-0000000000000001", "ports": []}]);
     let s = server(routes(held, attached_running())).await;
     assert_eq!(release(&s, "api").await.status(), 204);
     assert_eq!(written(&s).pop().unwrap(), json!([]));
@@ -250,12 +250,12 @@ async fn releasing_one_that_is_not_there_is_still_204() {
 /// agent brings the real service back; only `DELETE …/intercepts/{service}` takes it away.
 #[tokio::test]
 async fn stopping_the_workspace_leaves_the_intercept_alone() {
-    let held = json!([{"service": "api", "workspace": "ws-1", "ports": []}]);
+    let held = json!([{"service": "api", "workspace": "ws-0000000000000001", "ports": []}]);
     let mut rs = routes(held.clone(), attached_running());
-    rs.push(Route { method: "PATCH", path: format!("{API}/workspaces/ws-1"), status: 200, body: attached_running() });
+    rs.push(Route { method: "PATCH", path: format!("{API}/workspaces/ws-0000000000000001"), status: 200, body: attached_running() });
     let s = server(rs).await;
     let r = reqwest::Client::new()
-        .post(format!("{}/v1/workspaces/ws-1/stop", s.base))
+        .post(format!("{}/v1/workspaces/ws-0000000000000001/stop", s.base))
         .bearer_auth(token(&s.jwt))
         .send()
         .await
@@ -265,7 +265,7 @@ async fn stopping_the_workspace_leaves_the_intercept_alone() {
     // …and the environment still reports the wish, which is what the web renders as "held, not in
     // force" rather than as gone.
     let e = reqwest::Client::new()
-        .get(format!("{}/v1/environments/env-1", s.base))
+        .get(format!("{}/v1/environments/env-0000000000000001", s.base))
         .bearer_auth(token(&s.jwt))
         .send()
         .await
@@ -280,7 +280,7 @@ async fn stopping_the_workspace_leaves_the_intercept_alone() {
 #[tokio::test]
 async fn a_workspace_port_of_zero_is_422() {
     let s = server(routes(json!([]), attached_running())).await;
-    let r = intercept(&s, json!({"service": "api", "workspace": "ws-1", "ports": [{"service": 8080, "workspace": 0}]})).await;
+    let r = intercept(&s, json!({"service": "api", "workspace": "ws-0000000000000001", "ports": [{"service": 8080, "workspace": 0}]})).await;
     assert_eq!(r.status(), 422);
     let body = r.text().await.unwrap();
     assert!(body.contains("0 is not one"), "{body}");
@@ -293,7 +293,7 @@ async fn a_workspace_port_of_zero_is_422() {
 #[tokio::test]
 async fn the_tool_server_port_is_still_refused_after_the_proxy_rewrite() {
     let s = server(routes(json!([]), attached_running())).await;
-    let r = intercept(&s, json!({"service": "api", "workspace": "ws-1", "ports": [{"service": 8080, "workspace": 7788}]})).await;
+    let r = intercept(&s, json!({"service": "api", "workspace": "ws-0000000000000001", "ports": [{"service": 8080, "workspace": 7788}]})).await;
     assert_eq!(r.status(), 422);
     let body = r.text().await.unwrap();
     assert!(body.contains("7788"), "the tool server's port is named: {body}");
@@ -307,13 +307,13 @@ async fn a_service_that_declares_no_ports_is_422() {
     let mut e = env_obj(json!([]));
     e["spec"]["services"][0]["ports"] = json!([]);
     let rs = vec![
-        get(format!("{API}/environments/env-1"), e.clone()),
-        get(format!("{API}/workspaces/ws-1"), attached_running()),
+        get(format!("{API}/environments/env-0000000000000001"), e.clone()),
+        get(format!("{API}/workspaces/ws-0000000000000001"), attached_running()),
         empty("Snapshot", "snapshots"),
-        Route { method: "PATCH", path: format!("{API}/environments/env-1"), status: 200, body: e },
+        Route { method: "PATCH", path: format!("{API}/environments/env-0000000000000001"), status: 200, body: e },
     ];
     let s = server(rs).await;
-    let r = intercept(&s, json!({"service": "api", "workspace": "ws-1", "ports": []})).await;
+    let r = intercept(&s, json!({"service": "api", "workspace": "ws-0000000000000001", "ports": []})).await;
     assert_eq!(r.status(), 422);
     let body = r.text().await.unwrap();
     assert!(body.contains("declares no ports"), "{body}");
@@ -328,8 +328,8 @@ async fn a_service_that_declares_no_ports_is_422() {
 async fn a_stale_write_is_refused_rather_than_winning() {
     let mut rs = routes(json!([]), attached_running());
     // The mock walks a path's routes in order and repeats the last, so every attempt loses.
-    rs.retain(|r| !(r.method == "PATCH" && r.path.ends_with("/environments/env-1")));
-    rs.push(kloudlite_workspaces::kube_test::conflict("PATCH", format!("{API}/environments/env-1")));
+    rs.retain(|r| !(r.method == "PATCH" && r.path.ends_with("/environments/env-0000000000000001")));
+    rs.push(kloudlite_workspaces::kube_test::conflict("PATCH", format!("{API}/environments/env-0000000000000001")));
     let s = server(rs).await;
     let r = intercept(&s, good()).await;
     assert_eq!(r.status(), 409);
@@ -356,7 +356,7 @@ fn patch_routes(intercepts: Value) -> Vec<Route> {
 
 async fn patch_services(s: &Server, services: Value) -> reqwest::Response {
     reqwest::Client::new()
-        .patch(format!("{}/v1/environments/env-1", s.base))
+        .patch(format!("{}/v1/environments/env-0000000000000001", s.base))
         .bearer_auth(token(&s.jwt))
         .json(&json!({ "services": services }))
         .send()
@@ -396,11 +396,11 @@ async fn a_traversing_mount_is_refused_and_nothing_is_written() {
 /// serving traffic for a service that no longer exists. The person releases it first.
 #[tokio::test]
 async fn removing_an_intercepted_service_is_409_naming_the_holder() {
-    let held = json!([{"service": "api", "workspace": "ws-1", "ports": []}]);
+    let held = json!([{"service": "api", "workspace": "ws-0000000000000001", "ports": []}]);
     let s = server(patch_routes(held)).await;
     let r = patch_services(&s, json!([svc("cache")])).await;
     assert_eq!(r.status(), 409);
     let body = r.text().await.unwrap();
-    assert!(body.contains("ws-1") && body.contains("api"), "{body}");
+    assert!(body.contains("ws-0000000000000001") && body.contains("api"), "{body}");
     assert!(patched(&s).is_empty(), "nothing written");
 }

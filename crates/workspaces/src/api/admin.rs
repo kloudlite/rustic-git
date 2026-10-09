@@ -954,7 +954,7 @@ async fn admin_stop_env(
 ) -> Result<Response, Response> {
     let c = caller(&s, &headers).await?;
     let note = require_note(&body.note)?;
-    let r = super::environments::stop_env(State(s.clone()), headers.clone(), axum::http::Method::POST, axum::extract::OriginalUri(axum::http::Uri::from_static("/admin")), Path(id.clone())).await;
+    let r = super::environments::stop_env(State(s.clone()), headers.clone(), axum::http::Method::POST, axum::extract::OriginalUri(axum::http::Uri::from_static("/admin")), crate::api::scope::Named(id.clone())).await;
     let out = audited(&s, &c.name, "stop-environment", &id, Some(note.clone()), r).await?;
     audit(&s, &c.name, "stop-environment", &id, Some(note), "ok").await;
     Ok(out)
@@ -968,7 +968,7 @@ async fn admin_delete_env(
 ) -> Result<Response, Response> {
     let c = caller(&s, &headers).await?;
     let note = require_note(&body.note)?;
-    let r = super::environments::delete_env(State(s.clone()), headers.clone(), axum::http::Method::POST, axum::extract::OriginalUri(axum::http::Uri::from_static("/admin")), Path(id.clone())).await;
+    let r = super::environments::delete_env(State(s.clone()), headers.clone(), axum::http::Method::POST, axum::extract::OriginalUri(axum::http::Uri::from_static("/admin")), crate::api::scope::Named(id.clone())).await;
     let out = audited(&s, &c.name, "delete-environment", &id, Some(note.clone()), r).await?;
     audit(&s, &c.name, "delete-environment", &id, Some(note), "ok").await;
     Ok(out)

@@ -119,16 +119,16 @@ async fn server(routes: Vec<Route>) -> Server {
 #[tokio::test]
 async fn push_creates_a_working_snapshot_with_worktree_and_parent() {
     let routes = vec![
-        get(format!("{API}/workspaces/ws-1"), placed_ws_with_head("ws-1", "karthik", "ws-1-aaaaaaaa")),
+        get(format!("{API}/workspaces/ws-0000000000000001"), placed_ws_with_head("ws-0000000000000001", "karthik", "ws-0000000000000001-aaaaaaaa")),
         get(format!("{API}/snapshots"), json!({"apiVersion": "kloudlite.io/v1alpha1", "kind": "SnapshotList", "metadata": {}, "items": []})),
-        get(format!("{API}/volumes/ws-1"), json!({"apiVersion": "kloudlite.io/v1alpha1", "kind": "Volume", "metadata": {"name": "ws-1", "uid": "vol-uid-1"}, "spec": {"owner": "karthik", "nodeName": "node-a", "region": "r1", "quotaGb": 5}})),
-        Route { method: "POST", path: format!("{API}/snapshots"), status: 201, body: snapshot("ws-1-cccccccc", "ws-1", "karthik", "ws-1", "", "working") },
+        get(format!("{API}/volumes/ws-0000000000000001"), json!({"apiVersion": "kloudlite.io/v1alpha1", "kind": "Volume", "metadata": {"name": "ws-0000000000000001", "uid": "vol-uid-1"}, "spec": {"owner": "karthik", "nodeName": "node-a", "region": "r1", "quotaGb": 5}})),
+        Route { method: "POST", path: format!("{API}/snapshots"), status: 201, body: snapshot("ws-0000000000000001-cccccccc", "ws-0000000000000001", "karthik", "ws-0000000000000001", "", "working") },
     ];
     let s = server(routes).await;
     let tok = token(&s.jwt, "karthik");
 
     let resp = reqwest::Client::new()
-        .post(format!("{}/v1/workspaces/ws-1/push", s.base))
+        .post(format!("{}/v1/workspaces/ws-0000000000000001/push", s.base))
         .bearer_auth(&tok)
         .json(&json!({"message": "checkpoint"}))
         .send()
@@ -137,19 +137,19 @@ async fn push_creates_a_working_snapshot_with_worktree_and_parent() {
     assert_eq!(resp.status(), 202, "{}", resp.text().await.unwrap());
 
     let req = s.rec.sent("POST", &format!("{API}/snapshots")).remove(0);
-    assert_eq!(req["spec"]["volume"], "ws-1");
-    assert_eq!(req["spec"]["worktree"], "ws-1");
-    assert_eq!(req["spec"]["parent"], "ws-1-aaaaaaaa");
+    assert_eq!(req["spec"]["volume"], "ws-0000000000000001");
+    assert_eq!(req["spec"]["worktree"], "ws-0000000000000001");
+    assert_eq!(req["spec"]["parent"], "ws-0000000000000001-aaaaaaaa");
     assert_eq!(req["spec"]["message"], "checkpoint");
     assert_eq!(req["spec"]["owner"], "karthik");
     assert_eq!(req["status"]["phase"], "working");
     // H2: the label is a VIEW of `spec.volume`/`spec.owner` — the e2e's `-l kloudlite.io/volume=`
     // selects on exactly this, and nothing else stamps it.
-    assert_eq!(req["metadata"]["labels"]["kloudlite.io/volume"], "ws-1");
+    assert_eq!(req["metadata"]["labels"]["kloudlite.io/volume"], "ws-0000000000000001");
     assert_eq!(req["metadata"]["labels"]["kloudlite.io/owner"], "karthik");
     // Owned by the Volume: the record is garbage-collected with it instead of outliving a deleted workspace.
     assert_eq!(req["metadata"]["ownerReferences"][0]["kind"], "Volume");
-    assert_eq!(req["metadata"]["ownerReferences"][0]["name"], "ws-1");
+    assert_eq!(req["metadata"]["ownerReferences"][0]["name"], "ws-0000000000000001");
     assert_eq!(req["metadata"]["ownerReferences"][0]["uid"], "vol-uid-1");
     assert_eq!(req["metadata"]["ownerReferences"][0]["controller"], true);
     assert!(!s.rec.calls().iter().any(|c| c.contains("snapshotrequests")), "no SnapshotRequest under the flag");
@@ -161,16 +161,16 @@ async fn push_creates_a_working_snapshot_with_worktree_and_parent() {
 #[tokio::test]
 async fn a_push_snapshot_is_owned_by_the_volume_not_the_workspace() {
     let routes = vec![
-        get(format!("{API}/workspaces/ws-1"), placed_ws("ws-1", "karthik")),
+        get(format!("{API}/workspaces/ws-0000000000000001"), placed_ws("ws-0000000000000001", "karthik")),
         get(format!("{API}/snapshots"), json!({"apiVersion": "kloudlite.io/v1alpha1", "kind": "SnapshotList", "metadata": {}, "items": []})),
-        get(format!("{API}/volumes/ws-1"), json!({"apiVersion": "kloudlite.io/v1alpha1", "kind": "Volume", "metadata": {"name": "ws-1", "uid": "vol-uid-1"}, "spec": {"owner": "karthik", "nodeName": "node-a", "region": "r1", "quotaGb": 5}})),
-        Route { method: "POST", path: format!("{API}/snapshots"), status: 201, body: snapshot("ws-1-cccccccc", "ws-1", "karthik", "ws-1", "", "working") },
+        get(format!("{API}/volumes/ws-0000000000000001"), json!({"apiVersion": "kloudlite.io/v1alpha1", "kind": "Volume", "metadata": {"name": "ws-0000000000000001", "uid": "vol-uid-1"}, "spec": {"owner": "karthik", "nodeName": "node-a", "region": "r1", "quotaGb": 5}})),
+        Route { method: "POST", path: format!("{API}/snapshots"), status: 201, body: snapshot("ws-0000000000000001-cccccccc", "ws-0000000000000001", "karthik", "ws-0000000000000001", "", "working") },
     ];
     let s = server(routes).await;
     let tok = token(&s.jwt, "karthik");
 
     let resp = reqwest::Client::new()
-        .post(format!("{}/v1/workspaces/ws-1/push", s.base))
+        .post(format!("{}/v1/workspaces/ws-0000000000000001/push", s.base))
         .bearer_auth(&tok)
         .json(&json!({"message": "m"}))
         .send()
@@ -181,7 +181,7 @@ async fn a_push_snapshot_is_owned_by_the_volume_not_the_workspace() {
     let body = s.rec.sent("POST", &format!("{API}/snapshots")).pop().unwrap();
     let o = &body["metadata"]["ownerReferences"][0];
     assert_eq!(o["kind"], "Volume");
-    assert_eq!(o["name"], "ws-1");
+    assert_eq!(o["name"], "ws-0000000000000001");
     assert_eq!(o["uid"], "vol-uid-1");
     assert_eq!(o["controller"], true);
 }
@@ -191,15 +191,15 @@ async fn a_push_snapshot_is_owned_by_the_volume_not_the_workspace() {
 #[tokio::test]
 async fn push_404s_with_a_sentence_when_the_volume_is_missing() {
     let routes = vec![
-        get(format!("{API}/workspaces/ws-1"), placed_ws("ws-1", "karthik")),
+        get(format!("{API}/workspaces/ws-0000000000000001"), placed_ws("ws-0000000000000001", "karthik")),
         get(format!("{API}/snapshots"), json!({"apiVersion": "kloudlite.io/v1alpha1", "kind": "SnapshotList", "metadata": {}, "items": []})),
-        not_found(format!("{API}/volumes/ws-1")),
+        not_found(format!("{API}/volumes/ws-0000000000000001")),
     ];
     let s = server(routes).await;
     let tok = token(&s.jwt, "karthik");
 
     let resp = reqwest::Client::new()
-        .post(format!("{}/v1/workspaces/ws-1/push", s.base))
+        .post(format!("{}/v1/workspaces/ws-0000000000000001/push", s.base))
         .bearer_auth(&tok)
         .send()
         .await
@@ -214,15 +214,15 @@ async fn push_404s_with_a_sentence_when_the_volume_is_missing() {
 #[tokio::test]
 async fn first_push_of_a_workspace_has_no_parent() {
     let routes = vec![
-        get(format!("{API}/workspaces/ws-1"), placed_ws("ws-1", "karthik")),
+        get(format!("{API}/workspaces/ws-0000000000000001"), placed_ws("ws-0000000000000001", "karthik")),
         get(format!("{API}/snapshots"), json!({"apiVersion": "kloudlite.io/v1alpha1", "kind": "SnapshotList", "metadata": {}, "items": []})),
-        get(format!("{API}/volumes/ws-1"), json!({"apiVersion": "kloudlite.io/v1alpha1", "kind": "Volume", "metadata": {"name": "ws-1", "uid": "vol-uid-1"}, "spec": {"owner": "karthik", "nodeName": "node-a", "region": "r1", "quotaGb": 5}})),
-        Route { method: "POST", path: format!("{API}/snapshots"), status: 201, body: snapshot("ws-1-cccccccc", "ws-1", "karthik", "ws-1", "", "working") },
+        get(format!("{API}/volumes/ws-0000000000000001"), json!({"apiVersion": "kloudlite.io/v1alpha1", "kind": "Volume", "metadata": {"name": "ws-0000000000000001", "uid": "vol-uid-1"}, "spec": {"owner": "karthik", "nodeName": "node-a", "region": "r1", "quotaGb": 5}})),
+        Route { method: "POST", path: format!("{API}/snapshots"), status: 201, body: snapshot("ws-0000000000000001-cccccccc", "ws-0000000000000001", "karthik", "ws-0000000000000001", "", "working") },
     ];
     let s = server(routes).await;
     let tok = token(&s.jwt, "karthik");
     let resp = reqwest::Client::new()
-        .post(format!("{}/v1/workspaces/ws-1/push", s.base))
+        .post(format!("{}/v1/workspaces/ws-0000000000000001/push", s.base))
         .bearer_auth(&tok)
         .send()
         .await
@@ -236,9 +236,9 @@ async fn first_push_of_a_workspace_has_no_parent() {
 /// parent-linked — no registry round trip.
 #[tokio::test]
 async fn history_lists_snapshot_crs_in_parent_order() {
-    let mut root = snapshot("ws-1-aaaaaaaa", "ws-1", "karthik", "ws-1", "", "ready");
+    let mut root = snapshot("ws-0000000000000001-aaaaaaaa", "ws-0000000000000001", "karthik", "ws-0000000000000001", "", "ready");
     root["metadata"]["creationTimestamp"] = json!("2026-01-01T00:00:00Z");
-    let mut tip = snapshot("ws-1-bbbbbbbb", "ws-1", "karthik", "ws-1", "ws-1-aaaaaaaa", "working");
+    let mut tip = snapshot("ws-0000000000000001-bbbbbbbb", "ws-0000000000000001", "karthik", "ws-0000000000000001", "ws-0000000000000001-aaaaaaaa", "working");
     tip["metadata"]["creationTimestamp"] = json!("2026-01-02T00:00:00Z");
     let routes = vec![get(
         format!("{API}/snapshots"),
@@ -247,7 +247,7 @@ async fn history_lists_snapshot_crs_in_parent_order() {
     let s = server(routes).await;
     let tok = token(&s.jwt, "karthik");
     let resp = reqwest::Client::new()
-        .get(format!("{}/v1/volumes/ws-1/history", s.base))
+        .get(format!("{}/v1/volumes/ws-0000000000000001/history", s.base))
         .bearer_auth(&tok)
         .send()
         .await
@@ -255,9 +255,9 @@ async fn history_lists_snapshot_crs_in_parent_order() {
     assert_eq!(resp.status(), 200, "{}", resp.text().await.unwrap());
     let rows: Vec<Value> = resp.json().await.unwrap();
     assert_eq!(rows.len(), 2);
-    assert_eq!(rows[0]["id"], "ws-1-bbbbbbbb");
-    assert_eq!(rows[0]["parent"], "ws-1-aaaaaaaa");
-    assert_eq!(rows[1]["id"], "ws-1-aaaaaaaa");
+    assert_eq!(rows[0]["id"], "ws-0000000000000001-bbbbbbbb");
+    assert_eq!(rows[0]["parent"], "ws-0000000000000001-aaaaaaaa");
+    assert_eq!(rows[1]["id"], "ws-0000000000000001-aaaaaaaa");
     assert_eq!(rows[1]["parent"], Value::Null);
 }
 
@@ -265,9 +265,9 @@ async fn history_lists_snapshot_crs_in_parent_order() {
 /// stays `null` rather than inheriting a sibling's.
 #[tokio::test]
 async fn history_rows_carry_the_frozen_state_or_null() {
-    let mut with_state = snapshot_with_state("ws-1-aaaaaaaa", "ws-1", "karthik", "ws-1", "", "ready", Some(workspace_state("alpine:3.19", &["jq"], 5)));
+    let mut with_state = snapshot_with_state("ws-0000000000000001-aaaaaaaa", "ws-0000000000000001", "karthik", "ws-0000000000000001", "", "ready", Some(workspace_state("alpine:3.19", &["jq"], 5)));
     with_state["metadata"]["creationTimestamp"] = json!("2026-01-01T00:00:00Z");
-    let mut without_state = snapshot("ws-1-bbbbbbbb", "ws-1", "karthik", "ws-1", "ws-1-aaaaaaaa", "ready");
+    let mut without_state = snapshot("ws-0000000000000001-bbbbbbbb", "ws-0000000000000001", "karthik", "ws-0000000000000001", "ws-0000000000000001-aaaaaaaa", "ready");
     without_state["metadata"]["creationTimestamp"] = json!("2026-01-02T00:00:00Z");
     let routes = vec![get(
         format!("{API}/snapshots"),
@@ -276,7 +276,7 @@ async fn history_rows_carry_the_frozen_state_or_null() {
     let s = server(routes).await;
     let tok = token(&s.jwt, "karthik");
     let resp = reqwest::Client::new()
-        .get(format!("{}/v1/volumes/ws-1/history", s.base))
+        .get(format!("{}/v1/volumes/ws-0000000000000001/history", s.base))
         .bearer_auth(&tok)
         .send()
         .await
@@ -284,18 +284,18 @@ async fn history_rows_carry_the_frozen_state_or_null() {
     assert_eq!(resp.status(), 200, "{}", resp.text().await.unwrap());
     let rows: Vec<Value> = resp.json().await.unwrap();
     let by_id = |id: &str| rows.iter().find(|r| r["id"] == id).unwrap().clone();
-    assert_eq!(by_id("ws-1-aaaaaaaa")["state"]["kind"], "workspace");
-    assert_eq!(by_id("ws-1-aaaaaaaa")["state"]["image"], "alpine:3.19");
-    assert!(by_id("ws-1-bbbbbbbb")["state"].is_null());
+    assert_eq!(by_id("ws-0000000000000001-aaaaaaaa")["state"]["kind"], "workspace");
+    assert_eq!(by_id("ws-0000000000000001-aaaaaaaa")["state"]["image"], "alpine:3.19");
+    assert!(by_id("ws-0000000000000001-bbbbbbbb")["state"].is_null());
 }
 
 /// `/refs` names the newest snapshot as `main` — same "first = tip" convention the registry path
 /// keeps, computed here from creation order instead.
 #[tokio::test]
 async fn refs_names_the_newest_snapshot_as_main() {
-    let mut root = snapshot("ws-1-aaaaaaaa", "ws-1", "karthik", "ws-1", "", "ready");
+    let mut root = snapshot("ws-0000000000000001-aaaaaaaa", "ws-0000000000000001", "karthik", "ws-0000000000000001", "", "ready");
     root["metadata"]["creationTimestamp"] = json!("2026-01-01T00:00:00Z");
-    let mut tip = snapshot("ws-1-bbbbbbbb", "ws-1", "karthik", "ws-1", "ws-1-aaaaaaaa", "ready");
+    let mut tip = snapshot("ws-0000000000000001-bbbbbbbb", "ws-0000000000000001", "karthik", "ws-0000000000000001", "ws-0000000000000001-aaaaaaaa", "ready");
     tip["metadata"]["creationTimestamp"] = json!("2026-01-02T00:00:00Z");
     let routes = vec![get(
         format!("{API}/snapshots"),
@@ -304,14 +304,14 @@ async fn refs_names_the_newest_snapshot_as_main() {
     let s = server(routes).await;
     let tok = token(&s.jwt, "karthik");
     let resp = reqwest::Client::new()
-        .get(format!("{}/v1/volumes/ws-1/refs", s.base))
+        .get(format!("{}/v1/volumes/ws-0000000000000001/refs", s.base))
         .bearer_auth(&tok)
         .send()
         .await
         .unwrap();
     assert_eq!(resp.status(), 200);
     let body: Value = resp.json().await.unwrap();
-    assert_eq!(body["main"], "ws-1-bbbbbbbb");
+    assert_eq!(body["main"], "ws-0000000000000001-bbbbbbbb");
 }
 
 /// A caller reading a volume that has no `Snapshot` under any owner label they may read gets a
@@ -325,7 +325,7 @@ async fn history_of_an_unknown_volume_is_not_found() {
     let s = server(routes).await;
     let tok = token(&s.jwt, "karthik");
     let resp = reqwest::Client::new()
-        .get(format!("{}/v1/volumes/ws-1/history", s.base))
+        .get(format!("{}/v1/volumes/ws-0000000000000001/history", s.base))
         .bearer_auth(&tok)
         .send()
         .await
@@ -337,37 +337,37 @@ async fn history_of_an_unknown_volume_is_not_found() {
 /// unknown id is a 404, same as every other "no such snapshot" case.
 #[tokio::test]
 async fn restore_in_place_of_an_unknown_snapshot_is_not_found() {
-    let env = placed_env("env-1", "karthik");
+    let env = placed_env("env-0000000000000001", "karthik");
     let routes = vec![
-        get(format!("{API}/environments/env-1"), env),
+        get(format!("{API}/environments/env-0000000000000001"), env),
         not_found(format!("{API}/snapshots/no-such")),
     ];
     let s = server(routes).await;
     let tok = token(&s.jwt, "karthik");
     let resp = reqwest::Client::new()
-        .post(format!("{}/v1/environments/env-1/restore-in-place", s.base))
+        .post(format!("{}/v1/environments/env-0000000000000001/restore-in-place", s.base))
         .bearer_auth(&tok)
         .json(&json!({"snapshot_id": "no-such"}))
         .send()
         .await
         .unwrap();
     assert_eq!(resp.status(), 404);
-    assert!(!s.rec.calls().iter().any(|c| c.contains(&format!("PATCH {API}/environments/env-1"))), "no wish written on a bad id");
+    assert!(!s.rec.calls().iter().any(|c| c.contains(&format!("PATCH {API}/environments/env-0000000000000001"))), "no wish written on a bad id");
 }
 
 /// A snapshot still `Working` (not yet `Ready`) cannot be restored onto — the swap would have
 /// nothing finished to check out.
 #[tokio::test]
 async fn restore_in_place_of_a_not_ready_snapshot_is_not_found() {
-    let env = placed_env("env-1", "karthik");
-    let snap = snapshot("env-1-aaaaaaaa", "env-1", "karthik", "env-1", "", "working");
-    let routes = vec![get(format!("{API}/environments/env-1"), env), get(format!("{API}/snapshots/env-1-aaaaaaaa"), snap)];
+    let env = placed_env("env-0000000000000001", "karthik");
+    let snap = snapshot("env-0000000000000001-aaaaaaaa", "env-0000000000000001", "karthik", "env-0000000000000001", "", "working");
+    let routes = vec![get(format!("{API}/environments/env-0000000000000001"), env), get(format!("{API}/snapshots/env-0000000000000001-aaaaaaaa"), snap)];
     let s = server(routes).await;
     let tok = token(&s.jwt, "karthik");
     let resp = reqwest::Client::new()
-        .post(format!("{}/v1/environments/env-1/restore-in-place", s.base))
+        .post(format!("{}/v1/environments/env-0000000000000001/restore-in-place", s.base))
         .bearer_auth(&tok)
-        .json(&json!({"snapshot_id": "env-1-aaaaaaaa"}))
+        .json(&json!({"snapshot_id": "env-0000000000000001-aaaaaaaa"}))
         .send()
         .await
         .unwrap();
@@ -379,15 +379,15 @@ async fn restore_in_place_of_a_not_ready_snapshot_is_not_found() {
 /// object are for, not an in-place restore.
 #[tokio::test]
 async fn restore_in_place_of_a_foreign_snapshot_is_not_found() {
-    let env = placed_env("env-1", "karthik");
-    let snap = snapshot("env-2-aaaaaaaa", "env-2", "karthik", "env-2", "", "ready");
-    let routes = vec![get(format!("{API}/environments/env-1"), env), get(format!("{API}/snapshots/env-2-aaaaaaaa"), snap)];
+    let env = placed_env("env-0000000000000001", "karthik");
+    let snap = snapshot("env-0000000000000002-aaaaaaaa", "env-0000000000000002", "karthik", "env-0000000000000002", "", "ready");
+    let routes = vec![get(format!("{API}/environments/env-0000000000000001"), env), get(format!("{API}/snapshots/env-0000000000000002-aaaaaaaa"), snap)];
     let s = server(routes).await;
     let tok = token(&s.jwt, "karthik");
     let resp = reqwest::Client::new()
-        .post(format!("{}/v1/environments/env-1/restore-in-place", s.base))
+        .post(format!("{}/v1/environments/env-0000000000000001/restore-in-place", s.base))
         .bearer_auth(&tok)
-        .json(&json!({"snapshot_id": "env-2-aaaaaaaa"}))
+        .json(&json!({"snapshot_id": "env-0000000000000002-aaaaaaaa"}))
         .send()
         .await
         .unwrap();
@@ -398,31 +398,31 @@ async fn restore_in_place_of_a_foreign_snapshot_is_not_found() {
 /// the controllers do the checkout-swap, not this handler.
 #[tokio::test]
 async fn restore_in_place_of_a_valid_snapshot_writes_the_wish() {
-    let env = placed_env("env-1", "karthik");
-    let snap = snapshot("env-1-aaaaaaaa", "env-1", "karthik", "env-1", "", "ready");
+    let env = placed_env("env-0000000000000001", "karthik");
+    let snap = snapshot("env-0000000000000001-aaaaaaaa", "env-0000000000000001", "karthik", "env-0000000000000001", "", "ready");
     let routes = vec![
-        get(format!("{API}/environments/env-1"), env),
-        get(format!("{API}/snapshots/env-1-aaaaaaaa"), snap),
+        get(format!("{API}/environments/env-0000000000000001"), env),
+        get(format!("{API}/snapshots/env-0000000000000001-aaaaaaaa"), snap),
         Route {
             method: "PATCH",
-            path: format!("{API}/environments/env-1"),
+            path: format!("{API}/environments/env-0000000000000001"),
             status: 200,
-            body: placed_env("env-1", "karthik"),
+            body: placed_env("env-0000000000000001", "karthik"),
         },
     ];
     let s = server(routes).await;
     let tok = token(&s.jwt, "karthik");
     let resp = reqwest::Client::new()
-        .post(format!("{}/v1/environments/env-1/restore-in-place", s.base))
+        .post(format!("{}/v1/environments/env-0000000000000001/restore-in-place", s.base))
         .bearer_auth(&tok)
-        .json(&json!({"snapshot_id": "env-1-aaaaaaaa"}))
+        .json(&json!({"snapshot_id": "env-0000000000000001-aaaaaaaa"}))
         .send()
         .await
         .unwrap();
     assert_eq!(resp.status(), 202, "{}", resp.text().await.unwrap());
-    let patch = &s.rec.sent("PATCH", &format!("{API}/environments/env-1"))[0];
-    assert_eq!(patch["spec"]["restore"]["snapshotId"], "env-1-aaaaaaaa");
-    assert_eq!(patch["spec"]["restore"]["volume"], "env-1");
+    let patch = &s.rec.sent("PATCH", &format!("{API}/environments/env-0000000000000001"))[0];
+    assert_eq!(patch["spec"]["restore"]["snapshotId"], "env-0000000000000001-aaaaaaaa");
+    assert_eq!(patch["spec"]["restore"]["volume"], "env-0000000000000001");
 }
 
 /// F1: a second push while the first is still `Working` is refused before it can create a second
@@ -430,9 +430,9 @@ async fn restore_in_place_of_a_valid_snapshot_writes_the_wish() {
 /// retention (which walks only the winner's chain) would never revisit and never delete it.
 #[tokio::test]
 async fn a_racing_push_while_one_is_still_working_is_refused() {
-    let racing = snapshot("ws-1-aaaaaaaa", "ws-1", "karthik", "ws-1", "", "working");
+    let racing = snapshot("ws-0000000000000001-aaaaaaaa", "ws-0000000000000001", "karthik", "ws-0000000000000001", "", "working");
     let routes = vec![
-        get(format!("{API}/workspaces/ws-1"), placed_ws("ws-1", "karthik")),
+        get(format!("{API}/workspaces/ws-0000000000000001"), placed_ws("ws-0000000000000001", "karthik")),
         get(
             format!("{API}/snapshots"),
             json!({"apiVersion": "kloudlite.io/v1alpha1", "kind": "SnapshotList", "metadata": {}, "items": [racing]}),
@@ -441,7 +441,7 @@ async fn a_racing_push_while_one_is_still_working_is_refused() {
     let s = server(routes).await;
     let tok = token(&s.jwt, "karthik");
     let resp = reqwest::Client::new()
-        .post(format!("{}/v1/workspaces/ws-1/push", s.base))
+        .post(format!("{}/v1/workspaces/ws-0000000000000001/push", s.base))
         .bearer_auth(&tok)
         .send()
         .await
@@ -454,11 +454,11 @@ async fn a_racing_push_while_one_is_still_working_is_refused() {
 /// a consumer switched over at cutover must see the same order, not a reversed one.
 #[tokio::test]
 async fn history_stays_newest_first_across_a_three_snapshot_chain() {
-    let mut root = snapshot("ws-1-aaaaaaaa", "ws-1", "karthik", "ws-1", "", "ready");
+    let mut root = snapshot("ws-0000000000000001-aaaaaaaa", "ws-0000000000000001", "karthik", "ws-0000000000000001", "", "ready");
     root["metadata"]["creationTimestamp"] = json!("2026-01-01T00:00:00Z");
-    let mut mid = snapshot("ws-1-bbbbbbbb", "ws-1", "karthik", "ws-1", "ws-1-aaaaaaaa", "ready");
+    let mut mid = snapshot("ws-0000000000000001-bbbbbbbb", "ws-0000000000000001", "karthik", "ws-0000000000000001", "ws-0000000000000001-aaaaaaaa", "ready");
     mid["metadata"]["creationTimestamp"] = json!("2026-01-02T00:00:00Z");
-    let mut tip = snapshot("ws-1-cccccccc", "ws-1", "karthik", "ws-1", "ws-1-bbbbbbbb", "ready");
+    let mut tip = snapshot("ws-0000000000000001-cccccccc", "ws-0000000000000001", "karthik", "ws-0000000000000001", "ws-0000000000000001-bbbbbbbb", "ready");
     tip["metadata"]["creationTimestamp"] = json!("2026-01-03T00:00:00Z");
     let routes = vec![get(
         format!("{API}/snapshots"),
@@ -467,7 +467,7 @@ async fn history_stays_newest_first_across_a_three_snapshot_chain() {
     let s = server(routes).await;
     let tok = token(&s.jwt, "karthik");
     let resp = reqwest::Client::new()
-        .get(format!("{}/v1/volumes/ws-1/history", s.base))
+        .get(format!("{}/v1/volumes/ws-0000000000000001/history", s.base))
         .bearer_auth(&tok)
         .send()
         .await
@@ -475,14 +475,14 @@ async fn history_stays_newest_first_across_a_three_snapshot_chain() {
     assert_eq!(resp.status(), 200);
     let rows: Vec<Value> = resp.json().await.unwrap();
     let ids: Vec<&str> = rows.iter().map(|r| r["id"].as_str().unwrap()).collect();
-    assert_eq!(ids, vec!["ws-1-cccccccc", "ws-1-bbbbbbbb", "ws-1-aaaaaaaa"], "newest first, same as the registry path");
+    assert_eq!(ids, vec!["ws-0000000000000001-cccccccc", "ws-0000000000000001-bbbbbbbb", "ws-0000000000000001-aaaaaaaa"], "newest first, same as the registry path");
 }
 
 /// F3: `createdAt` is RFC3339 — the registry path's `chrono::DateTime<Utc>` serializes that way,
 /// and every consumer already parses it.
 #[tokio::test]
 async fn history_created_at_is_rfc3339() {
-    let mut root = snapshot("ws-1-aaaaaaaa", "ws-1", "karthik", "ws-1", "", "ready");
+    let mut root = snapshot("ws-0000000000000001-aaaaaaaa", "ws-0000000000000001", "karthik", "ws-0000000000000001", "", "ready");
     root["metadata"]["creationTimestamp"] = json!("2026-01-01T12:34:56Z");
     let routes = vec![get(
         format!("{API}/snapshots"),
@@ -491,7 +491,7 @@ async fn history_created_at_is_rfc3339() {
     let s = server(routes).await;
     let tok = token(&s.jwt, "karthik");
     let resp = reqwest::Client::new()
-        .get(format!("{}/v1/volumes/ws-1/history", s.base))
+        .get(format!("{}/v1/volumes/ws-0000000000000001/history", s.base))
         .bearer_auth(&tok)
         .send()
         .await
@@ -513,7 +513,7 @@ async fn refs_of_a_zero_snapshot_volume_is_null_not_not_found() {
     let s = server(routes).await;
     let tok = token(&s.jwt, "karthik");
     let resp = reqwest::Client::new()
-        .get(format!("{}/v1/volumes/ws-1/refs", s.base))
+        .get(format!("{}/v1/volumes/ws-0000000000000001/refs", s.base))
         .bearer_auth(&tok)
         .send()
         .await
@@ -538,21 +538,21 @@ fn stopped_ws_replicated(name: &str, owner: &str, status: &str, reason: &str, me
 /// truth that can disagree with the node's.
 #[tokio::test]
 async fn get_and_stop_expose_the_replicated_condition() {
-    let ws = stopped_ws_replicated("ws-1", "karthik", "False", "AwaitingReplica", "no other node holds the final sync point yet");
+    let ws = stopped_ws_replicated("ws-0000000000000001", "karthik", "False", "AwaitingReplica", "no other node holds the final sync point yet");
     let routes = vec![
-        get(format!("{API}/workspaces/ws-1"), ws.clone()),
+        get(format!("{API}/workspaces/ws-0000000000000001"), ws.clone()),
         get(format!("{API}/snapshots"), json!({"apiVersion": "v1", "kind": "SnapshotList", "metadata": {}, "items": []})),
-        Route { method: "PATCH", path: format!("{API}/workspaces/ws-1"), status: 200, body: ws },
+        Route { method: "PATCH", path: format!("{API}/workspaces/ws-0000000000000001"), status: 200, body: ws },
     ];
     let s = server(routes).await;
     let tok = token(&s.jwt, "karthik");
     let http = reqwest::Client::new();
 
-    let got: Value = http.get(format!("{}/v1/workspaces/ws-1", s.base)).bearer_auth(&tok).send().await.unwrap().json().await.unwrap();
+    let got: Value = http.get(format!("{}/v1/workspaces/ws-0000000000000001", s.base)).bearer_auth(&tok).send().await.unwrap().json().await.unwrap();
     assert_eq!(got["replicated"]["ready"], false);
     assert_eq!(got["replicated"]["message"], "no other node holds the final sync point yet");
 
-    let stopped: Value = http.post(format!("{}/v1/workspaces/ws-1/stop", s.base)).bearer_auth(&tok).send().await.unwrap().json().await.unwrap();
+    let stopped: Value = http.post(format!("{}/v1/workspaces/ws-0000000000000001/stop", s.base)).bearer_auth(&tok).send().await.unwrap().json().await.unwrap();
     assert_eq!(stopped["replicated"]["reason"], "AwaitingReplica");
 }
 
@@ -570,12 +570,12 @@ fn interrupted_ws(name: &str, owner: &str) -> Value {
 /// instead of leaving a start silently pending forever.
 #[tokio::test]
 async fn starting_an_interrupted_workspace_is_a_409_that_explains_itself() {
-    let routes = vec![get(format!("{API}/workspaces/ws-1"), interrupted_ws("ws-1", "karthik"))];
+    let routes = vec![get(format!("{API}/workspaces/ws-0000000000000001"), interrupted_ws("ws-0000000000000001", "karthik"))];
     let s = server(routes).await;
     let tok = token(&s.jwt, "karthik");
 
     let r = reqwest::Client::new()
-        .post(format!("{}/v1/workspaces/ws-1/start", s.base))
+        .post(format!("{}/v1/workspaces/ws-0000000000000001/start", s.base))
         .bearer_auth(&tok)
         .send()
         .await
@@ -594,15 +594,15 @@ async fn starting_an_interrupted_workspace_is_a_409_that_explains_itself() {
 
 #[tokio::test]
 async fn starting_an_interrupted_environment_is_a_409_too() {
-    let mut e = placed_env("env-1", "karthik");
+    let mut e = placed_env("env-0000000000000001", "karthik");
     e["status"]["conditions"] = json!([{
         "type": "Degraded", "status": "True", "reason": "NodeDead",
         "message": "node node-a is down", "lastTransitionTime": "2026-09-03T10:00:00Z"
     }]);
-    let routes = vec![get(format!("{API}/environments/env-1"), e)];
+    let routes = vec![get(format!("{API}/environments/env-0000000000000001"), e)];
     let s = server(routes).await;
     let tok = token(&s.jwt, "karthik");
-    let r = reqwest::Client::new().post(format!("{}/v1/environments/env-1/start", s.base)).bearer_auth(&tok).send().await.unwrap();
+    let r = reqwest::Client::new().post(format!("{}/v1/environments/env-0000000000000001/start", s.base)).bearer_auth(&tok).send().await.unwrap();
     assert_eq!(r.status(), 409);
     assert_eq!(r.text().await.unwrap(), "environment is interrupted: its node is down; it resumes when the node returns");
 }
@@ -611,21 +611,21 @@ async fn starting_an_interrupted_environment_is_a_409_too() {
 /// starts as soon as an up-to-date node claims it. Only a parent carrying `NodeDead` is refused.
 #[tokio::test]
 async fn a_plain_stopped_workspace_still_starts() {
-    let mut w = placed_ws("ws-1", "karthik");
+    let mut w = placed_ws("ws-0000000000000001", "karthik");
     w["status"]["phase"] = json!("stopped");
     let routes = vec![
-        get(format!("{API}/workspaces/ws-1"), w.clone()),
-        Route { method: "PATCH", path: format!("{API}/workspaces/ws-1"), status: 200, body: w },
+        get(format!("{API}/workspaces/ws-0000000000000001"), w.clone()),
+        Route { method: "PATCH", path: format!("{API}/workspaces/ws-0000000000000001"), status: 200, body: w },
         // A start is a FILL verb: it reads the owner's usage before it asks for a pod.
         get(format!("{API}/snapshots"), json!({"apiVersion": "kloudlite.io/v1alpha1", "kind": "SnapshotList", "metadata": {}, "items": []})),
     ];
     let s = server(routes).await;
     let tok = token(&s.jwt, "karthik");
-    let r = reqwest::Client::new().post(format!("{}/v1/workspaces/ws-1/start", s.base)).bearer_auth(&tok).send().await.unwrap();
+    let r = reqwest::Client::new().post(format!("{}/v1/workspaces/ws-0000000000000001/start", s.base)).bearer_auth(&tok).send().await.unwrap();
     assert_eq!(r.status(), 202);
     // 202 alone said only "not refused" (2026-09-12): a start that patched nothing, or patched
     // `desiredState` to the wrong value, passed it. What was WRITTEN is the whole handler.
-    let patch = &s.rec.sent("PATCH", &format!("{API}/workspaces/ws-1"))[0];
+    let patch = &s.rec.sent("PATCH", &format!("{API}/workspaces/ws-0000000000000001"))[0];
     assert_eq!(patch["spec"]["desiredState"], "running", "start did not ask for running: {patch}");
 }
 
@@ -644,24 +644,24 @@ fn transient(name: &str, volume: &str, owner: &str, worktree: &str) -> Value {
 #[tokio::test]
 async fn clone_cuts_a_transient_and_bases_the_clone_on_it() {
     let routes = vec![
-        get(format!("{API}/workspaces/ws-1"), placed_ws_with_head("ws-1", "karthik", "ws-1-aaaaaaaa")),
+        get(format!("{API}/workspaces/ws-0000000000000001"), placed_ws_with_head("ws-0000000000000001", "karthik", "ws-0000000000000001-aaaaaaaa")),
         no_workspaces(),
         no_environments(),
         get(format!("{API}/snapshots"), json!({"apiVersion": "kloudlite.io/v1alpha1", "kind": "SnapshotList", "metadata": {}, "items": [
-            transient("sync-ws-1-bbbb", "ws-1", "karthik", "ws-1")
+            transient("sync-ws-0000000000000001-bbbb", "ws-0000000000000001", "karthik", "ws-0000000000000001")
         ]})),
-        get(format!("{API}/volumes/ws-1"), json!({"apiVersion": "kloudlite.io/v1alpha1", "kind": "Volume",
-            "metadata": {"name": "ws-1", "uid": "vol-uid-1"},
+        get(format!("{API}/volumes/ws-0000000000000001"), json!({"apiVersion": "kloudlite.io/v1alpha1", "kind": "Volume",
+            "metadata": {"name": "ws-0000000000000001", "uid": "vol-uid-1"},
             "spec": {"owner": "karthik", "nodeName": "node-a", "region": "r1", "quotaGb": 5}})),
         Route { method: "POST", path: format!("{API}/snapshots"), status: 201,
-                body: snapshot("clone-ws-1-cafe", "ws-1", "karthik", "ws-1", "sync-ws-1-bbbb", "working") },
-        Route { method: "POST", path: format!("{API}/workspaces"), status: 201, body: placed_ws("ws-2", "karthik") },
+                body: snapshot("clone-ws-0000000000000001-cafe", "ws-0000000000000001", "karthik", "ws-0000000000000001", "sync-ws-0000000000000001-bbbb", "working") },
+        Route { method: "POST", path: format!("{API}/workspaces"), status: 201, body: placed_ws("ws-0000000000000002", "karthik") },
     ];
     let s = server(routes).await;
     let tok = token(&s.jwt, "karthik");
 
     let r = reqwest::Client::new()
-        .post(format!("{}/v1/workspaces/ws-1/clone", s.base))
+        .post(format!("{}/v1/workspaces/ws-0000000000000001/clone", s.base))
         .bearer_auth(&tok)
         .json(&json!({"name": "copy"}))
         .send()
@@ -670,11 +670,11 @@ async fn clone_cuts_a_transient_and_bases_the_clone_on_it() {
     assert_eq!(r.status(), 202);
 
     let cut = s.rec.sent("POST", &format!("{API}/snapshots")).remove(0);
-    assert!(cut["metadata"]["name"].as_str().unwrap().starts_with("clone-ws-1-"), "{cut}");
+    assert!(cut["metadata"]["name"].as_str().unwrap().starts_with("clone-ws-0000000000000001-"), "{cut}");
     assert_eq!(cut["spec"]["transient"], true, "a clone cut is a sync point, not a snapshot in anyone's history");
-    assert_eq!(cut["spec"]["parent"], "sync-ws-1-bbbb", "parented on the newest transient so the send is a delta");
-    assert_eq!(cut["spec"]["worktree"], "ws-1");
-    assert_eq!(cut["metadata"]["ownerReferences"][0]["name"], "ws-1", "owned by the source: deleting it is the whole delete");
+    assert_eq!(cut["spec"]["parent"], "sync-ws-0000000000000001-bbbb", "parented on the newest transient so the send is a delta");
+    assert_eq!(cut["spec"]["worktree"], "ws-0000000000000001");
+    assert_eq!(cut["metadata"]["ownerReferences"][0]["name"], "ws-0000000000000001", "owned by the source: deleting it is the whole delete");
 
     let made = s.rec.sent("POST", &format!("{API}/workspaces")).remove(0);
     assert_eq!(made["spec"]["storage"]["source"]["cloneOf"]["commit"], cut["metadata"]["name"]);
@@ -693,21 +693,21 @@ async fn clone_cuts_a_transient_and_bases_the_clone_on_it() {
 #[tokio::test]
 async fn a_never_snapshotted_source_is_cloneable_and_the_cut_is_its_root() {
     let routes = vec![
-        get(format!("{API}/workspaces/ws-1"), placed_ws("ws-1", "karthik")),
+        get(format!("{API}/workspaces/ws-0000000000000001"), placed_ws("ws-0000000000000001", "karthik")),
         no_workspaces(),
         no_environments(),
         get(format!("{API}/snapshots"), json!({"apiVersion": "kloudlite.io/v1alpha1", "kind": "SnapshotList", "metadata": {}, "items": []})),
-        get(format!("{API}/volumes/ws-1"), json!({"apiVersion": "kloudlite.io/v1alpha1", "kind": "Volume",
-            "metadata": {"name": "ws-1", "uid": "vol-uid-1"},
+        get(format!("{API}/volumes/ws-0000000000000001"), json!({"apiVersion": "kloudlite.io/v1alpha1", "kind": "Volume",
+            "metadata": {"name": "ws-0000000000000001", "uid": "vol-uid-1"},
             "spec": {"owner": "karthik", "nodeName": "node-a", "region": "r1", "quotaGb": 5}})),
         Route { method: "POST", path: format!("{API}/snapshots"), status: 201,
-                body: snapshot("clone-ws-1-cafe", "ws-1", "karthik", "ws-1", "", "working") },
-        Route { method: "POST", path: format!("{API}/workspaces"), status: 201, body: placed_ws("ws-2", "karthik") },
+                body: snapshot("clone-ws-0000000000000001-cafe", "ws-0000000000000001", "karthik", "ws-0000000000000001", "", "working") },
+        Route { method: "POST", path: format!("{API}/workspaces"), status: 201, body: placed_ws("ws-0000000000000002", "karthik") },
     ];
     let s = server(routes).await;
     let tok = token(&s.jwt, "karthik");
     let r = reqwest::Client::new()
-        .post(format!("{}/v1/workspaces/ws-1/clone", s.base))
+        .post(format!("{}/v1/workspaces/ws-0000000000000001/clone", s.base))
         .bearer_auth(&tok)
         .json(&json!({"name": "copy"}))
         .send()
@@ -736,25 +736,25 @@ fn replicas(items: Vec<Value>) -> Route {
 /// exactly what it is based on, so choosing it is choosing the gap knowingly.
 #[tokio::test]
 async fn cloning_an_interrupted_source_is_allowed_and_states_the_cut_it_used() {
-    let mut src = interrupted_ws("ws-1", "karthik");
-    src["status"]["head"] = json!("ws-1-aaaaaaaa");
+    let mut src = interrupted_ws("ws-0000000000000001", "karthik");
+    src["status"]["head"] = json!("ws-0000000000000001-aaaaaaaa");
     let routes = vec![
-        get(format!("{API}/workspaces/ws-1"), src),
+        get(format!("{API}/workspaces/ws-0000000000000001"), src),
         no_workspaces(),
         no_environments(),
         get(format!("{API}/snapshots"), json!({"apiVersion": "kloudlite.io/v1alpha1", "kind": "SnapshotList", "metadata": {}, "items": [
-            transient("sync-ws-1-bbbb", "ws-1", "karthik", "ws-1")
+            transient("sync-ws-0000000000000001-bbbb", "ws-0000000000000001", "karthik", "ws-0000000000000001")
         ]})),
-        replicas(vec![replica_holding("node-b", "ws-1", "ws-1", "sync-ws-1-bbbb")]),
-        get(format!("{API}/volumes/ws-1"), json!({"apiVersion": "kloudlite.io/v1alpha1", "kind": "Volume",
-            "metadata": {"name": "ws-1", "uid": "vol-uid-1"},
+        replicas(vec![replica_holding("node-b", "ws-0000000000000001", "ws-0000000000000001", "sync-ws-0000000000000001-bbbb")]),
+        get(format!("{API}/volumes/ws-0000000000000001"), json!({"apiVersion": "kloudlite.io/v1alpha1", "kind": "Volume",
+            "metadata": {"name": "ws-0000000000000001", "uid": "vol-uid-1"},
             "spec": {"owner": "karthik", "nodeName": "node-a", "region": "r1", "quotaGb": 5}})),
-        Route { method: "POST", path: format!("{API}/workspaces"), status: 201, body: placed_ws("ws-2", "karthik") },
+        Route { method: "POST", path: format!("{API}/workspaces"), status: 201, body: placed_ws("ws-0000000000000002", "karthik") },
     ];
     let s = server(routes).await;
     let tok = token(&s.jwt, "karthik");
     let r = reqwest::Client::new()
-        .post(format!("{}/v1/workspaces/ws-1/clone", s.base))
+        .post(format!("{}/v1/workspaces/ws-0000000000000001/clone", s.base))
         .bearer_auth(&tok)
         .json(&json!({"name": "copy"}))
         .send()
@@ -765,7 +765,7 @@ async fn cloning_an_interrupted_source_is_allowed_and_states_the_cut_it_used() {
     // graft onto — and that is exactly what the response names.
     assert!(s.rec.sent("POST", &format!("{API}/snapshots")).is_empty(), "an interrupted source cannot be cut");
     let body: Value = r.json().await.unwrap();
-    assert_eq!(body["based_on"]["snapshot"], "sync-ws-1-bbbb");
+    assert_eq!(body["based_on"]["snapshot"], "sync-ws-0000000000000001-bbbb");
     assert_eq!(body["based_on"]["interrupted"], true);
     assert_eq!(body["based_on"]["at"], "2026-09-01T14:32:07Z", "the age the person weighs is the cut's own readyAt");
     assert!(body["based_on"]["age_seconds"].as_i64().unwrap() > 0);
@@ -776,8 +776,8 @@ async fn cloning_an_interrupted_source_is_allowed_and_states_the_cut_it_used() {
     let made = s.rec.sent("POST", &format!("{API}/workspaces")).remove(0);
     let source = &made["spec"]["storage"]["source"];
     assert!(source["cloneOf"].is_null(), "an interrupted clone is never a shared worktree: {source}");
-    assert_eq!(source["seededFrom"]["volume"], "ws-1");
-    assert_eq!(source["seededFrom"]["snapshot"], "sync-ws-1-bbbb", "the held cut, which is what a holder node can seed from");
+    assert_eq!(source["seededFrom"]["volume"], "ws-0000000000000001");
+    assert_eq!(source["seededFrom"]["snapshot"], "sync-ws-0000000000000001-bbbb", "the held cut, which is what a holder node can seed from");
 }
 
 /// An interrupted source with nothing synced anywhere has no way forward at all — a 409 that says
@@ -785,7 +785,7 @@ async fn cloning_an_interrupted_source_is_allowed_and_states_the_cut_it_used() {
 #[tokio::test]
 async fn cloning_an_interrupted_source_with_no_sync_point_is_a_409() {
     let routes = vec![
-        get(format!("{API}/workspaces/ws-1"), interrupted_ws("ws-1", "karthik")),
+        get(format!("{API}/workspaces/ws-0000000000000001"), interrupted_ws("ws-0000000000000001", "karthik")),
         no_workspaces(),
         no_environments(),
         get(format!("{API}/snapshots"), json!({"apiVersion": "kloudlite.io/v1alpha1", "kind": "SnapshotList", "metadata": {}, "items": []})),
@@ -794,7 +794,7 @@ async fn cloning_an_interrupted_source_with_no_sync_point_is_a_409() {
     let s = server(routes).await;
     let tok = token(&s.jwt, "karthik");
     let r = reqwest::Client::new()
-        .post(format!("{}/v1/workspaces/ws-1/clone", s.base))
+        .post(format!("{}/v1/workspaces/ws-0000000000000001/clone", s.base))
         .bearer_auth(&tok)
         .json(&json!({"name": "copy"}))
         .send()
@@ -810,24 +810,24 @@ async fn cloning_an_interrupted_source_with_no_sync_point_is_a_409() {
 #[tokio::test]
 async fn an_interrupted_clone_skips_a_transient_no_live_node_holds() {
     let routes = vec![
-        get(format!("{API}/workspaces/ws-1"), interrupted_ws("ws-1", "karthik")),
+        get(format!("{API}/workspaces/ws-0000000000000001"), interrupted_ws("ws-0000000000000001", "karthik")),
         no_workspaces(),
         no_environments(),
         get(format!("{API}/snapshots"), json!({"apiVersion": "kloudlite.io/v1alpha1", "kind": "SnapshotList", "metadata": {}, "items": [
-            transient("sync-ws-1-old", "ws-1", "karthik", "ws-1"),
+            transient("sync-ws-0000000000000001-old", "ws-0000000000000001", "karthik", "ws-0000000000000001"),
             // Newest cluster-wide, and held by nobody but the corpse.
-            transient("sync-ws-1-last", "ws-1", "karthik", "ws-1")
+            transient("sync-ws-0000000000000001-last", "ws-0000000000000001", "karthik", "ws-0000000000000001")
         ]})),
-        replicas(vec![replica_holding("node-b", "ws-1", "ws-1", "sync-ws-1-old")]),
-        get(format!("{API}/volumes/ws-1"), json!({"apiVersion": "kloudlite.io/v1alpha1", "kind": "Volume",
-            "metadata": {"name": "ws-1", "uid": "vol-uid-1"},
+        replicas(vec![replica_holding("node-b", "ws-0000000000000001", "ws-0000000000000001", "sync-ws-0000000000000001-old")]),
+        get(format!("{API}/volumes/ws-0000000000000001"), json!({"apiVersion": "kloudlite.io/v1alpha1", "kind": "Volume",
+            "metadata": {"name": "ws-0000000000000001", "uid": "vol-uid-1"},
             "spec": {"owner": "karthik", "nodeName": "node-a", "region": "r1", "quotaGb": 5}})),
-        Route { method: "POST", path: format!("{API}/workspaces"), status: 201, body: placed_ws("ws-2", "karthik") },
+        Route { method: "POST", path: format!("{API}/workspaces"), status: 201, body: placed_ws("ws-0000000000000002", "karthik") },
     ];
     let s = server(routes).await;
     let tok = token(&s.jwt, "karthik");
     let r = reqwest::Client::new()
-        .post(format!("{}/v1/workspaces/ws-1/clone", s.base))
+        .post(format!("{}/v1/workspaces/ws-0000000000000001/clone", s.base))
         .bearer_auth(&tok)
         .json(&json!({"name": "copy"}))
         .send()
@@ -835,7 +835,7 @@ async fn an_interrupted_clone_skips_a_transient_no_live_node_holds() {
         .unwrap();
     assert_eq!(r.status(), 202);
     let body: Value = r.json().await.unwrap();
-    assert_eq!(body["based_on"]["snapshot"], "sync-ws-1-old", "the newest a LIVE node can serve, not the newest that exists");
+    assert_eq!(body["based_on"]["snapshot"], "sync-ws-0000000000000001-old", "the newest a LIVE node can serve, not the newest that exists");
 }
 
 /// The one-cut-in-flight guard must not reach the interrupted path. The `Working` cut belongs to
@@ -843,26 +843,26 @@ async fn an_interrupted_clone_skips_a_transient_no_live_node_holds() {
 /// shut the only door left — a clone off the copy a live peer already holds.
 #[tokio::test]
 async fn an_interrupted_clone_ignores_a_working_cut_the_dead_node_left_behind() {
-    let mut stuck = snapshot("sync-ws-1-stuck", "ws-1", "karthik", "ws-1", "", "working");
+    let mut stuck = snapshot("sync-ws-0000000000000001-stuck", "ws-0000000000000001", "karthik", "ws-0000000000000001", "", "working");
     stuck["spec"]["transient"] = json!(true);
     let routes = vec![
-        get(format!("{API}/workspaces/ws-1"), interrupted_ws("ws-1", "karthik")),
+        get(format!("{API}/workspaces/ws-0000000000000001"), interrupted_ws("ws-0000000000000001", "karthik")),
         no_workspaces(),
         no_environments(),
         get(format!("{API}/snapshots"), json!({"apiVersion": "kloudlite.io/v1alpha1", "kind": "SnapshotList", "metadata": {}, "items": [
-            transient("sync-ws-1-bbbb", "ws-1", "karthik", "ws-1"),
+            transient("sync-ws-0000000000000001-bbbb", "ws-0000000000000001", "karthik", "ws-0000000000000001"),
             stuck
         ]})),
-        replicas(vec![replica_holding("node-b", "ws-1", "ws-1", "sync-ws-1-bbbb")]),
-        get(format!("{API}/volumes/ws-1"), json!({"apiVersion": "kloudlite.io/v1alpha1", "kind": "Volume",
-            "metadata": {"name": "ws-1", "uid": "vol-uid-1"},
+        replicas(vec![replica_holding("node-b", "ws-0000000000000001", "ws-0000000000000001", "sync-ws-0000000000000001-bbbb")]),
+        get(format!("{API}/volumes/ws-0000000000000001"), json!({"apiVersion": "kloudlite.io/v1alpha1", "kind": "Volume",
+            "metadata": {"name": "ws-0000000000000001", "uid": "vol-uid-1"},
             "spec": {"owner": "karthik", "nodeName": "node-a", "region": "r1", "quotaGb": 5}})),
-        Route { method: "POST", path: format!("{API}/workspaces"), status: 201, body: placed_ws("ws-2", "karthik") },
+        Route { method: "POST", path: format!("{API}/workspaces"), status: 201, body: placed_ws("ws-0000000000000002", "karthik") },
     ];
     let s = server(routes).await;
     let tok = token(&s.jwt, "karthik");
     let r = reqwest::Client::new()
-        .post(format!("{}/v1/workspaces/ws-1/clone", s.base))
+        .post(format!("{}/v1/workspaces/ws-0000000000000001/clone", s.base))
         .bearer_auth(&tok)
         .json(&json!({"name": "copy"}))
         .send()
@@ -870,7 +870,7 @@ async fn an_interrupted_clone_ignores_a_working_cut_the_dead_node_left_behind() 
         .unwrap();
     assert_eq!(r.status(), 202);
     let body: Value = r.json().await.unwrap();
-    assert_eq!(body["based_on"]["snapshot"], "sync-ws-1-bbbb");
+    assert_eq!(body["based_on"]["snapshot"], "sync-ws-0000000000000001-bbbb");
     assert_eq!(body["based_on"]["interrupted"], true);
 }
 
@@ -878,18 +878,18 @@ async fn an_interrupted_clone_ignores_a_working_cut_the_dead_node_left_behind() 
 #[tokio::test]
 async fn an_interrupted_clone_ignores_replicas_of_a_different_worktree() {
     let routes = vec![
-        get(format!("{API}/workspaces/ws-1"), interrupted_ws("ws-1", "karthik")),
+        get(format!("{API}/workspaces/ws-0000000000000001"), interrupted_ws("ws-0000000000000001", "karthik")),
         no_workspaces(),
         no_environments(),
         get(format!("{API}/snapshots"), json!({"apiVersion": "kloudlite.io/v1alpha1", "kind": "SnapshotList", "metadata": {}, "items": [
-            transient("sync-ws-1-bbbb", "ws-1", "karthik", "ws-1")
+            transient("sync-ws-0000000000000001-bbbb", "ws-0000000000000001", "karthik", "ws-0000000000000001")
         ]})),
-        replicas(vec![replica_holding("node-b", "ws-1", "ws-other", "sync-ws-other-zzzz")]),
+        replicas(vec![replica_holding("node-b", "ws-0000000000000001", "ws-other", "sync-ws-other-zzzz")]),
     ];
     let s = server(routes).await;
     let tok = token(&s.jwt, "karthik");
     let r = reqwest::Client::new()
-        .post(format!("{}/v1/workspaces/ws-1/clone", s.base))
+        .post(format!("{}/v1/workspaces/ws-0000000000000001/clone", s.base))
         .bearer_auth(&tok)
         .json(&json!({"name": "copy"}))
         .send()
@@ -904,17 +904,17 @@ async fn an_interrupted_clone_ignores_replicas_of_a_different_worktree() {
 #[tokio::test]
 async fn cloning_an_environment_cuts_nothing_and_reports_no_base() {
     let routes = vec![
-        get(format!("{API}/environments/env-1"), placed_env("env-1", "karthik")),
-        get(format!("{API}/volumes/env-1"), json!({"apiVersion": "kloudlite.io/v1alpha1", "kind": "Volume",
-            "metadata": {"name": "env-1", "uid": "vol-uid-2"},
+        get(format!("{API}/environments/env-0000000000000001"), placed_env("env-0000000000000001", "karthik")),
+        get(format!("{API}/volumes/env-0000000000000001"), json!({"apiVersion": "kloudlite.io/v1alpha1", "kind": "Volume",
+            "metadata": {"name": "env-0000000000000001", "uid": "vol-uid-2"},
             "spec": {"owner": "karthik", "nodeName": "node-a", "region": "r1", "quotaGb": 5}})),
         get(format!("{API}/snapshots"), json!({"apiVersion": "kloudlite.io/v1alpha1", "kind": "SnapshotList", "metadata": {}, "items": []})),
-        Route { method: "POST", path: format!("{API}/environments"), status: 201, body: placed_env("env-2", "karthik") },
+        Route { method: "POST", path: format!("{API}/environments"), status: 201, body: placed_env("env-0000000000000002", "karthik") },
     ];
     let s = server(routes).await;
     let tok = token(&s.jwt, "karthik");
     let r = reqwest::Client::new()
-        .post(format!("{}/v1/environments/env-1/clone", s.base))
+        .post(format!("{}/v1/environments/env-0000000000000001/clone", s.base))
         .bearer_auth(&tok)
         .json(&json!({"name": "copy"}))
         .send()
@@ -933,16 +933,16 @@ async fn cloning_an_environment_cuts_nothing_and_reports_no_base() {
 /// workspace clone of an interrupted source is the one that IS allowed, grafting onto a replica.
 #[tokio::test]
 async fn cloning_an_interrupted_environment_is_a_409_that_names_the_wait() {
-    let mut src = placed_env("env-1", "karthik");
+    let mut src = placed_env("env-0000000000000001", "karthik");
     src["status"]["conditions"] = json!([{
         "type": "Degraded", "status": "True", "reason": "NodeDead",
         "message": "node node-a is down", "lastTransitionTime": "2026-09-03T10:00:00Z"
     }]);
-    let routes = vec![get(format!("{API}/environments/env-1"), src)];
+    let routes = vec![get(format!("{API}/environments/env-0000000000000001"), src)];
     let s = server(routes).await;
     let tok = token(&s.jwt, "karthik");
     let r = reqwest::Client::new()
-        .post(format!("{}/v1/environments/env-1/clone", s.base))
+        .post(format!("{}/v1/environments/env-0000000000000001/clone", s.base))
         .bearer_auth(&tok)
         .json(&json!({"name": "copy"}))
         .send()
@@ -961,20 +961,20 @@ async fn cloning_an_interrupted_environment_is_a_409_that_names_the_wait() {
 /// image/packages went with it rather than inheriting whatever the workspace has become.
 #[tokio::test]
 async fn a_push_records_the_workspace_definition_on_the_snapshot() {
-    let mut w = placed_ws_with_head("ws-1", "karthik", "ws-1-aaaaaaaa");
+    let mut w = placed_ws_with_head("ws-0000000000000001", "karthik", "ws-0000000000000001-aaaaaaaa");
     w["spec"]["image"] = json!("alpine:3.20");
     w["spec"]["packages"] = json!(["jq"]);
     let routes = vec![
-        get(format!("{API}/workspaces/ws-1"), w),
+        get(format!("{API}/workspaces/ws-0000000000000001"), w),
         get(format!("{API}/snapshots"), json!({"apiVersion": "kloudlite.io/v1alpha1", "kind": "SnapshotList", "metadata": {}, "items": []})),
-        get(format!("{API}/volumes/ws-1"), json!({"apiVersion": "kloudlite.io/v1alpha1", "kind": "Volume", "metadata": {"name": "ws-1", "uid": "vol-uid-1"}, "spec": {"owner": "karthik", "nodeName": "node-a", "region": "r1", "quotaGb": 5}})),
-        Route { method: "POST", path: format!("{API}/snapshots"), status: 201, body: snapshot("ws-1-cccccccc", "ws-1", "karthik", "ws-1", "", "working") },
+        get(format!("{API}/volumes/ws-0000000000000001"), json!({"apiVersion": "kloudlite.io/v1alpha1", "kind": "Volume", "metadata": {"name": "ws-0000000000000001", "uid": "vol-uid-1"}, "spec": {"owner": "karthik", "nodeName": "node-a", "region": "r1", "quotaGb": 5}})),
+        Route { method: "POST", path: format!("{API}/snapshots"), status: 201, body: snapshot("ws-0000000000000001-cccccccc", "ws-0000000000000001", "karthik", "ws-0000000000000001", "", "working") },
     ];
     let s = server(routes).await;
     let tok = token(&s.jwt, "karthik");
 
     let resp = reqwest::Client::new()
-        .post(format!("{}/v1/workspaces/ws-1/push", s.base))
+        .post(format!("{}/v1/workspaces/ws-0000000000000001/push", s.base))
         .bearer_auth(&tok)
         .json(&json!({"message": "m"}))
         .send()
@@ -991,22 +991,22 @@ async fn a_push_records_the_workspace_definition_on_the_snapshot() {
 /// Same freeze on the environment side: the state names its services, not the workspace shape.
 #[tokio::test]
 async fn a_push_records_the_environment_services_on_the_snapshot() {
-    let mut e = placed_env("env-1", "karthik");
+    let mut e = placed_env("env-0000000000000001", "karthik");
     e["spec"]["services"] = json!([
         {"name": "db", "image": "mongo:7", "command": [], "env": {}, "mounts": [], "ports": [27017]},
         {"name": "cache", "image": "redis:7", "command": [], "env": {}, "mounts": [], "ports": [6379]},
     ]);
     let routes = vec![
-        get(format!("{API}/environments/env-1"), e),
+        get(format!("{API}/environments/env-0000000000000001"), e),
         get(format!("{API}/snapshots"), json!({"apiVersion": "kloudlite.io/v1alpha1", "kind": "SnapshotList", "metadata": {}, "items": []})),
-        get(format!("{API}/volumes/env-1"), json!({"apiVersion": "kloudlite.io/v1alpha1", "kind": "Volume", "metadata": {"name": "env-1", "uid": "vol-uid-1"}, "spec": {"owner": "karthik", "nodeName": "node-a", "region": "r1", "quotaGb": 5}})),
-        Route { method: "POST", path: format!("{API}/snapshots"), status: 201, body: snapshot("env-1-cccccccc", "env-1", "karthik", "env-1", "", "working") },
+        get(format!("{API}/volumes/env-0000000000000001"), json!({"apiVersion": "kloudlite.io/v1alpha1", "kind": "Volume", "metadata": {"name": "env-0000000000000001", "uid": "vol-uid-1"}, "spec": {"owner": "karthik", "nodeName": "node-a", "region": "r1", "quotaGb": 5}})),
+        Route { method: "POST", path: format!("{API}/snapshots"), status: 201, body: snapshot("env-0000000000000001-cccccccc", "env-0000000000000001", "karthik", "env-0000000000000001", "", "working") },
     ];
     let s = server(routes).await;
     let tok = token(&s.jwt, "karthik");
 
     let resp = reqwest::Client::new()
-        .post(format!("{}/v1/environments/env-1/push", s.base))
+        .post(format!("{}/v1/environments/env-0000000000000001/push", s.base))
         .bearer_auth(&tok)
         .send()
         .await
@@ -1022,28 +1022,28 @@ async fn a_push_records_the_environment_services_on_the_snapshot() {
 /// source workspace still existing, let alone still looking the same.
 #[tokio::test]
 async fn a_clone_cut_records_the_source_definition() {
-    let mut w = placed_ws_with_head("ws-1", "karthik", "ws-1-aaaaaaaa");
+    let mut w = placed_ws_with_head("ws-0000000000000001", "karthik", "ws-0000000000000001-aaaaaaaa");
     w["spec"]["image"] = json!("alpine:3.20");
     w["spec"]["packages"] = json!(["jq"]);
     let routes = vec![
-        get(format!("{API}/workspaces/ws-1"), w),
+        get(format!("{API}/workspaces/ws-0000000000000001"), w),
         no_workspaces(),
         no_environments(),
         get(format!("{API}/snapshots"), json!({"apiVersion": "kloudlite.io/v1alpha1", "kind": "SnapshotList", "metadata": {}, "items": [
-            transient("sync-ws-1-bbbb", "ws-1", "karthik", "ws-1")
+            transient("sync-ws-0000000000000001-bbbb", "ws-0000000000000001", "karthik", "ws-0000000000000001")
         ]})),
-        get(format!("{API}/volumes/ws-1"), json!({"apiVersion": "kloudlite.io/v1alpha1", "kind": "Volume",
-            "metadata": {"name": "ws-1", "uid": "vol-uid-1"},
+        get(format!("{API}/volumes/ws-0000000000000001"), json!({"apiVersion": "kloudlite.io/v1alpha1", "kind": "Volume",
+            "metadata": {"name": "ws-0000000000000001", "uid": "vol-uid-1"},
             "spec": {"owner": "karthik", "nodeName": "node-a", "region": "r1", "quotaGb": 5}})),
         Route { method: "POST", path: format!("{API}/snapshots"), status: 201,
-                body: snapshot("clone-ws-1-cafe", "ws-1", "karthik", "ws-1", "sync-ws-1-bbbb", "working") },
-        Route { method: "POST", path: format!("{API}/workspaces"), status: 201, body: placed_ws("ws-2", "karthik") },
+                body: snapshot("clone-ws-0000000000000001-cafe", "ws-0000000000000001", "karthik", "ws-0000000000000001", "sync-ws-0000000000000001-bbbb", "working") },
+        Route { method: "POST", path: format!("{API}/workspaces"), status: 201, body: placed_ws("ws-0000000000000002", "karthik") },
     ];
     let s = server(routes).await;
     let tok = token(&s.jwt, "karthik");
 
     let r = reqwest::Client::new()
-        .post(format!("{}/v1/workspaces/ws-1/clone", s.base))
+        .post(format!("{}/v1/workspaces/ws-0000000000000001/clone", s.base))
         .bearer_auth(&tok)
         .json(&json!({"name": "copy"}))
         .send()

@@ -373,12 +373,12 @@ async fn create_ws_writes_exactly_one_unplaced_workspace() {
 #[tokio::test]
 async fn a_workspace_doc_has_no_live_state_field() {
     let s = server(vec![
-        get(format!("{API}/workspaces/ws-1"), placed_ws("ws-1", "karthik")),
+        get(format!("{API}/workspaces/ws-0000000000000001"), placed_ws("ws-0000000000000001", "karthik")),
         get(format!("{API}/snapshots"), json!({"apiVersion": "kloudlite.io/v1alpha1", "kind": "SnapshotList", "metadata": {}, "items": []})),
     ])
     .await;
     let body: Value = reqwest::Client::new()
-        .get(format!("{}/v1/workspaces/ws-1", s.base))
+        .get(format!("{}/v1/workspaces/ws-0000000000000001", s.base))
         .bearer_auth(token(&s.jwt, "karthik"))
         .send()
         .await
@@ -444,7 +444,7 @@ fn list_of_envs(items: Vec<Value>) -> Value {
 #[tokio::test]
 async fn cloning_past_the_quota_limit_is_refused() {
     let mut routes = vec![
-        get(format!("{API}/workspaces/ws-1"), placed_ws("ws-1", "karthik")),
+        get(format!("{API}/workspaces/ws-0000000000000001"), placed_ws("ws-0000000000000001", "karthik")),
         get(format!("{API}/workspaces"), ws_list(many_ws(5))),
         no_environments(),
         post(format!("{API}/workspaces"), ws_obj("ws-new", "karthik")),
@@ -452,7 +452,7 @@ async fn cloning_past_the_quota_limit_is_refused() {
     routes.extend(quota_gate_routes());
     let s = server(routes).await;
     let resp = reqwest::Client::new()
-        .post(format!("{}/v1/workspaces/ws-1/clone", s.base))
+        .post(format!("{}/v1/workspaces/ws-0000000000000001/clone", s.base))
         .bearer_auth(token(&s.jwt, "karthik"))
         .json(&json!({"name": "copy"}))
         .send()
@@ -611,8 +611,8 @@ async fn start_and_stop_patch_the_desired_state() {
     // A start is a FILL verb — it reads the owner's usage before asking for a pod — so the quota
     // listings are mocked here too. A stop is checked nowhere.
     let mut routes = vec![
-        get(format!("{API}/workspaces/ws-1"), placed_ws("ws-1", "karthik")),
-        Route { method: "PATCH", path: format!("{API}/workspaces/ws-1"), status: 200, body: placed_ws("ws-1", "karthik") },
+        get(format!("{API}/workspaces/ws-0000000000000001"), placed_ws("ws-0000000000000001", "karthik")),
+        Route { method: "PATCH", path: format!("{API}/workspaces/ws-0000000000000001"), status: 200, body: placed_ws("ws-0000000000000001", "karthik") },
         no_workspaces(),
         no_environments(),
     ];
@@ -623,13 +623,13 @@ async fn start_and_stop_patch_the_desired_state() {
 
     for (verb, want) in [("stop", "stopped"), ("start", "running")] {
         let resp = client
-            .post(format!("{}/v1/workspaces/ws-1/{verb}", s.base))
+            .post(format!("{}/v1/workspaces/ws-0000000000000001/{verb}", s.base))
             .bearer_auth(&tok)
             .send()
             .await
             .unwrap();
         assert_eq!(resp.status(), 202);
-        let patch = s.rec.sent("PATCH", &format!("{API}/workspaces/ws-1")).pop().unwrap();
+        let patch = s.rec.sent("PATCH", &format!("{API}/workspaces/ws-0000000000000001")).pop().unwrap();
         assert_eq!(patch["spec"]["desiredState"], want);
     }
 }
@@ -647,15 +647,15 @@ fn with_node_dead(mut w: Value) -> Value {
 
 #[tokio::test]
 async fn stop_warns_only_when_the_workspace_is_pinned_to_a_dead_node() {
-    let dead = with_node_dead(placed_ws("ws-1", "karthik"));
+    let dead = with_node_dead(placed_ws("ws-0000000000000001", "karthik"));
     let routes = vec![
         no_snapshots(),
-        get(format!("{API}/workspaces/ws-1"), dead),
-        Route { method: "PATCH", path: format!("{API}/workspaces/ws-1"), status: 200, body: placed_ws("ws-1", "karthik") },
+        get(format!("{API}/workspaces/ws-0000000000000001"), dead),
+        Route { method: "PATCH", path: format!("{API}/workspaces/ws-0000000000000001"), status: 200, body: placed_ws("ws-0000000000000001", "karthik") },
     ];
     let s = server(routes).await;
     let resp = reqwest::Client::new()
-        .post(format!("{}/v1/workspaces/ws-1/stop", s.base))
+        .post(format!("{}/v1/workspaces/ws-0000000000000001/stop", s.base))
         .bearer_auth(token(&s.jwt, "karthik"))
         .send()
         .await
@@ -671,15 +671,15 @@ async fn stop_warns_only_when_the_workspace_is_pinned_to_a_dead_node() {
     // A start is a FILL verb — it reads the owner's usage before asking for a pod — so the quota
     // listings are mocked here too. A stop is checked nowhere.
     let mut routes = vec![
-        get(format!("{API}/workspaces/ws-1"), placed_ws("ws-1", "karthik")),
-        Route { method: "PATCH", path: format!("{API}/workspaces/ws-1"), status: 200, body: placed_ws("ws-1", "karthik") },
+        get(format!("{API}/workspaces/ws-0000000000000001"), placed_ws("ws-0000000000000001", "karthik")),
+        Route { method: "PATCH", path: format!("{API}/workspaces/ws-0000000000000001"), status: 200, body: placed_ws("ws-0000000000000001", "karthik") },
         no_workspaces(),
         no_environments(),
     ];
     routes.extend(quota_gate_routes());
     let s = server(routes).await;
     let resp = reqwest::Client::new()
-        .post(format!("{}/v1/workspaces/ws-1/stop", s.base))
+        .post(format!("{}/v1/workspaces/ws-0000000000000001/stop", s.base))
         .bearer_auth(token(&s.jwt, "karthik"))
         .send()
         .await
@@ -691,15 +691,15 @@ async fn stop_warns_only_when_the_workspace_is_pinned_to_a_dead_node() {
 
 #[tokio::test]
 async fn stop_env_keeps_the_doc_fields_alongside_the_warning() {
-    let dead = with_node_dead(env_obj("env-1", "karthik"));
+    let dead = with_node_dead(env_obj("env-0000000000000001", "karthik"));
     let routes = vec![
         no_snapshots(),
-        get(format!("{API}/environments/env-1"), dead),
-        Route { method: "PATCH", path: format!("{API}/environments/env-1"), status: 200, body: env_obj("env-1", "karthik") },
+        get(format!("{API}/environments/env-0000000000000001"), dead),
+        Route { method: "PATCH", path: format!("{API}/environments/env-0000000000000001"), status: 200, body: env_obj("env-0000000000000001", "karthik") },
     ];
     let s = server(routes).await;
     let resp = reqwest::Client::new()
-        .post(format!("{}/v1/environments/env-1/stop", s.base))
+        .post(format!("{}/v1/environments/env-0000000000000001/stop", s.base))
         .bearer_auth(token(&s.jwt, "karthik"))
         .send()
         .await
@@ -709,17 +709,17 @@ async fn stop_env_keeps_the_doc_fields_alongside_the_warning() {
     let warning = body["warning"].as_str().expect("an environment pinned to a dead node must warn on stop");
     assert!(warning.contains(NODE));
     // The warning rides alongside the environment doc, not instead of it.
-    assert_eq!(body["id"], "env-1");
+    assert_eq!(body["id"], "env-0000000000000001");
     assert_eq!(body["state"], "stopped");
 
     let routes = vec![
         no_snapshots(),
-        get(format!("{API}/environments/env-1"), env_obj("env-1", "karthik")),
-        Route { method: "PATCH", path: format!("{API}/environments/env-1"), status: 200, body: env_obj("env-1", "karthik") },
+        get(format!("{API}/environments/env-0000000000000001"), env_obj("env-0000000000000001", "karthik")),
+        Route { method: "PATCH", path: format!("{API}/environments/env-0000000000000001"), status: 200, body: env_obj("env-0000000000000001", "karthik") },
     ];
     let s = server(routes).await;
     let resp = reqwest::Client::new()
-        .post(format!("{}/v1/environments/env-1/stop", s.base))
+        .post(format!("{}/v1/environments/env-0000000000000001/stop", s.base))
         .bearer_auth(token(&s.jwt, "karthik"))
         .send()
         .await
@@ -727,7 +727,7 @@ async fn stop_env_keeps_the_doc_fields_alongside_the_warning() {
     assert_eq!(resp.status(), 202);
     let body: Value = resp.json().await.unwrap();
     assert!(body.get("warning").is_none(), "a healthy environment must not get a manufactured warning: {body}");
-    assert_eq!(body["id"], "env-1");
+    assert_eq!(body["id"], "env-0000000000000001");
 }
 
 /// Delete is ONE call. The "Workspace first, then Volume" ordering became the API server's job the
@@ -736,20 +736,20 @@ async fn stop_env_keeps_the_doc_fields_alongside_the_warning() {
 async fn delete_is_one_call() {
     let routes = vec![
         no_snapshots(),
-        get(format!("{API}/workspaces/ws-1"), placed_ws("ws-1", "karthik")),
-        Route { method: "DELETE", path: format!("{API}/workspaces/ws-1"), status: 200, body: placed_ws("ws-1", "karthik") },
+        get(format!("{API}/workspaces/ws-0000000000000001"), placed_ws("ws-0000000000000001", "karthik")),
+        Route { method: "DELETE", path: format!("{API}/workspaces/ws-0000000000000001"), status: 200, body: placed_ws("ws-0000000000000001", "karthik") },
     ];
     let s = server(routes).await;
 
     let resp = reqwest::Client::new()
-        .delete(format!("{}/v1/workspaces/ws-1", s.base))
+        .delete(format!("{}/v1/workspaces/ws-0000000000000001", s.base))
         .bearer_auth(token(&s.jwt, "karthik"))
         .send()
         .await
         .unwrap();
     assert_eq!(resp.status(), 202, "{}", resp.text().await.unwrap());
     let deletes: Vec<_> = s.rec.calls().into_iter().filter(|c| c.starts_with("DELETE")).collect();
-    assert_eq!(deletes, vec![format!("DELETE {API}/workspaces/ws-1")], "the GC removes the Volume");
+    assert_eq!(deletes, vec![format!("DELETE {API}/workspaces/ws-0000000000000001")], "the GC removes the Volume");
 }
 
 #[tokio::test]
@@ -904,8 +904,8 @@ async fn agent_routes_are_gone_from_the_api_router() {
 fn snap_obj() -> serde_json::Value {
     json!({
         "apiVersion": "kloudlite.io/v1alpha1", "kind": "Snapshot",
-        "metadata": {"name": "ws-1-abcdef01"},
-        "spec": {"volume": "ws-1", "owner": "karthik", "worktree": "ws-1", "parent": ""},
+        "metadata": {"name": "ws-0000000000000001-abcdef01"},
+        "spec": {"volume": "ws-0000000000000001", "owner": "karthik", "worktree": "ws-0000000000000001", "parent": ""},
         "status": {"phase": "working"},
     })
 }
@@ -919,8 +919,8 @@ async fn push_creates_a_snapshot_for_the_volume_with_its_message() {
         no_snapshots(),
         no_workspaces(),
         no_environments(),
-        get(format!("{API}/workspaces/ws-1"), placed_ws("ws-1", "karthik")),
-        get(format!("{API}/volumes/ws-1"), vol_obj("ws-1", "karthik")),
+        get(format!("{API}/workspaces/ws-0000000000000001"), placed_ws("ws-0000000000000001", "karthik")),
+        get(format!("{API}/volumes/ws-0000000000000001"), vol_obj("ws-0000000000000001", "karthik")),
         get(format!("{API}/snapshots"), json!({"apiVersion": "kloudlite.io/v1alpha1", "kind": "SnapshotList", "items": []})),
         Route { method: "POST", path: format!("{API}/snapshots"), status: 201, body: snap_obj() },
     ];
@@ -929,7 +929,7 @@ async fn push_creates_a_snapshot_for_the_volume_with_its_message() {
     let tok = token(&s.jwt, "karthik");
 
     let resp = reqwest::Client::new()
-        .post(format!("{}/v1/workspaces/ws-1/push", s.base))
+        .post(format!("{}/v1/workspaces/ws-0000000000000001/push", s.base))
         .bearer_auth(&tok)
         .json(&json!({"message": "checkpoint"}))
         .send()
@@ -938,10 +938,10 @@ async fn push_creates_a_snapshot_for_the_volume_with_its_message() {
     assert_eq!(resp.status(), 202, "{}", resp.text().await.unwrap());
 
     let req = s.rec.sent("POST", &format!("{API}/snapshots")).remove(0);
-    assert_eq!(req["spec"]["volume"], "ws-1");
-    assert_eq!(req["spec"]["worktree"], "ws-1");
+    assert_eq!(req["spec"]["volume"], "ws-0000000000000001");
+    assert_eq!(req["spec"]["worktree"], "ws-0000000000000001");
     assert_eq!(req["spec"]["message"], "checkpoint");
-    assert_eq!(req["metadata"]["labels"]["kloudlite.io/volume"], "ws-1");
+    assert_eq!(req["metadata"]["labels"]["kloudlite.io/volume"], "ws-0000000000000001");
     assert_eq!(req["metadata"]["labels"]["kloudlite.io/owner"], "karthik");
     assert_eq!(req["status"]["phase"], "working");
 }
@@ -952,8 +952,8 @@ async fn push_with_no_body_omits_the_message() {
         no_snapshots(),
         no_workspaces(),
         no_environments(),
-        get(format!("{API}/workspaces/ws-1"), placed_ws("ws-1", "karthik")),
-        get(format!("{API}/volumes/ws-1"), vol_obj("ws-1", "karthik")),
+        get(format!("{API}/workspaces/ws-0000000000000001"), placed_ws("ws-0000000000000001", "karthik")),
+        get(format!("{API}/volumes/ws-0000000000000001"), vol_obj("ws-0000000000000001", "karthik")),
         get(format!("{API}/snapshots"), json!({"apiVersion": "kloudlite.io/v1alpha1", "kind": "SnapshotList", "items": []})),
         Route { method: "POST", path: format!("{API}/snapshots"), status: 201, body: snap_obj() },
     ];
@@ -962,7 +962,7 @@ async fn push_with_no_body_omits_the_message() {
     let tok = token(&s.jwt, "karthik");
 
     let resp = reqwest::Client::new()
-        .post(format!("{}/v1/workspaces/ws-1/push", s.base))
+        .post(format!("{}/v1/workspaces/ws-0000000000000001/push", s.base))
         .bearer_auth(&tok)
         .send()
         .await
@@ -978,8 +978,8 @@ async fn env_push_targets_the_environments_own_volume() {
         no_snapshots(),
         no_workspaces(),
         no_environments(),
-        get(format!("{API}/environments/env-1"), env_obj("env-1", "karthik")),
-        get(format!("{API}/volumes/env-1"), vol_obj("env-1", "karthik")),
+        get(format!("{API}/environments/env-0000000000000001"), env_obj("env-0000000000000001", "karthik")),
+        get(format!("{API}/volumes/env-0000000000000001"), vol_obj("env-0000000000000001", "karthik")),
         get(format!("{API}/snapshots"), json!({"apiVersion": "kloudlite.io/v1alpha1", "kind": "SnapshotList", "items": []})),
         Route { method: "POST", path: format!("{API}/snapshots"), status: 201, body: snap_obj() },
     ];
@@ -988,7 +988,7 @@ async fn env_push_targets_the_environments_own_volume() {
     let tok = token(&s.jwt, "karthik");
 
     let resp = reqwest::Client::new()
-        .post(format!("{}/v1/environments/env-1/push", s.base))
+        .post(format!("{}/v1/environments/env-0000000000000001/push", s.base))
         .bearer_auth(&tok)
         .json(&json!({"message": "snap"}))
         .send()
@@ -996,19 +996,19 @@ async fn env_push_targets_the_environments_own_volume() {
         .unwrap();
     assert_eq!(resp.status(), 202, "{}", resp.text().await.unwrap());
     let req = s.rec.sent("POST", &format!("{API}/snapshots")).remove(0);
-    assert_eq!(req["spec"]["volume"], "env-1");
+    assert_eq!(req["spec"]["volume"], "env-0000000000000001");
     assert_eq!(req["spec"]["message"], "snap");
 }
 
 /// Someone else's workspace is a 404, never a 403 — and no request object is created.
 #[tokio::test]
 async fn push_on_someone_elses_workspace_is_not_found() {
-    let routes = vec![get(format!("{API}/workspaces/ws-1"), placed_ws("ws-1", "alice"))];
+    let routes = vec![get(format!("{API}/workspaces/ws-0000000000000001"), placed_ws("ws-0000000000000001", "alice"))];
     let s = server(routes).await;
     let tok = token(&s.jwt, "karthik");
 
     let resp = reqwest::Client::new()
-        .post(format!("{}/v1/workspaces/ws-1/push", s.base))
+        .post(format!("{}/v1/workspaces/ws-0000000000000001/push", s.base))
         .bearer_auth(&tok)
         .send()
         .await
@@ -1021,10 +1021,10 @@ async fn push_on_someone_elses_workspace_is_not_found() {
 /// not a silently dropped request.
 #[tokio::test]
 async fn push_before_the_volume_exists_is_a_conflict() {
-    let s = server(vec![get(format!("{API}/workspaces/ws-1"), ws_obj("ws-1", "karthik"))]).await;
+    let s = server(vec![get(format!("{API}/workspaces/ws-0000000000000001"), ws_obj("ws-0000000000000001", "karthik"))]).await;
     let tok = token(&s.jwt, "karthik");
     let resp = reqwest::Client::new()
-        .post(format!("{}/v1/workspaces/ws-1/push", s.base))
+        .post(format!("{}/v1/workspaces/ws-0000000000000001/push", s.base))
         .bearer_auth(&tok)
         .send()
         .await
@@ -1052,7 +1052,7 @@ async fn listing_reinstalls_the_platform_key_when_the_namespace_secret_is_missin
 
     let list = json!({
         "apiVersion": "kloudlite.io/v1alpha1", "kind": "WorkspaceList", "metadata": {},
-        "items": [placed_ws("ws-1", "karthik")]
+        "items": [placed_ws("ws-0000000000000001", "karthik")]
     });
     // No route for the Secret GET: the mock 404s it, which is exactly "the namespace has no key".
     let routes = vec![
@@ -1154,17 +1154,17 @@ async fn create_writes_the_requested_packages() {
 
 #[tokio::test]
 async fn patch_merges_the_package_list_and_echoes_the_doc() {
-    let mut patched = placed_ws("ws-1", "karthik");
+    let mut patched = placed_ws("ws-0000000000000001", "karthik");
     patched["spec"]["packages"] = json!(["hello", "jq"]);
     let routes = vec![
         no_snapshots(),
-        get(format!("{API}/workspaces/ws-1"), placed_ws("ws-1", "karthik")),
-        Route { method: "PATCH", path: format!("{API}/workspaces/ws-1"), status: 200, body: patched },
+        get(format!("{API}/workspaces/ws-0000000000000001"), placed_ws("ws-0000000000000001", "karthik")),
+        Route { method: "PATCH", path: format!("{API}/workspaces/ws-0000000000000001"), status: 200, body: patched },
     ];
     let s = server(routes).await;
 
     let resp = reqwest::Client::new()
-        .patch(format!("{}/v1/workspaces/ws-1", s.base))
+        .patch(format!("{}/v1/workspaces/ws-0000000000000001", s.base))
         .bearer_auth(token(&s.jwt, "karthik"))
         .json(&json!({"packages": ["hello", "jq"]}))
         .send()
@@ -1175,7 +1175,7 @@ async fn patch_merges_the_package_list_and_echoes_the_doc() {
     assert_eq!(doc["packages"], json!(["hello", "jq"]));
     // A merge patch, not an apply: it must touch the package list and its locks, nothing else.
     // Neither entry is pinned, so the locks it writes are empty — see `api_packages.rs`.
-    let p = s.rec.sent("PATCH", &format!("{API}/workspaces/ws-1")).pop().unwrap();
+    let p = s.rec.sent("PATCH", &format!("{API}/workspaces/ws-0000000000000001")).pop().unwrap();
     assert_eq!(p, json!({"spec": {"packages": ["hello", "jq"], "locks": []}}));
 }
 
@@ -1283,36 +1283,36 @@ fn ws_with_host_key(name: &str, owner: &str, phase: &str, host_key: Option<&str>
 
 #[tokio::test]
 async fn an_ssh_session_is_minted_only_for_a_ready_workspace_the_caller_may_act_on() {
-    const HOST_KEY: &str = "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIhostkey ws-1";
+    const HOST_KEY: &str = "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIhostkey ws-0000000000000001";
     let s = server(vec![get(
-        format!("{API}/workspaces/ws-1"),
-        ws_with_host_key("ws-1", "karthik", "ready", Some(HOST_KEY)),
+        format!("{API}/workspaces/ws-0000000000000001"),
+        ws_with_host_key("ws-0000000000000001", "karthik", "ready", Some(HOST_KEY)),
     )])
     .await;
     let resp = reqwest::Client::new()
-        .post(format!("{}/v1/workspaces/ws-1/ssh-session", s.base))
+        .post(format!("{}/v1/workspaces/ws-0000000000000001/ssh-session", s.base))
         .bearer_auth(token(&s.jwt, "karthik"))
         .send()
         .await
         .unwrap();
     assert_eq!(resp.status(), 201, "{}", resp.text().await.unwrap());
     let body: Value = resp.json().await.unwrap();
-    assert_eq!(body["gateway"], "wss://ws-centralindia.khost.dev/tunnel/ws-1");
+    assert_eq!(body["gateway"], "wss://ws-centralindia.khost.dev/tunnel/ws-0000000000000001");
     assert_eq!(body["host_key"], HOST_KEY);
     let claims = s.jwt.verify_ssh_session(body["token"].as_str().unwrap()).unwrap();
-    assert_eq!(claims.ws, "ws-1");
+    assert_eq!(claims.ws, "ws-0000000000000001");
     assert_eq!(claims.sub, "karthik");
     assert_eq!(claims.region, "centralindia");
     assert!(body["expires_at"].as_str().unwrap().contains('T'), "RFC3339: {body}");
 
     // Someone else's workspace is a 404, the same as every other workspace route.
     let s = server(vec![get(
-        format!("{API}/workspaces/ws-1"),
-        ws_with_host_key("ws-1", "bob", "ready", Some(HOST_KEY)),
+        format!("{API}/workspaces/ws-0000000000000001"),
+        ws_with_host_key("ws-0000000000000001", "bob", "ready", Some(HOST_KEY)),
     )])
     .await;
     let resp = reqwest::Client::new()
-        .post(format!("{}/v1/workspaces/ws-1/ssh-session", s.base))
+        .post(format!("{}/v1/workspaces/ws-0000000000000001/ssh-session", s.base))
         .bearer_auth(token(&s.jwt, "karthik"))
         .send()
         .await
@@ -1321,12 +1321,12 @@ async fn an_ssh_session_is_minted_only_for_a_ready_workspace_the_caller_may_act_
 
     // Not running: there is nothing to connect to, and the state is what the CLI reports.
     let s = server(vec![get(
-        format!("{API}/workspaces/ws-1"),
-        ws_with_host_key("ws-1", "karthik", "stopped", Some(HOST_KEY)),
+        format!("{API}/workspaces/ws-0000000000000001"),
+        ws_with_host_key("ws-0000000000000001", "karthik", "stopped", Some(HOST_KEY)),
     )])
     .await;
     let resp = reqwest::Client::new()
-        .post(format!("{}/v1/workspaces/ws-1/ssh-session", s.base))
+        .post(format!("{}/v1/workspaces/ws-0000000000000001/ssh-session", s.base))
         .bearer_auth(token(&s.jwt, "karthik"))
         .send()
         .await
@@ -1338,12 +1338,12 @@ async fn an_ssh_session_is_minted_only_for_a_ready_workspace_the_caller_may_act_
     // Ready but the pod has not reported its host key yet: a session minted now would give the
     // CLI nothing to pin, so it fails closed rather than inviting a TOFU prompt.
     let s = server(vec![get(
-        format!("{API}/workspaces/ws-1"),
-        ws_with_host_key("ws-1", "karthik", "ready", None),
+        format!("{API}/workspaces/ws-0000000000000001"),
+        ws_with_host_key("ws-0000000000000001", "karthik", "ready", None),
     )])
     .await;
     let resp = reqwest::Client::new()
-        .post(format!("{}/v1/workspaces/ws-1/ssh-session", s.base))
+        .post(format!("{}/v1/workspaces/ws-0000000000000001/ssh-session", s.base))
         .bearer_auth(token(&s.jwt, "karthik"))
         .send()
         .await
@@ -1352,7 +1352,7 @@ async fn an_ssh_session_is_minted_only_for_a_ready_workspace_the_caller_may_act_
 
     // A name resolves through the caller's own list — one call for `kl ws ssh <name>` — and the
     // answer says which id it landed on.
-    let mut named = ws_with_host_key("ws-1", "karthik", "ready", Some(HOST_KEY));
+    let mut named = ws_with_host_key("ws-0000000000000001", "karthik", "ready", Some(HOST_KEY));
     named["spec"]["name"] = json!("gh");
     let s = server(vec![get(
         format!("{API}/workspaces"),
@@ -1367,8 +1367,8 @@ async fn an_ssh_session_is_minted_only_for_a_ready_workspace_the_caller_may_act_
         .unwrap();
     assert_eq!(resp.status(), 201, "{}", resp.text().await.unwrap());
     let body: Value = resp.json().await.unwrap();
-    assert_eq!(body["id"], "ws-1");
-    assert_eq!(body["gateway"], "wss://ws-centralindia.khost.dev/tunnel/ws-1");
+    assert_eq!(body["id"], "ws-0000000000000001");
+    assert_eq!(body["gateway"], "wss://ws-centralindia.khost.dev/tunnel/ws-0000000000000001");
 }
 
 struct StubKeys;
@@ -1670,29 +1670,29 @@ async fn a_second_workspace_with_the_same_name_in_the_same_team_is_refused() {
 /// namespace owned by the Environment — so this handler, which can still read the spec, removes it.
 #[tokio::test]
 async fn deleting_an_attached_workspace_removes_the_environment_side_policy() {
-    let mut attached = placed_ws("ws-1", "karthik");
-    attached["spec"]["attachedEnvironment"] = json!("env-1");
+    let mut attached = placed_ws("ws-0000000000000001", "karthik");
+    attached["spec"]["attachedEnvironment"] = json!("env-0000000000000001");
     let policy = format!(
         "/apis/networking.k8s.io/v1/namespaces/{}/networkpolicies/{}",
-        kloudlite_workspaces::crd::env_namespace("env-1"),
-        kloudlite_workspaces::k8s::attach_policy_name("ws-1")
+        kloudlite_workspaces::crd::env_namespace("env-0000000000000001"),
+        kloudlite_workspaces::k8s::attach_policy_name("ws-0000000000000001")
     );
     let s = server(vec![
-        get(format!("{API}/workspaces/ws-1"), attached),
-        Route { method: "DELETE", path: format!("{API}/workspaces/ws-1"), status: 200, body: placed_ws("ws-1", "karthik") },
+        get(format!("{API}/workspaces/ws-0000000000000001"), attached),
+        Route { method: "DELETE", path: format!("{API}/workspaces/ws-0000000000000001"), status: 200, body: placed_ws("ws-0000000000000001", "karthik") },
         Route { method: "DELETE", path: policy.clone(), status: 200, body: json!({"kind": "Status", "apiVersion": "v1", "status": "Success"}) },
     ])
     .await;
 
     let resp = reqwest::Client::new()
-        .delete(format!("{}/v1/workspaces/ws-1", s.base))
+        .delete(format!("{}/v1/workspaces/ws-0000000000000001", s.base))
         .bearer_auth(token(&s.jwt, "karthik"))
         .send()
         .await
         .unwrap();
     assert_eq!(resp.status(), 202, "{}", resp.text().await.unwrap());
     let calls = s.rec.calls();
-    let ws = calls.iter().position(|c| c == &format!("DELETE {API}/workspaces/ws-1")).expect("{calls:?}");
+    let ws = calls.iter().position(|c| c == &format!("DELETE {API}/workspaces/ws-0000000000000001")).expect("{calls:?}");
     let np = calls.iter().position(|c| c == &format!("DELETE {policy}")).expect("{calls:?}");
     // The Workspace goes FIRST: an agent pass landing between the two would re-`ensure` the grant
     // and then find no object left to ever remove it again.
@@ -1967,16 +1967,16 @@ async fn list_ws_drops_a_mislabelled_workspace() {
 async fn a_workspace_restore_refuses_an_environment_snapshot() {
     let snap = json!({
         "apiVersion": "kloudlite.io/v1alpha1", "kind": "Snapshot",
-        "metadata": {"name": "env-1-a", "labels": {"kloudlite.io/owner": "karthik"}},
-        "spec": {"volume": "env-1", "owner": "karthik", "worktree": "env-1", "parent": "",
+        "metadata": {"name": "env-0000000000000001-a", "labels": {"kloudlite.io/owner": "karthik"}},
+        "spec": {"volume": "env-0000000000000001", "owner": "karthik", "worktree": "env-0000000000000001", "parent": "",
                  "state": {"kind": "environment", "services": [], "quotaGb": 20}},
         "status": {"phase": "ready", "readyAt": "2026-08-27T09:00:00Z"}
     });
-    let s = server(vec![get(format!("{API}/snapshots/env-1-a"), snap)]).await;
+    let s = server(vec![get(format!("{API}/snapshots/env-0000000000000001-a"), snap)]).await;
     let resp = reqwest::Client::new()
         .post(format!("{}/v1/workspaces/restore", s.base))
         .bearer_auth(token(&s.jwt, "karthik"))
-        .json(&json!({"name": "wrong-kind", "snapshot_id": "env-1-a"}))
+        .json(&json!({"name": "wrong-kind", "snapshot_id": "env-0000000000000001-a"}))
         .send()
         .await
         .unwrap();
@@ -1991,18 +1991,18 @@ async fn a_workspace_restore_refuses_an_environment_snapshot() {
 async fn an_environment_restore_refuses_a_workspace_snapshot() {
     let snap = json!({
         "apiVersion": "kloudlite.io/v1alpha1", "kind": "Snapshot",
-        "metadata": {"name": "ws-1-a", "labels": {"kloudlite.io/owner": "karthik"}},
-        "spec": {"volume": "ws-1", "owner": "karthik", "worktree": "ws-1", "parent": "",
+        "metadata": {"name": "ws-0000000000000001-a", "labels": {"kloudlite.io/owner": "karthik"}},
+        "spec": {"volume": "ws-0000000000000001", "owner": "karthik", "worktree": "ws-0000000000000001", "parent": "",
                  "state": {"kind": "workspace", "image": "alpine:3.20", "packages": [],
                            "resources": {"cpuRequest": "2", "cpuLimit": "4", "memoryRequest": "4Gi", "memoryLimit": "8Gi"},
                            "quotaGb": 20}},
         "status": {"phase": "ready", "readyAt": "2026-08-27T09:00:00Z"}
     });
-    let s = server(vec![get(format!("{API}/snapshots/ws-1-a"), snap)]).await;
+    let s = server(vec![get(format!("{API}/snapshots/ws-0000000000000001-a"), snap)]).await;
     let resp = reqwest::Client::new()
         .post(format!("{}/v1/environments/restore", s.base))
         .bearer_auth(token(&s.jwt, "karthik"))
-        .json(&json!({"name": "wrong-kind", "snapshot_id": "ws-1-a"}))
+        .json(&json!({"name": "wrong-kind", "snapshot_id": "ws-0000000000000001-a"}))
         .send()
         .await
         .unwrap();
@@ -2038,20 +2038,20 @@ async fn every_v1_route_is_still_mounted() {
         ("GET", "/v1/regions"),
         ("POST", "/v1/workspaces"), ("GET", "/v1/workspaces"),
         ("POST", "/v1/workspaces/restore"),
-        ("GET", "/v1/workspaces/ws-1"), ("DELETE", "/v1/workspaces/ws-1"), ("PATCH", "/v1/workspaces/ws-1"),
-        ("POST", "/v1/workspaces/ws-1/clone"), ("POST", "/v1/workspaces/ws-1/push"),
-        ("POST", "/v1/workspaces/ws-1/start"), ("POST", "/v1/workspaces/ws-1/stop"),
-        ("POST", "/v1/workspaces/ws-1/attach"), ("POST", "/v1/workspaces/ws-1/detach"),
-        ("POST", "/v1/workspaces/ws-1/ssh-session"),
+        ("GET", "/v1/workspaces/ws-0000000000000001"), ("DELETE", "/v1/workspaces/ws-0000000000000001"), ("PATCH", "/v1/workspaces/ws-0000000000000001"),
+        ("POST", "/v1/workspaces/ws-0000000000000001/clone"), ("POST", "/v1/workspaces/ws-0000000000000001/push"),
+        ("POST", "/v1/workspaces/ws-0000000000000001/start"), ("POST", "/v1/workspaces/ws-0000000000000001/stop"),
+        ("POST", "/v1/workspaces/ws-0000000000000001/attach"), ("POST", "/v1/workspaces/ws-0000000000000001/detach"),
+        ("POST", "/v1/workspaces/ws-0000000000000001/ssh-session"),
         ("POST", "/v1/environments"), ("GET", "/v1/environments"),
         ("POST", "/v1/environments/restore"),
-        ("GET", "/v1/environments/env-1"), ("DELETE", "/v1/environments/env-1"),
-        ("POST", "/v1/environments/env-1/start"), ("POST", "/v1/environments/env-1/stop"),
-        ("POST", "/v1/environments/env-1/clone"), ("POST", "/v1/environments/env-1/push"),
-        ("POST", "/v1/environments/env-1/restore-in-place"),
-        ("GET", "/v1/volumes"), ("DELETE", "/v1/volumes/ws-1"),
-        ("GET", "/v1/volumes/ws-1/history"), ("GET", "/v1/volumes/ws-1/refs"),
-        ("DELETE", "/v1/volumes/ws-1/snapshots/ws-1-a"),
+        ("GET", "/v1/environments/env-0000000000000001"), ("DELETE", "/v1/environments/env-0000000000000001"),
+        ("POST", "/v1/environments/env-0000000000000001/start"), ("POST", "/v1/environments/env-0000000000000001/stop"),
+        ("POST", "/v1/environments/env-0000000000000001/clone"), ("POST", "/v1/environments/env-0000000000000001/push"),
+        ("POST", "/v1/environments/env-0000000000000001/restore-in-place"),
+        ("GET", "/v1/volumes"), ("DELETE", "/v1/volumes/ws-0000000000000001"),
+        ("GET", "/v1/volumes/ws-0000000000000001/history"), ("GET", "/v1/volumes/ws-0000000000000001/refs"),
+        ("DELETE", "/v1/volumes/ws-0000000000000001/snapshots/ws-0000000000000001-a"),
     ];
     for (m, p) in routes {
         let resp = c
@@ -2086,22 +2086,22 @@ async fn a_team_name_is_matched_case_insensitively() {
 #[tokio::test]
 async fn a_stop_response_reports_the_volume_it_has() {
     let s = server(vec![
-        get(format!("{API}/workspaces/ws-1"), placed_ws("ws-1", "karthik")),
+        get(format!("{API}/workspaces/ws-0000000000000001"), placed_ws("ws-0000000000000001", "karthik")),
         get(format!("{API}/snapshots"), json!({"apiVersion": "kloudlite.io/v1alpha1", "kind": "SnapshotList", "metadata": {},
-            "items": [{"metadata": {"name": "ws-1-a", "labels": {"kloudlite.io/owner": "karthik"}},
-                       "spec": {"volume": "ws-1", "owner": "karthik", "worktree": "ws-1", "parent": ""},
+            "items": [{"metadata": {"name": "ws-0000000000000001-a", "labels": {"kloudlite.io/owner": "karthik"}},
+                       "spec": {"volume": "ws-0000000000000001", "owner": "karthik", "worktree": "ws-0000000000000001", "parent": ""},
                        "status": {"phase": "ready"}}]})),
-        Route { method: "PATCH", path: format!("{API}/workspaces/ws-1"), status: 200, body: placed_ws("ws-1", "karthik") },
+        Route { method: "PATCH", path: format!("{API}/workspaces/ws-0000000000000001"), status: 200, body: placed_ws("ws-0000000000000001", "karthik") },
     ])
     .await;
     let resp = reqwest::Client::new()
-        .post(format!("{}/v1/workspaces/ws-1/stop", s.base))
+        .post(format!("{}/v1/workspaces/ws-0000000000000001/stop", s.base))
         .bearer_auth(token(&s.jwt, "karthik"))
         .send()
         .await
         .unwrap();
     let body: Value = resp.json().await.unwrap();
-    assert_eq!(body["volume"], "vol/karthik/ws-1", "a pushed volume is not null: {body}");
+    assert_eq!(body["volume"], "vol/karthik/ws-0000000000000001", "a pushed volume is not null: {body}");
 }
 
 /// The volume pointer on a workspace doc is answered by the snapshots in the cluster, not by a
@@ -2109,19 +2109,19 @@ async fn a_stop_response_reports_the_volume_it_has() {
 #[tokio::test]
 async fn a_workspace_doc_reports_its_volume_without_an_upstream() {
     let s = server(vec![
-        get(format!("{API}/workspaces/ws-1"), placed_ws("ws-1", "karthik")),
+        get(format!("{API}/workspaces/ws-0000000000000001"), placed_ws("ws-0000000000000001", "karthik")),
         get(format!("{API}/snapshots"), json!({"apiVersion": "kloudlite.io/v1alpha1", "kind": "SnapshotList", "metadata": {},
-            "items": [{"metadata": {"name": "ws-1-a", "labels": {"kloudlite.io/owner": "karthik"}},
-                       "spec": {"volume": "ws-1", "owner": "karthik", "worktree": "ws-1", "parent": ""},
+            "items": [{"metadata": {"name": "ws-0000000000000001-a", "labels": {"kloudlite.io/owner": "karthik"}},
+                       "spec": {"volume": "ws-0000000000000001", "owner": "karthik", "worktree": "ws-0000000000000001", "parent": ""},
                        "status": {"phase": "ready"}}]})),
     ])
     .await; // no `with_upstream` at all
     let resp = reqwest::Client::new()
-        .get(format!("{}/v1/workspaces/ws-1", s.base))
+        .get(format!("{}/v1/workspaces/ws-0000000000000001", s.base))
         .bearer_auth(token(&s.jwt, "karthik"))
         .send()
         .await
         .unwrap();
     let body: Value = resp.json().await.unwrap();
-    assert_eq!(body["volume"], "vol/karthik/ws-1", "{body}");
+    assert_eq!(body["volume"], "vol/karthik/ws-0000000000000001", "{body}");
 }

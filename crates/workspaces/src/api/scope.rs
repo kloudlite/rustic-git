@@ -9,6 +9,7 @@ use super::{kube, kube_err, not_found, ApiState, Caller};
 use crate::crd;
 use crate::k8s::{OWNER_LABEL, TEAM_LABEL};
 use kube::api::{Api, ListParams};
+use kube::ResourceExt;
 use axum::{http::StatusCode, response::{IntoResponse, Response}};
 
 pub(crate) async fn teams_for(s: &ApiState, caller: &str) -> Vec<String> {
@@ -205,7 +206,85 @@ pub(crate) async fn refuse_taken_name(c: &kube::Client, owner: &str, team: &str,
 /// someone else's workspace is a 404, never a 403.
 /// Workspaces are strictly personal — no team ownership — but a platform administrator may still
 /// act on any owner's, the claim's whole point.
-pub(crate) async fn my_ws(s: &ApiState, c: &Caller, id: &str) -> Result<crd::Workspace, Response> {
+pub(crate) async fn my_ws(s: &ApiState, c: &Caller, id_or_name: &str) -> Result<crd::Workspace, Response> {
+    // `team/name` picks the workspace with that `spec.team` (`/name` = personal); a bare name that
+    // matches a personal and a team workspace prefers the personal one. Only the caller's OWN
+    // workspaces are searched: another user's same-named workspace is never visible.
+    let (team, name) = id_or_name.split_once('/').map_or((None, id_or_name), |(t, n)| (Some(t), n));
+    // A bench's id is `crd::bench_id` (`bench-` + 12 hex), not a `rid`, and reaches here by id.
+    let bench = name.strip_prefix("bench-").is_some_and(|h| h.len() == 12 && h.bytes().all(|b| b.is_ascii_hexdigit()));
+    if is_id(name, "ws") || bench {
+        return my_ws_id(s, c, name).await;
+    }
+    let api: Api<crd::Workspace> = Api::all(kube(s)?.clone());
+    let list = api.list(&owned_by(&c.name)).await.map_err(kube_err)?;
+    let mut m: Vec<_> = list
+        .items
+        .into_iter()
+        .filter(|w| w.spec.owner == c.name && w.spec.name == name && team.is_none_or(|t| w.spec.team == t))
+        .collect();
+    if m.len() > 1 && team.is_none() && m.iter().filter(|w| w.spec.team.is_empty()).count() == 1 {
+        m.retain(|w| w.spec.team.is_empty());
+    }
+    match m.len() {
+        0 => Err(not_found()),
+        1 => my_ws_id(s, c, &m[0].name_any()).await,
+        _ => Err(ambiguous(name, m.iter().map(|w| serde_json::json!({"id": w.name_any(), "name": w.spec.name, "team": w.spec.team})))),
+    }
+}
+
+/// 409 naming every candidate, so the caller can disambiguate with `team/name` (or `?owner=`).
+fn ambiguous(name: &str, matches: impl Iterator<Item = serde_json::Value>) -> Response {
+    let matches: Vec<_> = matches.collect();
+    (
+        StatusCode::CONFLICT,
+        axum::Json(serde_json::json!({"error": format!("{name:?} is ambiguous; qualify it as owner/name"), "matches": matches})),
+    )
+        .into_response()
+}
+
+/// `{prefix}-` + 16 lowercase hex — see `model::is_id`.
+pub(crate) fn is_id(s: &str, prefix: &str) -> bool {
+    crate::model::is_id(s, prefix)
+}
+
+/// A single path segment naming a workspace or environment, with the optional `?owner=<team>`
+/// folded in as `team/name` (axum path segments cannot carry `/`). Feed it to `my_ws`/`find_env`.
+pub(crate) struct Named(pub String);
+
+fn qualify(first: String, parts: &axum::http::request::Parts) -> String {
+    let owner = axum::extract::Query::<std::collections::HashMap<String, String>>::try_from_uri(&parts.uri)
+        .ok()
+        .and_then(|q| q.0.get("owner").cloned());
+    match owner {
+        Some(o) => format!("{o}/{first}"),
+        None => first,
+    }
+}
+
+impl<St: Send + Sync> axum::extract::FromRequestParts<St> for Named {
+    type Rejection = Response;
+    async fn from_request_parts(parts: &mut axum::http::request::Parts, st: &St) -> Result<Self, Response> {
+        let axum::extract::Path(id) =
+            axum::extract::Path::<String>::from_request_parts(parts, st).await.map_err(IntoResponse::into_response)?;
+        Ok(Named(qualify(id, parts)))
+    }
+}
+
+/// `Named` for routes with a second segment after the workspace or environment.
+pub(crate) struct NamedPair(pub String, pub String);
+
+impl<St: Send + Sync> axum::extract::FromRequestParts<St> for NamedPair {
+    type Rejection = Response;
+    async fn from_request_parts(parts: &mut axum::http::request::Parts, st: &St) -> Result<Self, Response> {
+        let axum::extract::Path((a, b)) = axum::extract::Path::<(String, String)>::from_request_parts(parts, st)
+            .await
+            .map_err(IntoResponse::into_response)?;
+        Ok(NamedPair(qualify(a, parts), b))
+    }
+}
+
+async fn my_ws_id(s: &ApiState, c: &Caller, id: &str) -> Result<crd::Workspace, Response> {
     let api: Api<crd::Workspace> = Api::all(kube(s)?.clone());
     let w = super::admin::timing::step("kube.get.workspace", api.get_opt(id)).await.map_err(kube_err)?.ok_or_else(not_found)?;
     // Through `may_act_on`, not a hand-rolled `c.superadmin` arm: that arm reached another
@@ -244,7 +323,50 @@ pub(crate) async fn resolve_new_owner(s: &ApiState, caller: &Caller, owner: Opti
 /// passes, a team's passes when they are a member, and a platform administrator's claim passes
 /// for anyone. An environment they may not act on is a 404, never a 403 — the caller learns
 /// nothing about environments that are not theirs.
-pub(crate) async fn find_env(s: &ApiState, caller: &Caller, id: &str) -> Result<crd::Environment, Response> {
+pub(crate) async fn find_env(s: &ApiState, caller: &Caller, id_or_name: &str) -> Result<crd::Environment, Response> {
+    let (owner, name) = id_or_name.split_once('/').map_or((None, id_or_name), |(o, n)| (Some(o), n));
+    if is_id(name, "env") {
+        return find_env_id(s, caller, name).await;
+    }
+    let api: Api<crd::Environment> = Api::all(kube(s)?.clone());
+    let named = |e: &crd::Environment| e.spec.name == name && super::environments::visible_env(e);
+    let found: Vec<crd::Environment> = match owner {
+        // Explicit owner: `find_env_id` below applies `may_act_on`, so a stranger's is a 404.
+        Some(o) => {
+            let list = api.list(&owned_by(o)).await.map_err(kube_err)?;
+            list.items.into_iter().filter(|e| e.spec.owner == o && named(e)).collect()
+        }
+        // Own first, then the caller's teams. Admins use ids: a name never searches other owners.
+        None => {
+            let owners = caller_owners(s, caller).await;
+            let list = api.list(&ListParams::default().labels(&owner_set_selector(&owners))).await.map_err(kube_err)?;
+            let all: Vec<_> = mine(list.items, &owners).into_iter().filter(|e| named(e)).collect();
+            if all.iter().any(|e| e.spec.owner == caller.name) {
+                all.into_iter().filter(|e| e.spec.owner == caller.name).collect()
+            } else {
+                all
+            }
+        }
+    };
+    match found.len() {
+        0 => Err(not_found()),
+        1 => find_env_id(s, caller, &found[0].name_any()).await,
+        _ => Err(ambiguous(name, found.iter().map(|e| serde_json::json!({"id": e.name_any(), "name": e.spec.name, "owner": e.spec.owner})))),
+    }
+}
+
+/// `refuse_taken_name` for environments: a name is unique per owner (person or team). Systems
+/// (hidden builders) do not count.
+pub(crate) async fn refuse_taken_env_name(c: &kube::Client, owner: &str, name: &str) -> Result<(), Response> {
+    let api: Api<crd::Environment> = Api::all(c.clone());
+    let list = api.list(&owned_by(owner)).await.map_err(kube_err)?;
+    if list.items.iter().any(|e| super::environments::visible_env(e) && e.spec.owner == owner && e.spec.name == name) {
+        return Err((StatusCode::CONFLICT, format!("an environment named {name:?} already exists here")).into_response());
+    }
+    Ok(())
+}
+
+async fn find_env_id(s: &ApiState, caller: &Caller, id: &str) -> Result<crd::Environment, Response> {
     let api: Api<crd::Environment> = Api::all(kube(s)?.clone());
     let e = api.get_opt(id).await.map_err(kube_err)?.ok_or_else(not_found)?;
     // The ONE visibility guard, in the lookup every environment route shares — get, start, stop,
@@ -434,12 +556,12 @@ mod tests {
 
     async fn ws_status(owner: &str, team: &str, superadmin: bool) -> u16 {
         let spec = serde_json::json!({"owner": owner, "team": team, "name": "w1", "region": "r", "image": "i", "desiredState": "running"});
-        let body = serde_json::json!({"apiVersion": "kloudlite.io/v1alpha1", "kind": "Workspace", "metadata": {"name": "w1"}, "spec": spec});
-        let (client, _) = crate::kube_test::mock_client(vec![crate::kube_test::get("/apis/kloudlite.io/v1alpha1/workspaces/w1", body)]);
+        let body = serde_json::json!({"apiVersion": "kloudlite.io/v1alpha1", "kind": "Workspace", "metadata": {"name": "ws-0123456789abcdef"}, "spec": spec});
+        let (client, _) = crate::kube_test::mock_client(vec![crate::kube_test::get("/apis/kloudlite.io/v1alpha1/workspaces/ws-0123456789abcdef", body)]);
         let jwt = Arc::new(kloudlite_core::jwt::Jwt::new("test-secret-that-is-at-least-32-bytes-long").unwrap());
         let s = ApiState::new(jwt).with_kube(client).with_directory(Arc::new(Paused));
         let c = Caller { name: owner.into(), superadmin, parent: None, scope: None, jti8: None };
-        match my_ws(&s, &c, "w1").await {
+        match my_ws(&s, &c, "ws-0123456789abcdef").await {
             Ok(_) => 200,
             Err(r) => r.status().as_u16(),
         }
@@ -459,5 +581,84 @@ mod tests {
         assert_eq!(ws_status("rex", "acme", false).await, 403);
         assert_eq!(ws_status("rex", "gone", false).await, 403, "a deleted team too");
         assert_eq!(ws_status("rex", "", false).await, 200, "a personal workspace is unaffected");
+    }
+
+    const W1: &str = "ws-00000000000000a1";
+    const W2: &str = "ws-00000000000000a2";
+
+    fn ws_obj(id: &str, owner: &str, team: &str, name: &str) -> serde_json::Value {
+        serde_json::json!({"apiVersion": "kloudlite.io/v1alpha1", "kind": "Workspace", "metadata": {"name": id},
+            "spec": {"owner": owner, "team": team, "name": name, "region": "r", "image": "i", "desiredState": "running"}})
+    }
+
+    fn env_obj(id: &str, owner: &str, name: &str) -> serde_json::Value {
+        serde_json::json!({"apiVersion": "kloudlite.io/v1alpha1", "kind": "Environment", "metadata": {"name": id},
+            "spec": {"owner": owner, "name": name, "region": "r", "services": [], "desiredState": "running"}})
+    }
+
+    fn list(path: &str, kind: &str, items: Vec<serde_json::Value>) -> crate::kube_test::Route {
+        crate::kube_test::get(path, serde_json::json!({"apiVersion": "kloudlite.io/v1alpha1", "kind": kind, "metadata": {}, "items": items}))
+    }
+
+    fn with_routes(routes: Vec<crate::kube_test::Route>) -> ApiState {
+        let (client, _) = crate::kube_test::mock_client(routes);
+        state().with_kube(client)
+    }
+
+    fn who(name: &str) -> Caller {
+        Caller { name: name.into(), superadmin: false, parent: None, scope: None, jti8: None }
+    }
+
+    #[tokio::test]
+    async fn two_users_with_one_workspace_name_each_get_their_own() {
+        let a = ws_obj(W1, "alice", "", "dev");
+        let m = ws_obj(W2, "meera", "", "dev");
+        let s = with_routes(vec![
+            list("/apis/kloudlite.io/v1alpha1/workspaces", "WorkspaceList", vec![a.clone(), m.clone()]),
+            crate::kube_test::get(format!("/apis/kloudlite.io/v1alpha1/workspaces/{W1}"), a),
+            crate::kube_test::get(format!("/apis/kloudlite.io/v1alpha1/workspaces/{W2}"), m),
+        ]);
+        assert_eq!(my_ws(&s, &who("alice"), "dev").await.unwrap().name_any(), W1);
+        assert_eq!(my_ws(&s, &who("meera"), "dev").await.unwrap().name_any(), W2);
+        assert_eq!(my_ws(&s, &who("meera"), W2).await.unwrap().name_any(), W2, "an id still works");
+        assert_eq!(my_ws(&s, &who("meera"), "nope").await.unwrap_err().status(), StatusCode::NOT_FOUND);
+    }
+
+    #[tokio::test]
+    async fn a_personal_and_a_team_workspace_of_one_name_prefer_personal_and_take_team_slash_name() {
+        let p = ws_obj(W1, "meera", "", "dev");
+        let t = ws_obj(W2, "meera", "t1", "dev");
+        let s = with_routes(vec![
+            list("/apis/kloudlite.io/v1alpha1/workspaces", "WorkspaceList", vec![p.clone(), t.clone()]),
+            crate::kube_test::get(format!("/apis/kloudlite.io/v1alpha1/workspaces/{W1}"), p),
+            crate::kube_test::get(format!("/apis/kloudlite.io/v1alpha1/workspaces/{W2}"), t),
+        ]);
+        assert_eq!(my_ws(&s, &who("meera"), "dev").await.unwrap().name_any(), W1);
+        assert_eq!(my_ws(&s, &who("meera"), "t1/dev").await.unwrap().name_any(), W2);
+        assert_eq!(my_ws(&s, &who("meera"), "/dev").await.unwrap().name_any(), W1);
+    }
+
+    #[tokio::test]
+    async fn environment_names_resolve_personal_first_then_teams_and_ambiguity_is_409() {
+        let (e1, e2, e3) = ("env-00000000000000b1", "env-00000000000000b2", "env-00000000000000b3");
+        let envs = |items: Vec<serde_json::Value>| {
+            let mut r = vec![list("/apis/kloudlite.io/v1alpha1/environments", "EnvironmentList", items.clone())];
+            for o in items {
+                let id = o["metadata"]["name"].as_str().unwrap().to_string();
+                r.push(crate::kube_test::get(format!("/apis/kloudlite.io/v1alpha1/environments/{id}"), o));
+            }
+            r
+        };
+        // personal wins over a team's
+        let s = with_routes(envs(vec![env_obj(e1, "meera", "dev"), env_obj(e2, "t1", "dev")]));
+        assert_eq!(find_env(&s, &who("meera"), "dev").await.unwrap().name_any(), e1);
+        assert_eq!(find_env(&s, &who("meera"), "t1/dev").await.unwrap().name_any(), e2);
+        assert_eq!(find_env(&s, &who("meera"), "meera/dev").await.unwrap().name_any(), e1);
+        assert_eq!(find_env(&s, &who("meera"), "t9/dev").await.unwrap_err().status(), StatusCode::NOT_FOUND);
+        assert_eq!(find_env(&s, &who("meera"), "nope").await.unwrap_err().status(), StatusCode::NOT_FOUND);
+        // two team envs, none personal
+        let s = with_routes(envs(vec![env_obj(e2, "t1", "dev"), env_obj(e3, "t2", "dev")]));
+        assert_eq!(find_env(&s, &who("meera"), "dev").await.unwrap_err().status(), StatusCode::CONFLICT);
+        assert_eq!(find_env(&s, &who("meera"), "t2/dev").await.unwrap().name_any(), e3);
     }
 }

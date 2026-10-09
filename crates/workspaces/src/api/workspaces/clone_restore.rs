@@ -1,6 +1,7 @@
 //! The two grafting verbs: `clone` cuts its own sync point at the moment of the request and
 //! reports `based_on`; `restore` grafts onto a named past snapshot and re-attaches the Volume.
 
+use crate::api::scope::{Named};
 use super::*;
 
 
@@ -54,13 +55,14 @@ pub(crate) async fn clone_ws(
     headers: axum::http::HeaderMap,
     method: axum::http::Method,
     uri: axum::extract::OriginalUri,
-    Path(id): Path<String>,
+    Named(id): Named,
     Json(body): Json<CloneBody>,
 ) -> Result<Response, Response> {
     let owner = caller_for(&s, &headers, &method, uri.path()).await?;
     check_name(&body.name)?;
     let task = check_task(body.task.as_deref())?;
     let src = my_ws(&s, &owner, &id).await?;
+    let id = kube::ResourceExt::name_any(&src);
     refuse_taken_name(kube(&s)?, &owner, &src.spec.team, &body.name).await?;
     // The source's own locks, carried whole: a clone copies a package list, it does not re-pick
     // versions. Normally nothing is left to resolve — only a source written before pins existed

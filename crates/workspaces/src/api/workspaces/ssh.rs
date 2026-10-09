@@ -1,6 +1,7 @@
 //! `POST /v1/workspaces/{id}/ssh`: the one-shot session ticket `kl-connect ws ssh` presents to
 //! the region gateway.
 
+use crate::api::scope::{Named};
 use super::*;
 
 
@@ -14,7 +15,7 @@ use super::*;
 pub(crate) async fn ssh_session(
     State(s): State<Arc<ApiState>>,
     headers: axum::http::HeaderMap,
-    Path(target): Path<String>,
+    Named(target): Named,
 ) -> Result<Response, Response> {
     let owner = caller(&s, &headers).await?;
     let w = match my_ws(&s, &owner, &target).await {

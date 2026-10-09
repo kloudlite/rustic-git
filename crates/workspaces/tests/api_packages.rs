@@ -271,12 +271,12 @@ async fn a_patch_resolves_only_the_entry_that_changed() {
     let held = lock_json("nodejs@20", "20.19.0");
     let routes = vec![
         empty("Snapshot", "snapshots"),
-        get(format!("{API}/workspaces/ws-1"), ws_obj("ws-1", &["jq", "nodejs@20"], std::slice::from_ref(&held))),
-        patch_route("ws-1", &["jq", "nodejs@20", "python3@3.11"], &[]),
+        get(format!("{API}/workspaces/ws-0000000000000001"), ws_obj("ws-0000000000000001", &["jq", "nodejs@20"], std::slice::from_ref(&held))),
+        patch_route("ws-0000000000000001", &["jq", "nodejs@20", "python3@3.11"], &[]),
     ];
     let s = server(routes).await;
     let r = reqwest::Client::new()
-        .patch(format!("{}/v1/workspaces/ws-1", s.base))
+        .patch(format!("{}/v1/workspaces/ws-0000000000000001", s.base))
         .bearer_auth(token(&s.jwt))
         .json(&json!({"packages": ["jq", "nodejs@20", "python3@3.11"]}))
         .send()
@@ -284,7 +284,7 @@ async fn a_patch_resolves_only_the_entry_that_changed() {
         .unwrap();
     assert_eq!(r.status(), 200, "{}", r.text().await.unwrap());
     assert_eq!(s.fake.lock().unwrap().calls, 1, "the untouched entry keeps its lock");
-    let p = s.rec.sent("PATCH", &format!("{API}/workspaces/ws-1")).pop().unwrap();
+    let p = s.rec.sent("PATCH", &format!("{API}/workspaces/ws-0000000000000001")).pop().unwrap();
     let locks = p["spec"]["locks"].as_array().unwrap();
     assert_eq!(locks.len(), 2);
     // Carried over verbatim, old version and all: editing one entry must not move another's.
@@ -299,13 +299,13 @@ async fn the_update_route_re_resolves_what_the_workspace_already_has() {
     let fresh = lock_json("nodejs@20", "20.20.7");
     let routes = vec![
         empty("Snapshot", "snapshots"),
-        get(format!("{API}/workspaces/ws-1"), ws_obj("ws-1", &["nodejs@20"], &[held])),
-        patch_route("ws-1", &["nodejs@20"], &[fresh]),
+        get(format!("{API}/workspaces/ws-0000000000000001"), ws_obj("ws-0000000000000001", &["nodejs@20"], &[held])),
+        patch_route("ws-0000000000000001", &["nodejs@20"], &[fresh]),
     ];
     let s = server(routes).await;
     s.fake.lock().unwrap().patch = 7;
     let r = reqwest::Client::new()
-        .post(format!("{}/v1/workspaces/ws-1/packages/update", s.base))
+        .post(format!("{}/v1/workspaces/ws-0000000000000001/packages/update", s.base))
         .bearer_auth(token(&s.jwt))
         .send()
         .await
@@ -313,7 +313,7 @@ async fn the_update_route_re_resolves_what_the_workspace_already_has() {
     assert_eq!(r.status(), 200, "{}", r.text().await.unwrap());
     let doc: Value = r.json().await.unwrap();
     assert_eq!(doc["locks"][0]["version"], "20.20.7");
-    let p = s.rec.sent("PATCH", &format!("{API}/workspaces/ws-1")).pop().unwrap();
+    let p = s.rec.sent("PATCH", &format!("{API}/workspaces/ws-0000000000000001")).pop().unwrap();
     // The declared list is untouched — only what the pins point at moves.
     assert_eq!(p, json!({"spec": {"locks": p["spec"]["locks"]}}));
     assert_eq!(p["spec"]["locks"][0]["version"], "20.20.7");
@@ -325,19 +325,19 @@ async fn an_update_during_an_outage_keeps_the_locks_it_had() {
     let held = lock_json("nodejs@20", "20.19.0");
     let routes = vec![
         empty("Snapshot", "snapshots"),
-        get(format!("{API}/workspaces/ws-1"), ws_obj("ws-1", &["nodejs@20"], std::slice::from_ref(&held))),
-        patch_route("ws-1", &["nodejs@20"], std::slice::from_ref(&held)),
+        get(format!("{API}/workspaces/ws-0000000000000001"), ws_obj("ws-0000000000000001", &["nodejs@20"], std::slice::from_ref(&held))),
+        patch_route("ws-0000000000000001", &["nodejs@20"], std::slice::from_ref(&held)),
     ];
     let s = server(routes).await;
     s.fake.lock().unwrap().down = true;
     let r = reqwest::Client::new()
-        .post(format!("{}/v1/workspaces/ws-1/packages/update", s.base))
+        .post(format!("{}/v1/workspaces/ws-0000000000000001/packages/update", s.base))
         .bearer_auth(token(&s.jwt))
         .send()
         .await
         .unwrap();
     assert_eq!(r.status(), 200, "{}", r.text().await.unwrap());
-    let p = s.rec.sent("PATCH", &format!("{API}/workspaces/ws-1")).pop().unwrap();
+    let p = s.rec.sent("PATCH", &format!("{API}/workspaces/ws-0000000000000001")).pop().unwrap();
     assert_eq!(p["spec"]["locks"], json!([held]));
 }
 
@@ -345,12 +345,12 @@ async fn an_update_during_an_outage_keeps_the_locks_it_had() {
 async fn a_clone_carries_the_sources_locks_without_asking_the_index() {
     let held = lock_json("nodejs@20", "20.19.0");
     let mut routes = base_routes();
-    routes.push(get(format!("{API}/workspaces/ws-1"), ws_obj("ws-1", &["nodejs@20"], std::slice::from_ref(&held))));
+    routes.push(get(format!("{API}/workspaces/ws-0000000000000001"), ws_obj("ws-0000000000000001", &["nodejs@20"], std::slice::from_ref(&held))));
     routes.push(post(format!("{API}/snapshots"), json!({"apiVersion": "kloudlite.io/v1alpha1", "kind": "Snapshot",
-        "metadata": {"name": "cut"}, "spec": {"owner": "karthik", "volume": "ws-1", "worktree": "ws-1", "parent": "", "transient": true}})));
+        "metadata": {"name": "cut"}, "spec": {"owner": "karthik", "volume": "ws-0000000000000001", "worktree": "ws-0000000000000001", "parent": "", "transient": true}})));
     let s = server(routes).await;
     let r = reqwest::Client::new()
-        .post(format!("{}/v1/workspaces/ws-1/clone", s.base))
+        .post(format!("{}/v1/workspaces/ws-0000000000000001/clone", s.base))
         .bearer_auth(token(&s.jwt))
         .json(&json!({"name": "copy"}))
         .send()

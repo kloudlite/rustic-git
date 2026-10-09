@@ -552,7 +552,7 @@ async fn a_bench_costs_the_person_only_while_it_has_a_pod() {
 #[tokio::test]
 async fn a_benchs_disk_is_always_the_persons_and_its_count_is_nobodys() {
     let bench = bench_obj("alice", "acme", "stopped", Some("idle"), "full");
-    let (client, _) = mock_client(alloc("alice", vec![bench, plain_ws("ws-1", "alice", "acme")]));
+    let (client, _) = mock_client(alloc("alice", vec![bench, plain_ws("ws-0000000000000001", "alice", "acme")]));
     let alice = kloudlite_workspaces::quota::usage(&client, "alice").await.unwrap();
     let acme = kloudlite_workspaces::quota::usage(&client, "acme").await.unwrap();
     assert_eq!((alice.disk_gb, alice.workspaces), (0, 0), "no Volume, no disk — and never a count");
@@ -594,7 +594,7 @@ async fn a_bench_is_hidden_from_the_workspace_list_undeletable_and_stops_like_a_
     let sp = secret_path("alice", "acme");
     let t = setup(
         vec![
-            get(format!("{API}/workspaces"), list("Workspace", vec![b.clone(), plain_ws("ws-1", "alice", "")])),
+            get(format!("{API}/workspaces"), list("Workspace", vec![b.clone(), plain_ws("ws-0000000000000001", "alice", "")])),
             get(path.clone(), b.clone()),
             get(format!("{API}/snapshots"), list("Snapshot", vec![])),
             patch(path.clone(), b),
@@ -607,7 +607,7 @@ async fn a_bench_is_hidden_from_the_workspace_list_undeletable_and_stops_like_a_
     let (st, body) = t.call("GET", "/v1/workspaces", &tok, None).await;
     assert_eq!(st, 200, "{body}");
     let ids: Vec<&str> = body.as_array().unwrap().iter().map(|w| w["id"].as_str().unwrap()).collect();
-    assert_eq!(ids, ["ws-1"], "the bench is not one of the person's workspaces");
+    assert_eq!(ids, ["ws-0000000000000001"], "the bench is not one of the person's workspaces");
     let (st, body) = t.call("GET", "/v1/workspaces?team=acme", &tok, None).await;
     assert_eq!(st, 200, "{body}");
     assert!(!body.to_string().contains(&id), "nor in the team's list");
@@ -746,7 +746,7 @@ async fn a_bench_tool_token_gets_403_on_another_team() {
 }
 
 fn space(owner: &str, team: &str) -> Value {
-    serde_json::to_value(kloudlite_workspaces::crd::space_environment(owner, team, "env-1")).unwrap()
+    serde_json::to_value(kloudlite_workspaces::crd::space_environment(owner, team, "env-0000000000000001")).unwrap()
 }
 
 #[tokio::test]
@@ -762,8 +762,8 @@ async fn a_bench_tool_token_chooses_environments_only_in_its_own_spaces() {
     let t = setup(routes(), dir());
     let tok = tool_tok(&t);
     for (m, uri, body) in [
-        ("PUT", "/v1/me/environments/t2", Some(json!({"environment": "env-1"}))),
-        ("PUT", "/v1/me/environments/T2", Some(json!({"environment": "env-1"}))),
+        ("PUT", "/v1/me/environments/t2", Some(json!({"environment": "env-0000000000000001"}))),
+        ("PUT", "/v1/me/environments/T2", Some(json!({"environment": "env-0000000000000001"}))),
         ("DELETE", "/v1/me/environments/t2", None),
     ] {
         let (st, body) = t.call(m, uri, &tok, body).await;
