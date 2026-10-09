@@ -1,19 +1,21 @@
 #!/usr/bin/env bun
-// kl-tui: the TUI on the laptop, the agent on the bench. `kl-tui --ssh <ssh argv...>`; kl-connect
-// builds the argv and treats exit 3 (old bench, protocol mismatch) as "run the remote TUI".
+// kl-tui: the TUI on the laptop, the agent on the bench. `kl-tui --ssh <ssh argv...>` or
+// `kl-tui --pipe <command...>` (kl-connect's wss pipe); kl-connect builds the argv and
+// treats exit 3 (old bench, protocol mismatch) as "run the remote TUI".
 import { writeSync } from "node:fs";
 import { connect } from "@kloudlite-tui/backend";
 import { boot } from "./hello.ts";
+import { pipeArgv } from "./remote-args.ts";
 import { start } from "./start.tsx";
 
-const i = process.argv.indexOf("--ssh");
-if (i < 0 || i === process.argv.length - 1) {
-  process.stderr.write("usage: kl-tui --ssh <ssh arguments...>\n");
+const cmd = pipeArgv(process.argv);
+if (!cmd) {
+  process.stderr.write("usage: kl-tui --ssh <ssh arguments...> | --pipe <command...>\n");
   process.exit(2);
 }
 let c: Awaited<ReturnType<typeof connect>>;
 try {
-  c = await connect(["ssh", ...process.argv.slice(i + 1)]);
+  c = await connect(cmd);
 } catch (e: any) {
   process.stderr.write(`kl-tui: ${e.message}\n`);
   process.exit(e.code ?? 1);
@@ -27,7 +29,7 @@ const done = () => {
   if (process.stderr.isTTY) writeSync(2, "\x1b[?1049l");
   const tail = c.stderr();
   if (tail) writeSync(2, tail);
-  // ssh writes nothing when its proxy dies, so a bare exit 1 would explain nothing
+  // neither ssh nor the pipe says anything when the bench goes away, so a bare exit 1 would explain nothing
   else if (lost) writeSync(2, "kl-tui: lost the bench connection\n");
 };
 process.on("exit", done);
