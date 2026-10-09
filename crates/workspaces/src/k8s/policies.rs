@@ -237,7 +237,8 @@ pub fn allow_gateway_ingress(ns: &str, owner: &str, owner_ref: &OwnerReference) 
         owner,
         owner_ref,
         json!({
-            "podSelector": {},
+            // Not the bench pod: it has no sshd, so port 22 is not offered there.
+            "podSelector": { "matchExpressions": [{ "key": KIND_LABEL, "operator": "NotIn", "values": ["bench"] }] },
             "policyTypes": ["Ingress"],
             "ingress": [{
                 "from": [{

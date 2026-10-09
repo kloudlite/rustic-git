@@ -67,6 +67,11 @@ pub(crate) fn only_the_gateway_may_reach_port_22() {
     assert_eq!(GATEWAY_NAMESPACE, "kloudlite-system", "deploy/k3s/gateway.yaml puts the gateway here; keep them equal");
     let pod = from[0].pod_selector.as_ref().unwrap().match_labels.as_ref().unwrap();
     assert_eq!(pod["app"], "kloudlite-gateway");
+    // The bench has no sshd: the target excludes `kind=bench`, so port 22 is not offered there.
+    let target = spec.pod_selector.as_ref().unwrap().match_expressions.as_ref().unwrap();
+    assert_eq!(target.len(), 1);
+    assert_eq!((target[0].key.as_str(), target[0].operator.as_str()), (KIND_LABEL, "NotIn"));
+    assert_eq!(target[0].values.as_ref().unwrap(), &vec!["bench".to_string()]);
 }
 
 
