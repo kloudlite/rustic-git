@@ -448,11 +448,11 @@ test("the sidebar resizes with [ and ] and clamps at its limits", async () => {
 });
 
 // The platform tools live in the backend now; the TUI owns only what needs the user.
-test("the TUI registers only the question tool", async () => {
+test("the TUI registers no tools: question is the daemon's", async () => {
   const tools: ToolDef[] = [];
   const t = await testRender(<App tools={tools} />, { width: 160, height: 40 });
   await new Promise((r) => setTimeout(r, 200));
-  expect(tools.map((t) => t.name)).toEqual(["question"]);
+  expect(tools.map((t) => t.name)).toEqual([]);
 });
 
 // Permission mode is per-session chrome: shift+tab cycles it and only a

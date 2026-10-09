@@ -4,6 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { LocalBackend, ALWAYS_ASK, asking, baseHandle, mustAsk, roleCard, stripCard, shareable, installGate, registryFor, sessionCwd, sessionKind } from "./local.ts";
 import { toolDiff } from "./diff.ts";
+import { Cards } from "./cards.ts";
 import { PROTOCOL } from "./wire.ts";
 
 test("hello carries what the TUI reads at boot", async () => {
@@ -70,8 +71,8 @@ test("workspace sessions run in the pod's folder, main does not", () => {
 
 test("registry per session kind", async () => {
   delete process.env.KL_API_URL; // pod tools fall back to the fixed names
-  const deps = { live: new Map(), busy: new Set<string>(), open: async () => null as never, permit: async () => ({}) };
-  const opts: any = { tools: [{ name: "question", description: "", inputSchema: {}, run: async () => "" }] };
+  const deps = { live: new Map(), busy: new Set<string>(), open: async () => null as never, permit: async () => ({}), cards: new Cards(() => {}) };
+  const opts: any = { tools: [] };
   const main = (await registryFor({ kind: "main" }, deps, opts)).names();
   expect(main).toContain("workspace_create");
   expect(main).toContain("workspace_ask");

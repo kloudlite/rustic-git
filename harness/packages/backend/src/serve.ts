@@ -26,7 +26,6 @@ export function serve(backend: Backend, peer: Peer) {
     const h = await backend.session(key, {
       ...o,
       tools: tools.map((t: ToolSpec) => ({ ...t, run: (input: unknown) => peer.request<string>("tool", { key, name: t.name, input }) })),
-      permission: (req, signal) => peer.request("permission", { key, req }, signal),
       client: true,
     });
     open.set(key, h);
@@ -63,6 +62,16 @@ export function serve(backend: Backend, peer: Peer) {
     return true;
   });
 
+  // The bench stream: cards and permission mode, one per connection like sessions.watch.
+  let unbench: (() => void) | undefined;
+  peer.handle("watch", async () => {
+    unbench?.();
+    unbench = await backend.watch((e) => peer.emit("bench", "*", e));
+    return true;
+  });
+  peer.handle("ask.answer", ({ id, choice }) => backend.asks.answer(id, choice));
+  peer.handle("mode.set", ({ mode }) => backend.mode.set(mode));
+
   peer.handle("settings.write", (patch) => backend.settings.write(patch));
   peer.handle("space", () => backend.space());
   peer.handle("models.refresh", () => backend.models.refresh());
@@ -79,6 +88,7 @@ export function serve(backend: Backend, peer: Peer) {
   return {
     async dispose() {
       unwatch?.();
+      unbench?.();
       await Promise.allSettled([...open.values()].map((h) => h.dispose()));
       open.clear();
     },

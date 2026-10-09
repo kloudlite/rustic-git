@@ -20,8 +20,6 @@ function fake(): Backend & { seen: string[] } {
         messages: [{ role: "user", content: "earlier" }] as any,
         isClaude: false,
         prompt: async (text: string) => {
-          const d = await opts.permission!({ name: "bash", args: { command: text } }, new AbortController().signal);
-          seen.push(`decision:${d.block ? "block" : "allow"}`);
           seen.push(`tool:${await opts.tools[0]!.run({ q: text })}`);
           for (const s of subs) s({ type: "agent_end", error: new Error("e") });
         },
@@ -30,8 +28,6 @@ function fake(): Backend & { seen: string[] } {
         subscribe: (cb: any) => (subs.add(cb), () => subs.delete(cb)),
       };
     },
-    // a permission call that never answers until aborted
-    _hang: (signal: AbortSignal) => opts.permission!({ name: "bash", args: {} }, signal),
     sessions: {}, fs: {}, podfs: {}, settings: {}, models: {}, auth: {}, space: async () => ({ available: false, error: "x", user: "u", workspaces: [], environments: [] }),
   };
   return b;
@@ -44,48 +40,26 @@ function wired(backend: Backend) {
   return { remote: new RemoteBackend(client), client, host };
 }
 
-test("session round trip: messages, permission, TUI tool, events with Error", async () => {
+test("session round trip: messages, TUI tool, events with Error", async () => {
   const b = fake();
   const { remote } = wired(b);
   const events: any[] = [];
   const h = await remote.session("k", {
     initial: { model: { provider: "p", id: "m" } },
     tools: [{ name: "question", description: "", inputSchema: { type: "object" }, run: async (i: any) => `answered ${i.q}` }],
-    permission: async (req) => ({ block: req.args.command === "rm" }),
   });
   expect(h.messages).toEqual([{ role: "user", content: "earlier" }] as any);
   h.subscribe((e) => events.push(e));
   await h.prompt("ls");
-  expect(b.seen).toEqual(["decision:allow", "tool:answered ls"]);
+  expect(b.seen).toEqual(["tool:answered ls"]);
   await Bun.sleep(5);
   expect(events[0].error).toEqual({ name: "Error", message: "e" });
-});
-
-test("abort during permission sends cancel; late answer ignored", async () => {
-  const b: any = fake();
-  const { remote } = wired(b);
-  let answer!: (d: any) => void;
-  let clientSignal!: AbortSignal;
-  await remote.session("k", {
-    initial: { model: { provider: "p", id: "m" } },
-    tools: [],
-    permission: (_req, signal) => ((clientSignal = signal), new Promise((r) => (answer = r))),
-  });
-  const ac = new AbortController();
-  const pending = b._hang(ac.signal);
-  await Bun.sleep(5);
-  ac.abort();
-  await expect(pending).rejects.toThrow();
-  await Bun.sleep(5);
-  expect(clientSignal.aborted).toBe(true);
-  answer({}); // the card's late answer: dropped, no throw
-  await Bun.sleep(5);
 });
 
 test("disconnect rejects pending calls", async () => {
   const b = fake();
   const { remote, client } = wired(b);
-  const h = await remote.session("k", { initial: { model: { provider: "p", id: "m" } }, tools: [], permission: () => new Promise(() => {}) });
+  const h = await remote.session("k", { initial: { model: { provider: "p", id: "m" } }, tools: [{ name: "question", description: "", inputSchema: { type: "object" }, run: () => new Promise<string>(() => {}) }] });
   const p = h.prompt("ls");
   await Bun.sleep(5);
   client.close();
@@ -119,6 +93,6 @@ test("btw returns its string over the wire", async () => {
   const base = b.session;
   b.session = async (k: string, o: SessionOpts) => ({ ...(await base(k, o)), btw: async (q: string) => `answer to ${q}` }) as any;
   const { remote } = wired(b);
-  const h = await remote.session("k", { initial: { model: { provider: "p", id: "m" } }, tools: [], permission: async () => ({ block: false }) });
+  const h = await remote.session("k", { initial: { model: { provider: "p", id: "m" } }, tools: [] });
   expect(await h.btw("why?")).toBe("answer to why?");
 });

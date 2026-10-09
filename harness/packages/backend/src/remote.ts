@@ -1,8 +1,8 @@
 //! The client side: a `Backend` whose every call is a ./wire request to serve.ts in the bench daemon.
-//! Tools the TUI owns and the permission gate stay here — the host calls back for them. ssh's
+//! Tools the TUI owns stay here — the host calls back for them; the permission gate is the daemon's (cards). ssh's
 //! stderr (the bench-proxy's waking progress) is shown until `hello`, then buffered: after that
 //! the renderer owns the screen, so the tail is printed once the TUI exits.
-import type { Backend, Hello, LoginUi, SessionHandle, SessionOpts, SessionState } from "./index.ts";
+import type { Backend, BenchEvent, Hello, LoginUi, SessionHandle, SessionOpts, SessionState } from "./index.ts";
 import { Peer, PROTOCOL } from "./wire.ts";
 
 export class RemoteBackend implements Backend {
@@ -17,11 +17,6 @@ export class RemoteBackend implements Backend {
       if (!def) throw new Error(`unknown tool: ${name}`);
       return def.run(input);
     });
-    peer.handle("permission", async ({ key, req }, signal) => {
-      const o = this.#opts.get(key);
-      if (!o) return { block: true, reason: "session closed" };
-      return o.permission!(req, signal);
-    });
     peer.handle("auth.prompt", async ({ lid, prompt }) => {
       const ui = this.#logins.get(String(lid));
       if (!ui) throw new Error("login closed");
@@ -30,6 +25,7 @@ export class RemoteBackend implements Backend {
     peer.onEvent((ev, key, event) => {
       if (ev === "session") for (const cb of this.#subs.get(key) ?? []) cb(event);
       else if (ev === "sessions") for (const cb of this.#watchers) cb(event as any);
+      else if (ev === "bench") for (const cb of this.#bench) cb(event as any);
       else if (ev === "auth") this.#logins.get(key)?.notify(event as any);
     });
   }
@@ -98,6 +94,20 @@ export class RemoteBackend implements Backend {
       subscribe: (cb) => (subs.add(cb), () => void subs.delete(cb)),
     } as SessionHandle;
   }
+
+  #bench = new Set<(e: BenchEvent) => void>();
+  async watch(cb: (e: BenchEvent) => void): Promise<() => void> {
+    this.#bench.add(cb);
+    try {
+      await this.peer.request("watch", null);
+    } catch (e) {
+      this.#bench.delete(cb);
+      throw e;
+    }
+    return () => void this.#bench.delete(cb);
+  }
+  asks: Backend["asks"] = { answer: (id, choice) => this.peer.request("ask.answer", { id, choice }) };
+  mode: Backend["mode"] = { set: (mode) => this.peer.request("mode.set", { mode }) };
 
   #ops = <T extends Record<string, any>>(group: string, names: (keyof T)[]): T =>
     Object.fromEntries(names.map((n) => [n, (...args: unknown[]) => this.peer.request(`${group}.${String(n)}`, args)])) as T;

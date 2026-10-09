@@ -2,14 +2,13 @@
 //! fire-and-forget, the answer comes back later as a `[from <ws>] ...` message prompted, or followed
 //! up when busy, into the CALLER's session so main never blocks) and `main_tell` (a workspace session
 //! tells main it is done, blocked, or needs something; the only way a workspace speaks to main).
-//! Delegated sessions ask through `deps.permit`, which routes to whichever client is connected to the
-//! CALLER's session now (clients.ts), but each request names the delegated session
-//! (`PermissionRequest.session`), so the TUI shows the card in that workspace's view.
+//! Delegated sessions ask through `deps.permit`, the daemon's gate: the card is raised for the caller's key on every connected TUI.
 //! The answer is the last assistant text seen before `agent_end`: Claude sessions emit
 //! `agent_end` with an empty message list, so the events are tracked instead. It only counts after
 //! the asked user message was seen (a busy Claude ends its CURRENT run before the followUp runs).
 //! A `workspace_ask` is saved to disk (asks.ts) while it is in flight and resent after a bench
 //! restart (`resumeAsks`), at most twice.
+import type { Cards } from "./cards.ts";
 import { randomBytes } from "node:crypto";
 import type { ToolDef } from "@kloudlite-tui/tools";
 import type { PermissionRequest, Decision, SessionHandle, SessionOpts } from "./index.ts";
@@ -22,8 +21,10 @@ export type DelegateDeps = {
   /** Keys mid-turn right now. */
   busy: Set<string>;
   open(key: string, opts: SessionOpts): Promise<SessionHandle>;
-  /** Ask the client connected to `key` (the caller's session) for a decision; waits for one. */
+  /** Ask the person (a card on every connected TUI) for a decision; waits for one. */
   permit(key: string, req: PermissionRequest, signal: AbortSignal): Promise<Decision>;
+  /** The daemon's cards: the `question` tool raises them. Absent in tests that never ask. */
+  cards?: Cards;
   /** Where pending asks live; tests pass a temp dir. */
   asks?: string;
   /** ws key -> key of the session that last asked it: where its `main_tell` goes. */

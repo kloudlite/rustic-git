@@ -82,7 +82,31 @@ export type Hello = {
   home: string;
   /** Tools the backend registers itself (web_fetch, web_search). */
   tools: string[];
+  /** Cards waiting for an answer, for a connection that arrives late. */
+  asks: Ask[];
+  /** The permission mode every TUI shows. */
+  mode: PermMode;
 };
+
+export type PermMode = "default" | "acceptEdits" | "plan" | "bypass";
+/** A pending question to the person: raised by the daemon, shown by each TUI for its active key. */
+export type Ask = {
+  id: string;
+  /** The asking key (a delegated session's caller). */
+  key: string;
+  kind: "permission" | "question";
+  tool: string;
+  title: string;
+  subtitle?: string;
+  body?: string;
+  diff?: FileDiff;
+  options: { id: string; label: string }[];
+};
+/** Everything the daemon says to every connection, outside any one session. */
+export type BenchEvent =
+  | { type: "ask"; ask: Ask }
+  | { type: "ask_resolved"; id: string }
+  | { type: "perm"; mode: PermMode };
 
 export type PermissionRequest = {
   name: string;
@@ -116,7 +140,7 @@ export type SessionOpts = {
   /** Tools the TUI owns; their `run` executes in the TUI process. */
   tools: ToolDef[];
   /** Called only for gated tools: house actions always; bash, exec and web_fetch unless the fence holds (`mustAsk`); never write, edit, patch. Absent on internal opens (a
-   * view opened to deliver a reply): cards then go to whichever client holds the session (./clients). */
+   * view opened to deliver a reply): cards then go to every connected TUI (cards.ts). */
   permission?(req: PermissionRequest, signal: AbortSignal): Promise<Decision>;
   /** Set only by serve.ts: this view is a person at a client, so what is typed through it counts as their words (consent.ts). */
   client?: boolean;
@@ -152,6 +176,10 @@ export type SessionHandle = {
 
 export interface Backend {
   hello(): Promise<Hello>;
+  /** Bench-wide events (cards, permission mode). Resolves with the unsubscribe. */
+  watch(cb: (e: BenchEvent) => void): Promise<() => void>;
+  asks: { answer(id: string, choice: string): Promise<void> };
+  mode: { set(m: PermMode): Promise<void> };
   session(key: string, opts: SessionOpts): Promise<SessionHandle>;
   sessions: {
     list(prefix?: string): Promise<SessionMeta[]>;

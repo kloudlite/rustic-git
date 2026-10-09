@@ -105,3 +105,58 @@ test("setCodemode while busy is refused", async () => {
   local.busyForTest("w3", false);
   await h.dispose();
 }, 20000);
+
+const bashReq = { name: "bash", args: { command: "ls" } } as any;
+
+test("a gated call asks both TUIs; B answers; A hears ask_resolved; A's late answer is ignored", async () => {
+  const local = new LocalBackend();
+  const a = await pair(local), b = await pair(local);
+  const ea: any[] = [], eb: any[] = [];
+  await a.watch((e) => ea.push(e));
+  await b.watch((e) => eb.push(e));
+  const decision = local.permit("main", bashReq, new AbortController().signal);
+  await Bun.sleep(10);
+  const ask = eb.find((e) => e.type === "ask")!.ask;
+  expect(ea.find((e) => e.type === "ask")?.ask.id).toBe(ask.id);
+  await b.asks.answer(ask.id, "reject");
+  expect(await decision).toEqual({ block: true, reason: "The user rejected this tool call." });
+  await Bun.sleep(10);
+  expect(ea).toContainEqual({ type: "ask_resolved", id: ask.id });
+  await a.asks.answer(ask.id, "once"); // ignored, no throw
+});
+
+test("aborting the turn resolves the ask as reject", async () => {
+  const local = new LocalBackend();
+  const ac = new AbortController();
+  const d = local.permit("main", bashReq, ac.signal);
+  ac.abort();
+  expect((await d).block).toBe(true);
+});
+
+test("hello on a late connection returns the pending ask and the mode", async () => {
+  const local = new LocalBackend();
+  const a = await pair(local);
+  await a.mode.set("acceptEdits");
+  const d = local.permit("main", bashReq, new AbortController().signal);
+  const c = await pair(local);
+  const h = await c.hello();
+  expect(h.asks.map((x) => x.tool)).toEqual(["bash"]);
+  expect(h.mode).toBe("acceptEdits");
+  await c.asks.answer(h.asks[0]!.id, "once");
+  expect(await d).toEqual({});
+});
+
+test("mode: plan answers without a card, bypass allows, acceptEdits allows edits only", async () => {
+  const local = new LocalBackend();
+  const a = await pair(local);
+  const seen: any[] = [];
+  await a.watch((e) => seen.push(e));
+  await a.mode.set("plan");
+  expect((await local.permit("main", bashReq, new AbortController().signal)).block).toBe(true);
+  await a.mode.set("bypass");
+  expect(await local.permit("main", bashReq, new AbortController().signal)).toEqual({});
+  await a.mode.set("acceptEdits");
+  expect(await local.permit("main", { name: "edit", args: { path: "x" } } as any, new AbortController().signal)).toEqual({});
+  expect(seen.filter((e) => e.type === "perm").map((e) => e.mode)).toEqual(["plan", "bypass", "acceptEdits"]);
+  expect(seen.some((e) => e.type === "ask")).toBe(false);
+});

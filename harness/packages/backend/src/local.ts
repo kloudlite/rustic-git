@@ -2,8 +2,8 @@
 //! instance; every client (kl-tui over ssh, the browser TUI) is a connection to it, so an agent
 //! outlives the client that started it and there is exactly one writer per session file.
 //! One agent per key, many VIEWS of it (`shareable`): a view going away never ends a turn; an idle
-//! agent with no views is disposed (`#settle`). The permission gate and the TUI's own tools route by
-//! session key to the newest connected client (clients.ts); the decision itself is the TUI's.
+//! agent with no views is disposed (`#settle`). The permission gate and the `question` tool raise
+//! cards (cards.ts) to every connected TUI; the first answer wins.
 import { mkdirSync } from "node:fs";
 import { homedir } from "node:os";
 import {
@@ -24,7 +24,7 @@ import {
   type ModelRef,
 } from "@kloudlite-tui/agent";
 import { Registry, platformTools, podFence, podTools, type PodFence, scratchRoot, scratchTools, webFetch, webSearch, type ToolDef } from "@kloudlite-tui/tools";
-import { Clients } from "./clients.ts";
+import { Cards } from "./cards.ts";
 import { WORKSPACE_DIR, delegateTools, resumeAsks, type DelegateDeps } from "./delegate.ts";
 import { forgetSessions } from "./forget.ts";
 import * as git from "./git.ts";
@@ -34,7 +34,7 @@ import { podfs } from "./podfs.ts";
 import { space as spaceView } from "./space.ts";
 import { readTasks, taskTools, tasksFile } from "./tasks.ts";
 import { PROTOCOL } from "./wire.ts";
-import type { Backend, CatalogModel, Hello, LiveSessionMeta, SessionEvent, SessionHandle, SessionOpts, SessionState, SpaceView, ThinkingLevel } from "./index.ts";
+import type { Backend, BenchEvent, CatalogModel, Decision, PermMode, PermissionRequest, Hello, LiveSessionMeta, SessionEvent, SessionHandle, SessionOpts, SessionState, SpaceView, ThinkingLevel } from "./index.ts";
 
 /** House actions: they change what the person owns (or the registry), so they ask whatever walls hold. */
 export const ALWAYS_ASK = new Set([
@@ -136,15 +136,30 @@ function forgetting(t: ToolDef, deps: DelegateDeps): ToolDef {
   };
 }
 
+/** Asks the person a multiple-choice question as a card; never gated (the card is the ask). */
+function question(key: string, cards: Cards): ToolDef {
+  return {
+    name: "question",
+    description: "Ask the user a question and wait for their answer. Use it when you need a decision or clarification. Give 2-5 short answer options.",
+    inputSchema: { type: "object", properties: { question: { type: "string", description: "The question to ask." }, options: { type: "array", items: { type: "string" }, description: "The answer options that the user can select." } }, required: ["question", "options"] },
+    run: async ({ question, options }: { question: string; options: string[] }) => {
+      // ponytail: Tool.run carries no signal, so only dispose/delete (withdrawKey) ends a pending question; thread a signal through ToolDef to also end it on interrupt
+      const picked = await cards.ask({ key, kind: "question", tool: "question", title: question, options: options.map((label, i) => ({ id: String(i), label })) }, new AbortController().signal, "__withdrawn");
+      if (picked === "__withdrawn") throw new Error("the question was withdrawn (turn interrupted)");
+      return options[Number(picked)] ?? picked;
+    },
+  } as ToolDef;
+}
+
 /** Who gets which hands: main reaches the platform, delegates and has a confined scratch folder (bash, read, write); a workspace session has the
  * pod's code tools and its own slice of the platform, and reports to main with main_tell. */
 export async function registryFor(k: SessionKind, deps: DelegateDeps, opts: SessionOpts, key = "main"): Promise<Registry> {
   const r = new Registry();
   if (k.kind === "main")
-    return r.add(...[webFetch, webSearch, ...platformTools("main").map((t) => (t.name === "workspace_delete" ? forgetting(t, deps) : t)), ...delegateTools("main", undefined, deps, opts, key), ...taskTools(deps.tasks ?? tasksFile()), ...scratchTools(scratchRoot(key)), ...opts.tools].map(asking));
+    return r.add(...[webFetch, webSearch, ...platformTools("main").map((t) => (t.name === "workspace_delete" ? forgetting(t, deps) : t)), ...delegateTools("main", undefined, deps, opts, key), ...taskTools(deps.tasks ?? tasksFile()), ...scratchTools(scratchRoot(key)), ...opts.tools].map(asking), ...(deps.cards ? [question(key, deps.cards)] : []));
   // the self-stop is the one call that never asks: it only snapshots and parks the workspace
   // that is already finished, and carries no `because` for a card to quote
-  return r.add(...[webFetch, webSearch, ...(await podTools(k.ws)), ...platformTools("workspace", k.ws), ...delegateTools("workspace", k.ws, deps, opts), ...opts.tools].map((t) => (t.name === "workspace_stop" ? t : asking(t))));
+  return r.add(...[webFetch, webSearch, ...(await podTools(k.ws)), ...platformTools("workspace", k.ws), ...delegateTools("workspace", k.ws, deps, opts), ...opts.tools].map((t) => (t.name === "workspace_stop" ? t : asking(t))), ...(deps.cards ? [question(key, deps.cards)] : []));
 }
 
 /** The permission gate, on both doors a call comes through: `agent.beforeToolCall` for a
@@ -394,9 +409,13 @@ export class LocalBackend implements Backend {
       await live?.close(true);
     });
   }
-  #clients = new Clients();
-  /** Unregisters of the clients each key's views added; a closed agent has no client left. */
-  #offs = new Map<string, Set<() => void>>();
+  /** Permission mode for every TUI; per daemon process, so a restart resets it. */
+  #mode: PermMode = "default";
+  #bench = new Set<(e: BenchEvent) => void>();
+  #cards = new Cards((e) => this.#broadcast(e));
+  #broadcast(e: BenchEvent) {
+    for (const f of this.#bench) f(e);
+  }
   /** What the person typed through client views, per key (consent.ts). */
   #typed = new Map<string, TurnWords>();
   #words(key: string): TurnWords {
@@ -421,9 +440,46 @@ export class LocalBackend implements Backend {
       sessions: listSessions(),
       cwd: process.cwd(),
       home: homedir(),
-      tools: [webFetch.name, webSearch.name, ...platformTools("main").map((t) => t.name), "workspace_ask", "task_add", "task_update", "task_list", "bash", "read", "write"],
+      tools: [webFetch.name, webSearch.name, ...platformTools("main").map((t) => t.name), "workspace_ask", "task_add", "task_update", "task_list", "bash", "read", "write", "question"],
+      asks: this.#cards.pending(),
+      mode: this.#mode,
     };
   }
+
+  /** Tools that only mutate the workspace's files — what acceptEdits waves through. */
+  static readonly EDITS = new Set(["write", "edit", "patch"]);
+
+  /** The gate's decision: the mode first, then a card every connected TUI hears. "always" answers like "once" here; the grant is the TUI's. */
+  async permit(key: string, { name, args, diff, session, reason, claimed }: PermissionRequest, signal: AbortSignal): Promise<Decision> {
+    // a delegated session asks through its caller: the card belongs to the caller's key
+    const asker = session ?? key;
+    const mode = this.#mode;
+    // plan mode answers rather than asks: a refusal the model can read beats a card every turn
+    if (mode === "plan")
+      return { block: true, reason: `Plan mode: ${name} is not available. Research and explain what you would do; the user will leave plan mode when they want it done.` };
+    if (mode === "bypass" || (mode === "acceptEdits" && LocalBackend.EDITS.has(name))) return {};
+    const why = reason ? `Why: ${reason}` : claimed ? `Says you asked: “${claimed}”, which is not in your messages this turn` : "No reason given";
+    const subtitle = name === "bash" ? "Shell command" : name === "web_fetch" ? "Fetch a URL" : LocalBackend.EDITS.has(name) ? `${name === "write" ? "Write" : "Edit"} ${args?.path ?? "file"}` : `Run ${name}`;
+    const detail = name === "bash" ? `$ ${args?.command ?? ""}` : name === "web_fetch" ? String(args?.url ?? "") : diff ? undefined : JSON.stringify(args ?? {}).slice(0, 400);
+    const choice = await this.#cards.ask({
+      key: asker, kind: "permission", tool: name, title: "Permission required", subtitle,
+      body: [why, detail].filter(Boolean).join("\n\n"), diff,
+      options: [{ id: "once", label: "Allow once" }, { id: "always", label: "Allow always" }, { id: "reject", label: "Reject" }],
+    }, signal, "reject");
+    return choice === "reject" ? { block: true, reason: "The user rejected this tool call." } : {};
+  }
+
+  async watch(cb: (e: BenchEvent) => void): Promise<() => void> {
+    this.#bench.add(cb);
+    return () => void this.#bench.delete(cb);
+  }
+  asks: Backend["asks"] = { answer: async (id, choice) => this.#cards.answer(id, choice) };
+  mode: Backend["mode"] = {
+    set: async (m) => {
+      this.#mode = m;
+      this.#broadcast({ type: "perm", mode: m });
+    },
+  };
 
   /** main_tell's routing: who asked each workspace last, and which already reported this ask. */
   #lastCaller = new Map<string, string>();
@@ -436,7 +492,8 @@ export class LocalBackend implements Backend {
       live: this.#live,
       busy: this.#busy,
       open: (key, o) => this.session(key, o),
-      permit: (key, req, signal) => this.#clients.route(key, (c) => !!c.permission, (c) => c.permission!(req, signal), signal),
+      permit: (key, req, signal) => this.permit(key, req, signal),
+      cards: this.#cards,
     };
   }
 
@@ -458,11 +515,7 @@ export class LocalBackend implements Backend {
 
   /** Register this view's client (card callback + TUI tools) for its key; the view's dispose removes it. */
   #attach(key: string, opts: SessionOpts, v: SessionHandle): SessionHandle {
-    if (!opts.permission && opts.tools.length === 0 && !opts.client) return v;
-    const off = this.#clients.add(key, { permission: opts.permission, tools: new Map(opts.tools.map((t) => [t.name, t.run as (input: unknown) => Promise<string>])) });
-    let offs = this.#offs.get(key);
-    if (!offs) this.#offs.set(key, (offs = new Set()));
-    offs.add(off);
+    if (!opts.client) return v;
     const typed = opts.client
       ? {
           prompt: async (text: string, o?: Parameters<SessionHandle["prompt"]>[1]) => {
@@ -477,8 +530,6 @@ export class LocalBackend implements Backend {
     return derive(v, {
       ...typed,
       dispose: async () => {
-        off();
-        offs.delete(off);
         await v.dispose();
       },
     });
@@ -516,15 +567,7 @@ export class LocalBackend implements Backend {
     const model = resolveModel(want);
     if (!model) throw new Error(`unknown model ${want.provider}/${want.id}`);
     const k = sessionKind(key);
-    // the TUI's own tools run in whichever client is connected to this key NOW, not the opener
-    const routed: SessionOpts = {
-      ...opts,
-      tools: opts.tools.map((t) => ({
-        ...t,
-        run: (input: unknown) => this.#clients.route(key, (c) => c.tools.has(t.name), (c) => c.tools.get(t.name)!(input)),
-      })),
-    };
-    const registry = await registryFor(k, this.#deps(), routed, key);
+    const registry = await registryFor(k, this.#deps(), opts, key);
     const cwd = sessionCwd(k);
     // best effort: off the bench (a laptop running the backend) / is not writable, and only Claude spawns there
     if (cwd) try { mkdirSync(cwd, { recursive: true }); } catch {}
@@ -539,7 +582,7 @@ export class LocalBackend implements Backend {
       role: k.kind,
       cwd,
     });
-    installGate(agent, (req, signal) => this.#clients.route(key, (c) => !!c.permission, (c) => c.permission!(req, signal), signal), k.kind === "main" ? undefined : () => podFence(k.ws), () => ({ typed: this.#words(key).get(), self: k.kind === "main" ? undefined : k.ws }), k.kind);
+    installGate(agent, opts.permission ?? ((req, signal) => this.permit(key, req, signal)), k.kind === "main" ? undefined : () => podFence(k.ws), () => ({ typed: this.#words(key).get(), self: k.kind === "main" ? undefined : k.ws }), k.kind);
     const state: SessionState = {
       type: "session_state",
       model: { provider: want.provider, id: want.id },
@@ -560,8 +603,7 @@ export class LocalBackend implements Backend {
         this.#shared.delete(key);
         this.#built.delete(key);
         this.#rebuildAtEnd.delete(key);
-        for (const off of this.#offs.get(key) ?? []) off();
-        this.#offs.delete(key);
+        this.#cards.withdrawKey(key);
         // dispose clears busy right after this hook, so report once that has happened
         queueMicrotask(() => this.#changed());
       },

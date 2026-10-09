@@ -781,9 +781,8 @@ export function App({
             codemode: opts?.codemode ?? prefs.codemode === "on",
           },
           fresh: opts?.fresh,
-          // the question tool is registered once for every session; bind it to this key
-          tools: tuiTools.map((t) => (t.name === "question" ? { ...t, run: (i: any) => askQuestion(key, i) } : t)),
-          permission: (req, signal) => gate(key, req, signal),
+          // the daemon owns the permission gate and the question tool now (cards); Task 7 moves the UI
+          tools: tuiTools,
         }),
       )
       .then((agent) => {
@@ -840,29 +839,6 @@ export function App({
     return options[Number(picked)] ?? picked;
   }
 
-  // The model can ask the user a question with options (opencode's question tool).
-  const registered = useRef(false);
-  if (!registered.current) {
-    registered.current = true;
-    tuiTools.push({
-      name: "question",
-      description:
-        "Ask the user a question and wait for their answer. Use it when you need a decision or clarification. Give 2-5 short answer options.",
-      inputSchema: {
-        type: "object",
-        properties: {
-          question: { type: "string", description: "The question to ask." },
-          options: {
-            type: "array",
-            items: { type: "string" },
-            description: "The answer options that the user can select.",
-          },
-        },
-        required: ["question", "options"],
-      },
-      run: (i: { question: string; options: string[] }) => askQuestion(sessionKey(), i),
-    });
-  }
 
   /** One key for "what does the column show": chat › files › processes. */
   function cycleView(): void {
