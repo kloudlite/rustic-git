@@ -89,11 +89,12 @@ test("registry per session kind", async () => {
   expect(ws).toContain("subagent");
   expect((wsReg.get("packages_add").inputSchema as any).properties.workspace).toBeUndefined();
   const sub = (await registryFor({ kind: "subagent", ws: "w1" }, deps, opts)).names();
-  expect(sub).not.toContain("question");
-  expect(sub.filter((n) => n !== "web_fetch")).not.toContain("packages_add");
-  expect(sub).toContain("web_fetch");
+  // the workspace's own hands for its clone, minus another subagent
+  expect(sub).toContain("packages_add");
+  expect(sub).toContain("web_search");
   expect(sub).toContain("exec");
-  expect(sub).not.toContain("web_search");
+  expect(sub).toContain("question");
+  expect(sub).not.toContain("workspace_create");
   expect(sub).not.toContain("subagent");
 });
 
@@ -110,6 +111,7 @@ test(":agent- sessions are hidden from sessions.list", async () => {
   const keys = (await b.sessions.list()).map((s) => s.key);
   expect(keys).toContain("w9");
   expect(keys).not.toContain(key);
+  expect((await b.sessions.list("w9")).map((s) => s.key)).toContain(key);
   await h.dispose();
   await h2.dispose();
 }, 20000);

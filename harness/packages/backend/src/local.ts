@@ -109,14 +109,14 @@ function forgetting(t: ToolDef, deps: DelegateDeps): ToolDef {
 }
 
 /** Who gets which hands: main reaches the platform, delegates and has a confined scratch folder (bash, read, write); a workspace session has the
- * pod's code tools and its own slice of the platform; a subagent only code tools. */
+ * pod's code tools and its own slice of the platform; a subagent the same hands as a workspace session in its own clone, except it cannot start another subagent. */
 export async function registryFor(k: SessionKind, deps: DelegateDeps, opts: SessionOpts, key = "main"): Promise<Registry> {
   const r = new Registry();
   if (k.kind === "main")
     return r.add(...[webFetch, webSearch, ...platformTools("main").map((t) => (t.name === "workspace_delete" ? forgetting(t, deps) : t)), ...delegateTools("main", undefined, deps, opts, key), ...scratchTools(scratchRoot(key)), ...opts.tools].map(asking));
   if (k.kind === "workspace")
     return r.add(...[webFetch, webSearch, ...(await podTools(k.ws)), ...platformTools("workspace", k.ws), ...delegateTools("workspace", k.ws, deps, opts), ...opts.tools].map(asking));
-  return r.add(...[webFetch, ...(await podTools(k.ws))].map(asking));
+  return r.add(...[webFetch, webSearch, ...(await podTools(k.ws)), ...platformTools("workspace", k.ws), ...opts.tools].map(asking));
 }
 
 /** The permission gate, on both doors a call comes through: `agent.beforeToolCall` for a
@@ -290,7 +290,7 @@ export class LocalBackend implements Backend {
       sessions: listSessions(),
       cwd: process.cwd(),
       home: homedir(),
-      tools: [webFetch.name, webSearch.name, ...platformTools("main").map((t) => t.name), "workspace_ask", "subagent", "bash", "read", "write"],
+      tools: [webFetch.name, webSearch.name, ...platformTools("main").map((t) => t.name), "workspace_ask", "bash", "read", "write"],
     };
   }
 
@@ -419,8 +419,9 @@ export class LocalBackend implements Backend {
   }
 
   sessions = {
-    // subagent sessions are throwaway: never offered for resume
-    list: async (prefix?: string) => listSessions(prefix).filter((s) => !s.key.includes(":agent-")),
+    // subagent sessions are throwaway: never offered for resume in the general list; a clone's own
+    // prefix lists them so the TUI can show the one live under that clone
+    list: async (prefix?: string) => (prefix ? listSessions(prefix) : listSessions().filter((s) => !s.key.includes(":agent-"))),
     name: async (key: string, name: string) => nameSession(key, name),
     describe: async (key: string, d: string) => describeSession(key, d),
     clear: async (key: string) => clearSessionHistory(key),

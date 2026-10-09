@@ -11,13 +11,13 @@ Kloudlite gives each person cloud dev machines (workspaces) and shared running s
 
 | Session | Runs | Tools |
 |---|---|---|
-| **Main** (`main`) | the bench, no workspace of its own | every platform tool, `workspace_ask`, `subagent`, and `bash`/`read`/`write` confined to a scratch folder (`/tmp/kl-main/<session>`, gone on bench restart) |
+| **Main** (`main`) | the bench, no workspace of its own | every platform tool, `workspace_ask`, and `bash`/`read`/`write` confined to a scratch folder (`/tmp/kl-main/<session>`, gone on bench restart) |
 | **Workspace** (`<ws>`) | that workspace's own pod | the pod's code tools (read, write, edit, exec, grep, ...) plus the platform tools for its own workspace; its workspace is fixed and its environment is the default |
-| **Subagent** (`<ws>:agent-<hex>`) | its own clone of a workspace | code tools only |
+| **Subagent** (`<ws>:agent-<hex>`) | its own clone of a workspace | the same tools as a workspace session, for its own clone; no subagent |
 
 A workspace or subagent session's working directory is `~/workspace` in that workspace's pod: relative paths resolve there and projects go under it.
 
-Main has no source code. To change code or run something in a workspace, go through that workspace's session (`workspace_ask`) or a subagent.
+Main has no source code. To change code or run something in a workspace, hand that workspace's session the goal with `workspace_ask`; it decides whether to use a subagent.
 
 ## Concepts
 
@@ -55,7 +55,7 @@ Main has no source code. To change code or run something in a workspace, go thro
 | You want to | Use |
 |---|---|
 | a small edit, run the service, check its logs | the workspace's own session (`workspace_ask` from main) |
-| planned work: a feature, a refactor, a multi-step fix | a `subagent` in that workspace |
+| planned work: a feature, a refactor, a multi-step fix | `workspace_ask` the workspace; its session runs a `subagent` |
 | test your change against the team's real stack | `intercept` the service in the team environment, `release` when done |
 | a second branch in the same workspace | `worktree_add` |
 | a copy to experiment on | `workspace_clone` |
@@ -74,7 +74,9 @@ These are the team's rules. Follow them.
 
 **Destructive verbs** (delete, stop, restore in place): list, then call. First list the exact targets by name, then call the tool. The permission prompt is the confirmation; do not ask again in prose.
 
-**Main delegates the goal, not the code.** Main passes the person's request as they said it, plus the context it alone has (which workspace, which environment, what the person decided). It never picks the language, file paths, layout, endpoints or libraries, and never writes steps. The workspace session, or a subagent, decides how.
+**Main delegates the goal, not the code.** Main passes the person's request as they said it, plus the context it alone has (which workspace, which environment, what the person decided). It never picks the language, file paths, layout, endpoints or libraries, and never writes steps. The workspace session decides how.
+
+**No backdoors.** Every session works only in its own working folder. A session never reaches into another workspace, pod or session to get work done. When a delegation or push fails, report the failure to the person as it is; never route around it.
 
 **Push a snapshot only when asked.** Sync points already cover crash safety.
 

@@ -1,8 +1,8 @@
 //! Tools that start another session: `workspace_ask` (main hands a workspace's own session a goal;
 //! fire-and-forget, the answer comes back later as a `[from <ws>] ...` message prompted, or followed
 //! up when busy, into the CALLER's session so main never blocks) and `subagent` (a throwaway session
-//! with the pod tools only; it blocks for workspace sessions, which rely on its answer, and runs in
-//! the background for main, whose turn belongs to the person, answering like an ask).
+//! with the workspace's own tools; a workspace session's tool only, it blocks and the session relies on
+//! its answer). Main never gets `subagent`: it hands goals to workspaces with `workspace_ask`.
 //! `subagent` never works in the parent: it clones the parent workspace (a btrfs worktree, so cheap),
 //! runs in the clone, commits there and pushes straight into the parent's checked-out branch over
 //! SSH (the parent's home seed sets receive.denyCurrentBranch=updateInstead; the owner's platform
@@ -174,7 +174,7 @@ async function runInClone(P: string, task: string, deps: DelegateDeps, opts: (ke
 
     const sk = `${C}:agent-${hex()}`;
     h = await deps.open(sk, opts(sk, { fresh: true }));
-    const prompt = `${task}\n\nYou are in your own clone of the workspace; your code is in ${WS} on branch ${branch}. Commit your work there; do not push, the platform pushes it.`;
+    const prompt = `${task}\n\nYou are in your own clone of the workspace; your code is in ${WS} on branch ${branch}. You own how it is built. Commit your work there; the platform pushes it to the workspace with git when you finish. Work only in ${WS}: never reach another workspace, pod or session.`;
     const reply = await answer(h, prompt, () => h!.prompt(prompt));
 
     const commit = async () => {
@@ -201,7 +201,7 @@ async function runInClone(P: string, task: string, deps: DelegateDeps, opts: (ke
     }
     if (r.code !== 0) {
       settled = true;
-      return `${reply}\n\npush failed: ${tail(r.stderr, 5)}; clone ${C} kept with the commits`;
+      return `${reply}\n\npush failed: ${tail(r.stderr, 5)}; clone ${C} kept with the commits. Report this failure as it is; do not work around it by fetching, copying or asking another workspace to pull.`;
     }
     const sha = (await exec(C, `cd ${WS} && git rev-parse --short HEAD`)).stdout.trim();
     await del(C);
@@ -297,34 +297,14 @@ export function delegateTools(kind: "main" | "workspace", ws: string | undefined
       "Run a self-contained code task (search, read, edit, run) in a fresh throwaway session inside a workspace and get its final answer; use it to keep bulk exploration out of your own context.",
     inputSchema: {
       type: "object",
-      properties: { ...(kind === "main" ? { workspace: { type: "string" } } : {}), task: { type: "string" } },
-      required: [...(kind === "main" ? ["workspace"] : []), "task"],
+      properties: { task: { type: "string" } },
+      required: ["task"],
     },
-    async run(input: { workspace?: string; task: string }) {
-      const target = kind === "workspace" ? ws! : input.workspace;
-      if (!target) return "error: workspace is required";
-      return runInClone(target, input.task, deps, opts);
+    async run(input: { task: string }) {
+      return runInClone(ws!, input.task, deps, opts);
     },
   };
   if (kind === "workspace") return [subagent];
-
-  // main hands the clone run off like an ask: it took minutes and held main's turn the whole time
-  // (2026-10-09: main sat blocked while its subagent built a todos API). The answer comes back as a
-  // `[from <ws> subagent]` message. ponytail: not saved to asks/, a bench restart loses the reply.
-  const background: ToolDef = {
-    ...subagent,
-    description:
-      "Run a self-contained code task (search, read, edit, run) in a throwaway clone of a workspace; returns at once, and its final answer (with what it pushed to the workspace) arrives later as a message. Never wait or poll for it.",
-    async run(input: { workspace?: string; task: string }) {
-      if (!input.workspace) return "error: workspace is required";
-      const P = input.workspace;
-      const a: PendingAsk = { id: hex(), callerKey, key: P, text: input.task, tries: 0, model: caller.model, codemode: caller.codemode, thinkingLevel: caller.thinkingLevel, autoCompact: caller.autoCompact };
-      void runInClone(P, input.task, deps, opts)
-        .catch((e) => `failed: ${e instanceof Error ? e.message : String(e)}`)
-        .then((reply) => deliver(deps, a, `[from ${P} subagent] ${reply}`));
-      return `subagent started in a clone of ${P}. Its answer will arrive here as a message from ${P} subagent; do not wait or poll for it.`;
-    },
-  };
 
   const ask: ToolDef = {
     name: "workspace_ask",
@@ -348,5 +328,5 @@ export function delegateTools(kind: "main" | "workspace", ws: string | undefined
       return `sent to ${key}; its session is working on it. Its answer will arrive here as a message from ${key}; do not wait or poll for it.`;
     },
   };
-  return [ask, background];
+  return [ask];
 }
