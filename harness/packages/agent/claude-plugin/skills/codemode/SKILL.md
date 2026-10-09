@@ -1,51 +1,79 @@
 ---
 name: codemode
-description: How to write codemode scripts. Read this before your first codemode call in a session, and whenever a task needs several tool calls, a loop over many items, or filtering of large output.
+description: How to write codemode scripts. Read this skill before your first codemode call in a session. Also read it when a task needs many tool calls, a loop over many items, or a filter on a large output.
 ---
 
 # Codemode
 
-`codemode` runs a JavaScript script that calls the other tools. The script runs as the body of an async function, so top-level `await` and `return` work. Only what the script returns or prints reaches you. Use this to make many calls in one turn and keep raw output out of your context.
+This skill is written in ASD-STE100 Simplified Technical English. Each word has one meaning. Each instruction is one sentence.
 
-## When to use it
+`codemode` runs a JavaScript script that calls the other tools. The script is the body of an async function. Thus `await` and `return` work at the top level. You get only the value that the script returns or prints. Use codemode to make many calls in one turn and to keep large outputs out of your context.
 
-Use a script when:
+## When to use codemode
 
-- several calls are independent: fetch ten URLs, read five files, run three commands. Run them in parallel.
-- one call's result picks the next call: list, then read each match.
-- the output is large and you need a small part of it: a log, a JSON API, a directory listing.
+Use a script in these conditions:
 
-Use a single plain call inside a script when you only need one simple command and its whole output, such as `git status`. Do not build loops or helpers for one call.
+- The calls are independent. Example: get ten URLs, read five files, or run three commands. Run them in parallel.
+- The result of one call selects the next call. Example: get a list, then read each item that matches.
+- The output is large and you need only a small part of it. Example: a log, a JSON API or a directory list.
+
+If you need only one simple command and all of its output, make one plain call. Example: `git status`. Do not write loops or helper functions for one call.
 
 ## What each call returns
 
-- `tools.bash({ command })` resolves to an object, not a string:
-  `{ output, exit_code, truncated, wall_time_seconds }`. Read `.output`. Check `.exit_code`; a non-zero exit does not throw.
-- `tools.web_fetch({ url })` resolves to the page text. JSON comes back verbatim, so `JSON.parse` it directly. A failed fetch returns a string starting with `error`; it does not throw.
-- `tools.read({ path })` resolves to the file's text.
-- A call that is blocked or gets bad arguments rejects with an `Error`.
+| Call | It returns | Failure |
+|---|---|---|
+| `tools.bash({ command })` | An object: `{ output, exit_code, truncated, wall_time_seconds }`. It is not a string. Read `.output`. | An exit code that is not 0 does not throw. Examine `.exit_code`. |
+| `tools.exec({ cmd })` | An object: `{ exit_code, stdout, stderr }`. | An exit code that is not 0 does not throw. Examine `.exit_code`. |
+| `tools.web_fetch({ url })` | The text of the page. JSON comes back as it is. Use `JSON.parse` on it directly. | A failed fetch returns a string that starts with `error`. It does not throw. |
+| `tools.read({ path })` | The text of the file. | |
+| Any call | | A call that is blocked or has bad arguments rejects with an `Error`. |
 
-Workspace sessions have no `bash`; the equivalent is `await tools.exec({ cmd })`, which resolves to `{ exit_code, stdout, stderr }`. Call whichever shell the tool list has, never assume.
-
-## Four rules first
-
-1. Call a tool directly for one action. Use codemode only for several calls, a loop over items, or to filter large output.
-2. `await tools.bash(...)` resolves to an object; read `.output` (and `.exit_code`), never call string methods on the result itself.
-3. Fetch URLs with `tools.web_fetch`, not curl in bash; one call per item, run together with `Promise.all`.
-4. To show the user a table, list or report, build it in the script and pass it to `tools.display({ markdown })`. The displayed text stays readable to you for follow-ups; reply in one line, never retype what was displayed.
+The main session has `bash`. A workspace session does not have `bash`. It has `exec`. Use the shell that is in your tool list. Do not guess.
 
 ## Rules
 
-1. Run independent calls in parallel with `Promise.all`, or `Promise.allSettled` when some may fail. Make one tool call per item. Never chain commands with `;` or `&&` inside one `bash` call to fetch many things in a row; that runs them one at a time.
-2. Prefer `web_fetch` over `curl` in `bash` for HTTP. It is one call per URL and returns text you can parse.
-3. Return a compact result: the fields you need, not raw pages. Shape it with `.map`, `.filter` and `.slice` before returning.
-4. `tools.searchTools(...)` and `tools.describeTool(...)` are async: always `await` them.
-5. A poll loop exits as soon as the condition holds, has a bounded count, and checks `services[].ready` (or `service_status[].ready`), never a regex over the spec. A workspace's up state is `ready`, an environment's is `running`; also exit on `error` or `deleted`. A failed tool call throws; never poll after a write you did not check.
-6. A failed call made before a script error is not undone. Writes are real.
+1. For one action, call the tool directly. Use codemode only for many calls, a loop over items, or a filter on a large output.
+2. `await tools.bash(...)` returns an object. Read `.output` and `.exit_code`. Do not call string methods on the object.
+3. Get URLs with `tools.web_fetch`. Do not use `curl` in `bash`.
+4. Make one tool call for each item. Run independent calls in parallel with `Promise.all`. If some calls can fail, use `Promise.allSettled`.
+5. Do not join many commands with `;` or `&&` in one `bash` call. The commands then run one after the other.
+6. Return a small result. Return only the fields that you need. Do not return full pages. Use `.map`, `.filter` and `.slice` to make the result small.
+7. `tools.searchTools(...)` and `tools.describeTool(...)` are async. Always use `await` with them.
+8. To show the person a table, list or report, make it in the script. Then give it to `tools.display({ markdown })`. You can read the displayed text later. Reply in one line. Do not type the displayed text again.
+9. A failed platform call throws, and the script stops there. The calls before it are not undone. Writes are real.
+
+## Poll loops
+
+A lifecycle call returns before the work is done. To wait for the result, write a poll loop. Obey these rules:
+
+1. Set a maximum number of tries.
+2. Stop the loop immediately when the state is the state that you want.
+3. Stop the loop when the state is `error` or `deleted`. Return that state.
+4. Use the correct state:
+
+   | Object | The state when it is up |
+   |---|---|
+   | Workspace | `ready`. A workspace is not `running` at any time. |
+   | Environment | `running` |
+
+5. For a service, examine `services[].ready` or `service_status[].ready`. Do not use a regex on the spec.
+6. Use the id (`ws-…` or `env-…`) in the call. Do not use the name.
+7. Before the loop, make sure that the write call passed. A failed tool call throws.
+
+```js
+// Wait until a workspace is up
+for (let i = 0; i < 60; i++) {
+  const ws = JSON.parse(await tools.workspace_get({ workspace: "ws-23d55aca095079c4" }));
+  if (ws.state === "ready" || ws.state === "error" || ws.state === "deleted") return ws.state;
+  await tools.bash({ command: "sleep 5" });
+}
+return "still not ready after 60 tries";
+```
 
 ## Examples
 
-Top Hacker News stories as a table (build it in the script, show it, reply in one line):
+The top Hacker News stories as a table. Make the table in the script, show it, and reply in one line:
 
 ```js
 const ids = JSON.parse(await tools.web_fetch({ url: "https://hacker-news.firebaseio.com/v0/topstories.json" })).slice(0, 20);
@@ -58,9 +86,9 @@ await tools.display({ markdown });
 return "shown";
 ```
 
-Then reply in one line, e.g. "Shown above: the top 20 stories." Do not retype the table.
+Then reply in one line. Example: "The top 20 stories are above." Do not type the table again.
 
-Several commands at once, each checked:
+Many commands at the same time. Examine the result of each command:
 
 ```js
 const cmds = { branch: "git branch --show-current", status: "git status --short", log: "git log --oneline -5" };
@@ -74,7 +102,7 @@ await Promise.all(
 return out;
 ```
 
-Find, then read only what matters:
+Find files, then read only the necessary lines:
 
 ```js
 const r = await tools.bash({ command: "grep -rl 'TODO' src --include=*.ts" });
@@ -88,7 +116,7 @@ const hits = await Promise.all(
 return hits.flat().join("\n");
 ```
 
-Filter a large output down:
+Make a large output small:
 
 ```js
 const r = await tools.bash({ command: "journalctl -u myapp --since '1 hour ago' --no-pager" });
@@ -96,12 +124,18 @@ const errors = r.output.split("\n").filter((l) => /error|panic/i.test(l));
 return { total: errors.length, last: errors.slice(-20) };
 ```
 
-## Wrong patterns
+## Incorrect patterns
 
 ```js
-// Wrong: bash returns an object, not a JSON string
+// Incorrect: bash returns an object, not a JSON string
 JSON.parse(await tools.bash({ command: "curl -s https://example.com/api" }));
 
-// Wrong: ten fetches run one after another inside one shell
+// Incorrect: ten fetches run one after the other in one shell
 await tools.bash({ command: "curl -s $A; curl -s $B; curl -s $C" });
+
+// Incorrect: a workspace is "ready", not "running". This loop does not stop until its limit.
+if (ws.state === "running") return "up";
+
+// Incorrect: the call uses a name, not an id. The answer is 404.
+await tools.workspace_get({ workspace: "backend" });
 ```

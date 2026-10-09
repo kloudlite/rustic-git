@@ -1,78 +1,148 @@
 ---
 name: kloudlite
-description: You run on Kloudlite; "workspace", "environment", "service", "snapshot" in a request mean Kloudlite's, driven by the workspace_*/env_*/service_*/intercept/packages_* tools ("delete all workspaces" = list them with workspace_list, then workspace_delete each). Read this before any task that creates, changes, stops, deletes, lists or works inside a workspace or environment, or mentions intercept, push, restore, clone, package or build: concepts, permission cards, and the team's conventions. Your role (main or workspace session) has its own skill beside this one; read both.
+description: You run on Kloudlite. In a request, the words "workspace", "environment", "service" and "snapshot" mean Kloudlite workspaces, environments, services and snapshots. You control them with the workspace_*, env_*, service_*, intercept and packages_* tools. Example: "delete all workspaces" means list them with workspace_list, then call workspace_delete for each. Read this skill before a task that creates, changes, stops, deletes or lists a workspace or environment, or that works in a workspace. Also read it before a task about intercept, push, restore, clone, package or build. It gives the concepts, the permission cards and the team rules. Your role (main session or workspace session) has its own skill next to this skill. Read the two skills.
 ---
 
 # Kloudlite
 
-Kloudlite gives each person cloud dev machines (workspaces) and shared running stacks (environments) on one cluster. You drive it through the platform tools. "Delete all workspaces" means Kloudlite workspaces; only the main session creates and deletes them (list with `workspace_list`, then delete, following the convention for destructive verbs below).
+This skill is written in ASD-STE100 Simplified Technical English. Each word has one meaning. Each instruction is one sentence.
+
+Kloudlite gives each person dev machines in the cloud (workspaces) and shared stacks that run (environments). All of them are on one cluster. You control Kloudlite with the platform tools.
+
+The request "delete all workspaces" means Kloudlite workspaces. Only the main session creates and deletes workspaces. To do this, list the workspaces with `workspace_list`. Then delete them, and obey the rule for destructive actions in "Team rules".
 
 ## Two roles
 
-Every session has exactly one role, and one skill says what that role does. You were given yours beside this one: `main-session` or `workspace-session`. Your first message also names it (`[role: ...]`). Read your role skill first; this skill is only the shared ground.
+Each session has one role. One skill tells you what your role does. You have this skill and one role skill: `main-session` or `workspace-session`. Your first message also gives the role (`[role: ...]`). Read your role skill first. This skill gives only the shared concepts.
 
-| Role | Lives in | Job |
+| Role | Where it runs | What it does |
 |---|---|---|
-| **Main** | the bench; no workspace, no source code | talks to the person; creates, clones, starts and deletes workspaces and environments; keeps the task board; hands each task to a workspace with `workspace_ask` |
-| **Workspace** | one workspace's pod, `~/workspace` | owns one component: its design, code, service, intercept and working branch; reports to main with `main_tell`; may stop its own workspace when done |
+| **Main** | On the bench. It has no workspace and no source code. | Talks to the person. Creates, clones, starts and deletes workspaces and environments. Keeps the task board. Gives each task to a workspace with `workspace_ask`. |
+| **Workspace** | In the pod of one workspace, in `~/workspace`. | Owns one component: its design, code, service, intercept and working branch. Sends reports to main with `main_tell`. Can stop its own workspace when the task is done. |
 
-Every session is isolated: it works only in its own folder and pod. No session reads, runs or changes code in another workspace, pod or session. Work crosses between sessions only through `workspace_ask` (main to a workspace, with a task id when the work is on the board), `main_tell` (a workspace to main: done, blocked or need) and the answers to asks. Workspaces never message each other; main carries facts between them.
+Each session is isolated. It works only in its own folder and pod. A session does not read, run or change code in a different workspace, pod or session.
+
+Work moves between sessions only in these three ways:
+
+- `workspace_ask`: main gives work to a workspace. It includes a task id when the work is on the board.
+- `main_tell`: a workspace sends main a report (`done`, `blocked` or `need`).
+- The answer to an ask.
+
+Workspaces do not send messages to other workspaces. Main moves facts between them.
+
+## Ids and names
+
+Each workspace has a name and an id. The id starts with `ws-`. Each environment has a name and an id. The id starts with `env-`.
+
+1. Get the id from `workspace_list` or `env_list`.
+2. Use the id in the `workspace` or `env` parameter of a tool call. Do not use the name.
+3. Use the name when you write to the person.
 
 ## Concepts
 
-**Workspace.** One dev machine: a pod with its own home (`/home/kl`, a btrfs volume), source under `~/workspace`, and its own installed packages. One workspace per component: frontend, backend, worker, test suite. Components can come from different repos or the same one. Each kind tends to need different packages.
+**Workspace.** One dev machine. It is a pod with these items:
 
-**Worktree.** An extra working copy inside a workspace (`worktree_add` / `worktree_drop`), for a second branch without a second workspace.
+- Its own home, `/home/kl`. This is a btrfs volume.
+- Source code in `~/workspace`.
+- Its own installed packages.
 
-**Environment.** A shared, multi-service stack for a team (the backend, its database, a queue...). Each service runs as its own StatefulSet. Add, change and remove services with `service_add` / `service_update` / `service_remove`.
+Use one workspace for each component, for example frontend, backend, worker or test suite. Components can come from different repos or from the same repo. Each type of component usually needs different packages.
 
-**Service image.** When you add a service, you choose the image: build one with the `container_build` tool (`tags: ["name:tag"]`, context in your working directory; it builds on your builder and pushes to the Kloudlite registry) and retag with `container_push`. `kl` is not on PATH inside `exec`; these tools run it for you, or use any public image.
+**Worktree.** An extra working copy in a workspace. It gives a second branch without a second workspace. Use `worktree_add` and `worktree_drop`.
 
-**Intercept.** Route one service of an environment to a workspace instead of the service's own pod. Traffic for that service then reaches the code running in your workspace. `intercept` starts it, `release` ends it. Only one workspace can intercept a service at a time. If the workspace stops, the intercept is released after a short grace period, but the wish stays until `release`.
+**Environment.** A shared stack of services for a team. Example: the backend, its database and a queue. Each service runs as its own StatefulSet. Use `service_add`, `service_update` and `service_remove` to add, change and remove services.
 
-**Space.** `space_env_current` / `space_env_switch` / `space_env_clear`. A team's space follows one environment, so its workspaces can reach that environment's services by DNS name.
+**Service image.** When you add a service, you select its image. You can use a public image. To build an image, use the `container_build` tool:
 
-**Snapshots.** A read-only copy of a workspace's or environment's disk.
-- *Sync points* are cut automatically while a workspace runs. They are for crash safety only and are never shown as history.
-- *Push* (`workspace_push` / `env_push`) records a named snapshot in history. Pushes are never pruned. This is not `git push`.
-- *Restore* (`workspace_restore`, `env_restore`) makes a new copy from a snapshot. `env_restore_in_place` rewrites the environment itself.
-- *Clone* (`workspace_clone`, `env_clone`) copies a workspace or environment. The reply's `based_on` says how old the copy is.
-- `volume_list` / `volume_history` / `volume_refs` read the chain; `snapshot_delete` and `volume_delete` remove history.
+- Give `tags: ["name:tag"]`.
+- The build context is your working directory.
+- The tool builds on your builder and pushes the image to the Kloudlite registry.
 
-**Interrupted workspace.** If a workspace's node dies, starting it answers 409. Clone it instead: the clone starts from the last sync point.
+To give an image a new tag, use `container_push`. The `kl` command is not on the PATH in `exec`. These tools run `kl` for you.
 
-**Packages.** Nix packages pinned as `name@version` (`latest`, `N`, `N.N`, `N.N.N`). `packages_list` / `packages_add` / `packages_remove`; `packages_update` re-resolves to newer versions. A version that is not cached answers 422 with the versions that are.
+**Intercept.** An intercept sends the traffic for one service of an environment to a workspace. The service pod does not get this traffic. The code that runs in your workspace gets it.
 
-**Builders.** Each owner has a hidden builder that starts on demand for `container_build`. `builder_status` shows it.
+- `intercept` starts an intercept. `release` ends it.
+- Only one workspace at a time can intercept a service.
+- If the workspace stops, the platform releases the intercept after a short time. But the request for the intercept stays until `release`.
 
-**Quota and regions.** `quota` shows what the owner may still allocate (workspaces, environments, snapshots, disk, cpu, memory). Over quota answers 409. `regions` lists where workspaces can run. When a limit or a missing access blocks the person, `request_create` asks a superadmin (kinds quota, access, region, other; one pending per kind); `requests_list` / `request_get` show the decision. Never retry the blocked call hoping it passes.
+**Space.** A space follows one environment. Then the workspaces of the team can get to the services of that environment by their DNS names. Use `space_env_current`, `space_env_switch` and `space_env_clear`.
 
-**Lifecycle calls are asynchronous.** Create, start, stop, clone and restore return at once. Poll `workspace_get` / `env_get` until the state you want. A workspace goes `creating` then `ready` (never `running`); an environment goes `creating` then `running`. Both can also be `stopped`, `error` or `deleted`; stop polling on `error` or `deleted`.
+**Snapshots.** A snapshot is a read-only copy of the disk of a workspace or environment.
+
+- *Sync points*: The platform makes them automatically while a workspace runs. They are only for recovery after a crash. They do not show in the history.
+- *Push* (`workspace_push`, `env_push`): Records a named snapshot in the history. The platform does not remove pushes. This push is not `git push`.
+- *Restore* (`workspace_restore`, `env_restore`): Makes a new copy from a snapshot. `env_restore_in_place` writes the snapshot over the environment.
+- *Clone* (`workspace_clone`, `env_clone`): Copies a workspace or environment. The `based_on` field in the reply tells you the age of the copy.
+- `volume_list`, `volume_history` and `volume_refs` read the history. `snapshot_delete` and `volume_delete` remove history.
+
+**Interrupted workspace.** If the node of a workspace stops, `workspace_start` answers 409. Then clone the workspace. The clone starts from the last sync point.
+
+**Packages.** Nix packages with a version: `name@version`. The version is `latest`, `N`, `N.N` or `N.N.N`.
+
+- Use `packages_list`, `packages_add` and `packages_remove`.
+- `packages_update` finds newer versions.
+- If a version is not in the cache, the answer is 422. The answer gives the versions that are in the cache.
+
+**Builders.** Each owner has a hidden builder. It starts when `container_build` needs it. `builder_status` shows it.
+
+**Quota and regions.**
+
+- `quota` shows the resources that the owner can still use: workspaces, environments, snapshots, disk, cpu and memory.
+- A call that goes above the quota answers 409.
+- `regions` gives the regions where workspaces can run.
+- If a limit or missing access stops the person, use `request_create` to ask a superadmin. The kinds are quota, access, region and other. Only one request of each kind can wait at a time.
+- `requests_list` and `request_get` show the decision.
+- Do not try the stopped call again. It will not pass.
+
+**Lifecycle calls are asynchronous.** Create, start, stop, clone and restore return immediately. The work continues after the return. Poll `workspace_get` or `env_get` until you get the state that you want.
+
+| Object | States | The state when it is up |
+|---|---|---|
+| Workspace | `creating`, `ready`, `stopped`, `error`, `deleted` | `ready`. A workspace is not `running` at any time. |
+| Environment | `creating`, `running`, `stopped`, `error`, `deleted` | `running` |
+
+Stop the poll when the state is `error` or `deleted`. That state will not change to the state that you want.
 
 ## Tools
 
-Each role has a different set of tools; your role skill lists yours, with when to use each. Not every tool named above is yours: if a tool is not in your list, it is another role's job.
+Each role has a different set of tools. Your role skill gives your tools and when to use each tool. This skill gives the names of some tools that are not yours. If a tool is not in your list, it is the work of the other role.
 
-**Every role** has `web_fetch` (read one URL) and `web_search` (search the web).
+**Each role** has `web_fetch` (read one URL) and `web_search` (search the web).
 
-**Permission cards.** Some calls stop and show the person a card to approve or deny:
-- always: `workspace_stop` (except a workspace session stopping its own workspace), `workspace_delete`, `worktree_drop`, `env_stop`, `env_delete`, `env_restore_in_place`, `service_update`, `service_remove`, `volume_delete`, `snapshot_delete`, `packages_remove`, `intercept`, `container_build`, `container_push`;
-- unless the sandbox and network fence hold: `exec`, `bash`, `web_fetch`.
+**Permission cards.** Some calls stop and show a card to the person. The person accepts or refuses the call.
 
-These calls take a `because` field. Put the person's exact words in `asked` only when this turn they literally asked for this action and named its target; then the card is skipped. Otherwise write one sentence in `reason` on why the task needs it. A denied card is the person's answer: do not retry the call or reach the same result another way.
+- These calls always show a card: `workspace_stop`, `workspace_delete`, `worktree_drop`, `env_stop`, `env_delete`, `env_restore_in_place`, `service_update`, `service_remove`, `volume_delete`, `snapshot_delete`, `packages_remove`, `intercept`, `container_build`, `container_push`.
+- One exception: a workspace session that stops its own workspace does not get a card.
+- These calls show a card if the sandbox and the network fence are not in force: `exec`, `bash`, `web_fetch`.
 
-## Conventions
+These calls have a `because` field. Fill it in this way:
 
-These are the team's rules. Follow them.
+1. Put the exact words of the person in `asked` only if both conditions are true:
+   - In this turn, the person asked for this action.
+   - The person gave the target.
+   Then the card does not show.
+2. In all other conditions, write one sentence in `reason`. Tell why the task needs this call.
 
-**Destructive verbs** (delete, stop, restore in place): list, then call. First list the exact targets by name, then call the tool with their ids. The permission prompt is the confirmation; do not ask again in prose.
+If the person refuses a card, that is their answer. Do not try the call again. Do not get the same result in a different way.
 
-**No backdoors.** Never reach into another workspace, pod or session to get work done. When a delegation or push fails, report the failure to the person as it is; never route around it.
+## Team rules
 
-**Push a snapshot only when asked.** Sync points already cover crash safety.
+These are the rules of the team. Obey them.
 
-**Environments.** Intercept the shared team environment from your workspace rather than making a private copy. Release when you are done.
+**Destructive actions** (delete, stop, restore in place):
 
-**Packages and setup.** Every workspace session, at start, reads the repo's `AGENTS.md` (its Setup section) and installs the packages it names that are missing. When you install a new package, add it to `AGENTS.md`. Setup requirements live in the repo they belong to.
+1. List the exact targets by name.
+2. Call the tool with their ids.
 
-**Service images.** You decide: `container_build`/`container_push` for code you own, any image for off-the-shelf software.
+The permission card is the confirmation. Do not ask the person again in text.
+
+**No backdoors.** Do not go into a different workspace, pod or session to do work. If a delegation or a push fails, tell the person about the failure as it is. Do not go around it.
+
+**Push a snapshot only when the person asks.** The sync points already give recovery after a crash.
+
+**Environments.** Intercept the shared team environment from your workspace. Do not make a private copy of the environment. Release the intercept when you are done.
+
+**Packages and setup.** At the start, each workspace session reads the Setup section of `AGENTS.md` in the repo. Then it installs the missing packages that this section gives. When you install a new package, add it to `AGENTS.md`. The setup requirements of a repo are in that repo.
+
+**Service images.** You make the decision. For code that you own, use `container_build` and `container_push`. For standard software, use any image.
