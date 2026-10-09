@@ -550,7 +550,7 @@ pub fn workspace_pod(
     // The last place before `spec.name` becomes a root `/bin/sh -c` word, an sshd `SetEnv` value
     // and this container's `mount_path`. `/v1` checked it; this covers a Workspace written by any
     // other path, exactly as `git_init_container` and `service_statefulset` do for their inputs.
-    if !crate::model::valid_name(&spec.name) {
+    if !crate::model::safe_ws_name(&spec.name) {
         return Err(format!("workspace name {:?} is not a name", spec.name));
     }
     // ssh is a feature of the DEFAULT image only: a user image brings its own entrypoint, and we

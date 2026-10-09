@@ -89,6 +89,9 @@ fn default_env_quota() -> u64 {
 /// past here is treated as trusted by a root agent from then on — and a name that gets past here
 /// is what the controller applies, every requeue, forever.
 fn check_services(services: &[Service]) -> Result<(), Response> {
+    if let Some(s) = services.iter().find(|s| !crate::model::name_shape(&s.name)) {
+        return Err((StatusCode::BAD_REQUEST, format!("service name {:?} {}", s.name, crate::model::SERVICE_NAME_RULE)).into_response());
+    }
     crate::model::validate_services(services).map_err(|e| (StatusCode::BAD_REQUEST, e).into_response())
 }
 

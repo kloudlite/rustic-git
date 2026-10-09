@@ -242,8 +242,14 @@ pub fn validate_mount(m: &Mount) -> Result<(), String> {
 /// are checked here for the same reason — the API server, not this code, is what rejects a port 0
 /// or a `FOO-BAR` env name, and it does so one requeue at a time.
 pub fn validate_service(s: &Service) -> Result<(), String> {
-    if !valid_name(&s.name) {
-        return Err(format!("service {:?}: {NAME_RULE}", s.name));
+    let n = s.name.as_bytes();
+    let label = !n.is_empty()
+        && n.len() <= 63
+        && n[0].is_ascii_lowercase()
+        && n[n.len() - 1] != b'-'
+        && n.iter().all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || *b == b'-');
+    if !label {
+        return Err(format!("service name {:?} must be a lowercase DNS label starting with a letter", s.name));
     }
     if s.ports.contains(&0) {
         return Err(format!("service {:?}: port must be 1-65535", s.name));
@@ -287,6 +293,19 @@ pub fn is_id(s: &str, prefix: &str) -> bool {
 /// `{svc}-0` pod names, hence 40 and not 63. Id-shaped names are refused so a name can never be
 /// mistaken for an id by the resolver (`api/scope.rs`).
 pub fn valid_name(name: &str) -> bool {
+    name_shape(name)
+        && !is_id(name, "ws")
+        && !is_id(name, "env")
+        && !matches!(name, "ws" | "env" | "api" | "admin" | "system" | "kl")
+        && !name.starts_with("bld-")
+}
+
+/// The shape half of `valid_name`, without the reserved words: a service called `api` is
+/// natural and collides with nothing, because services are never addressed beside workspaces.
+/// `/v1` checks it on new services; the agent's render-time checks stay at the older, wider
+/// safety rules (`validate_service`, `safe_ws_name`) so an object created before this rule
+/// still starts.
+pub fn name_shape(name: &str) -> bool {
     let n = name.as_bytes();
     !n.is_empty()
         && n.len() <= 40
@@ -294,10 +313,18 @@ pub fn valid_name(name: &str) -> bool {
         && n[n.len() - 1] != b'-'
         && n.iter().all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || *b == b'-')
         && !name.contains("--")
-        && !is_id(name, "ws")
-        && !is_id(name, "env")
-        && !matches!(name, "ws" | "env" | "api" | "admin" | "system" | "kl")
-        && !name.starts_with("bld-")
+}
+
+pub const SERVICE_NAME_RULE: &str = "must be 1-40 lowercase letters, digits or '-', start with a letter, end with a letter or digit, no '--'";
+
+/// The render-time guard for a workspace name: the security half only (no newline or path
+/// segment can reach ssh config, `/bin/sh -c` or a mount path). Wider than `valid_name` on
+/// purpose, see `name_shape`.
+pub fn safe_ws_name(name: &str) -> bool {
+    !name.is_empty()
+        && name.len() <= 63
+        && name.bytes().all(|b| b.is_ascii_alphanumeric() || matches!(b, b'.' | b'_' | b'-'))
+        && name.bytes().any(|b| b != b'.')
 }
 
 /// A segment that also has to survive being patched verbatim into a label VALUE (63 chars, the
@@ -315,7 +342,7 @@ pub fn valid_segment_label(s: &str) -> bool {
 /// splice these into a root `/bin/sh -c` prelude and into `{pool}/vol/{id}`. Same rule, same
 /// reason, as `git_init_container`'s repo/branch re-check.
 pub fn validate_ws_spec(spec: &crate::crd::WorkspaceSpec) -> Result<(), String> {
-    if !valid_name(&spec.name) {
+    if !safe_ws_name(&spec.name) {
         return Err(format!("workspace name {:?} is not a name", spec.name));
     }
     validate_owner(&spec.owner)?;
@@ -495,6 +522,14 @@ mod tests {
         ] {
             assert!(!super::valid_name(bad), "name {bad:?} must be refused");
         }
+    }
+
+    #[test]
+    fn services_may_take_reserved_words_and_old_names_still_render() {
+        assert!(super::name_shape("api") && super::name_shape("kl"));
+        assert!(!super::name_shape(&"a".repeat(41)));
+        assert!(validate_services(&[svc("api"), svc(&"a".repeat(63))]).is_ok(), "render keeps the wider rule");
+        assert!(super::safe_ws_name("My_ws.2") && !super::safe_ws_name("a\nb"));
     }
 
     #[test]
