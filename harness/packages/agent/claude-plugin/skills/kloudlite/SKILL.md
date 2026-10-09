@@ -47,7 +47,7 @@ Every session is isolated: it works only in its own folder and pod. No session r
 
 **Quota and regions.** `quota` shows what the owner may still allocate (workspaces, environments, snapshots, disk, cpu, memory). Over quota answers 409. `regions` lists where workspaces can run. When a limit or a missing access blocks the person, `request_create` asks a superadmin (kinds quota, access, region, other; one pending per kind); `requests_list` / `request_get` show the decision. Never retry the blocked call hoping it passes.
 
-**Lifecycle calls are asynchronous.** Create, start, stop, clone and restore return at once. Poll `workspace_get` / `env_get` until the state you want.
+**Lifecycle calls are asynchronous.** Create, start, stop, clone and restore return at once. Poll `workspace_get` / `env_get` until the state you want. A workspace goes `creating` then `ready` (never `running`); an environment goes `creating` then `running`. Both can also be `stopped`, `error` or `deleted`; stop polling on `error` or `deleted`.
 
 ## Tools
 

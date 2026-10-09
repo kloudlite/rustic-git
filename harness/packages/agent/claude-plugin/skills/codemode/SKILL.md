@@ -40,7 +40,7 @@ Workspace sessions have no `bash`; the equivalent is `await tools.exec({ cmd })`
 2. Prefer `web_fetch` over `curl` in `bash` for HTTP. It is one call per URL and returns text you can parse.
 3. Return a compact result: the fields you need, not raw pages. Shape it with `.map`, `.filter` and `.slice` before returning.
 4. `tools.searchTools(...)` and `tools.describeTool(...)` are async: always `await` them.
-5. A poll loop exits as soon as the condition holds, has a bounded count, and checks `services[].ready` (or `service_status[].ready`), never a regex over the spec. A failed tool call throws; never poll after a write you did not check.
+5. A poll loop exits as soon as the condition holds, has a bounded count, and checks `services[].ready` (or `service_status[].ready`), never a regex over the spec. A workspace's up state is `ready`, an environment's is `running`; also exit on `error` or `deleted`. A failed tool call throws; never poll after a write you did not check.
 6. A failed call made before a script error is not undone. Writes are real.
 
 ## Examples
