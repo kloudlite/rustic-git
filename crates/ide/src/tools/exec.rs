@@ -118,7 +118,7 @@ async fn drain<R: tokio::io::AsyncRead + Unpin>(r: Option<R>) -> (String, bool) 
     (String::from_utf8_lossy(&bytes).into_owned(), dropped > 0)
 }
 
-async fn job(mut cmd: Command, timeout_ms: u64) -> Result<Value, ToolError> {
+pub(crate) async fn job(mut cmd: Command, timeout_ms: u64) -> Result<Value, ToolError> {
     let started = std::time::Instant::now();
     let mut child = cmd.stdout(std::process::Stdio::piped()).stderr(std::process::Stdio::piped()).stdin(std::process::Stdio::null()).spawn().map_err(|e| ToolError::Failed(format!("spawn: {e}")))?;
     let pid = child.id();

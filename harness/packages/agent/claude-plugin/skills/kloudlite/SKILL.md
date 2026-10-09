@@ -27,7 +27,7 @@ Main has no source code. To change code or run something in a workspace, go thro
 
 **Environment.** A shared, multi-service stack for a team (the backend, its database, a queue...). Each service runs as its own StatefulSet. Add, change and remove services with `service_add` / `service_update` / `service_remove`.
 
-**Service image.** When you add a service, you choose the image: build one with `kl build -t name:tag .` and `kl push name:tag` (inside a workspace, to the Kloudlite registry), or use any public image.
+**Service image.** When you add a service, you choose the image: build one with the `container_build` tool (`tags: ["name:tag"]`, context in your working directory; it builds on your builder and pushes to the Kloudlite registry) and retag with `container_push`. `kl` is not on PATH inside `exec`; these tools run it for you, or use any public image.
 
 **Intercept.** Route one service of an environment to a workspace instead of the service's own pod. Traffic for that service then reaches the code running in your workspace. `intercept` starts it, `release` ends it. Only one workspace can intercept a service at a time. If the workspace stops, the intercept is released after a short grace period, but the wish stays until `release`.
 
@@ -44,7 +44,7 @@ Main has no source code. To change code or run something in a workspace, go thro
 
 **Packages.** Nix packages pinned as `name@version` (`latest`, `N`, `N.N`, `N.N.N`). `packages_list` / `packages_add` / `packages_remove`; `packages_update` re-resolves to newer versions. A version that is not cached answers 422 with the versions that are.
 
-**Builders.** Each owner has a hidden builder that starts on demand for `kl build`. `builder_status` shows it.
+**Builders.** Each owner has a hidden builder that starts on demand for `container_build`. `builder_status` shows it.
 
 **Quota and regions.** `quota` shows what the owner may still allocate (workspaces, environments, snapshots, disk, cpu, memory). Over quota answers 409. `regions` lists where workspaces can run. When a limit or a missing access blocks the person, `request_create` asks a superadmin (kinds quota, access, region, other; one pending per kind); `requests_list` / `request_get` show the decision. Never retry the blocked call hoping it passes.
 
@@ -62,7 +62,7 @@ Main has no source code. To change code or run something in a workspace, go thro
 | keep a named point in history | `workspace_push` (only when asked) |
 | go back to a pushed point | `workspace_restore` |
 | a new tool installed | `packages_add`, then update AGENTS.md |
-| a new service in the environment | `service_add`, image from `kl build`/`kl push` or any image |
+| a new service in the environment | `service_add`, image from `container_build`/`container_push` or any image |
 | see what is running | `workspace_list`, `env_list`, `workspace_get`, `env_get` |
 | see what is left | `quota` |
 | ask for more quota, access or a region | request_create |
@@ -87,4 +87,4 @@ These are the team's rules. Follow them.
 
 **Packages and setup.** Every session, at start, reads the repo's `AGENTS.md` (its Setup section) and installs the packages it names that are missing. When you install a new package, add it to `AGENTS.md`. Setup requirements live in the repo they belong to.
 
-**Service images.** You decide: `kl build`/`kl push` for code you own, any image for off-the-shelf software.
+**Service images.** You decide: `container_build`/`container_push` for code you own, any image for off-the-shelf software.

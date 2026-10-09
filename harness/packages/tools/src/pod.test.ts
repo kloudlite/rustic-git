@@ -42,7 +42,7 @@ test("schema comes from the pod, only for fixed names, token is sent", async () 
 test("pod not ready falls back to the permissive schema and call says not ready", async () => {
   handler = () => j({ error: "workspace not ready" }, 409);
   const t = await podTools("w1");
-  expect(t.length).toBe(21);
+  expect(t.length).toBe(23);
   expect(t[0]!.inputSchema).toEqual({ type: "object", additionalProperties: true });
   await expect(t[0]!.run({})).rejects.toThrow("workspace not ready");
 });

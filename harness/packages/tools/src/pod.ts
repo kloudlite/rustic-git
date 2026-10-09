@@ -10,6 +10,7 @@ export const POD_TOOLS = [
   "process_list", "process_output", "process_write", "process_kill",
   "watch", "watch_poll", "watch_stop",
   "graft_find_code", "graft_find_all", "graft_trace_calls", "graft_file_api", "graft_repo_map", "graft_build", "graft_blast",
+  "container_build", "container_push",
 ];
 
 type Addr = { address: string; token?: string };
@@ -68,7 +69,10 @@ export async function podTools(ws: string): Promise<ToolDef[]> {
   }
 
   async function call(name: string, args: any): Promise<string> {
-    const timeout = name === "exec" ? (args?.timeout_ms ?? 120_000) + 15_000 : 60_000;
+    // A build waits on the builder and the registry: same long leash as a job, its own default.
+    const timeout = name === "exec" ? (args?.timeout_ms ?? 120_000) + 15_000
+      : name === "container_build" ? (args?.timeout_ms ?? 600_000) + 15_000
+      : name === "container_push" ? 180_000 : 60_000;
     try {
       let res: Response | undefined;
       // a stale address (pod restarted, token rotated) shows as a network error or 401: re-resolve once

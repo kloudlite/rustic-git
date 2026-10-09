@@ -1,7 +1,7 @@
 //! The HTTP surface: `/healthz`, `/tools`, `/fs`, and the two streams. Loopback only — see the crate doc.
 use crate::procs::Procs;
 use crate::trees::{TreeCtx, Trees};
-use crate::tools::{exec::Exec, files::Files, graft::GraftTools, watch::WatchTools, Registry};
+use crate::tools::{container::Container, exec::Exec, files::Files, graft::GraftTools, watch::WatchTools, Registry};
 use crate::watches::Watches;
 use crate::Config;
 use axum::{extract::{DefaultBodyLimit, State}, routing::{get, post}, Json, Router};
@@ -28,6 +28,7 @@ impl App {
             Box::new(Exec { trees: trees.clone(), procs: procs.clone() }),
             Box::new(WatchTools { trees: trees.clone(), procs: procs.clone(), watches: watches.clone() }),
             Box::new(GraftTools { trees: trees.clone(), procs: procs.clone() }),
+            Box::new(Container { trees: trees.clone() }),
         ]);
         App { cfg, registry, procs, watches, trees }
     }
@@ -356,7 +357,7 @@ mod tests {
         assert_eq!(r.status(), 200);
         let v: serde_json::Value = serde_json::from_slice(&axum::body::to_bytes(r.into_body(), 1 << 20).await.unwrap()).unwrap();
         let names: Vec<&str> = v["tools"].as_array().unwrap().iter().map(|t| t["name"].as_str().unwrap()).collect();
-        assert_eq!(names, vec!["read", "write", "edit", "patch", "glob", "grep", "exec", "process_list", "process_output", "process_write", "process_kill", "watch", "watch_poll", "watch_stop", "graft_find_code", "graft_find_all", "graft_trace_calls", "graft_file_api", "graft_repo_map", "graft_build", "graft_blast"]);
+        assert_eq!(names, vec!["read", "write", "edit", "patch", "glob", "grep", "exec", "process_list", "process_output", "process_write", "process_kill", "watch", "watch_poll", "watch_stop", "graft_find_code", "graft_find_all", "graft_trace_calls", "graft_file_api", "graft_repo_map", "graft_build", "graft_blast", "container_build", "container_push"]);
         assert!(!names.contains(&"pty"), "a PTY is not a tool: {names:?}");
         assert_eq!(v["tools"][0]["schema"]["type"], "object");
         let (s, v) = post(&app, "read", serde_json::json!({"path": "a.txt"})).await;
