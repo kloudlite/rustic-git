@@ -1,6 +1,7 @@
 #!/usr/bin/env bun
 // kl-tui: the TUI on the laptop, the agent on the bench. `kl-tui --ssh <ssh argv...>`; kl-connect
 // builds the argv and treats exit 3 (old bench, protocol mismatch) as "run the remote TUI".
+import { writeSync } from "node:fs";
 import { connect } from "@kloudlite-tui/backend";
 import { boot } from "./hello.ts";
 import { start } from "./start.tsx";
@@ -20,12 +21,14 @@ try {
 boot(c.backend, c.hello);
 let lost = false;
 const done = () => {
-  // leave the alternate screen first, or kl-connect's restore wipes the reason along with it
-  if (process.stderr.isTTY) process.stderr.write("\x1b[?1049l");
+  // Leave the alternate screen first or the reason goes with it; kl-connect then skips its own
+  // `?1049l`, which would put the cursor back over this line. writeSync because an async write in
+  // an exit handler can be dropped.
+  if (process.stderr.isTTY) writeSync(2, "\x1b[?1049l");
   const tail = c.stderr();
-  if (tail) process.stderr.write(tail);
+  if (tail) writeSync(2, tail);
   // ssh writes nothing when its proxy dies, so a bare exit 1 would explain nothing
-  else if (lost) process.stderr.write("kl-tui: lost the bench connection\n");
+  else if (lost) writeSync(2, "kl-tui: lost the bench connection\n");
 };
 process.on("exit", done);
 // The bench went away under us: leave rather than render a dead session.
