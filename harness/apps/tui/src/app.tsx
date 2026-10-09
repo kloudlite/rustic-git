@@ -295,6 +295,17 @@ export function App({
       off?.();
     };
   }, []);
+  // `/clear` in another view wipes only that view's copy: follow the bench's `cleared` mark. The
+  // first list seen is the baseline, so connecting never wipes a transcript.
+  const clearedSeen = useRef(new Map<string, number>());
+  useEffect(() => {
+    for (const m of watched ?? []) {
+      const was = clearedSeen.current.get(m.key);
+      clearedSeen.current.set(m.key, m.cleared ?? 0);
+      if (was !== undefined && was !== (m.cleared ?? 0))
+        setSessions((map) => patchSession(map, m.key, { entries: [], history: [], tokens: 0, queued: [] }));
+    }
+  }, [watched]);
   const [fetched, setFetched] = useState<SessionMeta[]>([]);
   useEffect(() => {
     if (watched !== null) return;

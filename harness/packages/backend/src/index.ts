@@ -26,7 +26,7 @@ export { connect, RemoteBackend } from "./remote.ts";
 
 export type Settings = ReturnType<typeof readSettings>;
 export type SessionMeta = ReturnType<typeof listSessions>[number];
-export type LiveSessionMeta = SessionMeta & { busy: boolean };
+export type LiveSessionMeta = SessionMeta & { busy: boolean; cleared?: number };
 export type LoginOption = ReturnType<typeof loginOptions>[number];
 export type ProviderAuth = Awaited<ReturnType<typeof providerAuth>>[number];
 export type LoginType = Parameters<typeof loginProvider>[1];

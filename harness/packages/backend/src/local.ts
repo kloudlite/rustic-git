@@ -283,7 +283,10 @@ export class LocalBackend implements Backend {
   #live = new Map<string, SessionHandle>();
   #busy = new Set<string>();
   #watchers = new Set<(list: LiveSessionMeta[]) => void>();
-  #list = () => listSessions().map((m) => ({ ...m, busy: this.#busy.has(m.key) }));
+  /** When each key's history was last cleared: another view still showing the old transcript
+   * wipes it when this changes (its own copy lives in that client, which `clear` never reaches). */
+  #cleared = new Map<string, number>();
+  #list = () => listSessions().map((m) => ({ ...m, busy: this.#busy.has(m.key), cleared: this.#cleared.get(m.key) }));
   /** Every view's sidebar: the stored list with which keys are mid-turn right now. */
   #changed() {
     if (this.#watchers.size === 0) return;
@@ -471,7 +474,7 @@ export class LocalBackend implements Backend {
     list: async (prefix?: string) => listSessions(prefix),
     name: async (key: string, name: string) => (await nameSession(key, name), this.#changed()),
     describe: async (key: string, d: string) => (await describeSession(key, d), this.#changed()),
-    clear: async (key: string) => (await clearSessionHistory(key), this.#changed()),
+    clear: async (key: string) => (await clearSessionHistory(key), this.#cleared.set(key, Date.now()), this.#changed()),
     watch: async (cb: (list: LiveSessionMeta[]) => void) => {
       this.#watchers.add(cb);
       cb(this.#list());
