@@ -4,6 +4,10 @@
 //! back through the workspace pods the api server already knows about. A reflector rather than a
 //! GET per connection: a `docker build` opens many connections, and the API server is not a
 //! per-connection dependency this path can afford (nor one it should be able to overload).
+//!
+//! Bench pods are indexed beside workspace pods: the main session runs in the bench and reads its
+//! environments' service logs through this same lookup. A bench pod carries the same owner labels,
+//! so it resolves to its own owner and gains nothing another of that owner's pods lacks.
 
 use k8s_openapi::api::core::v1::Pod;
 use kloudlite_workspaces::k8s;
@@ -68,7 +72,7 @@ impl Pods {
             use futures::StreamExt;
             use kube::runtime::{watcher, watcher::Event, WatchStreamExt};
             let api: kube::Api<Pod> = kube::Api::all(client);
-            let cfg = watcher::Config::default().labels(&format!("{}=workspace", k8s::KIND_LABEL));
+            let cfg = watcher::Config::default().labels(&format!("{} in (workspace,bench)", k8s::KIND_LABEL));
             let mut stream = watcher(api, cfg).default_backoff().boxed();
             // A relist is a whole new truth: collected aside and swapped in at `InitDone`, so a
             // resync never leaves the index momentarily empty for a connection arriving mid-list.
