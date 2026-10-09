@@ -83,9 +83,9 @@ pub(crate) async fn connect(
 /// handshake on the other end), and a `Close` frame ends the pump cleanly while any other error is
 /// reported.
 ///
-/// `keepalive`: `bench-proxy --tui` has no sshd under it, whose `ClientAliveInterval` kept the
-/// Cloudflare edge (100 s idle) awake, so it Pings every interval and gives up after three with no
-/// frame of any kind back, the same 3 x 15 s an ssh session allows today.
+/// `keepalive`: `bench-proxy` has no server-side keepalive behind it, so it Pings every interval
+/// to keep the Cloudflare edge (100 s idle) awake and gives up after three with no frame of any
+/// kind back (3 x 15 s).
 pub(crate) async fn pump_io<
     R: tokio::io::AsyncRead + Unpin + Send + 'static,
     W: tokio::io::AsyncWrite + Unpin,

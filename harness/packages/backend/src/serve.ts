@@ -1,7 +1,7 @@
 //! The bench side of a TUI: one `serve` per client connection to the bench daemon (./daemon),
 //! speaking ./wire over that connection's socket. The agents live in the daemon's one backend, so
 //! the connection closing disposes this client's VIEWS (`dispose` below), never the agents: a
-//! running turn survives a quit or an ssh drop and a reconnecting client finds it still going
+//! running turn survives a quit or a dropped connection and a reconnecting client finds it still going
 //! (`session.open` reports `busy`).
 import type { Backend, SessionHandle, ToolSpec } from "./index.ts";
 import { Peer } from "./wire.ts";

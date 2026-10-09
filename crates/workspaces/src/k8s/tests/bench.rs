@@ -1,5 +1,5 @@
 //! Tests for what a bench workspace adds to an ordinary workspace pod: the `sessions` container
-//! (runit, the agent CLI, ttyd, sshd), the tool-token Secret and the gateway-only hole to its two
+//! (runit, the agent CLI, ttyd), the tool-token Secret and the gateway-only hole to its two
 //! ports.
 
 use super::*;

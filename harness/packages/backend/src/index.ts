@@ -1,5 +1,5 @@
 //! The seam between the TUI and the agent. `LocalBackend` (./local) runs the agent in-process; a
-//! `RemoteBackend` (./remote) reaches the same thing on the bench over ssh stdio (./wire). The TUI
+//! `RemoteBackend` (./remote) reaches the same thing on the bench over a websocket through bench-proxy (./wire). The TUI
 //! imports only this file and ./remote at runtime, so the laptop binary bundles no agent.
 //! Design: docs/superpowers/specs/2026-10-08-local-tui-design.md.
 import type {
@@ -33,7 +33,7 @@ export type LoginType = Parameters<typeof loginProvider>[1];
 /** pi's `AuthInteraction`: `{ signal?, prompt(p): Promise<string>, notify(e): void }`. */
 export type LoginUi = Parameters<typeof loginProvider>[2];
 export type CatalogModel = { provider: string; id: string; name: string; input: string[] };
-/** What the sidebar shows, read by the bench from the platform (./space). JSON-safe: it crosses ssh. */
+/** What the sidebar shows, read by the bench from the platform (./space). JSON-safe: it crosses the websocket. */
 export type SpaceProcess = { id: string; tree?: string; cmd: string; state: string; exit_code?: number | null; failed?: boolean; started_at?: string; logs: { text: string; err?: true }[] };
 export type SpaceWorkspace = {
   id: string;

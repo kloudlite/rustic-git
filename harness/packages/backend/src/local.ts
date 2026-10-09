@@ -1,5 +1,5 @@
 //! The agent in-process behind the `Backend` interface. The bench daemon (daemon.ts) holds the one
-//! instance; every client (kl-tui over ssh, the browser TUI) is a connection to it, so an agent
+//! instance; every client (kl-tui over bench-proxy, the browser TUI) is a connection to it, so an agent
 //! outlives the client that started it and there is exactly one writer per session file.
 //! One agent per key, many VIEWS of it (`shareable`): a view going away never ends a turn; an idle
 //! agent with no views is disposed (`#settle`). The permission gate and the `question` tool raise

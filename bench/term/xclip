@@ -3,13 +3,8 @@
 #   -t TARGETS -o     -> "image/png" while there is an image
 #   -t image/png -o   -> its bytes
 # Anything else (text, bmp, writes) finds nothing and exits 1, as xclip does on an empty clipboard.
-#
-# Two sources of "the clipboard":
-#   - ssh via `kl-connect`: $KL_CLIP is a socket ssh forwards to the laptop (bins/kl-connect/src/
-#     clip.rs), which answers each connection with the laptop clipboard's PNG at that moment. The
-#     CLI asks TARGETS then image/png, so the TARGETS fetch is cached for the image/png that follows.
-#   - the browser terminal: the last image pasted there, saved by bench/term/main.ts. Fresh =
-#     written in the last 60 s, so an old screenshot never rides along on a later Ctrl+V.
+# The clipboard is the last image pasted into the browser terminal, saved by bench/term/main.ts.
+# Fresh = written in the last 60 s, so an old screenshot never rides along on a later Ctrl+V.
 target=
 while [ $# -gt 0 ]; do
   case "$1" in
@@ -17,22 +12,6 @@ while [ $# -gt 0 ]; do
   esac
   shift
 done
-if [ -n "$KL_CLIP" ] && [ -S "$KL_CLIP" ]; then
-  CLIP=/tmp/kl-clip-cache-$(basename "$KL_CLIP" .sock).png
-  fetch() {
-    # No socat/nc in the image; bun is (it runs the CLI).
-    bun -e 'const s=require("net").connect(process.argv[1]);s.pipe(process.stdout);s.on("error",()=>process.exit(1))' "$KL_CLIP" >"$CLIP.part" &&
-      mv "$CLIP.part" "$CLIP"
-  }
-  case "$target" in
-    TARGETS) fetch && [ -s "$CLIP" ] && echo image/png ;;
-    image/png)
-      [ -s "$CLIP" ] && [ -n "$(find "$CLIP" -newermt '-10 seconds' 2>/dev/null)" ] || fetch
-      [ -s "$CLIP" ] && cat "$CLIP" ;;
-    *) exit 1 ;;
-  esac
-  exit
-fi
 CLIP=/tmp/kl-clip/latest
 [ -f "$CLIP" ] && [ -n "$(find "$CLIP" -newermt '-60 seconds' 2>/dev/null)" ] || exit 1
 case "$target" in
