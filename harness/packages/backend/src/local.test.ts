@@ -147,6 +147,22 @@ test("sessions.list offers every key", async () => {
   await h.dispose();
 }, 20000);
 
+test("session state outlives the agent: reopen without fresh keeps what was set", async () => {
+  process.env.KLOUDLITE_CONFIG_DIR = mkdtempSync(join(tmpdir(), "kl-cfg-"));
+  delete process.env.KL_API_URL;
+  const { models } = await import("@kloudlite-tui/agent");
+  const m = models.getModels().find((x: any) => x.provider !== "anthropic") as any;
+  const agent = () => ({ agent: {}, messages: [], subscribe: () => () => {}, setThinkingLevel() {}, dispose() {} });
+  const b = new LocalBackend({ create: (async () => agent()) as any });
+  const o: any = { initial: { model: { provider: m.provider, id: m.id }, thinkingLevel: "low" }, tools: [] };
+  const h = await b.session("w9", { ...o, fresh: true });
+  await h.setThinkingLevel("high");
+  await h.dispose();
+  const h2 = await b.session("w9", o);
+  expect(h2.state.thinkingLevel).toBe("high");
+  await h2.dispose();
+}, 20000);
+
 test("an internal open (no TUI tools) reuses a live session without disposing it", async () => {
   process.env.KLOUDLITE_CONFIG_DIR = mkdtempSync(join(tmpdir(), "kl-cfg-"));
   delete process.env.KL_API_URL;

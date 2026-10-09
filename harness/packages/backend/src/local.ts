@@ -333,6 +333,8 @@ export class LocalBackend implements Backend {
   #shared = new Map<string, ReturnType<typeof shareable>>();
   /** What each live agent was built with: a later opener that needs more rebuilds it. */
   #built = new Map<string, { tools: Set<string>; agent: any }>();
+  /** Per key, outlives the agent: a rebuild reads it back. Never deleted on dispose; `fresh` replaces it. */
+  #state = new Map<string, SessionState>();
   readonly #create: typeof createSession;
   constructor(o: { create?: typeof createSession } = {}) {
     this.#create = o.create ?? createSession;
@@ -426,7 +428,7 @@ export class LocalBackend implements Backend {
 
   async session(key: string, opts: SessionOpts): Promise<SessionHandle> {
     // a rebuild for a missing tool keeps what the person set; `fresh` and first builds take `initial`
-    const prev = opts.fresh ? undefined : this.#live.get(key)?.state;
+    const prev = opts.fresh ? undefined : this.#state.get(key);
     const want = prev?.model ?? opts.initial?.model ?? defaultModel(catalog());
     const settings = readSettings();
     const initial = {
@@ -476,9 +478,17 @@ export class LocalBackend implements Backend {
       cwd,
     });
     installGate(agent, (req, signal) => this.#clients.route(key, (c) => !!c.permission, (c) => c.permission!(req, signal), signal), k.kind === "main" ? undefined : () => podFence(k.ws), () => ({ typed: this.#words(key).get(), self: k.kind === "main" ? undefined : k.ws }), k.kind);
+    const state: SessionState = {
+      type: "session_state",
+      model: { provider: want.provider, id: want.id },
+      ...initial,
+      queued: { steering: [], followUp: [] },
+      tokens: prev?.tokens ?? 0,
+    };
+    this.#state.set(key, state);
     const handle: SessionHandle = baseHandle(agent, key, {
       busy: this.#busy,
-      state: { type: "session_state", model: { provider: want.provider, id: want.id }, ...initial, queued: { steering: [], followUp: [] }, tokens: 0 },
+      state,
       onEnd: () => void setTimeout(() => this.#settle(key), 0),
       onChange: () => this.#changed(),
       onDispose: () => {
