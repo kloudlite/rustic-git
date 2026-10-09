@@ -113,8 +113,11 @@ path: a laptop TUI and the ttyd TUI on one session at once.
 
 ### 3. Sync: every client sees the same thing
 
-These four gaps exist on every transport. All four are fixed in the daemon and the TUI, not in
-the transport.
+These four gaps exist on every transport. They are fixed in the daemon and the TUI, not in the
+transport.
+
+**Narrowed by the owner's ruling 2026-10-09:** no stroke-by-stroke transcript sync; only sessions
+and their state. Items 1 and 3 below are out of scope and are not built; items 2 and 4 are.
 
 1. **Prompts reach every view.** Today the TUI appends a typed prompt locally (`app.tsx:1233`) and
    its event handler drops non-assistant messages (`app.tsx:617`), so another client never sees
@@ -158,13 +161,12 @@ answer its cards.
 - **kl-connect (cargo):** `bench-proxy --tui` hits `/tui/<bench>` (mock `tunnel_handler`); a 404
   upgrade exits 1 naming the status; no Pong for 45 s exits 1. `bench()` runs the ssh path when the
   direct child exits 3.
-- **Daemon (bun):** two clients, one on the unix socket and one on TCP, open one session. A prompt
-  from one appears as a user-message event on the other. `sessions.watch` emits on turn start and
-  end. Opening with another model leaves the agent's model unchanged.
-- **TUI (bun):** a user-message event from another client renders once; the client's own prompt
-  renders once (no duplicate); the poll stops when `sessions.watch` answers.
-- **Live, on a bench restarted by the owner:** laptop direct and ttyd on one session, each sees the
-  other's prompt and the reply; `KL_DIRECT=0` still connects over ssh; an old bench image still
+- **Daemon (bun):** two clients, one on the unix socket and one on TCP, open one session.
+  `sessions.watch` emits on turn start and end.
+- **TUI (bun):** a pushed list renders without a fetch; the fetch stops when `sessions.watch`
+  answers.
+- **Live, on a bench restarted by the owner:** laptop direct and ttyd on one session, each sidebar shows
+  the other's turn as busy; `KL_DIRECT=0` still connects over ssh; an old bench image still
   connects through the fallback.
 
 ## Rollout

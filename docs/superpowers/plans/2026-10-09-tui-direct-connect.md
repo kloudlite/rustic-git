@@ -3,14 +3,14 @@
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
 **Goal:** The laptop kl-tui reaches the bench daemon over wss with no ssh in the path, and every
-client (laptop TUIs, the ttyd TUI) sees the same sessions, prompts, replies and model live.
+client (laptop TUIs, the ttyd TUI) sees the same sessions and their busy state live.
 
 **Architecture:** The gateway grows a `/tui/{bench}` route that pumps a bench-session WebSocket to
 a new daemon TCP listener on port 7791, which runs the same `serve` handler as `host.sock`.
 kl-connect's `bench-proxy --tui` is the pipe kl-tui spawns (`--pipe`), with WebSocket keepalive;
 `kl-connect bench` tries direct, then today's two ssh paths, each on exit 3. Sync is fixed in the
-daemon and the TUI, not the transport: prompts render from session events, the session list is
-pushed (`sessions.watch`), and opening a session adopts its live model instead of reconfiguring it.
+daemon and the TUI, not the transport: the session list and busy state are pushed
+(`sessions.watch`). No stroke-by-stroke transcript sync (owner ruling 2026-10-09).
 
 **Tech Stack:** Rust (axum, tokio-tungstenite, k8s-openapi), Bun + TypeScript (node:net, opentui
 React), the `./wire` line protocol (`Peer`).
@@ -45,29 +45,18 @@ React), the `./wire` line protocol (`Peer`).
    (workspaces, environments, tasks) and STAYS. The session list is fetched only at
    `app.tsx:281-284`, on `activeBase`/name/describe changes. `sessions.watch` replaces that fetch
    and also supplies busy for sessions this client has not opened. An old bench keeps the fetch.
-2. **Role card.** `baseHandle.prompt` prepends `roleCard(key)` (`[role: …]` line, blank line) to a
-   session's first message, so the live user event and restored history both carry it. The TUI
-   strips one leading role card when rendering (`userText`).
-3. **pi user content may be a string.** `restoreTranscript` filters `content` as an array and
-   drops string content. `userText` takes string or blocks, and both the live and restore paths use it.
-4. **Explicit switches must still rebuild.** The TUI's `/model` cross-kind switch and the codemode
-   toggle (`reopen`) depend on `session()` rebuilding on mismatch. They pass `reconfigure: true`;
-   every other open adopts.
-5. **Steer and followUp** show on other views when injected (pi emits the user message then), and
-   until then only in the typing client's queue view. Deliveries to main (`[from <ws>] …`) now
-   render as user entries. Both intended.
+2. **Sync is sessions and their state only** (owner ruling 2026-10-09). Spec section 3 items 1
+   and 3 (prompts on every view; watching does not reconfigure) are out of scope. Only item 2
+   (pushed session list with busy) and item 4 (follow along through the list) are built.
 
 ## Review Focus
 
-1. **A first prompt carries the role card.** Expect the transcript to show exactly what was typed
-   — pinned in Task 6 (`userText` strips it; the sync app test sends a role-carded message_end).
-2. **pi string content in history.** Expect a restored pi session to show its user prompts —
-   pinned in Task 6 (`userText("hi")` and a `restoreTranscript` string-content case).
-3. **Two TUIs with different models open one session.** Expect the second to adopt, the first's
-   agent unchanged — pinned in Task 8 (`local.test.ts` adopt test with a second model).
-4. **An old bench without `sessions.watch`.** Expect today's list fetch — pinned in Task 7
+1. **A turn started in one view.** Expect the other view's sidebar to mark that session busy
+   without opening it — pinned in Task 6 (`sessions.watch` emits on turn start and end; the sync
+   app test renders a pushed busy list).
+2. **An old bench without `sessions.watch`.** Expect today's list fetch — pinned in Task 6
    (RemoteBackend rejects, TUI falls back, `list` called).
-5. **Cloudflare drops idle sockets at 100 s.** Expect a quiet session to stay connected — pinned in
+3. **Cloudflare drops idle sockets at 100 s.** Expect a quiet session to stay connected — pinned in
    Task 4 (keepalive sends Pings at the interval; a peer that answers keeps the pump alive past 3×).
 
 ---
@@ -886,284 +875,7 @@ git commit -m "Let kl-tui run its transport as a plain pipe"
 
 ---
 
-### Task 6: Sync — prompts render from session events
-
-**Files:**
-- Create: `harness/apps/tui/src/user-text.ts`, `harness/apps/tui/src/user-text.test.ts`
-- Create: `harness/apps/tui/src/sync.test.tsx`
-- Modify: `harness/apps/tui/src/components/Transcript.tsx:12`
-- Modify: `harness/apps/tui/src/app.tsx:598-620` (`handleAgentEvent`), `:948-965`
-  (`restoreTranscript`), `:1233` (local append)
-- Modify: `harness/packages/agent/src/claude.ts:686-688` (comment only)
-- Test: `harness/packages/backend/src/daemon.test.ts`
-
-**Interfaces:**
-- Produces: `userText(content: unknown): { text: string; images: number }`;
-  Entry `{ kind: "user"; id?: string; text: string; images?: number }`; user entries keyed
-  `u${message.timestamp}`.
-
-- [ ] **Step 1: Write the failing unit test**
-
-`harness/apps/tui/src/user-text.test.ts`:
-
-```ts
-import { expect, test } from "bun:test";
-import { userText } from "./user-text.ts";
-
-test("string content (pi) is the text", () => {
-  expect(userText("hi")).toEqual({ text: "hi", images: 0 });
-});
-test("text blocks join; images count", () => {
-  expect(userText([{ type: "text", text: "a" }, { type: "image", data: "x" }, { type: "text", text: "b" }])).toEqual({ text: "a\nb", images: 1 });
-});
-test("one leading role card is stripped", () => {
-  expect(userText("[role: main session]\nYou run the space.\n\nfix the build").text).toBe("fix the build");
-});
-test("a role-card-looking line later in the prompt stays", () => {
-  expect(userText("look at this:\n[role: x]\n\nok").text).toBe("look at this:\n[role: x]\n\nok");
-});
-test("missing content is empty", () => {
-  expect(userText(undefined)).toEqual({ text: "", images: 0 });
-});
-```
-
-- [ ] **Step 2: Run, expect failure**
-
-Run: `cd harness/apps/tui && bun test src/user-text.test.ts 2>&1 | tail -3`
-Expected: FAIL, module not found.
-
-- [ ] **Step 3: Implement `userText`**
-
-`harness/apps/tui/src/user-text.ts`:
-
-```ts
-/** A user message as the transcript shows it, from either agent: pi stores a prompt as a string,
- * Claude (and pi with images) as blocks. The daemon prepends a role card to a session's first
- * message (backend local.ts `roleCard`); the person never typed it, so one leading card goes. */
-const ROLE_CARD = /^\[role: [^\]]*\][\s\S]*?\n\n/;
-
-export function userText(content: unknown): { text: string; images: number } {
-  const blocks: any[] = typeof content === "string" ? [{ type: "text", text: content }] : Array.isArray(content) ? content : [];
-  const text = blocks
-    .filter((b) => b?.type === "text")
-    .map((b) => b.text as string)
-    .join("\n")
-    .replace(ROLE_CARD, "");
-  return { text, images: blocks.filter((b) => b?.type === "image").length };
-}
-```
-
-Run Step 2's command again. Expected: 5 pass.
-
-- [ ] **Step 4: Write the failing app test**
-
-`harness/apps/tui/src/sync.test.tsx` drives `App` against a backend whose session hands its
-subscriber to the test, so the test plays "another client" by emitting events:
-
-```tsx
-import { expect, test } from "bun:test";
-import { testRender } from "@opentui/react/test-utils";
-import { LocalBackend } from "@kloudlite-tui/backend/local";
-import { boot, hello } from "./hello.ts";
-import { App } from "./app.tsx";
-
-const tick = () => new Promise((r) => setTimeout(r, 60));
-
-/** A LocalBackend whose sessions are scripted: `emit` plays the daemon fanning an event to every
- * view, `prompts` records what this client sent. */
-function scripted(opts: { watch?: "answers" | "old" } = {}) {
-  const b: any = new LocalBackend();
-  b.space = backend0().space;
-  const subs = new Set<(e: any) => void>();
-  const prompts: string[] = [];
-  const listCalls: string[] = [];
-  let watcher: ((l: any[]) => void) | undefined;
-  const emit = (e: any) => subs.forEach((cb) => cb(e));
-  b.session = async () => ({
-    messages: [],
-    isClaude: false,
-    busy: false,
-    model: { provider: "openai", id: "gpt-x" },
-    subscribe: (cb: any) => (subs.add(cb), () => void subs.delete(cb)),
-    prompt: async (text: string) => {
-      prompts.push(text);
-      // the daemon prepends the role card on a first message, then echoes it to EVERY view
-      emit({ type: "message_end", message: { role: "user", content: `[role: main session]\ncard\n\n${text}`, timestamp: 1 } });
-    },
-    dispose: async () => {},
-    setModel: async () => {},
-    setThinkingLevel: async () => {},
-    setAutoCompactionEnabled: async () => {},
-  });
-  b.sessions = {
-    list: async (prefix: string) => (listCalls.push(prefix), []),
-    name: async () => {},
-    describe: async () => {},
-    clear: async () => {},
-    watch: async (cb: any) => {
-      if (opts.watch === "old") throw new Error("unknown op: sessions.watch");
-      watcher = cb;
-      cb([]);
-      return () => {};
-    },
-  };
-  return { b, emit, prompts, listCalls, push: (l: any[]) => watcher?.(l) };
-}
-const backend0 = () => new LocalBackend();
-
-async function mount(b: any) {
-  boot(b, { ...hello(), settings: { ...hello().settings, vim: "off", sidebarWidth: 42 } });
-  const setup = await testRender(<App />, { width: 200, height: 32, kittyKeyboard: true });
-  const frame = async () => (await tick(), await setup.renderOnce(), setup.captureCharFrame());
-  await frame();
-  return { ...setup, frame, done: () => setup.renderer.destroy() };
-}
-const count = (s: string, needle: string) => s.split(needle).length - 1;
-
-test("the client's own prompt renders once, without the role card", async () => {
-  const s = scripted();
-  const ui = await mount(s.b);
-  await ui.mockInput.typeText("fix the build");
-  ui.mockInput.pressEnter();
-  const f = await ui.frame();
-  expect(s.prompts).toEqual(["fix the build"]);
-  expect(count(f, "fix the build")).toBe(1);
-  expect(f).not.toContain("[role:");
-  ui.done();
-});
-
-test("another client's prompt renders on this view", async () => {
-  const s = scripted();
-  const ui = await mount(s.b);
-  await ui.mockInput.typeText("first");
-  ui.mockInput.pressEnter();
-  await ui.frame();
-  s.emit({ type: "message_end", message: { role: "user", content: [{ type: "text", text: "typed in ttyd" }], timestamp: 2 } });
-  const f = await ui.frame();
-  expect(count(f, "typed in ttyd")).toBe(1);
-  ui.done();
-});
-```
-
-`backend0` is defined below `scripted` but called inside it at call time, so the order is fine.
-If `hello.ts` exports `backend` and `App` needs `backend().space` to be a working function, the
-`b.space = backend0().space` line covers it; if `mockInput.typeText` is not the method name in this
-opentui version, use the one `app.test.tsx` uses to type (grep `mockInput.` there) — do not invent
-another.
-
-- [ ] **Step 5: Run, expect failure**
-
-Run: `cd harness/apps/tui && bun test src/sync.test.tsx 2>&1 | tail -8`
-Expected: first test FAILS (the prompt shows twice, or with the role card); second test FAILS
-(count 0: user events are dropped today).
-
-- [ ] **Step 6: Implement**
-
-`components/Transcript.tsx:12`: `| { kind: "user"; id?: string; text: string; images?: number }`.
-
-`app.tsx` `handleAgentEvent`, in `case "message_update": case "message_end": {`, replace
-`if (msg.role !== "assistant") break;` with:
-
-```ts
-        // Prompts come back from the session like replies do, so every view shows what any view
-        // (or main_tell, or a resumed ask) put in — and the typing view shows it once, from here.
-        if (msg.role === "user") {
-          if (event.type !== "message_end") break;
-          const { text, images } = userText(msg.content);
-          if (text || images) upsert(key, `u${msg.timestamp}`, () => ({ kind: "user", id: `u${msg.timestamp}`, text, images }));
-          break;
-        }
-        if (msg.role !== "assistant") break;
-```
-
-At `app.tsx:1233` delete `append(key, { kind: "user", text: trimmed, images: sent.length });`
-only. Keep the history push (1234-1236) and the session naming (1221-1225).
-
-`restoreTranscript`, the `if (m.role === "user")` branch becomes:
-
-```ts
-      if (m.role === "user") {
-        const { text, images } = userText(m.content);
-        if (text || images) {
-          // same id as the live path, so a message that lands during the restore is not doubled
-          entries.push({ kind: "user", id: `u${m.timestamp}`, text, images });
-          if (text) history.push(text);
-        }
-      }
-```
-
-Import `userText` from `./user-text.ts` in `app.tsx`.
-
-`packages/agent/src/claude.ts:686-688` comment: replace `The TUI ignores user ones.` with
-`The TUI renders user ones: that is how every view sees a prompt (app.tsx handleAgentEvent).`
-
-- [ ] **Step 7: Run, expect pass**
-
-Run: `cd harness/apps/tui && bun test src/sync.test.tsx src/user-text.test.ts src/app.test.tsx src/transcript.test.tsx 2>&1 | grep -E "pass|fail" | tail -4`
-Expected: 0 fail. If an `app.test.tsx` test asserted the locally appended prompt (it now arrives
-from LocalBackend's real `message_end`), it still sees one copy; a test that counted on it
-arriving synchronously gets one more `frame()` before the assertion — change nothing else.
-
-- [ ] **Step 8: Write the cross-client daemon test**
-
-Append to `harness/packages/backend/src/daemon.test.ts` (uses `tcpClient` from Task 3, `client(s)`
-and `sock()` already in the file):
-
-```ts
-/** One shared session behind both doors: what one view puts in, every view hears. */
-function sharedBackend() {
-  const subs = new Set<(e: any) => void>();
-  const b: any = {
-    sessions: {},
-    fs: {},
-    podfs: {},
-    hello: async () => ({ protocol: 1, cwd: "/home/kl", tools: [] }),
-    session: async () => ({
-      messages: [],
-      isClaude: false,
-      busy: false,
-      subscribe: (cb: any) => (subs.add(cb), () => void subs.delete(cb)),
-      prompt: async (text: string) => subs.forEach((cb) => cb({ type: "message_end", message: { role: "user", content: text, timestamp: 1 } })),
-      dispose: async () => {},
-    }),
-  };
-  return b as Backend;
-}
-
-test("a prompt from the ttyd door reaches the laptop door as a user message", async () => {
-  const b = sharedBackend();
-  const s = sock();
-  const unix = await host(b, s);
-  const tcp = await listenTcp(b, 0, "127.0.0.1");
-  const ttyd = await client(s);
-  const laptop = tcpClient((tcp.address() as any).port);
-  const opts = { model: { provider: "x", id: "y" }, tools: [] };
-  const seen: any[] = [];
-  const lh = await laptop.backend.session("main", opts);
-  lh.subscribe((e) => seen.push(e));
-  const th = await ttyd.backend.session("main", opts);
-  await th.prompt("from ttyd");
-  await new Promise((r) => setTimeout(r, 100));
-  expect(seen.filter((e) => e.type === "message_end" && e.message.role === "user").map((e) => e.message.content)).toEqual(["from ttyd"]);
-  laptop.close();
-  unix.close();
-  tcp.close();
-});
-```
-
-Run: `cd harness/packages/backend && bun test src/daemon.test.ts 2>&1 | tail -3`
-Expected: all pass (this holds the transport half; the daemon already fans events per key).
-
-- [ ] **Step 9: Commit**
-
-```bash
-git add harness/apps/tui/src harness/packages/agent/src/claude.ts harness/packages/backend/src/daemon.test.ts
-git commit -m "Render prompts from session events so every view sees them"
-```
-
----
-
-### Task 7: Sync — the session list is pushed (`sessions.watch`)
+### Task 6: Sync — the session list is pushed (`sessions.watch`)
 
 **Files:**
 - Modify: `harness/packages/backend/src/index.ts:142-147` (`Backend.sessions`)
@@ -1365,9 +1077,54 @@ Expected: 0 fail.
 
 - [ ] **Step 5: Write the failing TUI tests**
 
-Append to `harness/apps/tui/src/sync.test.tsx`:
+Create `harness/apps/tui/src/sync.test.tsx`. It drives `App` against a LocalBackend whose
+`sessions` ops are scripted, so the test plays the bench answering (or not answering) the watch:
 
 ```tsx
+import { expect, test } from "bun:test";
+import { testRender } from "@opentui/react/test-utils";
+import { LocalBackend } from "@kloudlite-tui/backend/local";
+import { boot, hello } from "./hello.ts";
+import { App } from "./app.tsx";
+
+const tick = () => new Promise((r) => setTimeout(r, 60));
+
+/** `watch: "old"` plays a bench without the op; `push` plays the bench pushing a new list. */
+function scripted(opts: { watch?: "answers" | "old" } = {}) {
+  const b: any = new LocalBackend();
+  const listCalls: string[] = [];
+  let watcher: ((l: any[]) => void) | undefined;
+  b.sessions = {
+    list: async (prefix: string) => (listCalls.push(prefix), []),
+    name: async () => {},
+    describe: async () => {},
+    clear: async () => {},
+    watch: async (cb: any) => {
+      if (opts.watch === "old") throw new Error("unknown op: sessions.watch");
+      watcher = cb;
+      cb([]);
+      return () => {};
+    },
+  };
+  return { b, listCalls, push: (l: any[]) => watcher?.(l) };
+}
+
+async function mount(b: any) {
+  boot(b, { ...hello(), settings: { ...hello().settings, vim: "off", sidebarWidth: 42 } });
+  const setup = await testRender(<App />, { width: 200, height: 32, kittyKeyboard: true });
+  const frame = async () => (await tick(), await setup.renderOnce(), setup.captureCharFrame());
+  await frame();
+  return { ...setup, frame, done: () => setup.renderer.destroy() };
+}
+
+test("a session another view names shows up here without a fetch", async () => {
+  const s = scripted({ watch: "answers" });
+  const ui = await mount(s.b);
+  s.push([{ key: "main/notes", name: "release notes", busy: true }]);
+  expect(await ui.frame()).toContain("release notes");
+  ui.done();
+});
+
 test("a bench that answers sessions.watch is never asked for the list", async () => {
   const s = scripted({ watch: "answers" });
   const ui = await mount(s.b);
@@ -1440,265 +1197,7 @@ git commit -m "Push the session list to every view"
 
 ---
 
-### Task 8: Sync — opening a session adopts its live model
-
-**Files:**
-- Modify: `harness/packages/backend/src/index.ts` (`SessionOpts`, `SessionHandle`, `SessionEvent`)
-- Modify: `harness/packages/backend/src/local.ts` (`baseHandle` setModel/setThinkingLevel and
-  getters, `session()` needsRebuild block lines 81-101, `#built` use)
-- Modify: `harness/packages/backend/src/serve.ts:31` (open returns)
-- Modify: `harness/packages/backend/src/remote.ts:45-60`
-- Modify: `harness/apps/tui/src/app.tsx:746-812` (`ensureAgent`), `:786` (`reopen`),
-  `:1118-1145` (`/model`), `handleAgentEvent`
-- Test: `harness/packages/backend/src/local.test.ts`, `harness/apps/tui/src/sync.test.tsx`
-
-**Interfaces:**
-- Produces: `SessionOpts.reconfigure?: boolean`; `SessionHandle.model?: ModelRef`,
-  `thinkingLevel?: ThinkingLevel`, `codemode?: boolean` (readonly); `SessionEvent` gains
-  `{ type: "settings_changed"; model?: ModelRef; thinkingLevel?: ThinkingLevel }`;
-  `session.open` returns `{ messages, isClaude, busy, model, thinkingLevel, codemode }`.
-
-- [ ] **Step 1: Write the failing backend tests**
-
-In `local.test.ts`, beside "an internal open (no TUI tools) reuses a live session without
-disposing it" (reuse its setup; pick TWO non-anthropic models from `models.getModels()` of the
-same provider as that test does, `m1` and `m2`):
-
-```ts
-const tool = { name: "t1", description: "", inputSchema: { type: "object" }, run: async () => "" } as any;
-
-test("a second view opening with another model adopts the live one", async () => {
-  const b = new LocalBackend();
-  const a = await b.session("main", { ...o, model: m1, tools: [tool] });
-  const v = await b.session("main", { ...o, model: m2, tools: [tool], fresh: false });
-  expect(v.model).toEqual({ provider: m1.provider, id: m1.id });
-  expect(a.model).toEqual({ provider: m1.provider, id: m1.id });
-  await v.dispose();
-  await a.dispose();
-}, 20000);
-
-test("reconfigure: true applies the opener's model", async () => {
-  const b = new LocalBackend();
-  const a = await b.session("main", { ...o, model: m1, tools: [tool] });
-  const v = await b.session("main", { ...o, model: m2, tools: [tool], fresh: false, reconfigure: true });
-  expect(v.model).toEqual({ provider: m2.provider, id: m2.id });
-  await v.dispose();
-  await a.dispose();
-}, 20000);
-
-test("setModel tells every view", async () => {
-  const b = new LocalBackend();
-  const a = await b.session("main", { ...o, model: m1, tools: [tool] });
-  const v = await b.session("main", { ...o, model: m1, tools: [tool], fresh: false });
-  const seen: any[] = [];
-  a.subscribe((e) => seen.push(e));
-  await v.setModel({ provider: m2.provider, id: m2.id });
-  expect(seen.find((e) => e.type === "settings_changed")?.model).toEqual({ provider: m2.provider, id: m2.id });
-  await v.dispose();
-  await a.dispose();
-}, 20000);
-```
-
-`o` there uses `fresh: true`; the second opens pass `fresh: false` so they hit the live agent.
-
-- [ ] **Step 2: Run, expect failure**
-
-Run: `cd harness/packages/backend && bun test src/local.test.ts 2>&1 | tail -6`
-Expected: FAIL (`v.model` undefined; first test, once `model` exists, shows m2 — the reconfigure).
-
-- [ ] **Step 3: Implement the backend**
-
-`index.ts`: `SessionOpts` gains
-
-```ts
-  /** The person asked for this build (/model across kinds, the codemode toggle): apply the
-   * opener's model, thinking level and codemode, rebuilding if needed. Without it, opening a live
-   * session adopts what it runs — another view's open must not change it under everyone. */
-  reconfigure?: boolean;
-```
-
-`SessionHandle` gains
-
-```ts
-  /** What the live agent runs now; an opener adopts it (SessionOpts.reconfigure). */
-  readonly model?: ModelRef;
-  readonly thinkingLevel?: ThinkingLevel;
-  readonly codemode?: boolean;
-```
-
-`SessionEvent` becomes
-`(AgentSessionEvent & { diff?: FileDiff }) | { type: "session_closed" } | { type: "settings_changed"; model?: ModelRef; thinkingLevel?: ThinkingLevel }`.
-
-`local.ts` `baseHandle`: hooks gain `codemode?: boolean`; add a local `fan` and use it in the
-subscribe loop and the two setters:
-
-```ts
-  const fan = (e: SessionEvent) => {
-    for (const cb of [...subs]) {
-      try {
-        cb(e);
-      } catch (err) {
-        console.error("session subscriber failed", key, err);
-      }
-    }
-  };
-  const ref = (): ModelRef | undefined => (agent.model ? { provider: agent.model.provider, id: agent.model.id } : undefined);
-```
-
-(the subscribe callback's loop becomes `fan(e);`), and in the returned object:
-
-```ts
-    get model() {
-      return ref();
-    },
-    get thinkingLevel() {
-      return agent.thinkingLevel;
-    },
-    codemode: !!hooks.codemode,
-    setModel: async (r) => {
-      const m = resolveModel(r);
-      if (!m) throw new Error(`unknown model ${r.provider}/${r.id}`);
-      await agent.setModel(m);
-      fan({ type: "settings_changed", model: ref(), thinkingLevel: agent.thinkingLevel });
-    },
-    setThinkingLevel: async (level) => {
-      agent.setThinkingLevel(level);
-      fan({ type: "settings_changed", model: ref(), thinkingLevel: agent.thinkingLevel });
-    },
-```
-
-Check `derive()` and `shareable(...).view()`: if they copy properties by spreading, getters
-are evaluated once and freeze; they must forward `model`/`thinkingLevel` live. Read both; if
-either spreads, add explicit getters there for `model`, `thinkingLevel`, `busy` (follow how `busy`
-is already forwarded — copy that exact mechanism).
-
-`session()`: pass `codemode: !!opts.codemode` in the `baseHandle` hooks. Replace lines 86-95
-(from `const needsRebuild =` through the `if (!needsRebuild) { … }` block) with:
-
-```ts
-      const missingTool = opts.tools.some((t) => !built.tools.has(t.name));
-      if (!opts.reconfigure && !missingTool) return this.#attach(key, opts, sh.view()); // adopt
-      const needsRebuild =
-        missingTool ||
-        (opts.model.provider === "anthropic") !== built.claude ||
-        !!opts.codemode !== built.codemode;
-      if (!needsRebuild) {
-        const cur = built.agent.model;
-        if (cur && (cur.provider !== opts.model.provider || cur.id !== opts.model.id)) await live.setModel(opts.model);
-        if (opts.thinkingLevel && opts.thinkingLevel !== built.agent.thinkingLevel) await live.setThinkingLevel(opts.thinkingLevel);
-        return this.#attach(key, opts, sh.view());
-      }
-      if (!opts.reconfigure) {
-        // a tool this view needs is missing: rebuild, but as the session runs now, not as this
-        // opener would have it
-        const cur = built.agent.model;
-        if (cur) opts = { ...opts, model: { provider: cur.provider, id: cur.id } };
-        opts = { ...opts, thinkingLevel: built.agent.thinkingLevel ?? opts.thinkingLevel, codemode: built.codemode };
-      }
-```
-
-then the existing `if (live.busy) { … }` stays. `opts` is a parameter; if lint forbids
-reassignment, introduce `let o = opts;` at the top of `session()` and use `o` for the rest of the
-function. `model` was resolved at the top from the opener's `opts.model`; move
-`const model = resolveModel(…)` / its throw to just before `createSession` (after this block) so
-the rebuild resolves the adopted model, and keep an early `resolveModel(opts.model)` check at the
-top for the unknown-model error.
-
-`serve.ts:31`:
-
-```ts
-    return { messages: h.messages, isClaude: h.isClaude, busy: h.busy, model: h.model, thinkingLevel: h.thinkingLevel, codemode: h.codemode };
-```
-
-`remote.ts:45` destructures `model, thinkingLevel, codemode` too; keep them current from the stream
-(beside `running`):
-
-```ts
-    let live = { model, thinkingLevel };
-    subs.add((e) => {
-      if (e.type === "settings_changed") live = { model: e.model ?? live.model, thinkingLevel: e.thinkingLevel ?? live.thinkingLevel };
-    });
-```
-
-and the returned handle gains `get model() { return live.model; }`, `get thinkingLevel() { return
-live.thinkingLevel; }`, `codemode,`. A bench without these fields returns `undefined`, which the
-TUI treats as "keep what you had".
-
-- [ ] **Step 4: Run, expect pass**
-
-Run: `cd harness/packages/backend && bun test 2>&1 | grep -E "pass|fail" | tail -3`
-Expected: 0 fail. The existing internal-open test still passes (the `tools.length === 0` early
-return above this block is unchanged).
-
-- [ ] **Step 5: Write the failing TUI test**
-
-Append to `sync.test.tsx` (the scripted session already reports `model: openai/gpt-x`):
-
-```tsx
-test("the view shows the model the live session runs, and follows a switch from another view", async () => {
-  const s = scripted();
-  const ui = await mount(s.b);
-  await ui.mockInput.typeText("hi");
-  ui.mockInput.pressEnter();
-  expect(await ui.frame()).toContain("gpt-x");
-  s.emit({ type: "settings_changed", model: { provider: "openai", id: "gpt-y" } });
-  expect(await ui.frame()).toContain("gpt-y");
-  ui.done();
-});
-```
-
-If the prompt card shows the catalog name rather than the id, set the scripted model to a real
-catalog entry from `hello().catalog` (first two non-anthropic entries) and assert on their
-`name`s; read how the session row renders `session.model` before choosing.
-
-Run: `cd harness/apps/tui && bun test src/sync.test.tsx 2>&1 | tail -4`
-Expected: FAIL.
-
-- [ ] **Step 6: Implement the TUI side**
-
-`ensureAgent` opts type: `{ fresh?: boolean; model?: ModelRef; codemode?: boolean; after?: Promise<unknown>; reconfigure?: boolean }`,
-and the `backend().session(key, { … })` call gains `reconfigure: opts?.reconfigure,`.
-
-In `.then((agent) => {`, after the busy line:
-
-```ts
-        // another view may have this session on another model: show what it runs
-        if (agent.model) setSessions((map) => patchSession(map, key, { model: agent.model! }));
-```
-
-`handleAgentEvent`, new case:
-
-```ts
-      case "settings_changed":
-        if (event.model) setSessions((map) => patchSession(map, key, { model: event.model! }));
-        break;
-```
-
-`reopen`: `ensureAgent(k, { ...opts, after, reconfigure: true })`.
-`/model` (lines 1118-1145): the cross-kind branch's `ensureAgent(activeKey, { model })` becomes
-`ensureAgent(activeKey, { model, reconfigure: true })`. The same-kind branch calls `a.setModel`,
-which now also arrives back as `settings_changed`; patching the same model twice is harmless.
-
-Thinking level stays a TUI preference for new sessions; there is no per-session thinking display,
-so nothing renders `thinkingLevel`.
-
-- [ ] **Step 7: Run, expect pass**
-
-Run: `cd harness && bun run check 2>&1 | tail -3`, then
-`cd harness/apps/tui && bun test 2>&1 | grep -E "pass|fail" | tail -3` and the same in
-`packages/backend`, `packages/agent`, `packages/tools`.
-Expected: check clean, 0 fail everywhere.
-
-- [ ] **Step 8: Commit**
-
-```bash
-git add harness/packages/backend/src harness/apps/tui/src
-git commit -m "Adopt the live session's model on open and push model switches"
-```
-
----
-
-### Task 9: Live drill on a bench the owner restarts
+### Task 7: Live drill on a bench the owner restarts
 
 Nothing here is automated; each step records its evidence (command and the decisive output line)
 in the ledger. The bench pod is restarted by the owner only.
@@ -1712,13 +1211,11 @@ IP on 7791 (`nc -z -w3 <ip> 7791`); expect a timeout. Note: the AKS cluster has 
 (memory `aks-no-network-policy-engine`); on that cluster record "skipped: no engine", and run it on
 k3s where the bench lives.
 - [ ] **Step 2: Direct + ttyd on one session.** `KL_DIRECT=1 kl-connect bench` on the laptop; open
-the ttyd TUI in a browser. Prompt from each; each view shows the other's prompt once and the reply.
-Start a turn in one; the other's sidebar marks it busy.
-- [ ] **Step 3: Model adopt.** Laptop TUI with a different default model opens main; the ttyd view's
-model row does not change. `/model` in the laptop TUI; the ttyd view's row follows.
-- [ ] **Step 4: Idle.** Leave the direct session idle for 5 minutes; it is still connected (keepalive
+the ttyd TUI in a browser. Start a turn in one; the other's sidebar marks it busy, then idle when it ends. Name a session in
+one; the other's list shows the name.
+- [ ] **Step 3: Idle.** Leave the direct session idle for 5 minutes; it is still connected (keepalive
 beats the 100 s edge).
-- [ ] **Step 5: `KL_DIRECT=0 kl-connect bench`** connects over ssh as today.
-- [ ] **Step 6: Old bench.** Against a bench still on the previous image, `KL_DIRECT=1 kl-connect
+- [ ] **Step 4: `KL_DIRECT=0 kl-connect bench`** connects over ssh as today.
+- [ ] **Step 5: Old bench.** Against a bench still on the previous image, `KL_DIRECT=1 kl-connect
 bench` falls back (502 from the gateway, exit 3) and connects over ssh.
-- [ ] **Step 7: Ledger and board.** Record each step's evidence; update the status board row.
+- [ ] **Step 6: Ledger and board.** Record each step's evidence; update the status board row.
