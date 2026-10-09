@@ -7,7 +7,7 @@ import type { Backend, SessionHandle, ToolSpec } from "./index.ts";
 import { Peer } from "./wire.ts";
 
 const METHODS = new Set([
-  "prompt", "steer", "followUp", "clearQueue", "abort",
+  "prompt", "steer", "followUp", "clearQueue", "btw", "abort",
   "setModel", "setThinkingLevel", "setAutoCompactionEnabled",
 ]);
 

@@ -222,7 +222,7 @@ function mdSyntaxStyle(): SyntaxStyle {
  * arriving, which is what stops a half-written table row from being parsed as
  * final; it is turned off once the message is done so the last token settles.
  */
-function Md({ text, fg, streaming }: { text: string; fg?: string; streaming?: boolean }) {
+export function Md({ text, fg, streaming }: { text: string; fg?: string; streaming?: boolean }) {
   return (
     <markdown
       content={text}

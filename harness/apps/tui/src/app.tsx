@@ -4,6 +4,7 @@ import { useKeyboard, useRenderer, useTerminalDimensions } from "@opentui/react"
 import type { ToolDef } from "@kloudlite-tui/tools";
 import { SessionTitle } from "./components/SessionTitle.tsx";
 import { Queue } from "./components/Queue.tsx";
+import { Btw, type BtwState } from "./components/Btw.tsx";
 import { Transcript, type Entry } from "./components/Transcript.tsx";
 import { foldRetries, foldRetry } from "./retry.ts";
 import { Prompt } from "./components/Prompt.tsx";
@@ -235,6 +236,10 @@ export function App({
   );
   // index into the active session's queue while editing it, else null
   const [queuePick, setQueuePick] = useState<number | null>(null);
+  // the /btw panel: never in a transcript, closed by esc. `n` numbers requests so a late answer for a
+  // closed or replaced panel is dropped
+  const [btw, setBtw] = useState<(BtwState & { key: string }) | null>(null);
+  const btwN = useRef(0);
   // narrow terminals (<= 120 cols): sidebar opened explicitly, as an overlay
   const [sidebarOpen, setSidebarOpen] = useState(false);
   // bumped to re-render after an in-place theme swap
@@ -360,6 +365,11 @@ export function App({
     if (key.ctrl && key.name === "c") return exit();
     // a full-column view owns the keyboard while it is up
     if (login || shownAsk || filesView || processesView) return;
+    if (btw && key.name === "escape") {
+      btwN.current++; // ponytail: no cancel; a late answer is just dropped
+      setBtw(null);
+      return;
+    }
     if (palette && key.name === "escape") {
       setPalette(false);
       setInput("");
@@ -1034,6 +1044,19 @@ const PERM_MODES: PermMode[] = ["default", "acceptEdits", "plan", "bypass"];
     setInput("");
 
     if (trimmed === "/exit") return exit();
+    if (trimmed === "/btw" || trimmed.startsWith("/btw ")) {
+      const q = trimmed.slice(4).trim();
+      if (!q) return append(activeKey, { kind: "info", text: "usage: /btw <question> — a side question, not saved" });
+      const key = activeKey;
+      const n = ++btwN.current;
+      setBtw({ key, q });
+      const done = (p: Partial<BtwState>) => btwN.current === n && setBtw({ key, q, ...p });
+      ensureAgent(key)
+        .then((a) => a.btw(q))
+        .then((answer) => done({ answer }))
+        .catch((e) => done({ error: String(e?.message ?? e) }));
+      return;
+    }
     if (trimmed === "/clear") {
       // start a brand-new persisted session: drop the live agent and its
       // restored history, so the cleared state survives a restart
@@ -1463,6 +1486,7 @@ const PERM_MODES: PermMode[] = ["default", "acceptEdits", "plan", "bypass"];
             width={contentWidth}
             onSelect={(i) => setQueuePick(i)}
           />
+          {btw && btw.key === activeKey && <Btw state={btw} width={contentWidth} />}
           {busy && !shownAsk && (
             <box paddingLeft={1} marginBottom={1} flexDirection="row">
               <text>

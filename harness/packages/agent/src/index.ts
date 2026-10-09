@@ -15,6 +15,7 @@ import type { Registry } from "@kloudlite-tui/tools";
 import { CODEMODE_SKILL, KLOUDLITE_SKILL, roleSkill, type Role, claudeSignedIn, createClaudeSession, type ClaudeSession } from "./claude.ts";
 
 export { claudeSignedIn, type ClaudeSession };
+export { btwPrompt, piBtw } from "./btw.ts";
 
 export type {
   AgentSession,

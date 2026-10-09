@@ -13,6 +13,7 @@ export const commands: SlashCommand[] = [
   { name: "/model", description: "Set this session's model", hasOptions: true },
   { name: "/theme", description: "Switch theme", hasOptions: true },
   { name: "/login", description: "Log in to a provider", hasOptions: true },
+  { name: "/btw", description: "Ask a side question; the answer is not saved" },
   { name: "/files", description: "Browse workspace files and diffs" },
   { name: "/settings", description: "Adjust settings", hasOptions: true },
   { name: "/exit", description: "Quit" },

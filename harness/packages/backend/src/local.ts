@@ -18,6 +18,7 @@ import {
   nameSession,
   providerAuth,
   readSettings,
+  piBtw,
   resolveModel,
   writeSettings,
   type ModelRef,
@@ -253,6 +254,7 @@ export function baseHandle(
     steer: async (text, images) => agent.steer(text, images),
     followUp: async (text, images) => agent.followUp(text, images),
     clearQueue: async () => void agent.clearQueue(),
+    btw: (q) => ("isClaude" in agent ? agent.btw(q) : piBtw(agent, q)),
     abort: async () => agent.abort(),
     dispose: async () => {
       if (closed) return;

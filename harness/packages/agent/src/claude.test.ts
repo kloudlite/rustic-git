@@ -714,3 +714,38 @@ test("each turn appends one timing line", async () => {
   expect(lines[0].first_tool_ms).toBeNull();
   expect(lines[0].ok).toBe(true);
 });
+
+test("btw is a separate one-shot query: result returned, no events, pi state untouched", async () => {
+  const calls: any[] = [];
+  const query = ((p: any) => {
+    calls.push(p);
+    return (async function* () {
+      yield { type: "system", subtype: "init" };
+      yield { type: "result", subtype: "success", result: " side answer ", is_error: false };
+    })();
+  }) as any;
+  const p = piHost([{ role: "user", content: [{ type: "text", text: "earlier" }], timestamp: 1 }]);
+  const s = createClaudeSession({ key: "k", model: { id: "claude-haiku-4-5" }, pi: p.host, query });
+  const events: any[] = [];
+  s.subscribe((e) => events.push(e));
+  const before = [...p.host.agent.state.messages];
+  expect(await s.btw("why?")).toBe("side answer");
+  expect(events).toEqual([]);
+  expect(p.recorded).toEqual([]);
+  expect(p.host.agent.state.messages).toEqual(before);
+  expect(calls).toHaveLength(1);
+  expect(typeof calls[0].prompt).toBe("string");
+  expect(calls[0].prompt).toContain("earlier");
+  expect(calls[0].prompt).toContain("<question>\nwhy?\n</question>");
+  const o = calls[0].options;
+  expect(o).toMatchObject({ tools: [], maxTurns: 1, persistSession: false, settingSources: [], systemPrompt: { type: "preset", preset: "claude_code" } });
+  expect(o.mcpServers).toBeUndefined();
+  expect(o.resume).toBeUndefined();
+});
+
+test("btw maps a failed result to its error and a login failure to the sign-in message", async () => {
+  const failing = (m: any) => (() => (async function* () { yield m; })()) as any;
+  const mk = (m: any) => createClaudeSession({ key: "k", model: { id: "m" }, pi: piHost().host, query: failing(m) });
+  await expect(mk({ type: "result", subtype: "error_max_turns", errors: ["too long"] }).btw("q")).rejects.toThrow("too long");
+  await expect(mk({ type: "result", subtype: "error_during_execution", is_error: true, result: "401 unauthorized" }).btw("q")).rejects.toThrow("Not signed in");
+});

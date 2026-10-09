@@ -719,3 +719,95 @@ test("dragging over log lines selects the log text (not the gutter) and copies i
   setCopier(null);
   t.done();
 });
+
+/** A session whose turn never ends, so /btw is exercised mid-turn and abort is observable. */
+function btwSession(calls: { btw: string[]; abort: number; prompt: string[] }, reply: () => Promise<string>) {
+  const noop = async () => {};
+  const h: any = new Proxy(
+    {
+      messages: [],
+      isClaude: false,
+      busy: false,
+      subscribe: () => () => {},
+      btw: async (q: string) => (calls.btw.push(q), reply()),
+      abort: async () => void calls.abort++,
+      prompt: async (t: string) => void calls.prompt.push(t),
+    },
+    { get: (o: any, k) => (k in o ? o[k] : k === "then" ? undefined : noop) },
+  );
+  return h;
+}
+
+/** The session opens asynchronously; wait for the app to reach it. */
+async function until(t: { frame(): Promise<string> }, ok: () => boolean) {
+  for (let i = 0; i < 30 && !ok(); i++) await t.frame();
+}
+
+async function withBtw(reply: () => Promise<string>, run: (t: Awaited<ReturnType<typeof mount>>, calls: { btw: string[]; abort: number; prompt: string[] }) => Promise<void>) {
+  const calls = { btw: [] as string[], abort: 0, prompt: [] as string[] };
+  const orig = LocalBackend.prototype.session;
+  LocalBackend.prototype.session = (async () => btwSession(calls, reply)) as any;
+  try {
+    const t = await mount({ vim: "off" });
+    await run(t, calls);
+    t.done();
+  } finally {
+    LocalBackend.prototype.session = orig;
+  }
+}
+
+test("/btw shows the answer in a panel, esc closes it without aborting, nothing enters the transcript", async () => {
+  await withBtw(async () => "Because **cache** keys collide.", async (t, calls) => {
+    await t.mockInput.typeText("/btw why is it slow");
+    await t.frame();
+    t.mockInput.pressEnter();
+    await until(t, () => calls.btw.length > 0);
+    let f = await t.frame();
+    expect(calls.btw).toEqual(["why is it slow"]);
+    expect(calls.prompt).toEqual([]);
+    expect(f).toContain("btw: why is it slow");
+    expect(f).toContain("Because");
+    expect(f).toContain("esc close");
+    t.mockInput.pressEscape();
+    f = await t.frame();
+    expect(f).not.toContain("btw: why is it slow");
+    expect(f).not.toContain("Because");
+    expect(calls.abort).toBe(0);
+  });
+});
+
+test("/btw alone shows the usage hint and asks nothing", async () => {
+  await withBtw(async () => "x", async (t, calls) => {
+    await t.mockInput.typeText("/btw");
+    await t.frame();
+    t.mockInput.pressEnter();
+    const f = await t.frame();
+    expect(f).toContain("usage: /btw <question>");
+    expect(calls.btw).toEqual([]);
+  });
+});
+
+test("a /btw answer that arrives after esc is dropped; an error shows in the panel", async () => {
+  let release!: (s: string) => void;
+  await withBtw(() => new Promise<string>((r) => (release = r)), async (t) => {
+    await t.mockInput.typeText("/btw late one");
+    await t.frame();
+    t.mockInput.pressEnter();
+    await t.frame();
+    let f = await t.frame();
+    expect(f).toContain("thinking");
+    t.mockInput.pressEscape();
+    await until(t, () => release !== undefined);
+    await t.frame();
+    release("too late");
+    f = await t.frame();
+    expect(f).not.toContain("too late");
+  });
+  await withBtw(async () => { throw new Error("no model"); }, async (t) => {
+    await t.mockInput.typeText("/btw q");
+    await t.frame();
+    t.mockInput.pressEnter();
+    await until(t, () => false);
+    expect(await t.frame()).toContain("no model");
+  });
+});

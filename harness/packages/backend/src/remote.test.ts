@@ -113,3 +113,12 @@ test("stderr passes through before hello and is buffered after", async () => {
   expect(c.stderr()).toContain("later");
   expect(c.stderr()).not.toContain("waking");
 });
+
+test("btw returns its string over the wire", async () => {
+  const b = fake();
+  const base = b.session;
+  b.session = async (k: string, o: SessionOpts) => ({ ...(await base(k, o)), btw: async (q: string) => `answer to ${q}` }) as any;
+  const { remote } = wired(b);
+  const h = await remote.session("k", { model: { provider: "p", id: "m" }, tools: [], permission: async () => ({ block: false }) });
+  expect(await h.btw("why?")).toBe("answer to why?");
+});
