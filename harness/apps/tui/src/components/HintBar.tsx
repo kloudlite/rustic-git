@@ -28,7 +28,7 @@ export function HintBar({
   /** Narrow terminal: show only the essential hints so the row can't wrap. */
   compact: boolean;
   /** Hints are clickable: the id matches the key they stand for. */
-  onHint?: (id: "type" | "jump" | "files" | "commands" | "help" | "queue") => void;
+  onHint?: (id: "type" | "jump" | "files" | "jobs" | "commands" | "help" | "queue") => void;
 }) {
   const click = (id: Parameters<NonNullable<typeof onHint>>[0]) =>
     onHint ? () => onHint(id) : undefined;
@@ -63,7 +63,8 @@ export function HintBar({
             <box onMouseDown={click("type")}><text selectable={false} fg={theme.fg}>i <span fg={theme.muted}>type</span></text></box>
             {!compact && <text selectable={false} fg={theme.fg}>j k <span fg={theme.muted}>workspaces</span></text>}
             {!compact && <box onMouseDown={click("jump")}><text selectable={false} fg={theme.fg}>p <span fg={theme.muted}>jump</span></text></box>}
-            {inWorkspace && <box onMouseDown={click("files")}><text selectable={false} fg={theme.fg}>f <span fg={theme.muted}>view</span></text></box>}
+            {inWorkspace && <box onMouseDown={click("files")}><text selectable={false} fg={theme.fg}>f <span fg={theme.muted}>files</span></text></box>}
+            <box onMouseDown={click("jobs")}><text selectable={false} fg={theme.fg}>^j <span fg={theme.muted}>jobs</span></text></box>
             <box onMouseDown={click("commands")}><text selectable={false} fg={theme.fg}>/ <span fg={theme.muted}>commands</span></text></box>
             <box onMouseDown={click("help")}><text selectable={false} fg={theme.fg}>? <span fg={theme.muted}>help</span></text></box>
           </>
@@ -76,7 +77,8 @@ export function HintBar({
           <>
             <text selectable={false} fg={theme.fg}>enter <span fg={theme.muted}>send</span></text>
             {!compact && <box onMouseDown={click("jump")}><text selectable={false} fg={theme.fg}>^p <span fg={theme.muted}>jump</span></text></box>}
-            {inWorkspace && <box onMouseDown={click("files")}><text selectable={false} fg={theme.fg}>^f <span fg={theme.muted}>view</span></text></box>}
+            {inWorkspace && <box onMouseDown={click("files")}><text selectable={false} fg={theme.fg}>^f <span fg={theme.muted}>files</span></text></box>}
+            <box onMouseDown={click("jobs")}><text selectable={false} fg={theme.fg}>^j <span fg={theme.muted}>jobs</span></text></box>
             <box onMouseDown={click("commands")}><text selectable={false} fg={theme.fg}>/ <span fg={theme.muted}>commands</span></text></box>
           </>
         )}

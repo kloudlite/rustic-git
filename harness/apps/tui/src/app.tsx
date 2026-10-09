@@ -364,7 +364,7 @@ export function App({
 
   // the file views only exist inside a workspace; leaving one goes back
   useEffect(() => {
-    if (focus === 0) setView("agent");
+    if (focus === 0 && view === "files") setView("agent");
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [focus]);
 
@@ -539,6 +539,9 @@ export function App({
       submit(input, true);
       return;
     }
+
+    // ^j is the Jobs screen in both key schemes (vim's bare j still walks the workspaces)
+    if (key.ctrl && key.name === "j" && !key.meta && !menuOpen) return setView((v) => (v === "processes" ? "agent" : "processes"));
 
     // ---- vim off: ctrl+<letter> commands, everything else types ----
     if (prefs.vim === "off" && key.ctrl && !key.meta && !menuOpen) {
@@ -855,14 +858,13 @@ export function App({
   const pushAskRef = useRef(pushAsk);
   pushAskRef.current = pushAsk;
 
-  /** One key for "what does the column show": chat › files › processes. */
+  /** ^f / f: chat ⇄ files. Jobs have their own key (^j). */
   function cycleView(): void {
     if (focus === 0) {
       append(activeKey, { kind: "info", text: "enter a workspace first — f opens its files" });
       return;
     }
-    const ring: ViewId[] = ["agent", "files", "processes"];
-    setView(ring[(ring.indexOf(view) + 1) % ring.length]!);
+    setView(view === "files" ? "agent" : "files");
   }
 
   /** Help popup: the keyboard/command reference in a panel, not the transcript. */
@@ -874,7 +876,7 @@ export function App({
         "Navigation (NORMAL mode)",
         "  i           type a prompt        /    commands",
         "  j k         workspace ring       p    jump: env · session · ws",
-        "  f           cycle views           r    (in files) rescan",
+        "  f · ^j      files · jobs screen   r    (in files) rescan",
         "  1-9 · 0     workspace N · main   p    jump anywhere",
         "  esc         interrupt the agent  ?    this help",
         "  u d         scroll",
@@ -1214,7 +1216,11 @@ export function App({
     return [];
   }, [palette, cmdMode, jumpMatches, input, menuCtx]);
   const filesView = view === "files" && focus > 0;
-  const processesView = view === "processes" && focus > 0;
+  const processesView = view === "processes";
+  // main's Jobs screen: every workspace's processes, ids prefixed so two workspaces' "p1" stay apart
+  const allJobs = workspaces
+    .filter((w) => w.processes?.length)
+    .map((w) => ({ label: w.name, processes: w.processes!.map((p) => ({ ...p, id: `${w.id}/${p.id}` })) }));
   const wide = columns > WIDE_COLUMNS;
   // "show" is opencode's "auto": docked when wide, otherwise only when opened
   const sidebarVisible = prefs.sidebar === "show" && (wide || sidebarOpen);
@@ -1282,10 +1288,10 @@ export function App({
             </box>
           ) : processesView ? (
             <Processes
-              workspace={workspaces[focus - 1]!.name}
-              processes={workspaces[focus - 1]!.processes ?? []}
+              workspace={focus === 0 ? "main" : workspaces[focus - 1]!.name}
+              processes={focus === 0 ? allJobs.flatMap((g) => g.processes) : workspaces[focus - 1]!.processes ?? []}
+              groups={focus === 0 ? allJobs : undefined}
               onClose={() => setView("agent")}
-              onCycle={cycleView}
             />
           ) : filesView ? (
             <Files
@@ -1330,7 +1336,7 @@ export function App({
           {!filesView && !processesView && (
           <box flexDirection="column" flexShrink={0}>
           <Work
-            rows={workRows(space?.tasks ?? [], activeBase === "main" ? [] : workspaces.find((w) => w.id === activeBase)?.processes ?? [], activeBase === "main" ? undefined : activeBase)}
+            rows={workRows(space?.tasks ?? [], activeBase === "main" ? undefined : activeBase)}
             width={contentWidth}
           />
           <Queue
@@ -1430,6 +1436,7 @@ export function App({
                 return setPalette(true);
               }
               if (id === "files") return focus > 0 ? setView("files") : undefined;
+              if (id === "jobs") return setView("processes");
               if (id === "commands") return openCmd();
               if (id === "help") return openHelp();
               if (id === "queue") {

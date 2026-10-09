@@ -14,18 +14,22 @@ const stopped = (p: Process) => p.status === "exited" || p.status === "crashed";
 
 export { uptime };
 
-/** RUNNING then STOPPED, filtered by name or command; a section with no rows is not drawn. */
-function buildRows(processes: Process[], filter: string): Row[] {
+export type Group = { label: string; processes: Process[] };
+
+/** RUNNING then STOPPED, filtered by name or command; a section with no rows is not drawn. With
+ * `groups` (main) each workspace is a section instead: running rows, then stopped, "{n} running". */
+function buildRows(processes: Process[], filter: string, groups?: Group[]): Row[] {
   const q = filter.toLowerCase();
-  const shown = processes.filter((p) => !q || p.name.toLowerCase().includes(q) || p.command.toLowerCase().includes(q));
+  const match = (list: Process[]) => list.filter((p) => !q || p.name.toLowerCase().includes(q) || p.command.toLowerCase().includes(q));
   const out: Row[] = [];
-  for (const [label, list] of [
-    ["RUNNING", shown.filter((p) => !stopped(p))],
-    ["STOPPED", shown.filter(stopped)],
-  ] as const) {
+  const sections: [string, Process[], boolean][] = groups
+    ? groups.map((g) => [g.label, match(g.processes), true])
+    : [["RUNNING", match(processes).filter((p) => !stopped(p)), false], ["STOPPED", match(processes).filter(stopped), false]];
+  for (const [label, list, byWorkspace] of sections) {
     if (!list.length) continue;
-    out.push({ kind: "header", label, extra: String(list.length) });
-    for (const proc of list) out.push({ kind: "proc", proc });
+    const live = list.filter((p) => !stopped(p));
+    out.push({ kind: "header", label, extra: byWorkspace ? `${live.length} running` : String(list.length) });
+    for (const proc of [...live, ...list.filter(stopped)]) out.push({ kind: "proc", proc });
   }
   return out;
 }
@@ -35,21 +39,21 @@ const glyphColor = (p: Process) => (p.status === "crashed" ? theme.error : stopp
 const exit = (p: Process) => (p.status === "crashed" ? `exit ${p.code ?? 1}` : "done");
 
 /**
- * Processes view, laid out like the files view: what the workspace runs on the left (RUNNING,
+ * Jobs screen (^j), laid out like the files view: what the workspace runs on the left (RUNNING,
  * STOPPED), the selected process's command and log on the right. j/k move, l or enter focuses the
  * log, tab swaps panes, `/` filters, esc backs out a layer. The log follows its tail until you
  * scroll up; G or F resumes. Exited processes keep their log (the pod lists them for 10 minutes).
  */
 export function Processes({
   processes,
+  groups,
   onClose,
-  onCycle,
 }: {
   workspace: string;
   processes: Process[];
+  /** Main only: every workspace's jobs, one section each; `processes` is then their flat list. */
+  groups?: Group[];
   onClose: () => void;
-  /** `f` moves on to the next view, same as outside. */
-  onCycle: () => void;
 }) {
   const wheel = useWheelAccel();
   const [selId, setSelId] = useState<string | null>(null);
@@ -60,7 +64,7 @@ export function Processes({
   const [flash, setFlash] = useState(false);
   const logRef = useRef<ScrollBoxRenderable>(null);
 
-  const rows = useMemo(() => buildRows(processes, filter), [processes, filter]);
+  const rows = useMemo(() => buildRows(processes, filter, groups), [processes, filter, groups]);
   const picks = rows.flatMap((r) => (r.kind === "proc" ? [r.proc] : []));
   const proc = picks.find((p) => p.id === selId) ?? picks[0];
   const lines = proc?.logs ?? [];
@@ -94,8 +98,8 @@ export function Processes({
   };
 
   useKeyboard((key) => {
-    // ^f is the cycle key when vim is off (app.tsx command()); the app's own handler is parked while this view is up
-    if (key.ctrl && key.name === "f" && !key.meta) return onCycle();
+    // ^j toggles this screen (app.tsx command()); the app's own handler is parked while it is up
+    if (key.ctrl && key.name === "j" && !key.meta) return onClose();
     if (key.ctrl || key.meta || key.option) return;
     if (typing) {
       if (key.name === "escape") {
@@ -113,7 +117,6 @@ export function Processes({
     const k = key.shift ? key.name.toUpperCase() : key.name;
     if (k === "escape") return filter ? setFilter("") : onClose();
     if (key.sequence === "/") return setTyping(true);
-    if (k === "f") return onCycle();
     if (k === "tab") return setPane((p) => (p === "list" ? "log" : "list"));
     if (pane === "list") {
       if (k === "j" || k === "down") return move(1);
@@ -140,7 +143,7 @@ export function Processes({
   const running = processes.filter((p) => !stopped(p)).length;
   const crashed = processes.filter((p) => p.status === "crashed").length;
   const now = Date.now();
-  const metaOf = (p: Process) => (stopped(p) ? exit(p) : uptime(p.startedAt, now));
+  const metaOf = (p: Process) => (stopped(p) ? exit(p) : uptime(p.startedAt, now) || "running");
 
   return (
     <box flexDirection="column" flexGrow={1} minHeight={0}>
@@ -259,6 +262,7 @@ export function Processes({
         <text fg={theme.fg}>G <span fg={theme.muted}>tail</span></text>
         <text fg={theme.fg}>F <span fg={theme.muted}>follow</span></text>
         <text fg={theme.fg}>/ <span fg={theme.muted}>filter</span></text>
+        <text fg={theme.fg}>^j <span fg={theme.muted}>chat</span></text>
         <text fg={theme.fg}>esc <span fg={theme.muted}>back</span></text>
       </box>
     </box>

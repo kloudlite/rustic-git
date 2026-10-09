@@ -294,10 +294,10 @@ test("mouse: clicking a sidebar workspace and a hint", async () => {
   await t.mockMouse.click(col + 1, row);
   expect(await t.frame()).toContain("billing-svc "); // hint bar path follows
 
-  // the hint bar's "f view" switches the column view on click
+  // the hint bar's "f files" switches the column view on click
   const hints = (await t.frame()).split("\n");
-  const hrow = hints.findIndex((l) => l.includes("f view"));
-  const hcol = hints[hrow]!.indexOf("f view");
+  const hrow = hints.findIndex((l) => l.includes("f files"));
+  const hcol = hints[hrow]!.indexOf("f files");
   await t.mockMouse.click(hcol + 1, hrow);
   expect(await t.frame()).toContain("CHANGES");
   t.done();
@@ -307,9 +307,7 @@ async function processesView() {
   const t = await mount();
   t.mockInput.pressKey("1"); // api-gateway
   await t.frame();
-  t.mockInput.pressKey("f"); // files
-  await t.frame();
-  t.mockInput.pressKey("f"); // processes
+  t.mockInput.pressKey("j", { ctrl: true }); // jobs
   return t;
 }
 
@@ -815,18 +813,50 @@ test("a /btw answer that arrives after esc is dropped; an error shows in the pan
   });
 });
 
-test("with vim off, ^f cycles files, then processes, then back to the chat", async () => {
+test("with vim off, ^f toggles files and chat; ^j toggles the jobs screen", async () => {
   const t = await mount({ vim: "off" });
   t.mockInput.pressKey("k", { ctrl: true });
   await t.frame();
   t.mockInput.pressKey("f", { ctrl: true });
   expect(await t.frame()).toContain("CHANGES");
-  t.mockInput.pressKey("f", { ctrl: true });
-  const proc = await t.frame();
-  expect(proc).toContain("no processes");
-  t.mockInput.pressKey("f", { ctrl: true });
+  t.mockInput.pressKey("f", { ctrl: true }); // files -> chat, never processes
   const chat = await t.frame();
-  expect(chat).not.toContain("no processes");
   expect(chat).not.toContain("CHANGES");
+  expect(chat).not.toContain("no processes");
+  t.mockInput.pressKey("j", { ctrl: true });
+  expect(await t.frame()).toContain("processes ›");
+  t.mockInput.pressKey("j", { ctrl: true }); // ^j closes it
+  expect(await t.frame()).not.toContain("processes ›");
   t.done();
 });
+
+test("^j opens the jobs screen from main, grouped by workspace, and closes it", async () => {
+  const t = await mount();
+  t.mockInput.pressKey("j", { ctrl: true });
+  const f = await t.frame();
+  expect(f).toMatch(/api-gateway\s+2 running/);
+  expect(f).toContain("probe"); // another workspace's job
+  expect(f).not.toContain("RUNNING");
+  t.mockInput.pressKey("j", { ctrl: true });
+  expect(await t.frame()).not.toMatch(/api-gateway\s+2 running/);
+  t.done();
+});
+
+test("jobs screen in a workspace: sections, command once, running when the start is unknown", async () => {
+  const t = await processesView();
+  const f = await t.frame();
+  expect(f).toMatch(/RUNNING\s+2/);
+  expect(f.split("gateway serve --port 8080").length - 1).toBe(1); // reader header only, not also the row
+  t.done();
+});
+
+test("jobs row says running when the pod gave no start time", async () => {
+  const { Processes } = await import("./components/Processes.tsx");
+  const p = { id: "1", name: "srv", command: "srv --x", status: "running" as const, logs: [] };
+  const setup = await testRender(<Processes workspace="w" processes={[p]} onClose={() => {}} />, { width: 100, height: 12 });
+  await tick();
+  await setup.renderOnce();
+  expect(setup.captureCharFrame()).toMatch(/● srv\s+running/);
+  setup.renderer.destroy();
+});
+

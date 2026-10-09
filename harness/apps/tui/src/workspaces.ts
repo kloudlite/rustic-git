@@ -100,6 +100,12 @@ const base = (w: string) => w.split("/").pop() ?? w;
 const RUNNERS = new Set(["npm", "pnpm", "yarn", "bun"]);
 const SHELLS = new Set(["sh", "bash", "zsh"]);
 
+/** The pod's `process_list` sends whole epoch seconds (crates/ide/src/procs.rs `now_rfc3339`, misnamed),
+ * which Date.parse reads as NaN; accept both so an RFC 3339 fix there needs no change here. */
+export function isoStart(s: string | undefined): string | undefined {
+  return s && /^\d+$/.test(s) ? new Date(Number(s) * 1000).toISOString() : s;
+}
+
 /** A short label for a process from its command line: `npm run dev`, `vite`, `node server.js`. */
 export function procName(cmd: string): string {
   let c = cmd.trim();
@@ -142,7 +148,7 @@ export function fromSpace(v: SpaceView): { workspaces: Workspace[]; environments
       id: p.id,
       // a process in another tree says whose it is; main's needs no label
       name: (p.tree && p.tree !== "main" ? `${p.tree} · ` : "") + (procName(p.cmd) || p.id),
-      startedAt: p.started_at,
+      startedAt: isoStart(p.started_at),
       command: p.cmd,
       status: p.state === "running" ? "running" : p.failed || (p.exit_code ?? 0) !== 0 ? "crashed" : "exited",
       code: p.exit_code ?? undefined,

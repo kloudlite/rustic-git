@@ -140,7 +140,7 @@ export function menuItems(input: string, ctx: MenuContext): MenuItem[] {
 /** Rotating input hints. */
 export const placeholders = [
   "Ask anything, or / for commands",
-  "^j/^k workspaces · ^1-9 jump",
+  "^k workspaces · ^f files · ^j jobs · ^1-9 jump",
   "Esc to interrupt",
   "\\ + Enter for a new line",
 ];

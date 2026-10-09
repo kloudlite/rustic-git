@@ -1,6 +1,6 @@
 import { expect, test } from "bun:test";
 import type { SpaceView } from "@kloudlite-tui/backend";
-import { fromSpace, procName, wsPath, type Workspace } from "./workspaces.ts";
+import { fromSpace, isoStart, procName, wsPath, type Workspace } from "./workspaces.ts";
 
 const w = (id: string, parent?: string): Workspace =>
   ({ id, name: id, owner: "karthik", parent, status: "running", ports: [], repo: "r", branch: "main" });
@@ -67,4 +67,10 @@ test("procName: the label a person would give the command", () => {
   expect(procName("/usr/bin/python3 -m http.server 8000")).toBe("python3 http.server");
   expect(procName("")).toBe("");
   expect(procName("x".repeat(40))).toHaveLength(32);
+});
+
+test("isoStart: the pod's epoch seconds become RFC 3339; RFC 3339 and missing pass through", () => {
+  expect(isoStart("1760000000")).toBe("2025-10-09T08:53:20.000Z");
+  expect(isoStart("2026-10-09T00:00:00Z")).toBe("2026-10-09T00:00:00Z");
+  expect(isoStart(undefined)).toBeUndefined();
 });

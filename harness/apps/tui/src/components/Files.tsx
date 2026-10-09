@@ -36,7 +36,7 @@ export function Files({
   /** bump to re-scan (agent finished an edit/write) */
   refreshKey: number;
   onClose: () => void;
-  /** `f` moves on to the next view, same as outside. */
+  /** `f` / ^f returns to the chat. */
   onCycle: () => void;
 }) {
   const wheel = useWheelAccel();
@@ -191,7 +191,7 @@ export function Files({
   }
 
   useKeyboard((key) => {
-    // ^f is the cycle key when vim is off (app.tsx command()); the app's own handler is parked while this view is up
+    // ^f is the files toggle when vim is off (app.tsx command()); the app's own handler is parked while this view is up
     if (key.ctrl && key.name === "f" && !key.meta) return onCycle();
     if (key.ctrl || key.meta || key.option) return;
     // "/" filter and "s" search share one typing prompt
@@ -525,6 +525,7 @@ export function Files({
             <text fg={theme.fg}>s <span fg={theme.muted}>search</span></text>
           </>
         )}
+        <text fg={theme.fg}>^f <span fg={theme.muted}>chat</span></text>
         <text fg={theme.fg}>esc <span fg={theme.muted}>back</span></text>
       </box>
     </box>
