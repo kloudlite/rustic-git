@@ -1,5 +1,5 @@
 import { expect, test } from "bun:test";
-import { askFor, baseOf } from "./sessions.ts";
+import { askFor, baseOf, pickAgentSession } from "./sessions.ts";
 
 const a = (key: string, n: number) => ({ key, n });
 
@@ -16,4 +16,11 @@ test("an ask shows only in its own workspace's view, oldest first", () => {
   expect(askFor(asks, "ws-a")?.n).toBe(1);
   expect(askFor(asks.slice(1), "ws-a")?.n).toBe(3);
   expect(askFor(asks, "ws-a:other")?.n).toBe(1);
+});
+
+test("a clone row picks its newest agent session, unless it has a regular one", () => {
+  const m = (key: string, updated: number) => ({ key, updated });
+  expect(pickAgentSession("ws-c", [m("ws-c:agent-a1", 1), m("ws-c:agent-b2", 5), m("ws-d:agent-z", 9)])).toBe("agent-b2");
+  expect(pickAgentSession("ws-c", [m("ws-c:agent-a1", 1), m("ws-c", 0)])).toBeUndefined();
+  expect(pickAgentSession("ws-c", [])).toBeUndefined();
 });
