@@ -666,6 +666,7 @@ pub(crate) async fn delete_as(
         }
     }
     drop_attach_policy(c, id, env.as_deref()).await;
+    super::environments::drop_intercepts_of(c, id).await;
     let mut doc = ws_doc(&w, &HashSet::new());
     doc.state = WsState::Deleted;
     Ok((StatusCode::ACCEPTED, Json(doc)).into_response())

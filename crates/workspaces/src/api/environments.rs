@@ -821,6 +821,38 @@ pub(crate) async fn clear_intercept(
     Err(contended())
 }
 
+/// Take a deleted workspace's intercepts out of every environment's spec.
+///
+/// The wish otherwise outlives the workspace: the agent renders it `Off/WorkspaceGone` but keeps
+/// it in spec, so the service shows as wished-for by an id that no longer exists, and nothing but a
+/// person's `DELETE .../intercepts/{service}` ever removes it (2026-10-10: t-env kept two after its
+/// workspaces were gone). Best-effort, like `drop_attach_policy`: the Workspace is already deleted,
+/// and the agent already serves the real service for a missing workspace.
+pub(crate) async fn drop_intercepts_of(c: &kube::Client, ws: &str) {
+    let api: Api<crd::Environment> = Api::all(c.clone());
+    let envs = match api.list(&ListParams::default()).await {
+        Ok(l) => l.items,
+        Err(e) => return tracing::warn!(workspace = %ws, error = %e, "intercepts.drop.failed"),
+    };
+    for e in envs.into_iter().filter(|e| e.spec.intercepts.iter().any(|i| i.workspace == ws)) {
+        let mut e = e;
+        for _ in 0..INTERCEPT_ATTEMPTS {
+            let want: Vec<crd::Intercept> = e.spec.intercepts.iter().filter(|i| i.workspace != ws).cloned().collect();
+            match cas_intercepts(c, &e, want).await {
+                Ok(Some(_)) => break,
+                Ok(None) => match api.get_opt(&e.name_any()).await {
+                    Ok(Some(fresh)) if fresh.spec.intercepts.iter().any(|i| i.workspace == ws) => e = fresh,
+                    _ => break,
+                },
+                Err(_) => {
+                    tracing::warn!(workspace = %ws, environment = %e.name_any(), "intercepts.drop.failed");
+                    break;
+                }
+            }
+        }
+    }
+}
+
 // ── the hidden per-owner builder ─────────────────────────────────────────
 
 /// Is this an environment a person may see and act on?
