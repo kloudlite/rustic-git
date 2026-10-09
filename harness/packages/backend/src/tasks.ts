@@ -96,13 +96,13 @@ export function boardText(ts: BoardTask[]): string {
 }
 
 const STR = { type: "string" };
-const WS = { type: "string", description: "workspace id (`ws-…`, the `id` from workspace_list), never its name" };
+const WS = { type: "string", description: "The workspace id (`ws-…`, the `id` from workspace_list). Do not use the name." };
 const DEPS = { type: "array", items: STR };
 
 export function taskTools(file: string): ToolDef[] {
   const add: ToolDef = {
     name: "task_add",
-    description: "Add a task to the board. Lower priority number runs first (default 3). depends_on lists task ids that must be done first. Returns the task line.",
+    description: "Add a task to the board. A lower priority number runs first. The default is 3. `depends_on` lists the ids of tasks that must be done first. Returns the task line.",
     inputSchema: { type: "object", properties: { title: STR, workspace: WS, priority: { type: "number" }, depends_on: DEPS, note: STR }, required: ["title"] },
     async run(i: { title: string; workspace?: string; priority?: number; depends_on?: string[]; note?: string }) {
       const r = addTask(file, { title: i.title, workspace: i.workspace, priority: i.priority, dependsOn: i.depends_on, note: i.note });
@@ -111,7 +111,7 @@ export function taskTools(file: string): ToolDef[] {
   };
   const update: ToolDef = {
     name: "task_update",
-    description: "Change a task: retitle, assign a workspace, reprioritise, set depends_on, move its state, or note it. A dependency loop or unknown id is refused and the board is unchanged. Returns the task line.",
+    description: "Change a task. You can change the title, the workspace, the priority, `depends_on`, the state or the note. The tool refuses a dependency loop or an unknown id. Then the board does not change. Returns the task line.",
     inputSchema: { type: "object", properties: { id: STR, title: STR, workspace: WS, priority: { type: "number" }, depends_on: DEPS, state: { type: "string", enum: STATES }, note: STR }, required: ["id"] },
     async run(i: { id: string; title?: string; workspace?: string; priority?: number; depends_on?: string[]; state?: TaskState; note?: string }) {
       const { id, depends_on, ...rest } = i;
@@ -121,7 +121,7 @@ export function taskTools(file: string): ToolDef[] {
   };
   const list: ToolDef = {
     name: "task_list",
-    description: "The task board: open tasks grouped by workspace, with what each waits on, then the count done.",
+    description: "Show the task board. It lists the open tasks grouped by workspace, with what each task waits on. At the end it gives the count of done tasks.",
     inputSchema: { type: "object", properties: {} },
     async run() {
       return boardText(readTasks(file));

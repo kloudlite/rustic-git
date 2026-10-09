@@ -120,7 +120,7 @@ export async function podTools(ws: string): Promise<ToolDef[]> {
     const t = listed.get(name);
     return {
       name,
-      description: t?.description ? `${t.description} (Runs in workspace ${ws}.)` : `Runs in workspace ${ws}.`,
+      description: t?.description ? `${t.description} (This tool runs in workspace ${ws}.)` : `This tool runs in workspace ${ws}.`,
       inputSchema: t?.schema ?? { type: "object", additionalProperties: true },
       run: (args: any) => call(name, args),
     };

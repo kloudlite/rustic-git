@@ -43,14 +43,14 @@ function clip(text: string, max: number): string {
 export const webFetch = {
   name: "web_fetch",
   description:
-    "Fetch a URL and return its readable text. Use for documentation, changelogs, issues, or any page whose contents you need to read. JSON comes back verbatim; HTML is stripped to text. Not a search engine — you need the exact URL.",
+    "Fetch a URL and return its readable text. Use it for documentation, changelogs, issues, or any page that you must read. JSON comes back unchanged. The tool removes the markup from HTML. It is not a search engine. You need the exact URL.",
   inputSchema: {
     type: "object",
     properties: {
-      url: { type: "string", description: "Absolute http(s) URL." },
+      url: { type: "string", description: "An absolute http(s) URL." },
       maxChars: {
         type: "number",
-        description: "Truncate the result at this many characters. Default 50000.",
+        description: "Truncate the result at this number of characters. The default is 50000.",
       },
     },
     required: ["url"],
@@ -114,12 +114,12 @@ export function searchProvider(): { name: string; key: string } | undefined {
 export const webSearch = {
   name: "web_search",
   description:
-    "Search the web and return titles, URLs and snippets. Use when you need to find a page rather than read one you already have the URL for; follow up with web_fetch to read a result.",
+    "Search the web and return titles, URLs and snippets. Use it to find a page. Do not use it to read a page when you have the URL. After a search, use web_fetch to read a result.",
   inputSchema: {
     type: "object",
     properties: {
       query: { type: "string", description: "What to search for." },
-      count: { type: "number", description: "How many results. Default 5, max 10." },
+      count: { type: "number", description: "The number of results. The default is 5. The maximum is 10." },
     },
     required: ["query"],
   },

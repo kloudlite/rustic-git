@@ -8,7 +8,7 @@
 export const BECAUSE_SCHEMA = {
   type: "object",
   description:
-    "Why this call happens; the person sees it on the permission card. `asked`: the person's exact words from their message THIS turn, only when they literally asked for this action, quoted verbatim and naming its target. Otherwise `reason`: one sentence on why the task needs it.",
+    "Why this call happens. The person sees it on the permission card. Use `asked` only if the person literally asked for this action in THIS turn. Then quote their exact words from this turn. The quote must name the target. Otherwise use `reason`. Write one sentence on why the task needs this call.",
   properties: { asked: { type: "string" }, reason: { type: "string" } },
 } as const;
 

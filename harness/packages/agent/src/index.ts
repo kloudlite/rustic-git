@@ -134,12 +134,12 @@ async function envKeysFor(provider: {
 // them after the long API listing and the model skipped them.
 const CODEMODE_NOTE =
   "Rules: (1) Call a tool directly for one action. Use codemode only for several calls, a loop over items, or to filter large output. " +
-  "(2) `await tools.bash(...)` resolves to an object; read `.output` (and `.exit_code`), never call string methods on the result itself. " +
-  "(3) Fetch URLs with `tools.web_fetch`, not curl in bash; one call per item, run together with `Promise.all`. " +
-  "(4) To show the user a table, list or report, build it in the script and pass it to `tools.display({ markdown })`; the displayed text stays readable to you for follow-ups; reply in one line, never retype what was displayed. " +
-  "(5) `tools.searchTools(...)` and `tools.describeTool(...)` are async: always `await` them. " +
-  "(6) The shell is `tools.bash` in the main session and `tools.exec` in workspace sessions; call whichever the tool list has, never assume. " +
-  "(7) A poll loop exits as soon as the condition holds, has a bounded count, and checks `services[].ready` (or `service_status[].ready`), never a regex over the spec; a failed tool call throws, so never poll after a write you did not check. " +
+  "(2) `await tools.bash(...)` resolves to an object. Read `.output` (and `.exit_code`). Do not call string methods on the result itself. " +
+  "(3) Fetch URLs with `tools.web_fetch`. Do not use curl in bash. Make one call for each item. Run the calls together with `Promise.all`. " +
+  "(4) To show the user a table, list or report, build it in the script. Pass it to `tools.display({ markdown })`. The displayed text stays readable to you for follow-ups. Reply in one line. Do not retype what was displayed. " +
+  "(5) `tools.searchTools(...)` and `tools.describeTool(...)` are asynchronous. Always use `await` with them. " +
+  "(6) The shell is `tools.bash` in the main session and `tools.exec` in workspace sessions. Call the one that the tool list has. Do not guess. " +
+  "(7) A poll loop exits as soon as the condition holds. It has a bounded count. It checks `services[].ready` (or `service_status[].ready`). It does not use a regex over the spec. A failed tool call throws. Do not poll after a write that you did not check. " +
   "The codemode skill has worked examples.";
 
 // Markdown the running script asked to show, by root tool call id (nested ids are `<parent>/<n>`).
@@ -153,10 +153,10 @@ function displayTool() {
     label: "Display",
     exposure: "codemode" as const,
     description:
-      "Show markdown to the user, rendered in full under this script's card. It also stays in the session for follow-ups; never retype it. Use for finished tables, lists and reports.",
+      "Show markdown to the user. It renders in full under the card of this script. It also stays in the session for follow-ups. Do not retype it. Use it for finished tables, lists and reports.",
     parameters: {
       type: "object",
-      properties: { markdown: { type: "string", description: "Markdown to show." } },
+      properties: { markdown: { type: "string", description: "The markdown to show." } },
       required: ["markdown"],
     } as any,
     execute: async (toolCallId: string, params: { markdown: string }) => {

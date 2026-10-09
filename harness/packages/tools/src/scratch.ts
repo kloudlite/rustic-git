@@ -107,13 +107,13 @@ export function scratchTools(root: string): ToolDef[] {
     {
       name: "bash",
       description:
-        `Run a shell command in your scratch folder (${root}), the only part of the filesystem it can see; the network works but no credentials are present.` +
-        "Returns { output, exit_code }; output is stdout+stderr, the last 50 KiB.",
+        `Run a shell command in your scratch folder (${root}). This is the only part of the filesystem that the command can see. The network works. No credentials are present. ` +
+        "It returns { output, exit_code }. The output is stdout and stderr. It has the last 50 KiB.",
       inputSchema: {
         type: "object",
         properties: {
           command: { type: "string" },
-          timeout: { type: "number", description: "seconds; default 120, max 600" },
+          timeout: { type: "number", description: "In seconds. The default is 120. The maximum is 600." },
         },
         required: ["command"],
       },
@@ -124,7 +124,7 @@ export function scratchTools(root: string): ToolDef[] {
     },
     {
       name: "read",
-      description: `Read a text file in your scratch folder (${root}); relative paths start there. Capped at 256 KiB. offset and limit are in lines.`,
+      description: `Read a text file in your scratch folder (${root}). A relative path starts in this folder. The maximum size is 256 KiB. \`offset\` and \`limit\` are in lines.`,
       inputSchema: {
         type: "object",
         properties: { path: { type: "string" }, offset: { type: "number" }, limit: { type: "number" } },
@@ -149,7 +149,7 @@ export function scratchTools(root: string): ToolDef[] {
     },
     {
       name: "write",
-      description: `Write a text file in your scratch folder (${root}); relative paths start there, parent folders are created.`,
+      description: `Write a text file in your scratch folder (${root}). A relative path starts in this folder. The tool creates the parent folders.`,
       inputSchema: {
         type: "object",
         properties: { path: { type: "string" }, content: { type: "string" } },

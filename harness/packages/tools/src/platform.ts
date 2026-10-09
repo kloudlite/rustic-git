@@ -66,8 +66,8 @@ const strip = (o: Record<string, unknown>) => Object.fromEntries(Object.entries(
 type Props = Record<string, unknown>;
 const S = { type: "string" };
 // Models reach for the display name; every /v1 path takes the id, so say so on every param.
-const WS = { type: "string", description: "workspace id (`ws-…`, the `id` from workspace_list), never its name" };
-const ENV = { type: "string", description: "environment id (`env-…`, the `id` from env_list), never its name" };
+const WS = { type: "string", description: "The workspace id (`ws-…`, the `id` from workspace_list). Do not use the name." };
+const ENV = { type: "string", description: "The environment id (`env-…`, the `id` from env_list). Do not use the name." };
 const N = { type: "number" };
 const SL = { type: "array", items: S };
 const OBJ = { type: "object" };
@@ -83,7 +83,7 @@ const SERVICE = {
     resources: OBJ,
   },
   required: ["name", "image"],
-  description: "command, env and mounts default to empty",
+  description: "The `command`, `env` and `mounts` fields default to empty.",
 };
 
 /** The API requires command, env and mounts on every service; the schema asks only for name and image. */
@@ -115,7 +115,7 @@ function def(name: string, description: string, properties: Props, required: str
 }
 
 const attrOf = (p: string) => p.split("@")[0]!;
-const ASYNC = " Returns 202: the change converges asynchronously, so poll with the matching *_get.";
+const ASYNC = " It returns 202 immediately. The work continues after the return. Poll the matching `*_get` tool.";
 
 /** GET a document and throw on a failure like `api`. */
 async function load(path: string): Promise<{ doc: any } | { err: string }> {
@@ -178,25 +178,25 @@ export function platformTools(kind: "main" | "workspace", wsId?: string): ToolDe
 
   // tools both kinds have
   const shared: ToolDef[] = [
-    def("packages_list", "List the packages declared for the workspace before changing them.", wp(), wr(), async (a) => {
+    def("packages_list", "List the packages that the workspace declares. Do this before you change them.", wp(), wr(), async (a) => {
       const g = await load(wsPath(a));
       return "err" in g ? g.err : JSON.stringify(g.doc?.packages ?? [], null, 2);
     }),
-    packages("packages_add", "Declare packages (attr or attr@version) on the workspace; an entry with the same attr replaces the old one.", { packages: SL }, ["packages"], (cur, a) => {
+    packages("packages_add", "Declare packages (`attr` or `attr@version`) on the workspace. An entry with the same `attr` replaces the old entry.", { packages: SL }, ["packages"], (cur, a) => {
       const add: string[] = a.packages ?? [];
       const keep = cur.filter((p) => !add.some((n) => attrOf(n) === attrOf(p)));
       return [...keep, ...add];
     }),
-    packages("packages_remove", "Remove declared packages by attr from the workspace.", { packages: SL }, ["packages"], (cur, a) => {
+    packages("packages_remove", "Remove declared packages from the workspace. Give the `attr` of each package.", { packages: SL }, ["packages"], (cur, a) => {
       const gone = new Set<string>((a.packages ?? []).map(attrOf));
       const next = cur.filter((p) => !gone.has(attrOf(p)));
       return next.length === cur.length ? `error: not declared: ${(a.packages ?? []).join(", ")}` : next;
     }),
-    def("packages_update", "Re-resolve the workspace's package pins to their newest matching versions.", wp(), wr(), async (a) => api("POST", `${wsPath(a)}/packages/update`)),
-    def("workspace_push", "Snapshot the workspace to its history." + ASYNC, wp({ message: S }), wr(), async (a) => api("POST", `${wsPath(a)}/push`, { message: a.message })),
+    def("packages_update", "Resolve the package pins of the workspace again, to the newest matching versions.", wp(), wr(), async (a) => api("POST", `${wsPath(a)}/packages/update`)),
+    def("workspace_push", "Make a snapshot of the workspace in its history." + ASYNC, wp({ message: S }), wr(), async (a) => api("POST", `${wsPath(a)}/push`, { message: a.message })),
     envTool(
       "service_logs",
-      "Read the recent logs of one service of an environment you own, from inside the cluster (not /v1). Read-only; tail defaults to 200 lines (max 2000), since is seconds (max 86400), previous reads the last crashed container. A service an intercept has taken answers with a note naming the workspace that runs it.",
+      "Read the recent logs of one service of an environment that you own. The tool reads from inside the cluster, not from /v1. It is read-only. `tail` is the number of lines. The default is 200 and the maximum is 2000. `since` is in seconds. The maximum is 86400. `previous` reads the last container that crashed. If an intercept has taken the service, the answer has a note. The note names the workspace that runs the service.",
       { service: S, tail: N, since: N, previous: { type: "boolean" } },
       ["service"],
       async (env, a) => {
@@ -209,30 +209,30 @@ export function platformTools(kind: "main" | "workspace", wsId?: string): ToolDe
         return text;
       },
     ),
-    def("space_env_current", "Show which environment each of the person's spaces (teams) follows.", {}, [], async () => api("GET", "/v1/me/environments")),
-    def("space_env_switch", "Make every workspace of a team follow another environment." + (ws ? " Team defaults to this workspace's." : ""), { ...teamProp, env: ENV }, ws ? ["env"] : ["team", "env"], async (a) => {
+    def("space_env_current", "Show the environment that each space (team) of the person follows.", {}, [], async () => api("GET", "/v1/me/environments")),
+    def("space_env_switch", "Make every workspace of a team follow a different environment." + (ws ? " The team defaults to the team of this workspace." : ""), { ...teamProp, env: ENV }, ws ? ["env"] : ["team", "env"], async (a) => {
       const t = await teamOf(a);
       return "err" in t ? t.err : api("PUT", `/v1/me/environments/${seg(t.team)}`, { environment: a.env });
     }),
-    def("space_env_clear", "Detach a team's space from its environment." + (ws ? " Team defaults to this workspace's." : ""), teamProp, ws ? [] : ["team"], async (a) => {
+    def("space_env_clear", "Detach the space of a team from its environment." + (ws ? " The team defaults to the team of this workspace." : ""), teamProp, ws ? [] : ["team"], async (a) => {
       const t = await teamOf(a);
       return "err" in t ? t.err : api("DELETE", `/v1/me/environments/${seg(t.team)}`);
     }),
-    envTool("env_get", "Read an environment's services, state and intercepts. Each services[] entry carries ready (and message) from service_status; poll ready, not the spec. state is creating|running|stopped|error|deleted; stop polling on error or deleted." + (ws ? " Defaults to the environment this workspace's space follows." : ""), {}, [], async (env) => withReady(await api("GET", `/v1/environments/${env}`))),
-    services("service_add", "Add one service to an environment; fails if the name exists." + ASYNC, { service: SERVICE }, ["service"], (cur, a) =>
+    envTool("env_get", "Read the services, state and intercepts of an environment. Each `services[]` entry has `ready` (and `message`) from service_status. Poll `ready`, not the spec. The `state` is `creating`, `running`, `stopped`, `error` or `deleted`. `running` means up. Stop the poll when the state is `error` or `deleted`." + (ws ? " It defaults to the environment that the space of this workspace follows." : ""), {}, [], async (env) => withReady(await api("GET", `/v1/environments/${env}`))),
+    services("service_add", "Add one service to an environment. The call fails if a service with this name exists." + ASYNC, { service: SERVICE }, ["service"], (cur, a) =>
       cur.some((s) => s.name === a.service?.name) ? `error: service exists: ${a.service?.name}` : [...cur, withServiceDefaults(a.service)]),
-    services("service_update", "Replace one existing service (matched by name) in an environment." + ASYNC, { service: SERVICE }, ["service"], (cur, a) =>
+    services("service_update", "Replace one existing service in an environment. The tool matches the service by name." + ASYNC, { service: SERVICE }, ["service"], (cur, a) =>
       cur.some((s) => s.name === a.service?.name) ? cur.map((s) => (s.name === a.service.name ? withServiceDefaults(a.service) : s)) : `error: no such service: ${a.service?.name}`),
-    services("service_remove", "Remove a service by name from an environment." + ASYNC, { name: S }, ["name"], (cur, a) =>
+    services("service_remove", "Remove a service from an environment. Give the name of the service." + ASYNC, { name: S }, ["name"], (cur, a) =>
       cur.some((s) => s.name === a.name) ? cur.filter((s) => s.name !== a.name) : `error: no such service: ${a.name}`),
     // a workspace session intercepts for itself only: no `workspace` param to aim it at another workspace
-    envTool("intercept", (ws ? "Route an environment service's traffic to this workspace." : "Route an environment service's traffic to a workspace.") + ASYNC, { service: S, ...(ws ? {} : { workspace: WS }), ports: { type: "array", items: { type: "object", properties: { service: N, workspace: N } } } }, ["service", ...(ws ? [] : ["workspace"])], (env, a) =>
+    envTool("intercept", (ws ? "Send the traffic of an environment service to this workspace." : "Send the traffic of an environment service to a workspace.") + ASYNC, { service: S, ...(ws ? {} : { workspace: WS }), ports: { type: "array", items: { type: "object", properties: { service: N, workspace: N } } } }, ["service", ...(ws ? [] : ["workspace"])], (env, a) =>
       api("POST", `/v1/environments/${env}/intercepts`, strip({ service: a.service, workspace: ws ? wsId : a.workspace, ports: a.ports }))),
     envTool("release", "Release an intercepted service back to its own pod.", { service: S }, ["service"], (env, a) => api("DELETE", `/v1/environments/${env}/intercepts/${seg(a.service)}`)),
   ];
   // main's own `workspace_stop` (below) takes a `workspace` param; this one stops the session's own
   // workspace, so it sits outside `shared` and `of()` never picks it up.
-  if (ws) return [...shared, def("workspace_stop", "Stop this workspace once its task is done and main or the person said to stop; it snapshots first, the next start resumes it." + ASYNC, {}, [], async () => api("POST", `${W}/stop`))];
+  if (ws) return [...shared, def("workspace_stop", "Stop this workspace after its task is done and main or the person said to stop. The tool makes a snapshot first. The next start resumes the workspace." + ASYNC, {}, [], async () => api("POST", `${W}/stop`))];
 
   const of = (n: string) => shared.find((t) => t.name === n)!;
 
@@ -240,65 +240,65 @@ export function platformTools(kind: "main" | "workspace", wsId?: string): ToolDe
     def(name, description, { [key]: key === "env" ? ENV : WS }, [key], async (a) => api(method, `${base}/${seg(a[key])}${suffix}`));
 
   return [
-    def("workspace_list", "List the person's workspaces, optionally for one team.", { team: S }, [], async (a) => api("GET", `/v1/workspaces${qs({ team: a.team })}`)),
-    def("workspace_get", "Read one workspace's state; poll this after any lifecycle call. state is creating|ready|stopped|error|deleted: ready means up (a workspace is never 'running'); stop polling on error or deleted.", { workspace: WS }, ["workspace"], async (a) => api("GET", `/v1/workspaces/${seg(a.workspace)}`)),
+    def("workspace_list", "List the workspaces of the person. You can give one team.", { team: S }, [], async (a) => api("GET", `/v1/workspaces${qs({ team: a.team })}`)),
+    def("workspace_get", "Read the state of one workspace. Poll this tool after any lifecycle call. The `state` is `creating`, `ready`, `stopped`, `error` or `deleted`. `ready` means up. A workspace is not `running` at any time. Stop the poll when the state is `error` or `deleted`.", { workspace: WS }, ["workspace"], async (a) => api("GET", `/v1/workspaces/${seg(a.workspace)}`)),
     def("workspace_create", "Create a workspace in a region." + ASYNC, { name: S, region: S, quota_gb: N, image: S, repo: S, branch: S, packages: SL, team: S }, ["name", "region", "quota_gb"], async (a) =>
       api("POST", "/v1/workspaces", strip({ team: a.team, name: a.name, region: a.region, quota_gb: a.quota_gb, image: a.image, repo: a.repo, branch: a.branch, packages: a.packages }))),
-    def("workspace_clone", "Clone a workspace's current state into a new workspace." + ASYNC, { workspace: WS, name: S, task: { type: "string", description: "what the clone is for, at most 200 characters" } }, ["workspace", "name"], async (a) => api("POST", `/v1/workspaces/${seg(a.workspace)}/clone`, strip({ name: a.name, task: a.task }))),
+    def("workspace_clone", "Clone the current state of a workspace into a new workspace." + ASYNC, { workspace: WS, name: S, task: { type: "string", description: "What the clone is for. Use at most 200 characters." } }, ["workspace", "name"], async (a) => api("POST", `/v1/workspaces/${seg(a.workspace)}/clone`, strip({ name: a.name, task: a.task }))),
     def("workspace_restore", "Create a workspace from a snapshot." + ASYNC, { name: S, snapshot_id: S, image: S, packages: SL, quota_gb: N }, ["name", "snapshot_id"], async (a) =>
       api("POST", "/v1/workspaces/restore", strip({ name: a.name, snapshot_id: a.snapshot_id, image: a.image, packages: a.packages, quota_gb: a.quota_gb }))),
     lifecycle("workspace_start", "Start a stopped workspace." + ASYNC, "POST", "/start"),
-    lifecycle("workspace_stop", "Stop a running workspace (it snapshots first)." + ASYNC, "POST", "/stop"),
-    lifecycle("workspace_delete", "Delete a workspace for good." + ASYNC, "DELETE", ""),
+    lifecycle("workspace_stop", "Stop a workspace that is up. The tool makes a snapshot first." + ASYNC, "POST", "/stop"),
+    lifecycle("workspace_delete", "Delete a workspace permanently." + ASYNC, "DELETE", ""),
     of("workspace_push"),
-    def("worktree_add", "Cut a new worktree in a workspace." + ASYNC, { workspace: WS, name: S }, ["workspace", "name"], async (a) => api("POST", `/v1/workspaces/${seg(a.workspace)}/trees`, { name: a.name })),
-    def("worktree_drop", "Drop a worktree from a workspace." + ASYNC, { workspace: WS, name: S }, ["workspace", "name"], async (a) => api("DELETE", `/v1/workspaces/${seg(a.workspace)}/trees/${seg(a.name)}`)),
+    def("worktree_add", "Make a new worktree in a workspace." + ASYNC, { workspace: WS, name: S }, ["workspace", "name"], async (a) => api("POST", `/v1/workspaces/${seg(a.workspace)}/trees`, { name: a.name })),
+    def("worktree_drop", "Remove a worktree from a workspace." + ASYNC, { workspace: WS, name: S }, ["workspace", "name"], async (a) => api("DELETE", `/v1/workspaces/${seg(a.workspace)}/trees/${seg(a.name)}`)),
     of("packages_list"),
-    def("env_list", "List environments, optionally for one team.", { team: S }, [], async (a) => api("GET", `/v1/environments${qs({ owner: a.team })}`)),
-    def("env_get", "Read one environment's services, state and intercepts; poll this after any env call. Each services[] entry carries ready (and message) from service_status; poll ready, not the spec. state is creating|running|stopped|error|deleted; stop polling on error or deleted.", { env: ENV }, ["env"], async (a) => withReady(await api("GET", `/v1/environments/${seg(a.env)}`))),
+    def("env_list", "List the environments. You can give one team.", { team: S }, [], async (a) => api("GET", `/v1/environments${qs({ owner: a.team })}`)),
+    def("env_get", "Read the services, state and intercepts of one environment. Poll this tool after any env call. Each `services[]` entry has `ready` (and `message`) from service_status. Poll `ready`, not the spec. The `state` is `creating`, `running`, `stopped`, `error` or `deleted`. `running` means up. Stop the poll when the state is `error` or `deleted`.", { env: ENV }, ["env"], async (a) => withReady(await api("GET", `/v1/environments/${seg(a.env)}`))),
     of("service_logs"),
-    def("env_delete", "Delete an environment for good.", { env: ENV }, ["env"], async (a) => api("DELETE", `/v1/environments/${seg(a.env)}`)),
+    def("env_delete", "Delete an environment permanently.", { env: ENV }, ["env"], async (a) => api("DELETE", `/v1/environments/${seg(a.env)}`)),
     def("env_start", "Start a stopped environment." + ASYNC, { env: ENV }, ["env"], async (a) => api("POST", `/v1/environments/${seg(a.env)}/start`)),
-    def("env_stop", "Stop a running environment." + ASYNC, { env: ENV }, ["env"], async (a) => api("POST", `/v1/environments/${seg(a.env)}/stop`)),
+    def("env_stop", "Stop an environment that is up." + ASYNC, { env: ENV }, ["env"], async (a) => api("POST", `/v1/environments/${seg(a.env)}/stop`)),
     def("env_create", "Create an environment of services in a region." + ASYNC, { name: S, region: S, services: { type: "array", items: SERVICE }, team: S, quota_gb: N }, ["name", "region"], async (a) =>
       api("POST", "/v1/environments", strip({ name: a.name, region: a.region, services: a.services?.map(withServiceDefaults), owner: a.team, quota_gb: a.quota_gb }))),
-    def("env_clone", "Copy a live environment into a new one." + ASYNC, { env: ENV, name: S }, ["env", "name"], async (a) => api("POST", `/v1/environments/${seg(a.env)}/clone`, { name: a.name })),
-    def("env_push", "Snapshot an environment to its history." + ASYNC, { env: ENV, message: S }, ["env"], async (a) => api("POST", `/v1/environments/${seg(a.env)}/push`, { message: a.message })),
+    def("env_clone", "Copy an environment that is up into a new environment." + ASYNC, { env: ENV, name: S }, ["env", "name"], async (a) => api("POST", `/v1/environments/${seg(a.env)}/clone`, { name: a.name })),
+    def("env_push", "Make a snapshot of an environment in its history." + ASYNC, { env: ENV, message: S }, ["env"], async (a) => api("POST", `/v1/environments/${seg(a.env)}/push`, { message: a.message })),
     def("env_restore", "Create an environment from a snapshot." + ASYNC, { name: S, snapshot_id: S, team: S, services: { type: "array", items: SERVICE }, region: S, quota_gb: N }, ["name", "snapshot_id"], async (a) =>
       api("POST", "/v1/environments/restore", strip({ name: a.name, snapshot_id: a.snapshot_id, owner: a.team, services: a.services?.map(withServiceDefaults), region: a.region, quota_gb: a.quota_gb }))),
-    def("env_restore_in_place", "Roll an environment back to one of its own snapshots." + ASYNC, { env: ENV, snapshot_id: S }, ["env", "snapshot_id"], async (a) =>
+    def("env_restore_in_place", "Put an environment back to one of its own snapshots." + ASYNC, { env: ENV, snapshot_id: S }, ["env", "snapshot_id"], async (a) =>
       api("POST", `/v1/environments/${seg(a.env)}/restore-in-place`, { snapshot_id: a.snapshot_id })),
     ...["service_add", "service_update", "service_remove"].map(of),
     ...["space_env_current", "space_env_switch", "space_env_clear"].map(of),
-    def("volume_list", "List volumes, optionally by kind (workspace|environment) and owner.", { kind: S, owner: S }, [], async (a) => api("GET", `/v1/volumes${qs({ kind: a.kind, owner: a.owner })}`)),
-    def("volume_history", "List a volume's snapshots (ids for restore).", { volume: S }, ["volume"], async (a) => api("GET", `/v1/volumes/${seg(a.volume)}/history`)),
-    def("volume_refs", "Read a volume's branch tips.", { volume: S }, ["volume"], async (a) => api("GET", `/v1/volumes/${seg(a.volume)}/refs`)),
-    def("volume_delete", "Delete a detached volume for good.", { volume: S }, ["volume"], async (a) => api("DELETE", `/v1/volumes/${seg(a.volume)}`)),
+    def("volume_list", "List the volumes. You can filter by kind (`workspace` or `environment`) and by owner.", { kind: S, owner: S }, [], async (a) => api("GET", `/v1/volumes${qs({ kind: a.kind, owner: a.owner })}`)),
+    def("volume_history", "List the snapshots of a volume. These are the ids for restore.", { volume: S }, ["volume"], async (a) => api("GET", `/v1/volumes/${seg(a.volume)}/history`)),
+    def("volume_refs", "Read the branch tips of a volume.", { volume: S }, ["volume"], async (a) => api("GET", `/v1/volumes/${seg(a.volume)}/refs`)),
+    def("volume_delete", "Delete a detached volume permanently.", { volume: S }, ["volume"], async (a) => api("DELETE", `/v1/volumes/${seg(a.volume)}`)),
     def("snapshot_delete", "Delete one snapshot of a volume.", { volume: S, snapshot: S }, ["volume", "snapshot"], async (a) => api("DELETE", `/v1/volumes/${seg(a.volume)}/snapshots/${seg(a.snapshot)}`)),
-    def("builder_status", "Check the image builder's state for a team.", { team: S }, [], async (a) => api("GET", `/v1/builders/me${qs({ team: a.team })}`)),
-    def("quota", "Show an owner's limits and current usage (workspaces, environments, snapshots, diskGb, cpu, memoryGb). Creating past a limit answers 409; ask for more with request_create kind quota.", { owner: S }, [], async (a) => api("GET", `/v1/quota${qs({ owner: a.owner })}`)),
-    def("requests_list", "List the person's requests (quota, access, region, other) and their teams', with state pending/approved/denied and the decision note.", { owner: S }, [], async (a) => api("GET", `/v1/requests${qs({ owner: a.owner })}`)),
+    def("builder_status", "Check the state of the image builder for a team.", { team: S }, [], async (a) => api("GET", `/v1/builders/me${qs({ team: a.team })}`)),
+    def("quota", "Show the limits and the current use of an owner (workspaces, environments, snapshots, diskGb, cpu, memoryGb). A call that creates more than a limit answers 409. To ask for more, use request_create with kind `quota`.", { owner: S }, [], async (a) => api("GET", `/v1/quota${qs({ owner: a.owner })}`)),
+    def("requests_list", "List the requests of the person and of their teams (quota, access, region, other). Each request has a state (`pending`, `approved` or `denied`) and the decision note.", { owner: S }, [], async (a) => api("GET", `/v1/requests${qs({ owner: a.owner })}`)),
     def("request_get", "Show one request and its decision.", { id: S }, ["id"], async (a) => api("GET", `/v1/requests/${seg(a.id)}`)),
     def(
       "request_create",
-      "Ask a superadmin for something the person cannot do now: more quota, access to a team, a region, or anything else. One pending request per owner per kind (409 otherwise). Returns at once; the decision comes later, check it with request_get.",
+      "Ask a superadmin for something that the person cannot do now. Examples are more quota, access to a team, a region, or anything else. Each owner can have only one pending request of each kind. Otherwise the answer is 409. The tool returns at once. The decision comes later. Use request_get to check it.",
       {
-        owner: { type: "string", description: "team slug; omit for the person's own" },
+        owner: { type: "string", description: "The team slug. Omit it for the person's own." },
         kind: { type: "string", enum: ["quota", "access", "region", "other"] },
         reason: S,
         quota: {
           type: "object",
-          description: "the new ceilings wanted, only the dimensions that change",
+          description: "The new ceilings that you want. Give only the dimensions that change.",
           properties: { workspaces: { type: "integer" }, environments: { type: "integer" }, snapshots: { type: "integer" }, diskGb: { type: "integer" }, cpu: { type: "integer" }, memoryGb: { type: "integer" } },
         },
         access: { type: "object", properties: { team: S, role: { type: "string", enum: ["member", "admin", "owner"] } }, required: ["team", "role"] },
-        region: { type: "string", description: "the region name" },
+        region: { type: "string", description: "The region name." },
         title: S,
         body: S,
       },
       ["kind", "reason"],
       async (a) => api("POST", "/v1/requests", strip({ owner: a.owner, kind: a.kind, reason: a.reason, quota: a.quota, access: a.access, region: a.region ? { region: a.region } : undefined, other: a.kind === "other" ? { title: a.title, body: a.body } : undefined })),
     ),
-    def("regions", "List the regions workspaces and environments can be created in.", {}, [], async () => api("GET", "/v1/regions")),
+    def("regions", "List the regions where workspaces and environments can be created.", {}, [], async () => api("GET", "/v1/regions")),
   ];
 }

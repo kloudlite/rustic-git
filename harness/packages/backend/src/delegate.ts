@@ -174,7 +174,7 @@ export function delegateTools(kind: "main" | "workspace", ws: string | undefined
     const tell: ToolDef = {
       name: "main_tell",
       description:
-        "Tell the main session something. done: the task is finished (tests pass, branch pushed); blocked: you cannot go on, say what would unblock you; need: a fact or an action from another workspace or the person, then keep working on what you can. Name the task id when the work came with one. After done or blocked, end your turn: your report is the answer.",
+        "Tell the main session something. Use `done` when the task is finished (tests pass, branch pushed). Use `blocked` when you cannot go on. Say what would unblock you. Use `need` when you need a fact or an action from another workspace or the person. Then keep working on what you can. Name the task id when the work came with one. After `done` or `blocked`, end your turn. Your report is the answer.",
       inputSchema: {
         type: "object",
         properties: { kind: { type: "string", enum: ["done", "blocked", "need"] }, task: { type: "string" }, text: { type: "string" } },
@@ -197,8 +197,8 @@ export function delegateTools(kind: "main" | "workspace", ws: string | undefined
   const ask: ToolDef = {
     name: "workspace_ask",
     description:
-      "Hand a workspace's own session a goal: the person's words plus context only you have (environment, decisions, facts from another workspace's answer), never paths, libraries or steps. Pass task (a board id) to mark it running there; refused while its dependencies are not done. Returns at once; the workspace's answer arrives later as a `[from <ws>] ...` message. Never wait or poll for it. The only way main gets work done in a workspace.",
-    inputSchema: { type: "object", properties: { workspace: { type: "string", description: "workspace id (`ws-…`, the `id` from workspace_list), never its name" }, request: { type: "string" }, task: { type: "string" } }, required: ["workspace", "request"] },
+      "Give a goal to the session of a workspace. The goal is the words of the person plus context that only you have (environment, decisions, facts from the answer of another workspace). Do not give paths, libraries or steps. Pass `task` (a board id) to mark the task as running there. The tool refuses if the dependencies of the task are not done. It returns at once. The answer of the workspace arrives later as a `[from <ws>] ...` message. Do not wait or poll for it. This is the only way for main to get work done in a workspace.",
+    inputSchema: { type: "object", properties: { workspace: { type: "string", description: "The workspace id (`ws-…`, the `id` from workspace_list). Do not use the name." }, request: { type: "string" }, task: { type: "string" } }, required: ["workspace", "request"] },
     async run(input: { workspace: string; request: string; task?: string }) {
       const key = input.workspace;
       const file = deps.tasks ?? tasksFile();

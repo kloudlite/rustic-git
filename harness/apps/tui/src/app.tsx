@@ -815,15 +815,15 @@ export function App({
     tuiTools.push({
       name: "question",
       description:
-        "Ask the user a question and wait for their answer. Use when you need a decision or clarification. Provide 2-5 short answer options.",
+        "Ask the user a question and wait for their answer. Use it when you need a decision or clarification. Give 2-5 short answer options.",
       inputSchema: {
         type: "object",
         properties: {
-          question: { type: "string", description: "The question to ask" },
+          question: { type: "string", description: "The question to ask." },
           options: {
             type: "array",
             items: { type: "string" },
-            description: "Selectable answer options",
+            description: "The answer options that the user can select.",
           },
         },
         required: ["question", "options"],
