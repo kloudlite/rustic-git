@@ -1,4 +1,4 @@
-# Workspace egress fence
+# Workspace egress fence and consent from the person's own words
 
 Date: 2026-10-09. Status: design, awaiting owner review.
 
@@ -118,10 +118,52 @@ builders keep `allow-internet-egress` as today. Consequences, decided:
   - new `allow-egress-gate`: all pods egress to ns `kloudlite-system` + `app=kloudlite-egress`,
     tcp 3128 and 2222.
 
-### 4. Harness
+### 4. Harness ask-list
 
-- `container_build` → `ALWAYS_ASK`. No other gate change: `exec` already auto-approves on
-  `active` + `fenced`.
+- `container_build` → `ALWAYS_ASK`. `exec` already auto-approves on `active` + `fenced`.
+- The TUI's `GATED` set (`harness/apps/tui/src/app.tsx:871`) is dead (defined, never read; it
+  still lists write/edit/patch) and is deleted. The backend's `mustAsk` is the one list.
+
+### 5. Consent from the person's own words
+
+Owner decision (2026-10-09, "go with this"): "if user himself ask to do something then there is no
+need to ask for permission again. but if that needs to be done for a task with out user knowing
+then we need to ask permission with proper reason". Analogy given and accepted: a teller does what
+you ask at the counter, and phones you, with the reason, when someone else asks in your name.
+
+- **The field.** Every tool `mustAsk` can return true for gets a required argument
+  `because`, injected into its schema in `registryFor` (`local.ts`), so pod tools, platform tools
+  and scratch tools are covered the same way: `{ "asked": "<the person's exact words>" }` or
+  `{ "reason": "<why the task needs it, one sentence>" }`. Its description tells the model:
+  `asked` only when the person literally asked for this action this turn; otherwise `reason`.
+  The gate removes `because` from `ctx.args` before the call runs, so no tool ever sees it.
+- **Typed words.** Each session keeps `typed: string[]`, the text of every `prompt`/`steer`/
+  `followUp` that came in through a CLIENT view (a view opened with `permission`, i.e. the
+  wire from kl-tui or the browser), cleared on `agent_end`. Internal views (`workspace_ask`
+  goals, delegate replies, subagent briefs, `[from …]` relays in `delegate.ts`) never add to it,
+  so a goal another session wrote, a web page, a file or a tool result can never count as the
+  person's consent.
+- **The check** (pure fn `consented(name, args, because, typed)` in a new
+  `harness/packages/backend/src/consent.ts`): skip the card only when all hold —
+  1. `because.asked` is at least 8 characters and, after lowercasing and collapsing whitespace,
+     is a substring of one `typed` entry (same normalisation);
+  2. the call's TARGET appears in that quote, by tool:
+     - workspace/worktree/env/service/volume/snapshot tools: the named object (its id or name
+       argument; a tool that defaults to "this workspace" uses that workspace's id or name);
+     - `container_build`/`container_push`: the image name of the first tag / of `src`, tag
+       stripped;
+     - `exec`, `bash`: the program, i.e. the basename of the first word of the command;
+     - `web_fetch`: the URL's host.
+  Anything else asks. `// ponytail:` the quote binds the program, not its arguments (`cargo`
+  covers any `cargo …`); the network fence is the wall that matters for exec.
+- **The card** carries the reason. `PermissionRequest` gains `reason?: string` and
+  `claimed?: string`. With `reason`: the card reads "Wants to {action} {target}: {reason}".
+  With an `asked` quote that failed the check: "Says you asked: “{quote}”, which is not in your
+  messages this turn" (the honest signal that something is pretending). With neither: "No reason
+  given".
+- Consent lasts one turn. Yesterday's "delete foo" does not cover today's.
+- Unattended bench sessions (no client) have no typed words, so every gated call waits for a
+  person, with its reason, exactly as today minus the calls the person asked for.
 
 ## Known ceilings (`// ponytail:` in code)
 
@@ -144,6 +186,12 @@ builders keep `allow-internet-egress` as today. Consequences, decided:
 - `crates/workspaces`: pod env/labels fenced vs open vs bench; policy shapes (`NotIn [fenced]`,
   `allow-egress-gate`); `Egress` CRD in `crds.yaml`.
 - api: `PUT` validates hosts (422), refuses another owner (403), SSA writes.
+- consent (`consent.test.ts`): verbatim quote with target → no card; quote missing the target
+  (`"delete it"` for `workspace_delete foo`) → card; quote not in typed text → card with
+  `claimed`; quote from a `workspace_ask` goal → card; text typed in an earlier turn → card;
+  case/whitespace differences still match; `exec` quote naming `cargo` covers `cargo test`, not
+  `curl …`; `web_fetch` host match; `because` stripped before the tool runs; schema of every gated
+  tool carries required `because`.
 - Fleet probe `ws.egress.fence`: a fenced workspace `curl https://github.com` succeeds,
   `curl https://example.com` fails with the proxy's 403, `GET /tools` reports
   `network: fenced`; then `kl net allow example.com` and the curl succeeds.
