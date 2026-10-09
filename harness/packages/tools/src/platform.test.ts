@@ -48,16 +48,28 @@ test("api reads the token file on every call, reports unavailable, 204 and error
 });
 
 test("packages_add merges by attr, packages_remove errors on unknown", async () => {
-  const t = platformTools("main");
+  const t = platformTools("workspace", "w1");
   routes["GET /v1/workspaces/w1"] = json({ packages: ["nodejs", "git@2"] });
   routes["PATCH /v1/workspaces/w1"] = json({});
-  await tool(t, "packages_add").run({ workspace: "w1", packages: ["nodejs@20", "jq"] });
+  await tool(t, "packages_add").run({ packages: ["nodejs@20", "jq"] });
   expect(calls.at(-1)!.body).toEqual({ packages: ["git@2", "nodejs@20", "jq"] });
-  await tool(t, "packages_remove").run({ workspace: "w1", packages: ["git"] });
+  await tool(t, "packages_remove").run({ packages: ["git"] });
   expect(calls.at(-1)!.body).toEqual({ packages: ["nodejs"] });
   const n = calls.length;
-  await expect(tool(t, "packages_remove").run({ workspace: "w1", packages: ["zzz"] })).rejects.toThrow("not declared: zzz");
+  await expect(tool(t, "packages_remove").run({ packages: ["zzz"] })).rejects.toThrow("not declared: zzz");
   expect(calls.length).toBe(n + 1); // the GET only, no PATCH
+});
+
+test("main keeps packages_list only; a workspace stops itself with no workspace param", async () => {
+  const names = platformTools("main").map((x) => x.name);
+  for (const n of ["packages_add", "packages_remove", "packages_update", "intercept", "release"]) expect(names).not.toContain(n);
+  expect(names).toContain("packages_list");
+  routes["POST /v1/workspaces/w1/stop"] = json({}, 202);
+  const stop = tool(platformTools("workspace", "w1"), "workspace_stop");
+  expect((stop.inputSchema as any).properties).toEqual({});
+  await stop.run({});
+  expect(calls.at(-1)!.url).toBe("/v1/workspaces/w1/stop");
+  expect(((tool(platformTools("main"), "workspace_stop").inputSchema as any).required)).toEqual(["workspace"]);
 });
 
 test("service add/update/remove PATCH the whole list; duplicates and strangers error", async () => {
@@ -95,7 +107,7 @@ test("workspace sessions default env through /v1/me/environments", async () => {
   expect(calls.at(-1)!.body).toEqual({ service: "web", workspace: "w1" });
   routes["GET /v1/me/environments"] = json([{ team: "other", environment: "x" }]);
   await expect(tool(t, "env_get").run({})).rejects.toThrow("this workspace's space follows no environment");
-  expect(t.some((x) => x.name === "workspace_create" || x.name === "workspace_stop")).toBe(false);
+  expect(t.some((x) => x.name === "workspace_create")).toBe(false);
 });
 
 test("env_get folds service_status readiness into services[]; workspace_clone sends task only when given", async () => {

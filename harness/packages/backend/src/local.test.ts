@@ -2,7 +2,7 @@ import { expect, test } from "bun:test";
 import { mkdtempSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { LocalBackend, ALWAYS_ASK, asking, baseHandle, mustAsk, shareable, installGate, registryFor, sessionCwd, sessionKind } from "./local.ts";
+import { LocalBackend, ALWAYS_ASK, asking, baseHandle, mustAsk, roleCard, shareable, installGate, registryFor, sessionCwd, sessionKind } from "./local.ts";
 import { toolDiff } from "./diff.ts";
 import { PROTOCOL } from "./wire.ts";
 
@@ -60,12 +60,11 @@ test("sessionKind", () => {
   expect(sessionKind("main:x")).toEqual({ kind: "main" });
   expect(sessionKind("ws1")).toEqual({ kind: "workspace", ws: "ws1" });
   expect(sessionKind("ws1:x")).toEqual({ kind: "workspace", ws: "ws1" });
-  expect(sessionKind("ws1:agent-ab12")).toEqual({ kind: "subagent", ws: "ws1" });
+  expect(sessionKind("ws1:agent-ab12")).toEqual({ kind: "workspace", ws: "ws1" });
 });
 
-test("workspace and subagent sessions run in the pod's folder, main does not", () => {
+test("workspace sessions run in the pod's folder, main does not", () => {
   expect(sessionCwd(sessionKind("ws1"))).toBe("/home/kl/workspace");
-  expect(sessionCwd(sessionKind("ws1:agent-ab12"))).toBe("/home/kl/workspace");
   expect(sessionCwd(sessionKind("main"))).toBeUndefined();
 });
 
@@ -86,37 +85,65 @@ test("registry per session kind", async () => {
   expect(ws).not.toContain("workspace_create");
   expect(ws).not.toContain("workspace_ask");
   expect(wsReg.get("read").description).not.toContain("scratch");
-  expect(ws).toContain("subagent");
+  expect(ws).toContain("main_tell");
   expect((wsReg.get("packages_add").inputSchema as any).properties.workspace).toBeUndefined();
-  const sub = (await registryFor({ kind: "subagent", ws: "w1" }, deps, opts)).names();
-  // the workspace's own hands for its clone, minus another subagent
-  expect(sub).toContain("packages_add");
-  expect(sub).toContain("web_search");
-  expect(sub).toContain("exec");
-  expect(sub).toContain("question");
-  expect(sub).not.toContain("workspace_create");
-  expect(sub).not.toContain("subagent");
-  expect(sub).not.toContain("intercept");
-  expect(sub).not.toContain("release");
+  // the self-stop carries no card fields; main's still names the workspace and says why
+  const stop: any = wsReg.get("workspace_stop").inputSchema;
+  expect(stop.properties.because).toBeUndefined();
+  expect(stop.properties.workspace).toBeUndefined();
+  const mstop: any = (await registryFor({ kind: "main" }, deps, opts)).get("workspace_stop").inputSchema;
+  expect(mstop.required).toEqual(["workspace", "because"]);
   expect(ws).toContain("intercept");
 });
 
-test(":agent- sessions are hidden from sessions.list", async () => {
+test("main keeps only the orchestrator's tools", async () => {
+  delete process.env.KL_API_URL;
+  const deps = { live: new Map(), busy: new Set<string>(), open: async () => null as never, permit: async () => ({}) };
+  const main = (await registryFor({ kind: "main" }, deps, { tools: [] } as any)).names();
+  for (const n of ["packages_add", "packages_remove", "packages_update", "intercept", "release", "subagent"]) expect(main).not.toContain(n);
+  for (const n of ["packages_list", "workspace_create", "workspace_delete", "workspace_ask"]) expect(main).toContain(n);
+});
+
+test("a workspace's own workspace_stop never asks; main's does", () => {
+  expect(mustAsk("workspace_stop", undefined, "open", "workspace")).toBe(false);
+  expect(mustAsk("workspace_stop", undefined, "open", "main")).toBe(true);
+});
+
+/** An agent that records what reached `prompt`. */
+function promptAgent(messages: unknown[]) {
+  const seen: string[] = [];
+  return { seen, messages, subscribe: () => () => {}, prompt: async (t: string) => void (seen.push(t), messages.push({ role: "user" })), dispose() {} };
+}
+const handleOf = (agent: any, key: string) => baseHandle(agent, key, { busy: new Set(), onEnd() {}, onDispose() {} });
+
+test("the role card rides the first prompt only, and never a resumed session's", async () => {
+  const fresh = promptAgent([]);
+  const h = handleOf(fresh, "main");
+  await h.prompt("hi");
+  await h.prompt("again");
+  expect(fresh.seen[0]!.startsWith("[role: main session]")).toBe(true);
+  expect(fresh.seen[0]!.endsWith("hi")).toBe(true);
+  expect(fresh.seen[1]).toBe("again");
+  const resumed = promptAgent([{ role: "user" }]);
+  await handleOf(resumed, "main").prompt("hi");
+  expect(resumed.seen).toEqual(["hi"]);
+  const ws = promptAgent([]);
+  await handleOf(ws, "ws-a").prompt("hi");
+  expect(ws.seen[0]!.startsWith("[role: workspace session for ws-a]")).toBe(true);
+  expect(roleCard("ws-a:x")).toContain("workspace session for ws-a");
+});
+
+test("sessions.list offers every key", async () => {
   process.env.KLOUDLITE_CONFIG_DIR = mkdtempSync(join(tmpdir(), "kl-cfg-"));
   delete process.env.KL_API_URL;
   const { models } = await import("@kloudlite-tui/agent");
   const m = models.getModels().find((x: any) => x.provider !== "anthropic") as any;
   const b = new LocalBackend();
   const o: any = { model: { provider: m.provider, id: m.id }, fresh: true, tools: [], permission: async () => ({}) };
-  const key = `w9:agent-ab12`;
-  const h = await b.session(key, o);
-  const h2 = await b.session("w9", o);
+  const h = await b.session("w9", o);
   const keys = (await b.sessions.list()).map((s) => s.key);
   expect(keys).toContain("w9");
-  expect(keys).not.toContain(key);
-  expect((await b.sessions.list("w9")).map((s) => s.key)).toContain(key);
   await h.dispose();
-  await h2.dispose();
 }, 20000);
 
 test("an internal open (no TUI tools) reuses a live session without disposing it", async () => {

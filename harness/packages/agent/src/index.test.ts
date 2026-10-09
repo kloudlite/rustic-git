@@ -50,7 +50,7 @@ test("systemAppends: kloudlite always, codemode only when on", async () => {
 
 test("systemAppends: each role gets exactly its own role skill", async () => {
   const { systemAppends } = await import("./index.ts");
-  const roles = ["main", "workspace", "subagent"] as const;
+  const roles = ["main", "workspace"] as const;
   for (const role of roles) {
     const texts = systemAppends(false, role);
     expect(texts).toHaveLength(2);
@@ -117,7 +117,7 @@ test("noTools builtin: no pi fs/shell tools active, custom tools kept", async ()
   s.dispose();
 });
 
-test("dropSessions removes a workspace's sessions and its subagents', keeps others", async () => {
+test("dropSessions removes a workspace's sessions, keeps others", async () => {
   // CONFIG_DIR is fixed at first import, so other tests' sessions may share it: compare ours only
   const { dropSessions, nameSession, listSessions } = await import("./index.ts");
   for (const k of ["ws-a", "ws-a:x1", "ws-a:agent-12", "ws-ab", "ws-ab:y", "main", "main:ws-a"]) nameSession(k, k);

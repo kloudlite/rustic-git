@@ -227,7 +227,9 @@ export function platformTools(kind: "main" | "workspace", wsId?: string): ToolDe
       api("POST", `/v1/environments/${env}/intercepts`, strip({ service: a.service, workspace: ws ? wsId : a.workspace, ports: a.ports }))),
     envTool("release", "Release an intercepted service back to its own pod.", { service: S }, ["service"], (env, a) => api("DELETE", `/v1/environments/${env}/intercepts/${seg(a.service)}`)),
   ];
-  if (ws) return shared;
+  // main's own `workspace_stop` (below) takes a `workspace` param; this one stops the session's own
+  // workspace, so it sits outside `shared` and `of()` never picks it up.
+  if (ws) return [...shared, def("workspace_stop", "Stop this workspace once its task is done and main or the person said to stop; it snapshots first, the next start resumes it." + ASYNC, {}, [], async () => api("POST", `${W}/stop`))];
 
   const of = (n: string) => shared.find((t) => t.name === n)!;
 
@@ -248,7 +250,7 @@ export function platformTools(kind: "main" | "workspace", wsId?: string): ToolDe
     of("workspace_push"),
     def("worktree_add", "Cut a new worktree in a workspace." + ASYNC, { workspace: S, name: S }, ["workspace", "name"], async (a) => api("POST", `/v1/workspaces/${seg(a.workspace)}/trees`, { name: a.name })),
     def("worktree_drop", "Drop a worktree from a workspace." + ASYNC, { workspace: S, name: S }, ["workspace", "name"], async (a) => api("DELETE", `/v1/workspaces/${seg(a.workspace)}/trees/${seg(a.name)}`)),
-    ...["packages_list", "packages_add", "packages_remove", "packages_update"].map(of),
+    of("packages_list"),
     def("env_list", "List environments, optionally for one team.", { team: S }, [], async (a) => api("GET", `/v1/environments${qs({ owner: a.team })}`)),
     def("env_get", "Read one environment's services, state and intercepts; poll this after any env call. Each services[] entry carries ready (and message) from service_status; poll ready, not the spec.", { env: S }, ["env"], async (a) => withReady(await api("GET", `/v1/environments/${seg(a.env)}`))),
     of("service_logs"),
@@ -263,7 +265,7 @@ export function platformTools(kind: "main" | "workspace", wsId?: string): ToolDe
       api("POST", "/v1/environments/restore", strip({ name: a.name, snapshot_id: a.snapshot_id, owner: a.team, services: a.services?.map(withServiceDefaults), region: a.region, quota_gb: a.quota_gb }))),
     def("env_restore_in_place", "Roll an environment back to one of its own snapshots." + ASYNC, { env: S, snapshot_id: S }, ["env", "snapshot_id"], async (a) =>
       api("POST", `/v1/environments/${seg(a.env)}/restore-in-place`, { snapshot_id: a.snapshot_id })),
-    ...["service_add", "service_update", "service_remove", "intercept", "release"].map(of),
+    ...["service_add", "service_update", "service_remove"].map(of),
     ...["space_env_current", "space_env_switch", "space_env_clear"].map(of),
     def("volume_list", "List volumes, optionally by kind (workspace|environment) and owner.", { kind: S, owner: S }, [], async (a) => api("GET", `/v1/volumes${qs({ kind: a.kind, owner: a.owner })}`)),
     def("volume_history", "List a volume's snapshots (ids for restore).", { volume: S }, ["volume"], async (a) => api("GET", `/v1/volumes/${seg(a.volume)}/history`)),

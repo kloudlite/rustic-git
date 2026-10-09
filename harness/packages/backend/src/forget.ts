@@ -1,5 +1,5 @@
 //! What a deleted workspace leaves on the bench: its sessions. Shared by main's
-//! `workspace_delete` (local.ts) and the subagent's clone teardown (delegate.ts).
+//! `workspace_delete` (local.ts).
 import { dropSessions } from "@kloudlite-tui/agent";
 import type { SessionHandle } from "./index.ts";
 

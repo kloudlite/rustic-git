@@ -2,7 +2,7 @@
 //! workspace pod, yet codemode scripts need a shell and a place for files. The confinement keeps the
 //! bench's home, the owner's keys and every other session out of reach: paths are checked against the
 //! real (symlink-resolved) root, and bash runs in fresh namespaces where only that folder is visible.
-//! Workspace and subagent sessions never get these; they have the pod's tools (pod.ts).
+//! Workspace sessions never get these; they have the pod's tools (pod.ts).
 import { spawn } from "node:child_process";
 import { existsSync, lstatSync, mkdirSync, readFileSync, realpathSync, writeFileSync } from "node:fs";
 import { dirname, relative, resolve } from "node:path";

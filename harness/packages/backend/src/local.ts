@@ -68,20 +68,40 @@ export const EDITS = new Set(["write", "edit", "patch"]);
  * bash and web_fetch run in the bench process, whose network is fenced when KLOUDLITE_EGRESS says
  * so (bash's scratch sandbox already fails closed).
  */
-export function mustAsk(name: string, fence?: PodFence, egress = process.env.KLOUDLITE_EGRESS): boolean {
+export function mustAsk(name: string, fence?: PodFence, egress = process.env.KLOUDLITE_EGRESS, kind: "main" | "workspace" = "main"): boolean {
+  if (kind === "workspace" && name === "workspace_stop") return false;
   if (ALWAYS_ASK.has(name)) return true;
   if (!ASK_UNLESS_FENCED.has(name)) return false;
   if (name === "exec") return !(fence?.sandbox === "active" && fence?.network === "fenced");
   return egress !== "fenced";
 }
 
-export type SessionKind = { kind: "main" } | { kind: "workspace"; ws: string } | { kind: "subagent"; ws: string };
+/** Who this session is, on its first message: Claude sessions see skills only by name until they
+ * load one, so the role must arrive in the conversation itself (the system prompt stays Claude
+ * Code's own for billing, claude.ts). */
+export function roleCard(key: string): string {
+  const k = sessionKind(key);
+  if (k.kind === "main")
+    return [
+      "[role: main session]",
+      "You orchestrate. You create, clone, start and delete workspaces and environments, keep the task board (task_add, task_update, task_list), and hand work to a workspace with workspace_ask (pass the task id).",
+      "You never write the code yourself. Reports arrive as `[from <ws>] ...` messages; update the board from them and dispatch the next ready task.",
+    ].join("\n");
+  return [
+    `[role: workspace session for ${k.ws}]`,
+    "You work only in this workspace. Work comes from the person or as `[from main session] [task T<n>] ...`.",
+    "You never create, clone, restore or delete workspaces. Report to main with main_tell: done, blocked, or need (for a fact or action from another workspace).",
+    "Stop this workspace with workspace_stop only after you finished and main or the person said to stop.",
+  ].join("\n");
+}
 
-/** `main[:id]` is the main session, `<ws>:agent-<hex>` a subagent, anything else a workspace's. */
+export type SessionKind = { kind: "main" } | { kind: "workspace"; ws: string };
+
+/** `main[:id]` is the main session, anything else a workspace's. */
 export function sessionKind(key: string): SessionKind {
   const base = key.split(":")[0]!;
   if (base === "main") return { kind: "main" };
-  return key.includes(":agent-") ? { kind: "subagent", ws: base } : { kind: "workspace", ws: base };
+  return { kind: "workspace", ws: base };
 }
 
 function catalog(): CatalogModel[] {
@@ -109,26 +129,24 @@ function forgetting(t: ToolDef, deps: DelegateDeps): ToolDef {
 }
 
 /** Who gets which hands: main reaches the platform, delegates and has a confined scratch folder (bash, read, write); a workspace session has the
- * pod's code tools and its own slice of the platform; a subagent the same hands as a workspace session in its own clone, except it cannot start another subagent
- * and cannot intercept: the workspace session runs the service and holds the intercept, a subagent works on its code. */
+ * pod's code tools and its own slice of the platform, and reports to main with main_tell. */
 export async function registryFor(k: SessionKind, deps: DelegateDeps, opts: SessionOpts, key = "main"): Promise<Registry> {
   const r = new Registry();
   if (k.kind === "main")
     return r.add(...[webFetch, webSearch, ...platformTools("main").map((t) => (t.name === "workspace_delete" ? forgetting(t, deps) : t)), ...delegateTools("main", undefined, deps, opts, key), ...scratchTools(scratchRoot(key)), ...opts.tools].map(asking));
-  if (k.kind === "workspace")
-    return r.add(...[webFetch, webSearch, ...(await podTools(k.ws)), ...platformTools("workspace", k.ws), ...delegateTools("workspace", k.ws, deps, opts), ...opts.tools].map(asking));
-  const workspaceOnly = new Set(["intercept", "release"]);
-  return r.add(...[webFetch, webSearch, ...(await podTools(k.ws)), ...platformTools("workspace", k.ws).filter((t) => !workspaceOnly.has(t.name)), ...opts.tools].map(asking));
+  // the self-stop is the one call that never asks: it only snapshots and parks the workspace
+  // that is already finished, and carries no `because` for a card to quote
+  return r.add(...[webFetch, webSearch, ...(await podTools(k.ws)), ...platformTools("workspace", k.ws), ...delegateTools("workspace", k.ws, deps, opts), ...opts.tools].map((t) => (t.name === "workspace_stop" ? t : asking(t))));
 }
 
 /** The permission gate, on both doors a call comes through: `agent.beforeToolCall` for a
  * model's own calls (pi's loop and Claude's tool server both call it), and the pi session's
  * `_beforeToolCall` for calls a codemode script makes, which pi's nested runner sends straight
  * there with the parent's id and no signal. Gated once per call: top level has no parent id. */
-export function installGate(agent: any, permission: SessionOpts["permission"], fence?: () => PodFence | undefined, words?: () => { typed: string[]; self?: string }): void {
+export function installGate(agent: any, permission: SessionOpts["permission"], fence?: () => PodFence | undefined, words?: () => { typed: string[]; self?: string }, kind: "main" | "workspace" = "main"): void {
   const ask = async (ctx: any, signal: AbortSignal) => {
     const name = ctx.toolCall.name;
-    if (!mustAsk(name, fence?.())) return undefined;
+    if (!mustAsk(name, fence?.(), undefined, kind)) return undefined;
     const { because, ...args } = ctx.args ?? {};
     const w = words?.();
     if (w && consented(name, args, because, w.typed, w.self)) return undefined;
@@ -152,7 +170,7 @@ export function installGate(agent: any, permission: SessionOpts["permission"], f
 }
 
 /**
- * Workspace and subagent sessions work in the pod's ~/workspace, so the model is told that path and
+ * Workspace sessions work in the pod's ~/workspace, so the model is told that path and
  * resolves relative paths there; main keeps the bench's cwd. Every file tool is the pod's, so on the
  * bench the folder only has to exist (Claude spawns its process in it; session() creates it).
  */
@@ -230,7 +248,7 @@ export function baseHandle(
       return hooks.busy.has(key);
     },
     isClaude: "isClaude" in agent,
-    prompt: async (text, o) => agent.prompt(text, o),
+    prompt: async (text, o) => agent.prompt(agent.messages.length === 0 ? `${roleCard(key)}\n\n${text}` : text, o),
     steer: async (text, images) => agent.steer(text, images),
     followUp: async (text, images) => agent.followUp(text, images),
     clearQueue: async () => void agent.clearQueue(),
@@ -296,8 +314,14 @@ export class LocalBackend implements Backend {
     };
   }
 
+  /** main_tell's routing: who asked each workspace last, and which already reported this ask. */
+  #lastCaller = new Map<string, string>();
+  #reported = new Set<string>();
+
   #deps(): DelegateDeps {
     return {
+      lastCaller: this.#lastCaller,
+      reported: this.#reported,
       live: this.#live,
       busy: this.#busy,
       open: (key, o) => this.session(key, o),
@@ -396,7 +420,7 @@ export class LocalBackend implements Backend {
       role: k.kind,
       cwd,
     });
-    installGate(agent, (req, signal) => this.#clients.route(key, (c) => !!c.permission, (c) => c.permission!(req, signal), signal), k.kind === "main" ? undefined : () => podFence(k.ws), () => ({ typed: this.#words(key).get(), self: k.kind === "main" ? undefined : k.ws }));
+    installGate(agent, (req, signal) => this.#clients.route(key, (c) => !!c.permission, (c) => c.permission!(req, signal), signal), k.kind === "main" ? undefined : () => podFence(k.ws), () => ({ typed: this.#words(key).get(), self: k.kind === "main" ? undefined : k.ws }), k.kind);
     const handle: SessionHandle = baseHandle(agent, key, {
       busy: this.#busy,
       onEnd: () => void setTimeout(() => this.#settle(key), 0),
@@ -422,9 +446,7 @@ export class LocalBackend implements Backend {
   }
 
   sessions = {
-    // subagent sessions are throwaway: never offered for resume in the general list; a clone's own
-    // prefix lists them so the TUI can show the one live under that clone
-    list: async (prefix?: string) => (prefix ? listSessions(prefix) : listSessions().filter((s) => !s.key.includes(":agent-"))),
+    list: async (prefix?: string) => listSessions(prefix),
     name: async (key: string, name: string) => nameSession(key, name),
     describe: async (key: string, d: string) => describeSession(key, d),
     clear: async (key: string) => clearSessionHistory(key),

@@ -138,7 +138,7 @@ const CODEMODE_NOTE =
   "(3) Fetch URLs with `tools.web_fetch`, not curl in bash; one call per item, run together with `Promise.all`. " +
   "(4) To show the user a table, list or report, build it in the script and pass it to `tools.display({ markdown })`; the displayed text stays readable to you for follow-ups; reply in one line, never retype what was displayed. " +
   "(5) `tools.searchTools(...)` and `tools.describeTool(...)` are async: always `await` them. " +
-  "(6) The shell is `tools.bash` in the main session and `tools.exec` in workspace and subagent sessions; call whichever the tool list has, never assume. " +
+  "(6) The shell is `tools.bash` in the main session and `tools.exec` in workspace sessions; call whichever the tool list has, never assume. " +
   "(7) A poll loop exits as soon as the condition holds, has a bounded count, and checks `services[].ready` (or `service_status[].ready`), never a regex over the spec; a failed tool call throws, so never poll after a write you did not check. " +
   "The codemode skill has worked examples.";
 
@@ -359,8 +359,7 @@ export function clearSessionHistory(key: string): void {
 }
 
 /**
- * Forget a deleted workspace's sessions: its own (`<ws>`, `<ws>:<id>`) and its subagents'
- * (`<ws>:agent-<hex>`). Only after the platform accepted the delete, so a refused delete keeps
+ * Forget a deleted workspace's sessions: its own (`<ws>`, `<ws>:<id>`). Only after the platform accepted the delete, so a refused delete keeps
  * the history. Keys are sanitised into dir names (`:` becomes `_`); workspace ids never hold `_`.
  */
 export function dropSessions(ws: string): void {
@@ -402,7 +401,7 @@ export async function createSession({
   autoCompact?: boolean;
   /** Let the model write a script that calls tools, instead of one call per turn. */
   codemode?: boolean;
-  /** main, workspace or subagent: picks the role skill loaded beside kloudlite. */
+  /** main or workspace: picks the role skill loaded beside kloudlite. */
   role?: Role;
   /** Working directory the model is told and Claude spawns in (default: this process's). */
   cwd?: string;

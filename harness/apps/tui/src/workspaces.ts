@@ -140,7 +140,7 @@ export function fromSpace(v: SpaceView): { workspaces: Workspace[]; environments
     branch: w.branch ?? "",
     processes: w.processes?.map((p) => ({
       id: p.id,
-      // a subagent's process says whose it is; main's needs no label
+      // a process in another tree says whose it is; main's needs no label
       name: (p.tree && p.tree !== "main" ? `${p.tree} · ` : "") + (procName(p.cmd) || p.id),
       startedAt: p.started_at,
       command: p.cmd,

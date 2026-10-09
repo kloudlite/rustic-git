@@ -42,11 +42,11 @@ import { createToolServer, declaredTools } from "./claude-tools.ts";
 
 // Claude sessions run Claude Code's loop, which never sees pi's skills; ours reach it as a local
 // plugin: `kl:kloudlite` (platform context) in every session, plus the session role's own skill
-// (`kl:main-session` / `kl:workspace-session` / `kl:subagent-session`), `kl:codemode` only while codemode is a tool.
+// (`kl:main-session` / `kl:workspace-session`), `kl:codemode` only while codemode is a tool.
 const KL_PLUGIN = fileURLToPath(new URL("../claude-plugin", import.meta.url));
 export const CODEMODE_SKILL = join(KL_PLUGIN, "skills", "codemode");
 export const KLOUDLITE_SKILL = join(KL_PLUGIN, "skills", "kloudlite");
-export type Role = "main" | "workspace" | "subagent";
+export type Role = "main" | "workspace";
 export const roleSkill = (role: Role) => join(KL_PLUGIN, "skills", `${role}-session`);
 
 export const AUTH_MESSAGE = "Not signed in to Claude. On your laptop run: kl-connect claude login";
