@@ -32,8 +32,8 @@ test("fs wraps git.ts", async () => {
 });
 
 test("house actions always ask; file edits never do", () => {
-  const house = ["workspace_stop", "workspace_delete", "worktree_drop", "env_delete", "env_stop", "env_restore_in_place", "service_remove", "volume_delete", "snapshot_delete", "container_push", "container_build"];
-  expect(ALWAYS_ASK.size).toBe(11);
+  const house = ["workspace_stop", "workspace_delete", "worktree_drop", "env_delete", "env_stop", "env_restore_in_place", "service_remove", "volume_delete", "snapshot_delete", "container_push", "container_build", "packages_remove", "service_update", "intercept"];
+  expect(ALWAYS_ASK.size).toBe(14);
   const walls = { sandbox: "active", network: "fenced" };
   for (const n of house) expect([mustAsk(n, walls, "fenced"), mustAsk(n)]).toEqual([true, true]);
   for (const n of ["write", "edit", "patch", "read"]) expect(mustAsk(n)).toBe(false);

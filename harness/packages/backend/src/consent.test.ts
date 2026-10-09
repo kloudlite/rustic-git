@@ -65,3 +65,14 @@ test("TurnWords keeps what is typed mid-turn", () => {
   w.end();
   expect(w.get()).toEqual([]);
 });
+
+test("packages_remove needs every package named", () => {
+  const a = { packages: ["jq", "ripgrep@14"] };
+  expect(consented("packages_remove", a, { asked: "remove jq and ripgrep" }, ["remove jq and ripgrep"])).toBe(true);
+  expect(consented("packages_remove", a, { asked: "remove jq please" }, ["remove jq please"])).toBe(false);
+});
+
+test("service_update and intercept name their service", () => {
+  expect(consented("service_update", { service: { name: "web", image: "x" } }, { asked: "update the web service" }, ["update the web service"])).toBe(true);
+  expect(consented("intercept", { service: "api" }, { asked: "intercept api into here" }, ["intercept api into here"])).toBe(true);
+});

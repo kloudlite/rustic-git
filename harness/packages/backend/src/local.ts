@@ -38,6 +38,7 @@ import type { Backend, CatalogModel, Hello, SessionEvent, SessionHandle, Session
 export const ALWAYS_ASK = new Set([
   "workspace_stop", "workspace_delete", "worktree_drop", "env_delete", "env_stop", "env_restore_in_place",
   "service_remove", "volume_delete", "snapshot_delete", "container_push", "container_build",
+  "packages_remove", "service_update", "intercept",
 ]);
 /** Run code or reach the network: they ask unless the fence holds (see `mustAsk`). */
 export const ASK_UNLESS_FENCED = new Set(["bash", "exec", "web_fetch"]);

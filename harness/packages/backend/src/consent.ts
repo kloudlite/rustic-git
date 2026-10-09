@@ -26,7 +26,7 @@ function program(cmd: unknown): string | undefined {
 
 /** What the quote must name for this call; undefined means no rule, so the call asks. `self` is the
  * workspace a workspace session's tool defaults to when its `workspace` argument is absent. */
-export function target(name: string, args: any, self?: string): string | undefined {
+export function target(name: string, args: any, self?: string): string | string[] | undefined {
   switch (name) {
     case "workspace_stop":
     case "workspace_delete":
@@ -43,6 +43,14 @@ export function target(name: string, args: any, self?: string): string | undefin
       return args?.volume;
     case "snapshot_delete":
       return args?.snapshot;
+    case "packages_remove": {
+      const names = (args?.packages ?? []).map((p: unknown) => String(p).split("@")[0]);
+      return names.length ? names : undefined;
+    }
+    case "service_update":
+      return args?.service?.name;
+    case "intercept":
+      return args?.service;
     case "container_build":
       return image(args?.tags?.[0]);
     case "container_push":
@@ -69,7 +77,8 @@ export function consented(name: string, args: any, because: Because | undefined,
   const q = typeof because?.asked === "string" ? norm(because.asked) : "";
   if (q.length < 8 || !typed.some((t) => norm(t).includes(q))) return false;
   const t = target(name, args, self);
-  return typeof t === "string" && t.length > 0 && q.includes(norm(t));
+  const all = (Array.isArray(t) ? t : [t]).filter((x): x is string => typeof x === "string" && x.length > 0);
+  return all.length > 0 && all.length === (Array.isArray(t) ? t.length : 1) && all.every((x) => q.includes(norm(x)));
 }
 
 /** What the person typed, for the turn it feeds. `start` at agent_start marks what that turn read;
