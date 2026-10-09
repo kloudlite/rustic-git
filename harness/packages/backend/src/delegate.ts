@@ -174,7 +174,7 @@ async function runInClone(P: string, task: string, deps: DelegateDeps, opts: (ke
 
     const sk = `${C}:agent-${hex()}`;
     h = await deps.open(sk, opts(sk, { fresh: true }));
-    const prompt = `${task}\n\nYou are in your own clone of the workspace; your code is in ${WS} on branch ${branch}. You own how it is built. Commit your work there; the platform pushes it to the workspace with git when you finish. Work only in ${WS}: never reach another workspace, pod or session.`;
+    const prompt = `${task}\n\nYou are in your own clone of the workspace; your code is in ${WS} on branch ${branch}. You own how it is built. Commit your work there and do not push; the platform pushes it to the workspace with git when you finish. Your last message is your report to the workspace session: what you did, how you checked it, anything it must decide. Work only in ${WS}: never reach another workspace, pod or session.`;
     const reply = await answer(h, prompt, () => h!.prompt(prompt));
 
     const commit = async () => {
@@ -294,7 +294,7 @@ export function delegateTools(kind: "main" | "workspace", ws: string | undefined
   const subagent: ToolDef = {
     name: "subagent",
     description:
-      "Run a self-contained code task (search, read, edit, run) in a fresh throwaway session inside a workspace and get its final answer; use it to keep bulk exploration out of your own context.",
+      "Hand planned work (a feature, a refactor, a multi-step fix) to a throwaway subagent in its own clone of this workspace. Commit your own work first. The task must stand alone: the subagent has none of your conversation. Blocks until it ends; the platform then pushes its commits into your checked-out branch with git and deletes the clone. Returns its answer plus `pushed <sha> ...`, `no code changes`, or `push failed ...` (report that as it is).",
     inputSchema: {
       type: "object",
       properties: { task: { type: "string" } },
@@ -309,7 +309,7 @@ export function delegateTools(kind: "main" | "workspace", ws: string | undefined
   const ask: ToolDef = {
     name: "workspace_ask",
     description:
-      "Hand a workspace's own session a goal (in the person's words); returns at once and the workspace's answer arrives later as a message. Never wait or poll for it.",
+      "Hand a workspace's own session a goal: the person's words plus context only you have (environment, decisions, facts from another workspace's answer), never paths, libraries or steps. Returns at once; the workspace's answer arrives later as a `[from <ws>] ...` message. Never wait or poll for it. The only way main gets work done in a workspace.",
     inputSchema: { type: "object", properties: { workspace: { type: "string" }, request: { type: "string" } }, required: ["workspace", "request"] },
     async run(input: { workspace: string; request: string }) {
       const key = input.workspace;
