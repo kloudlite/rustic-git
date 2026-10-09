@@ -27,6 +27,7 @@ import { Clients } from "./clients.ts";
 import { WORKSPACE_DIR, delegateTools, resumeAsks, type DelegateDeps } from "./delegate.ts";
 import { forgetSessions } from "./forget.ts";
 import * as git from "./git.ts";
+import { BECAUSE_SCHEMA, TurnWords, consented } from "./consent.ts";
 import { toolDiff } from "./diff.ts";
 import { podfs } from "./podfs.ts";
 import { space } from "./space.ts";
@@ -36,10 +37,27 @@ import type { Backend, CatalogModel, Hello, SessionEvent, SessionHandle, Session
 /** House actions: they change what the person owns (or the registry), so they ask whatever walls hold. */
 export const ALWAYS_ASK = new Set([
   "workspace_stop", "workspace_delete", "worktree_drop", "env_delete", "env_stop", "env_restore_in_place",
-  "service_remove", "volume_delete", "snapshot_delete", "container_push",
+  "service_remove", "volume_delete", "snapshot_delete", "container_push", "container_build",
 ]);
 /** Run code or reach the network: they ask unless the fence holds (see `mustAsk`). */
 export const ASK_UNLESS_FENCED = new Set(["bash", "exec", "web_fetch"]);
+
+/** Every tool `mustAsk` can be true for: each carries a required `because` (consent.ts). */
+export const GATED = new Set([...ALWAYS_ASK, ...ASK_UNLESS_FENCED]);
+
+/** A gated tool with `because` in its schema, removed before the tool runs: no tool ever sees it. */
+export function asking(t: ToolDef): ToolDef {
+  if (!GATED.has(t.name)) return t;
+  const s: any = t.inputSchema ?? {};
+  return {
+    ...t,
+    inputSchema: { ...s, type: "object", properties: { ...s.properties, because: BECAUSE_SCHEMA }, required: [...(s.required ?? []).filter((n: string) => n !== "because"), "because"] },
+    run: (input: any) => {
+      const { because: _, ...rest } = input ?? {};
+      return t.run(rest);
+    },
+  };
+}
 /** Tools that only mutate the workspace's files — never asked: `paths::confine` / the scratch folder keep them in the tree. */
 export const EDITS = new Set(["write", "edit", "patch"]);
 
@@ -94,21 +112,28 @@ function forgetting(t: ToolDef, deps: DelegateDeps): ToolDef {
 export async function registryFor(k: SessionKind, deps: DelegateDeps, opts: SessionOpts, key = "main"): Promise<Registry> {
   const r = new Registry();
   if (k.kind === "main")
-    return r.add(webFetch, webSearch, ...platformTools("main").map((t) => (t.name === "workspace_delete" ? forgetting(t, deps) : t)), ...delegateTools("main", undefined, deps, opts, key), ...scratchTools(scratchRoot(key)), ...opts.tools);
+    return r.add(...[webFetch, webSearch, ...platformTools("main").map((t) => (t.name === "workspace_delete" ? forgetting(t, deps) : t)), ...delegateTools("main", undefined, deps, opts, key), ...scratchTools(scratchRoot(key)), ...opts.tools].map(asking));
   if (k.kind === "workspace")
-    return r.add(webFetch, webSearch, ...(await podTools(k.ws)), ...platformTools("workspace", k.ws), ...delegateTools("workspace", k.ws, deps, opts), ...opts.tools);
-  return r.add(webFetch, ...(await podTools(k.ws)));
+    return r.add(...[webFetch, webSearch, ...(await podTools(k.ws)), ...platformTools("workspace", k.ws), ...delegateTools("workspace", k.ws, deps, opts), ...opts.tools].map(asking));
+  return r.add(...[webFetch, ...(await podTools(k.ws))].map(asking));
 }
 
 /** The permission gate, on both doors a call comes through: `agent.beforeToolCall` for a
  * model's own calls (pi's loop and Claude's tool server both call it), and the pi session's
  * `_beforeToolCall` for calls a codemode script makes, which pi's nested runner sends straight
  * there with the parent's id and no signal. Gated once per call: top level has no parent id. */
-export function installGate(agent: any, permission: SessionOpts["permission"], fence?: () => PodFence | undefined): void {
+export function installGate(agent: any, permission: SessionOpts["permission"], fence?: () => PodFence | undefined, words?: () => { typed: string[]; self?: string }): void {
   const ask = async (ctx: any, signal: AbortSignal) => {
     const name = ctx.toolCall.name;
     if (!mustAsk(name, fence?.())) return undefined;
-    const decision = await permission!({ name, args: ctx.args, diff: toolDiff(name, ctx.args) ?? undefined }, signal);
+    const { because, ...args } = ctx.args ?? {};
+    const w = words?.();
+    if (w && consented(name, args, because, w.typed, w.self)) return undefined;
+    const said = (v: unknown) => (typeof v === "string" && v.trim() ? v.trim() : undefined);
+    const decision = await permission!(
+      { name, args, diff: toolDiff(name, args) ?? undefined, reason: said(because?.reason), claimed: said(because?.asked) },
+      signal,
+    );
     return decision.block ? decision : undefined;
   };
   const inner = agent.agent.beforeToolCall;
@@ -240,6 +265,13 @@ export class LocalBackend implements Backend {
   #clients = new Clients();
   /** Unregisters of the clients each key's views added; a closed agent has no client left. */
   #offs = new Map<string, Set<() => void>>();
+  /** What the person typed through client views, per key (consent.ts). */
+  #typed = new Map<string, TurnWords>();
+  #words(key: string): TurnWords {
+    let w = this.#typed.get(key);
+    if (!w) this.#typed.set(key, (w = new TurnWords()));
+    return w;
+  }
 
   /** Turns running now: the bench's idle clock must not stop a pod under one (daemon.ts). */
   get busyCount(): number {
@@ -287,12 +319,20 @@ export class LocalBackend implements Backend {
 
   /** Register this view's client (card callback + TUI tools) for its key; the view's dispose removes it. */
   #attach(key: string, opts: SessionOpts, v: SessionHandle): SessionHandle {
-    if (!opts.permission && opts.tools.length === 0) return v;
+    if (!opts.permission && opts.tools.length === 0 && !opts.client) return v;
     const off = this.#clients.add(key, { permission: opts.permission, tools: new Map(opts.tools.map((t) => [t.name, t.run as (input: unknown) => Promise<string>])) });
     let offs = this.#offs.get(key);
     if (!offs) this.#offs.set(key, (offs = new Set()));
     offs.add(off);
+    const typed = opts.client
+      ? {
+          prompt: (text: string, o?: Parameters<SessionHandle["prompt"]>[1]) => (this.#words(key).add(text), v.prompt(text, o)),
+          steer: (text: string, images?: Parameters<SessionHandle["steer"]>[1]) => (this.#words(key).add(text), v.steer(text, images)),
+          followUp: (text: string, images?: Parameters<SessionHandle["followUp"]>[1]) => (this.#words(key).add(text), v.followUp(text, images)),
+        }
+      : {};
     return derive(v, {
+      ...typed,
       dispose: async () => {
         off();
         offs.delete(off);
@@ -352,7 +392,7 @@ export class LocalBackend implements Backend {
       codemode: opts.codemode,
       cwd,
     });
-    installGate(agent, (req, signal) => this.#clients.route(key, (c) => !!c.permission, (c) => c.permission!(req, signal), signal), k.kind === "main" ? undefined : () => podFence(k.ws));
+    installGate(agent, (req, signal) => this.#clients.route(key, (c) => !!c.permission, (c) => c.permission!(req, signal), signal), k.kind === "main" ? undefined : () => podFence(k.ws), () => ({ typed: this.#words(key).get(), self: k.kind === "main" ? undefined : k.ws }));
     const handle: SessionHandle = baseHandle(agent, key, {
       busy: this.#busy,
       onEnd: () => void setTimeout(() => this.#settle(key), 0),
@@ -365,6 +405,10 @@ export class LocalBackend implements Backend {
         for (const off of this.#offs.get(key) ?? []) off();
         this.#offs.delete(key);
       },
+    });
+    handle.subscribe((e) => {
+      if (e.type === "agent_start") this.#words(key).start();
+      else if (e.type === "agent_end") this.#words(key).end();
     });
     this.#live.set(key, handle);
     this.#built.set(key, { claude: "isClaude" in agent, codemode: !!opts.codemode, tools: new Set(opts.tools.map((t) => t.name)), agent });

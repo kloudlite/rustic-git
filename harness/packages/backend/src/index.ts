@@ -85,6 +85,10 @@ export type PermissionRequest = {
   diff?: FileDiff;
   /** Key of the session that asks, when it is not the one the callback was opened for (delegated sessions). */
   session?: string;
+  /** The model's one-sentence reason (because.reason). */
+  reason?: string;
+  /** A quote the model said the person typed but that failed the check (because.asked). */
+  claimed?: string;
 };
 export type Decision = { block?: boolean; reason?: string };
 
@@ -99,6 +103,8 @@ export type SessionOpts = {
   /** Called only for gated tools: house actions always; bash, exec and web_fetch unless the fence holds (`mustAsk`); never write, edit, patch. Absent on internal opens (a
    * view opened to deliver a reply): cards then go to whichever client holds the session (./clients). */
   permission?(req: PermissionRequest, signal: AbortSignal): Promise<Decision>;
+  /** Set only by serve.ts: this view is a person at a client, so what is typed through it counts as their words (consent.ts). */
+  client?: boolean;
 };
 
 type Image = Parameters<AgentSession["steer"]>[1] extends (infer I)[] | undefined ? I : never;

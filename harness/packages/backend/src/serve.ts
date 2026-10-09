@@ -27,6 +27,7 @@ export function serve(backend: Backend, peer: Peer) {
       ...o,
       tools: tools.map((t: ToolSpec) => ({ ...t, run: (input: unknown) => peer.request<string>("tool", { key, name: t.name, input }) })),
       permission: (req, signal) => peer.request("permission", { key, req }, signal),
+      client: true,
     });
     open.set(key, h);
     h.subscribe((event) => peer.emit("session", key, event));

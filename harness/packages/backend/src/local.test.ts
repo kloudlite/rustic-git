@@ -2,7 +2,7 @@ import { expect, test } from "bun:test";
 import { mkdtempSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { LocalBackend, ALWAYS_ASK, baseHandle, mustAsk, shareable, installGate, registryFor, sessionCwd, sessionKind } from "./local.ts";
+import { LocalBackend, ALWAYS_ASK, asking, baseHandle, mustAsk, shareable, installGate, registryFor, sessionCwd, sessionKind } from "./local.ts";
 import { toolDiff } from "./diff.ts";
 import { PROTOCOL } from "./wire.ts";
 
@@ -32,8 +32,8 @@ test("fs wraps git.ts", async () => {
 });
 
 test("house actions always ask; file edits never do", () => {
-  const house = ["workspace_stop", "workspace_delete", "worktree_drop", "env_delete", "env_stop", "env_restore_in_place", "service_remove", "volume_delete", "snapshot_delete", "container_push"];
-  expect(ALWAYS_ASK.size).toBe(10);
+  const house = ["workspace_stop", "workspace_delete", "worktree_drop", "env_delete", "env_stop", "env_restore_in_place", "service_remove", "volume_delete", "snapshot_delete", "container_push", "container_build"];
+  expect(ALWAYS_ASK.size).toBe(11);
   const walls = { sandbox: "active", network: "fenced" };
   for (const n of house) expect([mustAsk(n, walls, "fenced"), mustAsk(n)]).toEqual([true, true]);
   for (const n of ["write", "edit", "patch", "read"]) expect(mustAsk(n)).toBe(false);
@@ -204,4 +204,36 @@ test("baseHandle: events reach every subscriber and track busy; dispose says ses
   expect(a).toEqual(["agent_start", "agent_end", "session_closed"]);
   expect(b).toEqual(a);
   expect([agent.disposed, disposes]).toEqual([1, 1]);
+});
+
+test("asking adds a required because and strips it before the tool runs", async () => {
+  let got: any;
+  const t: any = { name: "workspace_delete", description: "d", inputSchema: { type: "object", properties: { workspace: { type: "string" } }, required: ["workspace"] }, run: async (i: any) => ((got = i), "ok") };
+  const a = asking(t);
+  expect((a.inputSchema as any).properties.because).toBeDefined();
+  expect((a.inputSchema as any).required).toEqual(["workspace", "because"]);
+  await a.run({ workspace: "x", because: { reason: "r" } });
+  expect(got).toEqual({ workspace: "x" });
+  const read: any = { name: "read", inputSchema: { type: "object" }, run: async () => "" };
+  expect(asking(read)).toBe(read);
+});
+
+test("the gate skips the card for words the person typed, else shows the reason", async () => {
+  const gate = (typed: string[]) => {
+    const pi: any = { agent: {} };
+    const reqs: any[] = [];
+    installGate(pi, async (req) => (reqs.push(req), {}), undefined, () => ({ typed }));
+    return { pi, reqs };
+  };
+  const call = (because: any) => ({ toolCall: { name: "workspace_delete" }, args: { workspace: "foo", because } });
+  const yes = gate(["please delete workspace foo"]);
+  expect(await yes.pi.agent.beforeToolCall(call({ asked: "delete workspace foo" }))).toBeUndefined();
+  expect(yes.reqs).toEqual([]);
+  const no = gate([]);
+  await no.pi.agent.beforeToolCall(call({ asked: "delete workspace foo" }));
+  expect(no.reqs.length).toBe(1);
+  expect(no.reqs[0].claimed).toBe("delete workspace foo");
+  expect(no.reqs[0].args).toEqual({ workspace: "foo" });
+  await no.pi.agent.beforeToolCall(call({ reason: "cleanup after test" }));
+  expect(no.reqs[1].reason).toBe("cleanup after test");
 });
