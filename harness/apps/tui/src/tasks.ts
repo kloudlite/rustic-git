@@ -8,7 +8,7 @@ import type { BoardTask } from "@kloudlite-tui/backend";
 export type Board = { session: string; tasks: BoardTask[] };
 export type Tone = "accent" | "muted" | "error" | "success" | "warning";
 /** One drawn line: guides + text on the left, a state column on the right. */
-export type PlanRow = { text: string; right?: string; tone?: Tone; head?: boolean; live?: boolean };
+export type PlanRow = { text: string; right?: string; tone?: Tone; head?: boolean; live?: boolean; task?: BoardTask; session?: string };
 
 const ICON: Record<BoardTask["state"], [string, Tone]> = {
   running: ["●", "accent"],
@@ -54,7 +54,7 @@ export function planRows(
       const [icon, tone] = ICON[t.state];
       const blockers = t.state === "queued" ? t.dependsOn.filter((d) => ids.has(d)) : [];
       const right = t.state === "running" ? "working" : blockers.length ? `waits ${blockers.join(", ")}` : t.state;
-      out.push({ text: `${prefix}${icon} ${t.id} ${t.note?.startsWith("ask:") ? `${names(t.note.slice(4))}: ${t.title}` : t.title}`, right, tone, live: t.state === "running", must: t.state !== "queued" });
+      out.push({ text: `${prefix}${icon} ${t.id} ${t.note?.startsWith("ask:") ? `${names(t.note.slice(4))}: ${t.title}` : t.title}`, right, tone, live: t.state === "running", must: t.state !== "queued", task: t, session: names(b.session) });
       const k = kids(t);
       k.forEach((c, i) => draw(c, cont + (i === k.length - 1 ? "└─ " : "├─ "), cont + (i === k.length - 1 ? "   " : "│  ")));
     };

@@ -35,7 +35,7 @@ function Shimmer({ text, from, to }: { text: string; from: string; to: string })
 }
 
 /** One plan line: guides and text left, state right. A session header is its name, a rule, its state. */
-export function PlanLine({ row, width }: { row: PlanRow; width: number }) {
+export function PlanLine({ row, width, on }: { row: PlanRow; width: number; on?: boolean }) {
   const right = row.right ?? "";
   if (row.head) {
     // a group label under the one "Tasks" heading: no rule of its own, so it never reads as a second title
@@ -48,6 +48,14 @@ export function PlanLine({ row, width }: { row: PlanRow; width: number }) {
     );
   }
   const left = clip(row.text, Math.max(1, width - right.length - 4));
+  if (on)
+    // the selected row of the ^g list: plain text on the selection band, the way Files draws its cursor
+    return (
+      <box flexDirection="row" justifyContent="space-between" height={1} overflow="hidden" paddingLeft={1} paddingRight={1} backgroundColor={theme.selection}>
+        <text selectable={false} fg={theme.bg}>{left}</text>
+        <text selectable={false} fg={theme.bg}>{right}</text>
+      </box>
+    );
   return (
     <box flexDirection="row" justifyContent="space-between" height={1} overflow="hidden" paddingLeft={1} paddingRight={1}>
       {row.live ? <Shimmer text={left} from={theme.accent} to={theme.fg} /> : <text fg={toneColor(row.tone)}>{left}</text>}
