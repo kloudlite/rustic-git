@@ -119,7 +119,10 @@ pub fn bwrap_argv_with_cwd(tree: &TreeCtx, cmd: &[String], env: &[(String, Strin
         a.extend(["--ro-bind".to_string(), f.into(), f.into()]);
     }
     a.extend([
-        "--tmpfs".to_string(),
+        // The tree's own `/tmp`, shared by its execs: a fresh tmpfs per exec lost every file one
+        // command left for the next.
+        "--bind".to_string(),
+        tree.sandbox_tmp().to_string_lossy().into_owned(),
         "/tmp".into(),
         "--proc".into(),
         "/proc".into(),
@@ -279,8 +282,8 @@ pub fn usable(tree: &TreeCtx) -> Option<&'static str> {
 /// `OnceLock` — the caching is `usable`'s and the DECISION is this function's.
 fn preflight(bwrap: &'static str, tree: &TreeCtx) -> Option<&'static str> {
     {
-        // The HOME the real argv sets must exist before the real argv is run, preflight included.
-        let _ = std::fs::create_dir_all(tree.sandbox_home());
+        // The HOME and /tmp the real argv binds must exist before the real argv is run, preflight included.
+        let _ = std::fs::create_dir_all(tree.sandbox_tmp());
         // Two questions in one run: does the wrapper START, and can something inside it reach a
         // trust store. The second is asked with the profile's own `test` against the bundles the
         // image might carry — `-r` on the first that answers, so an image with a different layout
@@ -359,6 +362,9 @@ mod tests {
         // HOME is the tree's own, never the person's.
         let home = argv.windows(3).find(|w| w[0] == "--setenv" && w[1] == "HOME").expect("HOME is set");
         assert_eq!(home[2], format!("{tree_path}/.home"));
+        // /tmp is the tree's, so one exec's file is there for the next.
+        let t = argv.windows(3).find(|w| w[0] == "--bind" && w[2] == "/tmp").expect("/tmp is bound");
+        assert_eq!(t[1], format!("{tree_path}/.home/tmp"));
         // Nothing names the workspace root, so a `cd ..` has nowhere to land.
         assert!(!argv.iter().any(|s| *s == root.to_string_lossy()), "{argv:?}");
         // The command is last, whole, after the `--`.

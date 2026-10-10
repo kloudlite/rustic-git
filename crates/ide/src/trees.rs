@@ -71,6 +71,12 @@ impl TreeCtx {
     pub fn sandbox_home(&self) -> PathBuf {
         self.root.join(".home")
     }
+
+    /// The `/tmp` every exec of this tree shares, inside the git-ignored `.home`. A tmpfs per exec
+    /// made `/tmp/test.log` written by one exec missing in the next (2026-10-10, session report).
+    pub fn sandbox_tmp(&self) -> PathBuf {
+        self.sandbox_home().join("tmp")
+    }
 }
 
 

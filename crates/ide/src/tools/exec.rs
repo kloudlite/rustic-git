@@ -73,9 +73,9 @@ fn command(t: &TreeCtx, args: &Value) -> Result<(Command, String), ToolError> {
         }
     }
     let mut cmd = if let Some(bwrap) = sandbox::usable(t) {
-        // The sandbox's HOME must exist before bwrap sets it, or every tool that writes a dotfile
-        // fails inside an empty namespace.
-        let _ = std::fs::create_dir_all(t.sandbox_home());
+        // The sandbox's HOME and /tmp must exist before bwrap binds them, or every tool that writes
+        // a dotfile fails inside an empty namespace.
+        let _ = std::fs::create_dir_all(t.sandbox_tmp());
         // The RESOLVED path, never the bare name: this process's PATH does not carry the profile's
         // bin, so `Command::new("bwrap")` found nothing and silently ran every exec unwrapped.
         let mut c = Command::new(bwrap);
