@@ -54,6 +54,8 @@ export type SpaceEnvironment = {
   owner: string;
   state: string;
   services: { name: string; ports: number[]; interceptedBy?: string }[];
+  /** The snapshot the environment sits on (its message, else its id); only the connected one. */
+  snapshot?: string;
 };
 export type TaskState = "queued" | "running" | "blocked" | "done" | "failed";
 export type BoardTask = { id: string; title: string; priority: number; dependsOn: string[]; state: TaskState; note?: string; created: number };

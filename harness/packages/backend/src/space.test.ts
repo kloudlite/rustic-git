@@ -1,4 +1,5 @@
 import { afterEach, expect, test } from "bun:test";
+import { envCurrent, type Snap } from "./space.ts";
 import { mkdtempSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -167,4 +168,24 @@ test("a worktree's process is listed with its tree, and its logs are read from t
   const p = s.workspaces[0]!.processes![0]!;
   expect(p.tree).toBe("x");
   expect(outputs[0]).toMatchObject({ id: "px", tree: "x" });
+});
+
+const s = (id: string, t: string, parent?: string, message?: string): Snap => ({ id, parent, message, createdAt: `2026-10-10T0${t}:00:00Z` });
+
+test("never restored: the newest record", () => {
+  expect(envCurrent([s("c", "3", "b"), s("b", "2", "a"), s("a", "1")], null, null)?.id).toBe("c");
+});
+
+test("restored: the restored record, not its older child", () => {
+  const h = [s("c", "3", "b"), s("b", "2", "a"), s("a", "1")];
+  expect(envCurrent(h, "a", "2026-10-10T04:00:00Z")?.id).toBe("a");
+});
+
+test("restored then pushed: the push on top of the restore", () => {
+  const h = [s("d", "5", "a"), s("c", "3", "b"), s("b", "2", "a"), s("a", "1")];
+  expect(envCurrent(h, "a", "2026-10-10T04:00:00Z")?.id).toBe("d");
+});
+
+test("foreign restore names no record", () => {
+  expect(envCurrent([s("a", "1")], "elsewhere", "2026-10-10T04:00:00Z")).toBeUndefined();
 });

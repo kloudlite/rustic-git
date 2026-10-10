@@ -109,6 +109,13 @@ export async function space(): Promise<SpaceView> {
     }));
   await Promise.all(workspaces.filter((w) => w.state === "ready").map(enrich));
 
+  const follows = mine?.find((m) => m.team === team) ?? mine?.[0];
+  const connected: string | undefined = follows?.environment ?? undefined;
+  // Only the connected environment's snapshot: the sidebar shows that one, and each is a history read.
+  const on = envs.find((e) => e.id === connected);
+  const history = on ? await capped(apiJson<Snap[]>("GET", `/v1/volumes/${encodeURIComponent(on.id)}/history`)) : undefined;
+  const at = on && history ? envCurrent(history, on.restored_to ?? null, on.restore_requested_at ?? null) : undefined;
+
   const environments: SpaceEnvironment[] = envs.map((e) => {
     const status = new Map<string, any>((e.service_status ?? []).map((s: any) => [s.name, s]));
     return {
@@ -117,8 +124,33 @@ export async function space(): Promise<SpaceView> {
       owner: e.owner,
       state: e.state,
       services: (e.services ?? []).map((s: any) => ({ name: s.name, ports: s.ports ?? [], interceptedBy: status.get(s.name)?.interceptedBy ?? undefined })),
+      snapshot: e === on && at ? at.message || at.id : undefined,
     };
   });
-  const follows = mine?.find((m) => m.team === team) ?? mine?.[0];
-  return { available: true, user, workspaces, environments, connected: follows?.environment ?? undefined };
+  return { available: true, user, workspaces, environments, connected };
+}
+
+/** A row of `/v1/volumes/{name}/history`, newest first. */
+export type Snap = { id: string; parent?: string | null; message?: string; createdAt: string | null };
+
+/** Where an environment sits: the web's rule (`web/apps/web/src/lib/env-current.ts`), kept equal by
+ * hand. Never restored: the newest record. Restored: the newest record pushed AFTER the restore that
+ * descends from the restored one, else the restored record. A `restoredTo` naming no record here
+ * (a foreign graft) is no record: naming one would claim a snapshot the environment is not on. */
+export function envCurrent(history: Snap[], restoredTo: string | null, restoredAt: string | null): Snap | undefined {
+  if (restoredTo === null) return history[0];
+  const byId = new Map(history.map((h) => [h.id, h]));
+  const restored = byId.get(restoredTo);
+  if (!restored) return undefined;
+  const since = restoredAt ? Date.parse(restoredAt) : 0;
+  const time = (h: Snap) => (h.createdAt ? Date.parse(h.createdAt) : NaN);
+  // walk parents only through records newer than the restore; an older one is the branch left behind
+  const descends = (n: Snap): boolean => {
+    for (let p: Snap | undefined = n; p; p = p.parent ? byId.get(p.parent) : undefined) {
+      if (p.id === restored.id) return true;
+      if (!(time(p) > since)) return false;
+    }
+    return false;
+  };
+  return history.find((h) => time(h) > since && descends(h)) ?? restored;
 }
