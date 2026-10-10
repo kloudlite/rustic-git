@@ -64,6 +64,7 @@ import {
   patchSession,
     sessionIdOf,
   sessionKey,
+  pickAgentSession,
   askFor,
   baseOf,
   type QueuedMessage,
@@ -347,6 +348,12 @@ export function App({
   }, [watched, activeBase]);
   // same filter as the bench's listSessions(prefix)
   const baseSessions = watched ? watched.filter((m) => m.key.startsWith(activeBase)) : fetched;
+  // a clone has no session of its own, only its subagent's: open that one
+  useEffect(() => {
+    if (activeBase === "main" || sessionId[activeBase]) return;
+    const id = pickAgentSession(activeBase, baseSessions);
+    if (id) setSessionId((m) => (m[activeBase] ? m : { ...m, [activeBase]: id }));
+  }, [activeBase, baseSessions, sessionId]);
   const activeKey = sessionKey(
     focus === 0 ? undefined : workspaces[focus - 1]!.id,
     sessionId[activeBase] ?? "main",

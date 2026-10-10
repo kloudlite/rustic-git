@@ -33,7 +33,7 @@ export type QueuedMessage = { text: string; kind: "steer" | "followUp" };
 
 const emptySession: Session = { entries: [], busy: false, tokens: 0, history: [], model: DEFAULT_MODEL, queued: [] };
 
-/** The workspace a session key belongs to: `main`, `ws-…`. */
+/** The workspace a session key belongs to: `main`, `ws-…`; `ws-…:agent-<hex>` belongs to `ws-…`. */
 export function baseOf(key: string): string {
   return key.split(":")[0]!;
 }
@@ -52,6 +52,15 @@ export function sessionKey(workspaceId?: string, id = "main"): string {
 /** The session id inside a key, i.e. the inverse of `sessionKey`. */
 export function sessionIdOf(base: string, key: string): string {
   return key === base ? "main" : key.slice(base.length + 1);
+}
+
+/** A clone's row has no session of its own, only its subagent's (`<clone>:agent-<hex>`): the id of
+ * the newest one, or undefined when the base has a regular session or no agent one. */
+export function pickAgentSession(base: string, sessions: { key: string; updated: number }[]): string | undefined {
+  const mine = sessions.filter((s) => s.key === base || s.key.startsWith(`${base}:`));
+  if (mine.some((s) => !s.key.includes(":agent-"))) return undefined;
+  const newest = mine.reduce<{ key: string; updated: number } | undefined>((a, s) => (!a || s.updated > a.updated ? s : a), undefined);
+  return newest && sessionIdOf(base, newest.key);
 }
 
 export type SessionMap = Record<string, Session>;

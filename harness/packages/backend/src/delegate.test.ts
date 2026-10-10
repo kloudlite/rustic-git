@@ -147,7 +147,7 @@ test("resumeAsks resends a fresh ask with a prefix and tries+1; the third restar
 
 test("delegateTools: main gets workspace_ask, a workspace gets main_tell", () => {
   expect(delegateTools("main", undefined, D(), caller).map((t) => t.name)).toEqual(["workspace_ask"]);
-  expect(delegateTools("workspace", "ws-a", D(), caller).map((t) => t.name)).toEqual(["main_tell"]);
+  expect(delegateTools("workspace", "ws-a", D(), caller).map((t) => t.name)).toEqual(["main_tell", "subagent"]);
 });
 
 const tellOf = (deps: DelegateDeps, ws = "ws-a") => delegateTools("workspace", ws, deps, caller)[0]!;
@@ -292,4 +292,198 @@ test("workspace_ask lends the caller's typed words to the workspace key before p
   await ask!.run({ workspace: "w1", request: "start it" });
   await flush();
   expect(lent).toEqual([["w1", ["run it on port 3000"]]]);
+});
+
+// ---- subagent in its own clone ----
+
+type Rig = ReturnType<typeof rig>;
+function rig(o: { bare?: boolean; branch?: string; head?: string; pushes?: { code: number; stderr: string }[]; clone?: string[]; ready?: boolean } = {}) {
+  const calls: string[] = [];
+  const execs: { ws: string; cmd: string }[] = [];
+  const clone = [...(o.clone ?? ['{"id":"ws-c1"}'])];
+  const pushes = [...(o.pushes ?? [{ code: 0, stderr: "" }])];
+  let head = o.head ?? "newsha";
+  // like the real api: a failed answer throws "<status>: <text>"
+  const api = async (m: string, path: string, body?: any) => {
+    const r = await answer(m, path, body);
+    if (r.startsWith("error ")) throw new Error(r.slice(6));
+    return r;
+  };
+  const answer = async (m: string, path: string, body?: any) => {
+    calls.push(`${m} ${path}`);
+    if (path.endsWith("/clone")) bodies.push(body);
+    if (path.endsWith("/clone")) return clone.length > 1 ? clone.shift()! : clone[0]!;
+    if (m === "DELETE") return "ok";
+    if (path === "/v1/workspaces/ws-c1") return JSON.stringify({ state: o.ready === false ? "creating" : "ready" });
+    if (path === "/v1/workspaces/ws-c1/tools") return JSON.stringify({ address: "10.0.0.9:7788", token: "SECRET" });
+    if (path === "/v1/workspaces/P/tools") return JSON.stringify({ address: "10.0.0.5:7788", token: "SECRET" });
+    return "error 404: no";
+  };
+  const exec = async (ws: string, cmd: string) => {
+    execs.push({ ws, cmd });
+    const ok = (stdout = "") => ({ code: 0, stdout, stderr: "" });
+    if (cmd.includes("--abbrev-ref") && o.bare && !execs.some((e) => e.cmd.includes("--allow-empty")))
+      return { code: 128, stdout: "", stderr: "fatal: not a git repository (or any of the parent directories): .git" };
+    if (cmd.includes("--abbrev-ref")) return ok(`${o.branch ?? "main"}\nbasesha\n`);
+    if (cmd.includes("git push")) return { stdout: "", ...pushes.shift()! };
+    if (cmd.includes("rev-parse --short")) return ok("abc1234\n");
+    if (cmd.includes("rev-parse HEAD")) return ok(head + "\n");
+    if (cmd.includes("--name-only")) return ok("a.ts\nb.ts\n");
+    return ok();
+  };
+  const child = fake("did it");
+  const opened: string[] = [];
+  const forgot: string[] = [];
+  const bodies: any[] = [];
+  const deps = { ...D(), open: async (k: string) => (opened.push(k), child), api, exec, sleep: async () => {}, forget: async (ws: string) => void forgot.push(ws) };
+  const [, sub] = delegateTools("workspace", "P", deps, caller);
+  return { calls, execs, child, opened, forgot, bodies, run: (task = "fix the bug\nmore") => sub!.run({ task }) as Promise<string>, setHead: (h: string) => (head = h) };
+}
+const deleted = (r: Rig) => r.calls.includes("DELETE /v1/workspaces/ws-c1");
+
+test("clone happy path: ready, session on the clone, commit, push to the parent ip, clone deleted", async () => {
+  const r = rig();
+  const out = await r.run();
+  expect(r.calls[0]).toBe("GET /v1/workspaces/P/tools");
+  expect(r.calls).toContain("POST /v1/workspaces/P/clone");
+  expect(r.opened[0]).toMatch(/^ws-c1:agent-[0-9a-f]{8}$/);
+  expect(r.child.sent[0]).toContain("your own clone");
+  expect(r.child.sent[0]).toContain("branch main");
+  const commit = r.execs.find((e) => e.cmd.includes("commit -q"))!;
+  expect(commit.ws).toBe("ws-c1");
+  expect(commit.cmd).toContain("-m 'fix the bug'");
+  const push = r.execs.find((e) => e.cmd.includes("git push"))!;
+  expect(push.cmd).toContain("'ssh://kl@10.0.0.5/home/kl/workspace' HEAD:'main'");
+  expect(deleted(r)).toBe(true);
+  expect(out).toBe("did it\n\npushed abc1234 to main in P:\na.ts\nb.ts");
+  expect(out).not.toContain("SECRET");
+  expect(r.child.disposed).toBe(1);
+  expect(r.forgot).toEqual(["ws-c1"]);
+});
+
+test("clone with no changes: no push, clone deleted", async () => {
+  const r = rig({ head: "basesha" });
+  expect(await r.run()).toBe("did it\n\nno code changes");
+  expect(r.execs.some((e) => e.cmd.includes("git push"))).toBe(false);
+  expect(deleted(r)).toBe(true);
+});
+
+test("a workspace with no git yet gets a repo and a first commit, then the clone goes ahead", async () => {
+  const r = rig({ bare: true });
+  expect(await r.run()).toContain("pushed");
+  const start = r.execs.find((e) => e.cmd.includes("--allow-empty"))!;
+  expect(start.ws).toBe("P");
+  expect(start.cmd).toContain("git init -q -b main");
+  expect(r.calls.some((c) => c.endsWith("/clone"))).toBe(true);
+});
+
+test("detached HEAD in the parent: error and no clone", async () => {
+  const r = rig({ branch: "HEAD" });
+  expect(await r.run()).toBe("error: subagent needs a git branch checked out in /home/kl/workspace of P");
+  expect(r.calls.some((c) => c.endsWith("/clone"))).toBe(false);
+});
+
+test("clone 409 'already being cut' is retried", async () => {
+  const r = rig({ clone: ["error 409: a snapshot is already being cut for this workspace", '{"id":"ws-c1"}'] });
+  expect(await r.run()).toContain("pushed");
+  expect(r.calls.filter((c) => c.endsWith("/clone")).length).toBe(2);
+});
+
+test("other clone errors come back as is", async () => {
+  const r = rig({ clone: ["error 409: quota"] });
+  expect(await r.run()).toBe("error 409: quota");
+  expect(r.opened.length).toBe(0);
+});
+
+test("push rejected, then accepted after one rebase prompt to the same session, which owns the conflicts", async () => {
+  const r = rig({ pushes: [{ code: 1, stderr: "! [rejected] HEAD -> main (non-fast-forward)" }, { code: 0, stderr: "" }] });
+  expect(await r.run()).toContain("pushed abc1234");
+  expect(r.child.sent.length).toBe(2);
+  expect(r.child.sent[1]).toContain("git pull --rebase ssh://kl@10.0.0.5/home/kl/workspace main");
+  expect(r.child.sent[1]).toContain("resolve every conflict yourself");
+  expect(r.opened.length).toBe(1);
+  expect(deleted(r)).toBe(true);
+});
+
+test("a moved branch is rebased up to 3 rounds by the same session, then the clone is kept and named", async () => {
+  const bad = { code: 1, stderr: "x\n! [rejected] (fetch first)" };
+  const r = rig({ pushes: [bad, bad, bad, bad] });
+  const out = await r.run();
+  expect(out).toContain("push failed:");
+  expect(out).toContain("clone ws-c1 kept with the commits");
+  expect(r.child.sent.length).toBe(4); // the task, then three rebase rounds
+  expect(r.execs.filter((e) => e.cmd.includes("git push")).length).toBe(4);
+  expect(r.opened.length).toBe(1);
+  expect(deleted(r)).toBe(false);
+  expect(r.forgot).toEqual([]);
+});
+
+test("the third rebase round can still land the push", async () => {
+  const bad = { code: 1, stderr: "! [rejected] (non-fast-forward)" };
+  const r = rig({ pushes: [bad, bad, bad, { code: 0, stderr: "" }] });
+  expect(await r.run()).toContain("pushed abc1234");
+  expect(r.child.sent.length).toBe(4);
+  expect(deleted(r)).toBe(true);
+});
+
+test("a refusal that is not a moved branch (dirty parent) is not retried", async () => {
+  const r = rig({ pushes: [{ code: 1, stderr: "remote rejected: Working directory has unstaged changes" }] });
+  expect(await r.run()).toContain("clone ws-c1 kept");
+  expect(r.child.sent.length).toBe(1);
+});
+
+test("clone never ready: deleted, error returned, no session", async () => {
+  const r = rig({ ready: false });
+  expect(await r.run()).toContain("did not become ready");
+  expect(deleted(r)).toBe(true);
+  expect(r.opened.length).toBe(0);
+});
+
+test("a throw before the push deletes the clone", async () => {
+  const r = rig();
+  r.child.prompt = async () => { throw new Error("boom"); };
+  await expect(r.run()).rejects.toThrow("boom");
+  expect(deleted(r)).toBe(true);
+  expect(r.child.disposed).toBe(1);
+});
+
+test("the clone request carries the task's first line, cut to 72 characters", async () => {
+  const r = rig();
+  await r.run("fix the bug\nmore");
+  expect(r.bodies).toHaveLength(1);
+  expect(r.bodies[0]).toMatchObject({ task: "fix the bug" });
+  expect(r.bodies[0].name).toMatch(/^sub-/);
+  const long = rig();
+  await long.run("x".repeat(100));
+  expect(long.bodies[0].task).toBe("x".repeat(72));
+});
+
+test("no clone, no clone request", async () => {
+  const r = rig({ branch: "HEAD" });
+  await r.run();
+  expect(r.bodies).toEqual([]);
+});
+
+
+test("a subagent session's permission request goes to the workspace session's key and names the subagent", async () => {
+  const seen: [string, string | undefined][] = [];
+  let given!: SessionOpts;
+  const deps: DelegateDeps = {
+    ...D({ permit: async (k, q) => (seen.push([k, q.session]), {}) }),
+    open: async (_k, o) => ((given = o), fake()),
+    api: async (m, p) => (p.endsWith("/clone") ? '{"id":"ws-c1"}' : p.endsWith("/tools") ? '{"address":"10.0.0.5:7788","token":"T"}' : m === "DELETE" ? "ok" : '{"state":"ready"}'),
+    exec: async (_w, cmd) => ({ code: 0, stdout: cmd.includes("--abbrev-ref") ? "main\nbasesha\n" : "basesha\n", stderr: "" }),
+    sleep: async () => {},
+    forget: async () => {},
+  };
+  const [, sub] = delegateTools("workspace", "P", deps, caller, "P:work");
+  await sub!.run({ task: "t" });
+  await given.permission!({ name: "exec", args: {} }, new AbortController().signal);
+  expect(seen[0]![0]).toBe("P:work");
+  expect(seen[0]![1]).toMatch(/^ws-c1:agent-/);
+});
+
+test("workspace has subagent, main does not", () => {
+  expect(delegateTools("workspace", "ws-a", D(), caller).map((t) => t.name)).toEqual(["main_tell", "subagent"]);
+  expect(delegateTools("main", undefined, D(), caller).map((t) => t.name)).not.toContain("subagent");
 });

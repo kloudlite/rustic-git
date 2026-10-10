@@ -139,7 +139,7 @@ const CODEMODE_NOTE =
   "(3) Fetch URLs with `tools.web_fetch`. Do not use curl in bash. Make one call for each item. Run the calls together with `Promise.all`. " +
   "(4) To show the user a table, list or report, build it in the script. Pass it to `tools.display({ markdown })`. The displayed text stays readable to you for follow-ups. Reply in one line. Do not retype what was displayed. " +
   "(5) `tools.searchTools(...)` and `tools.describeTool(...)` are asynchronous. Always use `await` with them. " +
-  "(6) The shell is `tools.bash` in the main session and `tools.exec` in workspace sessions. Call the one that the tool list has. Do not guess. " +
+  "(6) The shell is `tools.bash` in the main session and `tools.exec` in workspace and subagent sessions. Call the one that the tool list has. Do not guess. " +
   "(7) A poll loop exits as soon as the condition holds. It has a bounded count. It checks `services[].ready` (or `service_status[].ready`). It does not use a regex over the spec. A failed tool call throws. Do not poll after a write that you did not check. " +
   "The codemode skill has worked examples.";
 
@@ -402,7 +402,7 @@ export async function createSession({
   autoCompact?: boolean;
   /** Let the model write a script that calls tools, instead of one call per turn. */
   codemode?: boolean;
-  /** main or workspace: picks the role skill loaded beside kloudlite. */
+  /** main, workspace or subagent: picks the role skill loaded beside kloudlite. */
   role?: Role;
   /** Working directory the model is told and Claude spawns in (default: this process's). */
   cwd?: string;

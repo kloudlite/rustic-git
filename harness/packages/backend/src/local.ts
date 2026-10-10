@@ -73,7 +73,7 @@ export const EDITS = new Set(["write", "edit", "patch"]);
  * bash and web_fetch run in the bench process, whose network is fenced when KLOUDLITE_EGRESS says
  * so (bash's scratch sandbox already fails closed).
  */
-export function mustAsk(name: string, fence?: PodFence, egress = process.env.KLOUDLITE_EGRESS, kind: "main" | "workspace" = "main"): boolean {
+export function mustAsk(name: string, fence?: PodFence, egress = process.env.KLOUDLITE_EGRESS, kind: "main" | "workspace" | "subagent" = "main"): boolean {
   if (kind === "workspace" && name === "workspace_stop") return false;
   if (ALWAYS_ASK.has(name)) return true;
   if (!ASK_UNLESS_FENCED.has(name)) return false;
@@ -98,6 +98,11 @@ export function roleCard(key: string): string {
       "You orchestrate. You create, clone, start and delete workspaces and environments. You give work to workspaces and watch their boards with workspace_tasks. Each workspace keeps its own tasks. Use task_add only for work you do yourself. When work crosses components, write the contract first and send every component ask at the same time; send the integration ask when every component is done.",
       "You never write the code yourself. Reports arrive as `[from <ws>] ...` messages.",
     ].join("\n");
+  if (k.kind === "subagent")
+    return [
+      `[role: subagent of workspace ${k.ws}]`,
+      `You are a subagent of workspace ${k.ws}. Do the task alone. Commit your work and do not push; the platform pushes. If the platform says the branch moved, rebase, resolve every conflict, commit and reply done. Your last message is your report to the workspace session. You do not talk to main.`,
+    ].join("\n");
   return [
     `[role: workspace session for ${k.ws}]`,
     "You work only in this workspace. Work comes from the person or as `[from main session] ...` messages.",
@@ -107,13 +112,13 @@ export function roleCard(key: string): string {
   ].join("\n");
 }
 
-export type SessionKind = { kind: "main" } | { kind: "workspace"; ws: string };
+export type SessionKind = { kind: "main" } | { kind: "workspace"; ws: string } | { kind: "subagent"; ws: string };
 
-/** `main[:id]` is the main session, anything else a workspace's. */
+/** `main[:id]` is the main session, `<ws>:agent-<hex>` a subagent, anything else a workspace's. */
 export function sessionKind(key: string): SessionKind {
   const base = key.split(":")[0]!;
   if (base === "main") return { kind: "main" };
-  return { kind: "workspace", ws: base };
+  return key.includes(":agent-") ? { kind: "subagent", ws: base } : { kind: "workspace", ws: base };
 }
 
 function catalog(): CatalogModel[] {
@@ -156,21 +161,28 @@ function question(key: string, cards: Cards): ToolDef {
 }
 
 /** Who gets which hands: main reaches the platform, delegates and has a confined scratch folder (bash, read, write); a workspace session has the
- * pod's code tools and its own slice of the platform, and reports to main with main_tell. */
+ * pod's code tools and its own slice of the platform, and reports to main with main_tell; a subagent has the same minus everything that
+ * delegates, reports upward, asks the person or keeps a board. */
 export async function registryFor(k: SessionKind, deps: DelegateDeps, opts: SessionOpts, key = "main"): Promise<Registry> {
   const r = new Registry();
   if (k.kind === "main")
     return r.add(...[webFetch, webSearch, ...platformTools("main").map((t) => (t.name === "workspace_delete" ? forgetting(t, deps) : t)), ...delegateTools("main", undefined, deps, opts, key), ...taskTools(tasksFile(key, deps.tasks)), ...boardTools(deps.tasks), ...scratchTools(scratchRoot(key)), ...opts.tools].map(asking), ...(deps.cards ? [question(key, deps.cards)] : []));
   // the self-stop is the one call that never asks: it only snapshots and parks the workspace
   // that is already finished, and carries no `because` for a card to quote
-  return r.add(...[webFetch, webSearch, ...(await podTools(k.ws)), ...platformTools("workspace", k.ws), ...delegateTools("workspace", k.ws, deps, opts), ...taskTools(tasksFile(key, deps.tasks)), ...opts.tools].map((t) => (t.name === "workspace_stop" ? t : asking(t))), ...(deps.cards ? [question(key, deps.cards)] : []));
+  if (k.kind === "subagent") {
+    // a subagent talks only to its workspace session (its last message is the tool result): nothing that
+    // delegates, reports upward, asks the person, keeps a board, or holds the workspace's service/lifecycle
+    const no = new Set(["workspace_stop", "intercept", "release", "task_add", "task_update", "task_list", "workspace_tasks", "workspace_ask", "main_tell", "subagent"]);
+    return r.add(...[webFetch, webSearch, ...(await podTools(k.ws)), ...platformTools("workspace", k.ws).filter((t) => !no.has(t.name)), ...opts.tools].map(asking));
+  }
+  return r.add(...[webFetch, webSearch, ...(await podTools(k.ws)), ...platformTools("workspace", k.ws), ...delegateTools("workspace", k.ws, deps, opts, key), ...taskTools(tasksFile(key, deps.tasks)), ...opts.tools].map((t) => (t.name === "workspace_stop" ? t : asking(t))), ...(deps.cards ? [question(key, deps.cards)] : []));
 }
 
 /** The permission gate, on both doors a call comes through: `agent.beforeToolCall` for a
  * model's own calls (pi's loop and Claude's tool server both call it), and the pi session's
  * `_beforeToolCall` for calls a codemode script makes, which pi's nested runner sends straight
  * there with the parent's id and no signal. Gated once per call: top level has no parent id. */
-export function installGate(agent: any, permission: SessionOpts["permission"], fence?: () => PodFence | undefined, words?: () => { typed: string[]; self?: string }, kind: "main" | "workspace" = "main"): void {
+export function installGate(agent: any, permission: SessionOpts["permission"], fence?: () => PodFence | undefined, words?: () => { typed: string[]; self?: string }, kind: "main" | "workspace" | "subagent" = "main"): void {
   const ask = async (ctx: any, signal: AbortSignal) => {
     const name = ctx.toolCall.name;
     if (!mustAsk(name, fence?.(), undefined, kind)) return undefined;
@@ -654,7 +666,9 @@ export class LocalBackend implements Backend {
   }
 
   sessions = {
-    list: async (prefix?: string) => listSessions(prefix),
+    // subagent sessions are throwaway: never offered for resume in the general list; a clone's own
+    // prefix lists them so the TUI can show the one live under that clone
+    list: async (prefix?: string) => (prefix ? listSessions(prefix) : listSessions().filter((s) => !s.key.includes(":agent-"))),
     name: async (key: string, name: string) => (await nameSession(key, name), this.#changed()),
     describe: async (key: string, d: string) => (await describeSession(key, d), this.#changed()),
     clear: async (key: string) => {

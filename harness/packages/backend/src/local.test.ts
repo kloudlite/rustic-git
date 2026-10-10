@@ -62,11 +62,12 @@ test("sessionKind", () => {
   expect(sessionKind("main:x")).toEqual({ kind: "main" });
   expect(sessionKind("ws1")).toEqual({ kind: "workspace", ws: "ws1" });
   expect(sessionKind("ws1:x")).toEqual({ kind: "workspace", ws: "ws1" });
-  expect(sessionKind("ws1:agent-ab12")).toEqual({ kind: "workspace", ws: "ws1" });
+  expect(sessionKind("ws1:agent-ab12")).toEqual({ kind: "subagent", ws: "ws1" });
 });
 
 test("workspace sessions run in the pod's folder, main does not", () => {
   expect(sessionCwd(sessionKind("ws1"))).toBe("/home/kl/workspace");
+  expect(sessionCwd(sessionKind("ws1:agent-ab12"))).toBe("/home/kl/workspace");
   expect(sessionCwd(sessionKind("main"))).toBeUndefined();
 });
 
@@ -96,6 +97,20 @@ test("registry per session kind", async () => {
   const mstop: any = (await registryFor({ kind: "main" }, deps, opts)).get("workspace_stop").inputSchema;
   expect(mstop.required).toEqual(["workspace", "because"]);
   expect(ws).toContain("intercept");
+  expect(ws).toContain("subagent");
+  expect(main).not.toContain("subagent");
+  // a subagent talks only to its workspace session: none of these, everything else the workspace has
+  const sub = (await registryFor({ kind: "subagent", ws: "w1" }, deps, opts)).names();
+  for (const n of ["subagent", "workspace_ask", "main_tell", "workspace_stop", "intercept", "release", "question", "task_add", "task_update", "task_list", "workspace_tasks"]) expect(sub).not.toContain(n);
+  for (const n of ws.filter((n) => !["subagent", "main_tell", "workspace_stop", "intercept", "release", "question", "task_add", "task_update", "task_list", "workspace_tasks"].includes(n))) expect(sub).toContain(n);
+  expect(sub).toContain("exec");
+  expect(sub).toContain("packages_add");
+  expect(sub).toContain("web_search");
+  expect(sub).not.toContain("workspace_create");
+});
+
+test("a subagent role card names its workspace and the commit-do-not-push rule", () => {
+  expect(roleCard("ws-a:agent-1f")).toContain("You are a subagent of workspace ws-a. Do the task alone. Commit your work and do not push; the platform pushes.");
 });
 
 test("main keeps only the orchestrator's tools", async () => {
@@ -136,17 +151,21 @@ test("the role card rides the first prompt only, and never a resumed session's",
   expect(roleCard("ws-a:x")).toContain("workspace session for ws-a");
 });
 
-test("sessions.list offers every key", async () => {
+test("sessions.list hides :agent- keys, a clone's own prefix lists them", async () => {
   process.env.KLOUDLITE_CONFIG_DIR = mkdtempSync(join(tmpdir(), "kl-cfg-"));
   delete process.env.KL_API_URL;
   const { models } = await import("@kloudlite-tui/agent");
   const m = models.getModels().find((x: any) => x.provider !== "anthropic") as any;
   const b = new LocalBackend();
   const o: any = { initial: { model: { provider: m.provider, id: m.id } }, fresh: true, tools: [], permission: async () => ({}) };
-  const h = await b.session("w9", o);
+  const h = await b.session("w9:agent-ab12", o);
+  const h2 = await b.session("w9", o);
   const keys = (await b.sessions.list()).map((s) => s.key);
   expect(keys).toContain("w9");
+  expect(keys).not.toContain("w9:agent-ab12");
+  expect((await b.sessions.list("w9")).map((s) => s.key)).toContain("w9:agent-ab12");
   await h.dispose();
+  await h2.dispose();
 }, 20000);
 
 test("session state outlives the agent: reopen without fresh keeps what was set", async () => {

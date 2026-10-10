@@ -1,7 +1,11 @@
 //! Tools that start another session: `workspace_ask` (main hands a workspace's own session a goal;
 //! fire-and-forget, the answer comes back later as a `[from <ws>] ...` message prompted, or followed
 //! up when busy, into the CALLER's session so main never blocks) and `main_tell` (a workspace session
-//! tells main it is done, blocked, or needs something; the only way a workspace speaks to main).
+//! tells main it is done, blocked, or needs something; the only way a workspace speaks to main) and
+//! `subagent` (a workspace session's tool only: a throwaway session in a clone of the workspace; it
+//! blocks, commits there, and the platform pushes into the parent's checked-out branch over SSH, the
+//! child resolving a moved branch itself in up to 3 rebase rounds; a push that still fails keeps the
+//! clone. Needs the bench token: a workspace token cannot clone).
 //! Messages carry only words: a task id never travels in the text and never reaches the other
 //! session's board. One exception on the CALLER's own board: `workspace_ask` moves the task it
 //! serves (`for`) from queued to running, so the Plan panel shows the handed-off work as live. The message log (messages.ts) is the one
@@ -14,10 +18,11 @@
 //! restart (`resumeAsks`), at most twice.
 import type { Cards } from "./cards.ts";
 import { randomBytes } from "node:crypto";
-import type { ToolDef } from "@kloudlite-tui/tools";
+import { api, podExec, type ExecResult, type ToolDef } from "@kloudlite-tui/tools";
 import type { PermissionRequest, Decision, SessionHandle, SessionOpts } from "./index.ts";
 import { messagesFile, recordMessage } from "./messages.ts";
 import { asksDir, dropAsk, listAsks, saveAsk, type PendingAsk } from "./asks.ts";
+import { forgetSessions } from "./forget.ts";
 import { readTasks, tasksDir, tasksFile, updateTask } from "./tasks.ts";
 
 export type DelegateDeps = {
@@ -49,10 +54,34 @@ export type DelegateDeps = {
   typed?(key: string): string[];
   /** Add words to the turn of `key` as if typed there; a relayed ask lends the caller's. */
   lend?(key: string, words: string[]): void;
+  /** Platform API (tools' `api`) and pod exec; injectable so tests run on fakes. */
+  api?: (method: string, path: string, body?: unknown) => Promise<string>;
+  exec?: (ws: string, cmd: string, timeoutMs?: number) => Promise<ExecResult>;
+  /** Waits between polls; tests pass a no-op (the caps count slept time, not wall time). */
+  sleep?: (ms: number) => Promise<void>;
+  /** Drops a deleted workspace's bench sessions; tests pass a fake. */
+  forget?: (ws: string) => Promise<void>;
 };
 
 /** A workspace pod's source folder (crates/workspaces/src/k8s/mod.rs WORKSPACE_DIR). */
 export const WORKSPACE_DIR = "/home/kl/workspace";
+const WS = WORKSPACE_DIR;
+const sq = (s: string) => `'${s.replace(/'/g, `'\\''`)}'`;
+const tail = (s: string, n: number) => s.trim().split("\n").slice(-n).join("\n");
+const REBASE_ROUNDS = 3;
+const MOVED = /non-fast-forward|fetch first/;
+
+/** One commit of whatever the child left. The -c fallbacks apply only when the pod has no git
+ * identity (the directory knows no name for the handle); otherwise the person's own identity wins. */
+const commitCmd = (task: string) =>
+  `cd ${WS} && git add -A && (git diff --cached --quiet || { n=$(git config user.name); e=$(git config user.email); ` +
+  `git -c user.name="\${n:-kl subagent}" -c user.email="\${e:-subagent@kloudlite.local}" commit -q -m ${sq(task.split("\n")[0]!.slice(0, 72) || "subagent changes")}; })`;
+
+/** `git init -b main` unless already a repo, then an empty first commit so there is a branch and a
+ * HEAD to clone from and merge back onto. Same identity fallbacks as `commitCmd`. */
+const startCmd =
+  `cd ${WS} && (git rev-parse --git-dir >/dev/null 2>&1 || git init -q -b main) && n=$(git config user.name); e=$(git config user.email); ` +
+  `git -c user.name="\${n:-kl subagent}" -c user.email="\${e:-subagent@kloudlite.local}" commit -q --allow-empty -m 'Start workspace'`;
 const hex = () => randomBytes(4).toString("hex");
 
 const textOf = (m: any): string =>
@@ -88,6 +117,125 @@ function answer(h: SessionHandle, text: string, send: () => Promise<void>): Prom
       reject(err);
     });
   });
+}
+
+async function runInClone(P: string, task: string, deps: DelegateDeps, opts: (key: string, e?: Partial<SessionOpts>) => SessionOpts): Promise<string> {
+  // api throws on a non-2xx answer; this flow branches on the status text ("error 409: … already being cut")
+  const call = (m: string, path: string, body?: unknown) =>
+    (deps.api ?? api)(m, path, body).catch((e: any) => `error ${e?.message ?? e}`);
+  const exec = deps.exec ?? podExec;
+  const sleep = deps.sleep ?? ((ms: number) => new Promise<void>((r) => setTimeout(r, ms)));
+  const p = (id: string) => `/v1/workspaces/${encodeURIComponent(id)}`;
+  /** Poll `f` every 2 s until it yields a value; null once `capMs` of waiting is spent. */
+  const until = async <T>(f: () => Promise<T | undefined>, capMs: number): Promise<T | null> => {
+    for (let waited = 0; ; waited += 2000) {
+      const v = await f();
+      if (v !== undefined) return v;
+      if (waited >= capMs) return null;
+      await sleep(2000);
+    }
+  };
+  const forget = deps.forget ?? ((id: string) => forgetSessions(id, deps.live, deps.changed ?? (() => {})));
+  // the subagent's own session history goes with its clone, once the platform took the delete
+  const del = async (id: string) => {
+    await h?.dispose(); // before its history goes
+    h = undefined;
+    const r = await call("DELETE", p(id)).catch(() => "error");
+    if (!r.startsWith("error") && !r.startsWith("platform tools unavailable")) {
+      await forget(id);
+    }
+  };
+
+  const HEAD = `cd ${WS} && git rev-parse --abbrev-ref HEAD && git rev-parse HEAD`;
+  let base = await exec(P, HEAD);
+  // A workspace made without a repo has no git yet, or an unborn branch: start one here rather
+  // than refuse (its pod start does the same since then; this covers the workspaces made before)
+  if (base.code === 128 || /not a git repository/.test(base.stderr)) {
+    const s = await exec(P, startCmd);
+    if (s.code !== 0) return `error: could not start a git repo in ${WS} of ${P}: ${tail(s.stderr, 5)}`;
+    base = await exec(P, HEAD);
+  }
+  const [branch, baseSha] = base.stdout.trim().split("\n");
+  if (base.code !== 0 && base.code !== 128 && !/not a git repository/.test(base.stderr)) return `error: ${base.stderr.trim()}`;
+  if (base.code !== 0 || !branch || branch === "HEAD" || !baseSha) return `error: subagent needs a git branch checked out in ${WS} of ${P}`;
+
+  const parent = await call("GET", `${p(P)}/tools`);
+  if (parent.startsWith("error") || parent.startsWith("platform tools unavailable")) return parent;
+  const ip = String(JSON.parse(parent).address ?? "").replace(/:\d+$/, "");
+  const remote = `ssh://kl@${ip}${WS}`;
+
+  // one cut per source at a time: a second clone of the same parent 409s until the first's cut lands
+  let made = "";
+  const created = await until(async () => {
+    made = await call("POST", `${p(P)}/clone`, { name: `sub-${hex()}`, task: task.split("\n")[0]!.slice(0, 72) });
+    return made.startsWith("error 409:") && made.includes("already being cut") ? undefined : made;
+  }, 60_000);
+  if (created === null || created.startsWith("error") || created.startsWith("platform tools unavailable")) return created ?? made;
+  const C = JSON.parse(created).id as string;
+
+  let settled = false; // clone deleted, or deliberately kept
+  let h: SessionHandle | undefined;
+  try {
+    const ready = await until(async () => {
+      try {
+        const w = await call("GET", p(C));
+        if (w.startsWith("error") || JSON.parse(w).state !== "ready") return undefined;
+        const t = await call("GET", `${p(C)}/tools`);
+        if (t.startsWith("error")) return undefined;
+        const j = JSON.parse(t);
+        return j.address && j.token ? true : undefined;
+      } catch {
+        return undefined;
+      }
+    }, 180_000);
+    if (!ready) {
+      await del(C);
+      settled = true;
+      return `error: clone ${C} of ${P} did not become ready in 180s; deleted`;
+    }
+
+    const sk = `${C}:agent-${hex()}`;
+    h = await deps.open(sk, opts(sk, { fresh: true }));
+    const prompt = `${task}\n\nYou are in your own clone of the workspace; your code is in ${WS} on branch ${branch}. You own how it is built. Commit your work there and do not push; the platform pushes it to the workspace with git when you finish. If the platform says the branch moved, rebase, resolve every conflict, commit and reply done. Your last message is your report to the workspace session: what you did, how you checked it, anything it must decide. You do not talk to main. Work only in ${WS}: never reach another workspace, pod or session.`;
+    const reply = await answer(h, prompt, () => h!.prompt(prompt));
+
+    const commit = async () => {
+      const r = await exec(C, commitCmd(task));
+      if (r.code !== 0) throw new Error(`commit failed in clone ${C}: ${tail(r.stderr, 5)}`);
+      return (await exec(C, `cd ${WS} && git rev-parse HEAD`)).stdout.trim();
+    };
+    const head = await commit();
+    if (head === baseSha) {
+      await del(C);
+      settled = true;
+      return `${reply}\n\nno code changes`;
+    }
+    // listed before any rebase so the parent's own newer commits do not pad it
+    const files = (await exec(C, `cd ${WS} && git diff --name-only ${baseSha}..HEAD`)).stdout.trim();
+    const push = () => exec(C, `cd ${WS} && git push ${sq(remote)} HEAD:${sq(branch)}`);
+
+    let r = await push();
+    // the child resolves its own conflicts; each round is the same session, so it keeps what it learned
+    for (let round = 0; round < REBASE_ROUNDS && r.code !== 0 && MOVED.test(r.stderr); round++) {
+      const rebase = `The branch moved (${tail(r.stderr, 2)}). Run \`git pull --rebase ${remote} ${branch}\` in ${WS}, resolve every conflict yourself, commit, and reply done.`;
+      await answer(h, rebase, () => h!.prompt(rebase));
+      await commit();
+      r = await push();
+    }
+    if (r.code !== 0) {
+      settled = true;
+      return `${reply}\n\npush failed: ${tail(r.stderr, 5)}; clone ${C} kept with the commits. Report this failure as it is; do not work around it by fetching, copying or asking another workspace to pull.`;
+    }
+    const sha = (await exec(C, `cd ${WS} && git rev-parse --short HEAD`)).stdout.trim();
+    await del(C);
+    settled = true;
+    return `${reply}\n\npushed ${sha} to ${branch} in ${P}:\n${files}`;
+  } catch (e) {
+    if (!settled) await del(C);
+    throw e;
+  } finally {
+    await h?.dispose();
+  }
 }
 
 /** What a workspace opened for an ask gets: the caller's model and settings, none of the TUI's own
@@ -198,7 +346,7 @@ export function delegateTools(kind: "main" | "workspace", ws: string | undefined
         return `told ${to}`;
       },
     };
-    return [tell];
+    return [tell, subagent(ws!, deps, caller, callerKey)];
   }
 
   const ask: ToolDef = {
@@ -229,4 +377,27 @@ export function delegateTools(kind: "main" | "workspace", ws: string | undefined
     },
   };
   return [ask];
+}
+
+/** Workspace sessions only: main hands goals to workspaces with `workspace_ask`. */
+function subagent(ws: string, deps: DelegateDeps, caller: SessionOpts, callerKey: string): ToolDef {
+  // same model, same gate; nothing of the TUI's own tools goes along
+  // the request carries the delegated session's key so the TUI files the card under that workspace
+  const opts = (key: string, extra: Partial<SessionOpts> = {}): SessionOpts => ({
+    ...caller,
+    tools: [],
+    permission: (req, s) => deps.permit(callerKey, { ...req, session: req.session ?? key }, s),
+    ...extra,
+  });
+  // ponytail: a bench restart mid-subagent leaves its `sub-*` clone (it may hold the work) and the
+  // caller sees "Tool call was interrupted"; upgrade = persist the clone id and report it on boot.
+  return {
+    name: "subagent",
+    description:
+      "Hand planned work (a feature, a refactor, a multi-step fix) to a throwaway subagent in its own clone of this workspace. Commit your own work first. The task must stand alone: the subagent has none of your conversation. Blocks until it ends; the platform then pushes its commits into your checked-out branch with git (the subagent resolves a moved branch itself, up to 3 rebase rounds) and deletes the clone. Returns its answer plus `pushed <sha> ...`, `no code changes`, or `push failed ...` (report that as it is).",
+    inputSchema: { type: "object", properties: { task: { type: "string" } }, required: ["task"] },
+    async run(input: { task: string }) {
+      return runInClone(ws, input.task, deps, opts);
+    },
+  };
 }
