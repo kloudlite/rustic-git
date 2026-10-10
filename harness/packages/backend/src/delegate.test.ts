@@ -5,7 +5,7 @@ import { join } from "node:path";
 import { delegateTools, dispatchAsk, resumeAsks } from "./delegate.ts";
 import type { DelegateDeps } from "./delegate.ts";
 import type { SessionHandle, SessionOpts } from "./index.ts";
-import { addTask, readTasks } from "./tasks.ts";
+import { addTask, readTasks, tasksFile, updateTask } from "./tasks.ts";
 import { readMessages } from "./messages.ts";
 
 const caller = { initial: { model: { provider: "p", id: "m" } }, tools: [] } as unknown as SessionOpts;
@@ -246,17 +246,25 @@ test("a delegated session's permission request goes to the caller's key and name
 
 const board = () => join(mkdtempSync(join(tmpdir(), "kl-board-")), "tasks.json");
 
-test("workspace_ask sends only words, logs the caller's task as `for`, and leaves boards alone", async () => {
-  const tasks = board();
+test("workspace_ask sends only words, logs the caller's task as `for`, and runs only that queued task", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "kl-board-"));
+  const tasks = tasksFile("main", dir);
   addTask(tasks, { title: "a" });
+  addTask(tasks, { title: "b" });
+  updateTask(tasks, "T2", { state: "blocked" });
   const log = join(mkdtempSync(join(tmpdir(), "kl-msgs-")), "m.json");
   const ws = fake("done it");
   const main = fake();
-  const [ask] = delegateTools("main", undefined, D({ messages: log, open: route(ws, main) }), caller);
+  const [ask] = delegateTools("main", undefined, D({ messages: log, tasks: dir, open: route(ws, main) }), caller);
   await ask!.run({ workspace: "w", request: "x", for: "T1" });
   await flush();
   expect(ws.sent).toEqual(["prompt:[from main session] x"]);
-  expect(readTasks(tasks)[0]!.state).toBe("queued");
+  expect(readTasks(tasks).map((t) => t.state)).toEqual(["running", "blocked"]);
+  // a task in any other state, or an unknown id, is left alone
+  await ask!.run({ workspace: "w", request: "y", for: "T2" });
+  await ask!.run({ workspace: "w", request: "z", for: "T9" });
+  await flush();
+  expect(readTasks(tasks).map((t) => t.state)).toEqual(["running", "blocked"]);
   const [m1, m2] = readMessages(log);
   expect(m1).toMatchObject({ from: "main", to: "w", text: "[from main session] x", for: "T1" });
   expect(m2).toMatchObject({ from: "w", to: "main", reply: m1!.id });
