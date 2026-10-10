@@ -114,10 +114,10 @@ spec:
         # changed. Both are pinned by deploy/pin.sh like the env values below (same reference
         # regex), so a roll pulls them once per node here and no person's first start pays it.
         - name: warm-workspace-image
-          image: ghcr.io/kloudlite/kloudlite-workspace:bb48ac5df8bdad09c4f96864dad10fd62c234cc9@sha256:bff3d48c331e358ebcdf413b40de32e2f86e08fa3ec18c5593a76839fee47aed
+          image: ghcr.io/kloudlite/kloudlite-workspace:cbfdc8bb763014f71a814639e085fb15a07c8fc7@sha256:ab76a701b57d87ffd13b8533589ed6cb41efef3d671d56a17c7553fd34471135
           command: ["true"]
         - name: warm-bench-image
-          image: ghcr.io/kloudlite/kloudlite-bench:bb48ac5df8bdad09c4f96864dad10fd62c234cc9@sha256:e79cc59687c14e4ce7641658fd0b047dec5863484d007d9adc5751e6b096df4e
+          image: ghcr.io/kloudlite/kloudlite-bench:cbfdc8bb763014f71a814639e085fb15a07c8fc7@sha256:0a70fbad6be5a356e9a22b8e2b793311c694be98da4c8efb42fa9592b045c914
           command: ["true"]
       containers:
         - name: agent
@@ -127,7 +127,7 @@ spec:
           # No imagePullSecret: the package is public, like the repository. That is deliberate —
           # the image carries no secret, and a cluster-wide pull credential is one more thing to
           # scope, rotate and leak.
-          image: ghcr.io/kloudlite/kloudlite-agent:bb48ac5df8bdad09c4f96864dad10fd62c234cc9@sha256:2edb97ece55803ca0813149f98b749c2a3fad74004db27ea7ba84eea3763760a
+          image: ghcr.io/kloudlite/kloudlite-agent:cbfdc8bb763014f71a814639e085fb15a07c8fc7@sha256:932706ac240d834e4db6a0d022002d9ae9cf0acfa25f7b147b4c64ec9c5fee2f
           # Safe with an immutable SHA tag, and it means kubelet image GC evicting the layers costs
           # one re-pull rather than a broken DaemonSet — which is what the hand-shipped tarball did.
           imagePullPolicy: IfNotPresent
@@ -227,14 +227,14 @@ spec:
             # pinned to the same SHA as this agent by pin.sh. Legacy specs that still say
             # `alpine:3.20` are mapped to it too (`model::is_default_image`).
             - name: WS_DEFAULT_IMAGE
-              value: ghcr.io/kloudlite/kloudlite-workspace:bb48ac5df8bdad09c4f96864dad10fd62c234cc9@sha256:bff3d48c331e358ebcdf413b40de32e2f86e08fa3ec18c5593a76839fee47aed
+              value: ghcr.io/kloudlite/kloudlite-workspace:cbfdc8bb763014f71a814639e085fb15a07c8fc7@sha256:ab76a701b57d87ffd13b8533589ed6cb41efef3d671d56a17c7553fd34471135
             # The sessions container a bench workspace's pod carries beside the workspace
             # container (a bench IS a Workspace since 2026-09-16). Pinned by deploy/pin.sh.
             - name: KLOUDLITE_BENCH_IMAGE
-              value: ghcr.io/kloudlite/kloudlite-bench:bb48ac5df8bdad09c4f96864dad10fd62c234cc9@sha256:e79cc59687c14e4ce7641658fd0b047dec5863484d007d9adc5751e6b096df4e
+              value: ghcr.io/kloudlite/kloudlite-bench:cbfdc8bb763014f71a814639e085fb15a07c8fc7@sha256:0a70fbad6be5a356e9a22b8e2b793311c694be98da4c8efb42fa9592b045c914
             # The forwarder that stands in for an intercepted service. Pinned by deploy/pin.sh.
             - name: WS_INTERCEPT_PROXY_IMAGE
-              value: ghcr.io/kloudlite/kloudlite-intercept-proxy:bb48ac5df8bdad09c4f96864dad10fd62c234cc9@sha256:fb1e097c87193bd8b42a9e06a425892768e25a68599b810b031ca83f4406967b
+              value: ghcr.io/kloudlite/kloudlite-intercept-proxy:cbfdc8bb763014f71a814639e085fb15a07c8fc7@sha256:2d2682afd290a0d3a47ea93a05132a9794507189f095dde66155aed6e2f0cd59
             # What every workspace gets before its own list. Explicit here rather than the
             # binary's default so a change is a yaml diff someone reviews, and so the two nodes
             # cannot drift: the set is part of every profile's hash.
