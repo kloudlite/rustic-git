@@ -257,6 +257,7 @@ subjects:
 #
 #   Secret       verbs                      written by
 #   user-key     get update patch           keys beat, workspace/bench create
+#   registry-pull get update patch          keys beat, environment create
 #   bench-tool   get patch delete           mint_bench_tool_secret, stop_bench
 #   (any name)   create                     first apply of either
 apiVersion: rbac.authorization.k8s.io/v1
@@ -274,7 +275,7 @@ rules:
     # name is not known at authorization time), so the api may still create an arbitrarily named
     # Secret in a workspace namespace; it may not touch an existing `ws-ssh-*` one, which is the
     # finding this closes.
-    resourceNames: ["user-key"]
+    resourceNames: ["user-key", "registry-pull"]
     # `patch` is what server-side apply needs; without it the key install fails with a 403 that
     # reads like a missing binding. No `delete`: the Secret carries an ownerReference and is
     # reclaimed with its namespace.

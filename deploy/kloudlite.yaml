@@ -462,6 +462,11 @@ spec:
             # 100m-CPU pod. Four matches what the request can actually run.
             - name: TOKIO_WORKER_THREADS
               value: "4"
+            # Host (no scheme) the api writes into each environment namespace's `registry-pull`
+            # Secret, so kubelet can pull private images from the owner's registry namespace.
+            # Unset = no Secret and a private image sits in ImagePullBackOff (401).
+            - name: KLOUDLITE_REGISTRY_HOST
+              value: cr.khost.dev
             - name: KLOUDLITE_S3_URL
               # `rustic-git` is the blob CONTAINER, a storage location that predates the rename and
               # holds every repo; a name change here means copying every object, not editing a line.
@@ -919,6 +924,11 @@ spec:
             # api::admin::router() instead of api::router() and runs the superadmin bootstrap.
             - name: KLOUDLITE_API_ROLE
               value: admin
+            # Host (no scheme) the api writes into each environment namespace's `registry-pull`
+            # Secret, so kubelet can pull private images from the owner's registry namespace.
+            # Unset = no Secret and a private image sits in ImagePullBackOff (401).
+            - name: KLOUDLITE_REGISTRY_HOST
+              value: cr.khost.dev
             - name: KLOUDLITE_S3_URL
               # `rustic-git` is the blob CONTAINER, a storage location that predates the rename and
               # holds every repo; a name change here means copying every object, not editing a line.

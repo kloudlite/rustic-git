@@ -11,6 +11,7 @@ name = "kloudlite_workspaces"
 tracing = { workspace = true }
 metrics = { workspace = true }
 kube = { workspace = true }
+base64 = { workspace = true }
 k8s-openapi = { workspace = true }
 schemars = { workspace = true }
 kloudlite-core = { path = "../core" }

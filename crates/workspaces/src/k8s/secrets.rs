@@ -70,6 +70,33 @@ pub fn user_key_secret(
 }
 
 
+/// The pull credential every environment namespace carries, named by the service pod template.
+pub const REGISTRY_PULL_SECRET: &str = "registry-pull";
+
+
+/// A `dockerconfigjson` Secret that lets kubelet pull the owner's private images.
+///
+/// The username MUST be the owner: the registry rejects Basic whose user is not the token's owner
+/// (`registry::auth`). No ownerReference: it is reclaimed with the namespace, and the api rewrites
+/// it every keys beat because the token inside lives 24 h.
+pub fn registry_pull_secret(owner: &str, namespace: &str, host: &str, token: &str) -> Secret {
+    use base64::Engine;
+    let auth = base64::engine::general_purpose::STANDARD.encode(format!("{owner}:{token}"));
+    let cfg = json!({ "auths": { host: { "username": owner, "password": token, "auth": auth } } });
+    Secret {
+        metadata: ObjectMeta {
+            name: Some(REGISTRY_PULL_SECRET.to_string()),
+            namespace: Some(namespace.to_string()),
+            labels: Some(labels(owner, "environment")),
+            ..Default::default()
+        },
+        string_data: Some(BTreeMap::from([(".dockerconfigjson".to_string(), cfg.to_string())])),
+        type_: Some("kubernetes.io/dockerconfigjson".to_string()),
+        ..Default::default()
+    }
+}
+
+
 pub(super) fn gitconfig(name: &str, email: &str) -> String {
     let q = |v: &str| v.replace('\\', "\\\\").replace('"', "\\\"");
     format!("[user]\n\tname = \"{}\"\n\temail = \"{}\"\n", q(name), q(email))

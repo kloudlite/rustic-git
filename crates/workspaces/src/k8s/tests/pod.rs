@@ -314,15 +314,17 @@ pub(crate) fn a_workspace_pod_carries_the_owners_platform_key() {
 }
 
 
-/// A pull secret nothing creates is a kubelet warning on every pod start, not a feature: our
-/// images are public, and a private one needs a Secret with a writer behind it.
+/// A pull secret nothing creates is a kubelet warning on every pod start, not a feature: only
+/// environments have a writer for `registry-pull` (`api::env_pull`), workspaces stay without.
 #[test]
-pub(crate) fn tenant_pods_name_no_pull_secret() {
+pub(crate) fn only_environment_pods_name_the_pull_secret() {
     let p = workspace_pod(&ws_spec(), "ws-1", "ws-1", &ctx(), None, None).unwrap();
     assert!(p.spec.unwrap().image_pull_secrets.is_none());
 
     let d = service_statefulset(&svc("data", "/data"), "env-1", "env-1", "team", &ctx()).unwrap();
-    assert!(d.spec.unwrap().template.spec.unwrap().image_pull_secrets.is_none());
+    let refs = d.spec.unwrap().template.spec.unwrap().image_pull_secrets.unwrap();
+    assert_eq!(refs.len(), 1);
+    assert_eq!(refs[0].name, REGISTRY_PULL_SECRET);
 }
 
 
@@ -870,4 +872,19 @@ pub(crate) fn the_prelude_is_byte_identical_to_the_snapshot_before_shell_rc() {
         std::fs::write(concat!(env!("CARGO_MANIFEST_DIR"), "/src/k8s/tests/prelude-snapshot.txt"), prelude("api")).unwrap();
     }
     assert_eq!(prelude("api"), include_str!("prelude-snapshot.txt"));
+}
+
+
+#[test]
+pub(crate) fn the_registry_pull_secret_logs_in_as_the_owner() {
+    use base64::Engine;
+    let s = registry_pull_secret("alice", "env-1", "cr.example.dev", "TOK");
+    assert_eq!(s.type_.as_deref(), Some("kubernetes.io/dockerconfigjson"));
+    assert_eq!(s.metadata.labels, Some(labels("alice", "environment")));
+    assert!(s.metadata.owner_references.is_none());
+    let cfg: serde_json::Value = serde_json::from_str(&s.string_data.unwrap()[".dockerconfigjson"]).unwrap();
+    let e = &cfg["auths"]["cr.example.dev"];
+    assert_eq!((e["username"].as_str(), e["password"].as_str()), (Some("alice"), Some("TOK")));
+    let auth = base64::engine::general_purpose::STANDARD.decode(e["auth"].as_str().unwrap()).unwrap();
+    assert_eq!(auth, b"alice:TOK");
 }

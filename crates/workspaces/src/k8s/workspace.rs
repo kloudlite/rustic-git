@@ -697,8 +697,8 @@ pub fn workspace_pod(
             v
         }),
         init_containers: init.map(|c| vec![c]),
-        // No `imagePullSecrets`: see `environment.rs` — the Secret they named has no writer, and
-        // the kubelet warned on every pod start for it.
+        // No `imagePullSecrets`: only environment namespaces get a `registry-pull` writer
+        // (`api::env_pull`); workspace images are public and a dangling name warns on every start.
         // What `--restart unless-stopped` became: stopping is expressed by deleting the pod, not by
         // a policy the kubelet interprets.
         restart_policy: Some("Always".to_string()),

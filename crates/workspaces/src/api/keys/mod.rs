@@ -167,6 +167,7 @@ pub async fn run_beat(s: Arc<ApiState>) {
     loop {
         tick.tick().await;
         project_all(&s).await;
+        super::env_pull::refresh_registry_pulls(&s).await;
         membership_beat(&s).await;
         prune_namespaces(&s).await;
         prune_bindings(&s).await;

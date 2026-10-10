@@ -110,10 +110,10 @@ pub fn service_statefulset(
         }],
         // Volume root, environment leaf — the same split a workspace clone's mount uses.
         volumes: Some(vec![live_worktree_volume(ctx.pool, volume, env_id)]),
-        // No `imagePullSecrets`: nothing has ever created the `registry-pull` Secret these named,
-        // so every pod start logged `FailedToRetrieveImagePullSecret` for a credential that did not
-        // exist. Our images are public (ghcr.io/kloudlite/*); a private image needs a Secret AND a
-        // writer for it, and neither is here.
+        // Private images live in the owner's registry namespace and kubelet needs a credential for
+        // them (401 -> ImagePullBackOff, 2026-10-10). The api writes `registry-pull` once the
+        // namespace exists and renews it every keys beat; until it lands kubelet just retries.
+        image_pull_secrets: Some(vec![k8s_openapi::api::core::v1::LocalObjectReference { name: REGISTRY_PULL_SECRET.to_string() }]),
         runtime_class_name: ctx.runtime_class.map(str::to_string),
         ..Default::default()
     };

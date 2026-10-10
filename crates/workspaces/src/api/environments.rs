@@ -152,6 +152,7 @@ pub(crate) async fn patch_env_services(
 
 /// The one place an `Environment` is written; `create_workspace`'s twin.
 async fn create_environment(
+    s: &Arc<ApiState>,
     c: &kube::Client,
     id: &str,
     spec: crd::EnvironmentSpec,
@@ -163,7 +164,11 @@ async fn create_environment(
     let mut e = crd::Environment::new(id, spec);
     e.metadata.labels = Some(l);
     let api: Api<crd::Environment> = Api::all(c.clone());
-    api.create(&PostParams::default(), &e).await.map_err(kube_err)
+    let e = api.create(&PostParams::default(), &e).await.map_err(kube_err)?;
+    // The pull credential needs the namespace, which a node makes only once it claims the env.
+    // Every create path (new, restore, clone) goes through here, so one spawn covers them all.
+    tokio::spawn(super::env_pull::pull_after_placed(s.clone(), c.clone(), id.to_string(), e.spec.owner.clone()));
+    Ok(e)
 }
 
 pub(crate) async fn create_env(
@@ -186,6 +191,7 @@ pub(crate) async fn create_env(
     guard_alloc(&s, &owner, owner != caller_id.name, &environment_cost(body.services.len())).await?;
     let id = rid("env");
     let e = create_environment(
+        &s,
         c,
         &id,
         crd::EnvironmentSpec {
@@ -316,6 +322,7 @@ pub(crate) async fn restore_env(
     };
     let id = rid("env");
     let e = create_environment(
+        &s,
         c,
         &id,
         crd::EnvironmentSpec {
@@ -548,6 +555,7 @@ pub(crate) async fn clone_env(
     }
     guard_alloc(&s, &src.spec.owner, src.spec.owner != caller_id.name, &environment_cost(src.spec.services.len())).await?;
     let e = create_environment(
+        &s,
         c,
         &new_id,
         crd::EnvironmentSpec {
