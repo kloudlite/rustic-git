@@ -265,6 +265,7 @@ test("workspace_ask sends only words, logs the caller's task as `for`, and runs 
   await ask!.run({ workspace: "w", request: "z", for: "T9" });
   await flush();
   expect(readTasks(tasks).map((t) => t.state)).toEqual(["running", "blocked"]);
+  expect(readTasks(tasks).map((t) => t.workspace)).toEqual(["w", undefined]);
   const [m1, m2] = readMessages(log);
   expect(m1).toMatchObject({ from: "main", to: "w", text: "[from main session] x", for: "T1" });
   expect(m2).toMatchObject({ from: "w", to: "main", reply: m1!.id });

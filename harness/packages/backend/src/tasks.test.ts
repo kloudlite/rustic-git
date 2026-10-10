@@ -68,3 +68,13 @@ test("two sessions' boards are separate", async () => {
   expect(readTasks(join(d, "main.json")).map((t) => t.title)).toEqual(["m"]);
   expect(readTasks(join(d, "ws-a.json")).map((t) => [t.id, t.title])).toEqual([["T1", "w1"], ["T2", "w2"]]);
 });
+
+test("add and update keep the workspace", () => {
+  const f = tmp();
+  addTask(f, { title: "a", workspace: "ws-1" });
+  addTask(f, { title: "b" });
+  expect(readTasks(f).map((t) => t.workspace)).toEqual(["ws-1", undefined]);
+  updateTask(f, "T2", { workspace: "ws-2" });
+  updateTask(f, "T1", { state: "running" });
+  expect(readTasks(f).map((t) => t.workspace)).toEqual(["ws-1", "ws-2"]);
+});

@@ -66,18 +66,18 @@ function badDeps(ts: BoardTask[], id: string, deps: string[]): string | undefine
   return undefined;
 }
 
-export function addTask(file: string, a: { title: string; priority?: number; dependsOn?: string[]; note?: string }): BoardTask | string {
+export function addTask(file: string, a: { title: string; priority?: number; dependsOn?: string[]; note?: string; workspace?: string }): BoardTask | string {
   const ts = readTasks(file);
   const id = `T${Math.max(0, ...ts.map((t) => Number(t.id.slice(1)) || 0)) + 1}`;
   const dependsOn = a.dependsOn ?? [];
   const bad = badDeps(ts, id, dependsOn);
   if (bad) return bad;
-  const t: BoardTask = { id, title: a.title, priority: a.priority ?? 3, dependsOn, state: "queued", note: a.note, created: Date.now() };
+  const t: BoardTask = { id, title: a.title, priority: a.priority ?? 3, dependsOn, state: "queued", note: a.note, workspace: a.workspace, created: Date.now() };
   write(file, [...ts, t]);
   return t;
 }
 
-export function updateTask(file: string, id: string, p: Partial<Pick<BoardTask, "title" | "priority" | "dependsOn" | "state" | "note">>): BoardTask | string {
+export function updateTask(file: string, id: string, p: Partial<Pick<BoardTask, "title" | "priority" | "dependsOn" | "state" | "note" | "workspace">>): BoardTask | string {
   const ts = readTasks(file);
   const cur = ts.find((t) => t.id === id);
   if (!cur) return `error: unknown task ${id}`;
@@ -111,22 +111,23 @@ export function boardText(ts: BoardTask[]): string {
 
 const STR = { type: "string" };
 const DEPS = { type: "array", items: STR };
+const WS = { type: "string", description: "The workspace id (`ws-…`) that does this task. Only main sets it." };
 
 export function taskTools(file: string): ToolDef[] {
   const add: ToolDef = {
     name: "task_add",
-    description: "Add a task to your own board. A lower priority number runs first. The default is 3. `depends_on` lists the ids of tasks that must be done first. Returns the task line.",
-    inputSchema: { type: "object", properties: { title: STR, priority: { type: "number" }, depends_on: DEPS, note: STR }, required: ["title"] },
-    async run(i: { title: string; priority?: number; depends_on?: string[]; note?: string }) {
-      const r = addTask(file, { title: i.title, priority: i.priority, dependsOn: i.depends_on, note: i.note });
+    description: "Add a task to your own board. A lower priority number runs first. The default is 3. `depends_on` lists the ids of tasks that must be done first. `workspace` names the workspace that does the task. Only main sets it. Returns the task line.",
+    inputSchema: { type: "object", properties: { title: STR, priority: { type: "number" }, depends_on: DEPS, note: STR, workspace: WS }, required: ["title"] },
+    async run(i: { title: string; priority?: number; depends_on?: string[]; note?: string; workspace?: string }) {
+      const r = addTask(file, { title: i.title, priority: i.priority, dependsOn: i.depends_on, note: i.note, workspace: i.workspace });
       return typeof r === "string" ? r : line(readTasks(file), r);
     },
   };
   const update: ToolDef = {
     name: "task_update",
-    description: "Change a task. You can change the title, the priority, `depends_on`, the state or the note. The tool refuses a dependency loop or an unknown id. Then the board does not change. Returns the task line.",
-    inputSchema: { type: "object", properties: { id: STR, title: STR, priority: { type: "number" }, depends_on: DEPS, state: { type: "string", enum: STATES }, note: STR }, required: ["id"] },
-    async run(i: { id: string; title?: string; priority?: number; depends_on?: string[]; state?: TaskState; note?: string }) {
+    description: "Change a task. You can change the title, the priority, `depends_on`, the state, the note or the workspace. The tool refuses a dependency loop or an unknown id. Then the board does not change. Returns the task line.",
+    inputSchema: { type: "object", properties: { id: STR, title: STR, priority: { type: "number" }, depends_on: DEPS, state: { type: "string", enum: STATES }, note: STR, workspace: WS }, required: ["id"] },
+    async run(i: { id: string; title?: string; priority?: number; depends_on?: string[]; state?: TaskState; note?: string; workspace?: string }) {
       const { id, depends_on, ...rest } = i;
       const r = updateTask(file, id, { ...rest, dependsOn: depends_on });
       return typeof r === "string" ? r : line(readTasks(file), r);

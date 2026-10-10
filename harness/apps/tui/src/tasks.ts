@@ -1,5 +1,7 @@
-//! The Plan panel's view of the boards (components/Plan.tsx, the ^g screen): one board per session,
-//! drawn as a tree under each session's name. Only open work: a task hangs under its first dependency
+//! The Plan panel's view of the boards (components/Plan.tsx, the ^g screen): a tree per doer.
+//! Main's view groups by who does the work: "main" for main's tasks with no `workspace`, then one header
+//! per workspace holding main's tasks for it (with ids) and, nested under main's first running one, the
+//! workspace's own steps (without ids: both boards number from T1). A workspace sees only its board. Only open work: a task hangs under its first dependency
 //! still open, the others show as "waits"; finished tasks leave (^q lists them) and messages are chat
 //! cards, never plan rows. Main sees every session with something open; a workspace sees only itself. Pure so grouping, tree and fold are tested without a renderer. Processes live
 //! on the Jobs screen (^j), not here.
@@ -41,24 +43,55 @@ export function planRows(
   max = 10,
 ): PlanRow[] {
   type Cand = PlanRow & { must?: boolean };
+  type Node = (prefix: string, cont: string) => void;
   const out: Cand[] = [];
-  for (const b of boards.filter((b) => view === "main" || b.session === view)) {
-    const open = b.tasks.filter((t) => t.state !== "done");
-    if (!open.length) continue;
-    const ids = new Set(open.map((t) => t.id));
-    // a task hangs under its first dependency still open; a cycle has no root and is not drawn
+  const header = (key: string) => out.push({ text: names(key), right: status(key), head: true });
+  const openOf = (ts: BoardTask[]) => ts.filter((t) => t.state !== "done");
+  /** The root nodes of `list` as a tree: a task hangs under its first dependency still open in `list`
+   * (a cycle has no root and is not drawn). `waits` are the open ids a queued task may wait on. `extra`
+   * hangs after the children of `anchor`. Without `id` a row shows the title only. */
+  const nodes = (list: BoardTask[], waits: Set<string>, id: boolean, anchor?: BoardTask, extra: Node[] = []): Node[] => {
+    const ids = new Set(list.map((t) => t.id));
     const parentOf = (t: BoardTask) => t.dependsOn.find((d) => ids.has(d));
-    const kids = (t: BoardTask) => open.filter((c) => parentOf(c) === t.id);
-    out.push({ text: names(b.session), right: status(b.session), head: true });
-    const draw = (t: BoardTask, prefix: string, cont: string) => {
+    const node = (t: BoardTask): Node => (prefix, cont) => {
       const [icon, tone] = ICON[t.state];
-      const blockers = t.state === "queued" ? t.dependsOn.filter((d) => ids.has(d)) : [];
+      const blockers = t.state === "queued" ? t.dependsOn.filter((d) => waits.has(d)) : [];
       const right = t.state === "running" ? "working" : blockers.length ? `waits ${blockers.join(", ")}` : t.state;
-      out.push({ text: `${prefix}${icon} ${t.id} ${t.title}`, right, tone, live: t.state === "running", must: t.state !== "queued" });
-      const k = kids(t);
-      k.forEach((c, i) => draw(c, cont + (i === k.length - 1 ? "└─ " : "├─ "), cont + (i === k.length - 1 ? "   " : "│  ")));
+      out.push({ text: `${prefix}${icon} ${id ? `${t.id} ` : ""}${t.title}`, right, tone, live: t.state === "running", must: t.state !== "queued" });
+      const k = [...list.filter((c) => parentOf(c) === t.id).map(node), ...(t === anchor ? extra : [])];
+      k.forEach((f, i) => f(cont + (i === k.length - 1 ? "└─ " : "├─ "), cont + (i === k.length - 1 ? "   " : "│  ")));
     };
-    open.filter((t) => !parentOf(t)).forEach((t) => draw(t, "", ""));
+    return list.filter((t) => !parentOf(t)).map(node);
+  };
+  const ids = (ts: BoardTask[]) => new Set(ts.map((t) => t.id));
+  if (view !== "main") {
+    for (const b of boards.filter((b) => b.session === view)) {
+      const open = openOf(b.tasks);
+      if (!open.length) continue;
+      header(b.session);
+      nodes(open, ids(open), true).forEach((f) => f("", ""));
+    }
+  } else {
+    // Grouped by who does the work: main's own tasks, then each workspace with main's tasks for it and,
+    // nested under main's first running one (else directly under the header), the workspace's own steps.
+    // Those show without ids: the two boards number from T1 independently.
+    const mine = openOf(boards.find((b) => b.session === "main")?.tasks ?? []);
+    const others = boards.filter((b) => b.session !== "main");
+    const doers = [...new Set([...mine.flatMap((t) => (t.workspace ? [t.workspace] : [])), ...others.filter((b) => openOf(b.tasks).length).map((b) => b.session)])];
+    const own = mine.filter((t) => !t.workspace);
+    if (own.length) {
+      header("main");
+      nodes(own, ids(mine), true).forEach((f) => f("", ""));
+    }
+    for (const ws of doers) {
+      const group = mine.filter((t) => t.workspace === ws);
+      const theirs = openOf(others.find((b) => b.session === ws)?.tasks ?? []);
+      const steps = nodes(theirs, ids(theirs), false);
+      const anchor = group.find((t) => t.state === "running");
+      header(ws);
+      nodes(group, ids(mine), true, anchor, steps).forEach((f) => f("", ""));
+      if (!anchor) steps.forEach((f) => f("", ""));
+    }
   }
   if (out.length <= max) return out;
 

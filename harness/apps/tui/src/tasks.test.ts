@@ -24,10 +24,35 @@ test("main view: only open work, tree under the first open dependency, finished 
     "└─ ○ T3 T3 | waits T1, T4",
     "● T4 T4 | working",
     "todo-demo | working",
-    "● T2 T2 | working",
-    "└─ ○ T3 T3 | waits T2",
+    "● T2 | working",
+    "└─ ○ T3 | waits T2",
   ]);
-  expect(rows.filter((r) => r.live).map((r) => r.text)).toEqual(["● T1 T1", "● T4 T4", "● T2 T2"]);
+  expect(rows.filter((r) => r.live).map((r) => r.text)).toEqual(["● T1 T1", "● T4 T4", "● T2"]);
+});
+
+test("main view: main's task for a workspace carries that workspace's own steps, no id collisions", () => {
+  const boards = [
+    { session: "main", tasks: [T("T1", { state: "done" }), T("T2", { title: "Build todo frontend UI", state: "running", workspace: "ws-f" }), T("T3", { title: "Build todo tests", workspace: "ws-t" })] },
+    { session: "ws-f", tasks: [T("T1", { title: "Scaffold frontend app" }), T("T2", { title: "List view", dependsOn: ["T1"] }), T("T3", { title: "Styles" })] },
+  ];
+  const nm = (k: string) => ({ main: "main", "ws-f": "todo-frontend", "ws-t": "todo-tests" })[k] ?? k;
+  expect(text(planRows(boards, nm, "main", (k) => (k === "ws-f" ? "working" : "idle")))).toEqual([
+    "todo-frontend | working",
+    "● T2 Build todo frontend UI | working",
+    "├─ ○ Scaffold frontend app | queued",
+    "│  └─ ○ List view | waits T1",
+    "└─ ○ Styles | queued",
+    "todo-tests | idle",
+    "○ T3 Build todo tests | queued",
+  ]);
+});
+
+test("main view: a task without workspace stays under main; steps with no running task hang under the header", () => {
+  const boards = [
+    { session: "main", tasks: [T("T1", { state: "running" }), T("T2", { workspace: "ws-f", dependsOn: ["T1"] })] },
+    { session: "ws-f", tasks: [T("T1", { title: "step" })] },
+  ];
+  expect(text(planRows(boards, (k) => k, "main"))).toEqual(["main", "● T1 T1 | working", "ws-f", "○ T2 T2 | waits T1", "○ step | queued"]);
 });
 
 test("workspace view shows only its own board; a finished board shows nothing", () => {
