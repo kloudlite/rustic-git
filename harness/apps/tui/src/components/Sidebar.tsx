@@ -240,14 +240,11 @@ export function Sidebar({
           // tag and would collide with a long env name up on the env row
           <>
             <box height={1} flexShrink={0} />
-            <Row
-              left={
-                <span>
-                  <span fg={theme.muted}>{"current snapshot: "}</span>
-                  <span fg={theme.fg}>{clip(snapshot, inner - 18)}</span>
-                </span>
-              }
-            />
+            <Row left={<span fg={theme.muted}>{"current snapshot"}</span>} />
+            {/* own line, wrapped: a snapshot message rarely fits after the label */}
+            <box paddingLeft={2} paddingRight={1}>
+              <text fg={theme.fg} wrapMode="word">{snapshot}</text>
+            </box>
           </>
         ) : null}
         </box>
