@@ -444,7 +444,7 @@ export class LocalBackend implements Backend {
       sessions: listSessions(),
       cwd: process.cwd(),
       home: homedir(),
-      tools: [webFetch.name, webSearch.name, ...platformTools("main").map((t) => t.name), "workspace_ask", "task_add", "task_update", "task_list", "bash", "read", "write", "question"],
+      tools: [webFetch.name, webSearch.name, ...platformTools("main").map((t) => t.name), "workspace_ask", "task_add", "task_update", "task_list", "workspace_tasks", "bash", "read", "write", "question"],
       asks: this.#cards.pending(),
       mode: this.#mode,
     };
