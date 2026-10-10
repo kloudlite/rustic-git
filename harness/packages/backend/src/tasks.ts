@@ -142,3 +142,21 @@ export function taskTools(file: string): ToolDef[] {
   };
   return [add, update, list];
 }
+
+/** Main's window onto the workspaces' own boards. Read only: a message never moves a task on another
+ * session's board, so there is no writer here. */
+export function boardTools(dir = tasksDir()): ToolDef[] {
+  return [
+    {
+      name: "workspace_tasks",
+      description: "Show the task board of a workspace session. Each workspace keeps its own board. Use it to see the progress of work you asked for. You cannot change it.",
+      inputSchema: { type: "object", properties: { workspace: { type: "string", description: "The workspace id (`ws-…`). Leave it out to get every workspace board." } } },
+      async run(i: { workspace?: string }) {
+        const boards = i.workspace
+          ? [{ workspace: i.workspace, tasks: readTasks(tasksFile(i.workspace, dir)) }]
+          : readBoards(dir).filter((b) => b.session !== "main").map((b) => ({ workspace: b.session, tasks: b.tasks }));
+        return JSON.stringify(boards);
+      },
+    },
+  ];
+}

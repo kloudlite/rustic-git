@@ -2,7 +2,7 @@ import { expect, test } from "bun:test";
 import { mkdtempSync, readFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { addTask, blockers, boardText, ready, readTasks, taskTools, tasksFile, updateTask } from "./tasks.ts";
+import { addTask, blockers, boardTools, boardText, ready, readTasks, taskTools, tasksFile, updateTask } from "./tasks.ts";
 
 const tmp = () => join(mkdtempSync(join(tmpdir(), "kl-tasks-")), "tasks.json");
 
@@ -67,4 +67,16 @@ test("two sessions' boards are separate", async () => {
   await wsAdd!.run({ title: "w2" });
   expect(readTasks(join(d, "main.json")).map((t) => t.title)).toEqual(["m"]);
   expect(readTasks(join(d, "ws-a.json")).map((t) => [t.id, t.title])).toEqual([["T1", "w1"], ["T2", "w2"]]);
+});
+
+test("workspace_tasks reads one board, all boards, a missing board, never main", async () => {
+  const d = mkdtempSync(join(tmpdir(), "kl-boards-"));
+  await taskTools(tasksFile("main", d))[0]!.run({ title: "m" });
+  await taskTools(tasksFile("ws-a", d))[0]!.run({ title: "a1" });
+  await taskTools(tasksFile("ws-b", d))[0]!.run({ title: "b1" });
+  const [t] = boardTools(d);
+  const titles = (r: string) => JSON.parse(r).map((b: any) => [b.workspace, b.tasks.map((x: any) => x.title)]);
+  expect(titles(await t!.run({ workspace: "ws-a:agent-1" }))).toEqual([["ws-a:agent-1", ["a1"]]]);
+  expect(titles(await t!.run({}))).toEqual([["ws-a", ["a1"]], ["ws-b", ["b1"]]]);
+  expect(titles(await t!.run({ workspace: "ws-zzz" }))).toEqual([["ws-zzz", []]]);
 });
