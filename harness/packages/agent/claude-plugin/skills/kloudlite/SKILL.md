@@ -54,6 +54,22 @@ Use one workspace for each component, for example frontend, backend, worker or t
 
 **Environment.** A shared stack of services for a team. Example: the backend, its database and a queue. Each service runs as its own StatefulSet. Use `service_add`, `service_update` and `service_remove` to add, change and remove services.
 
+**Service data.** A service with no `mounts` loses its data each time its pod restarts. Its data is also lost when the environment stops, restarts or moves. A service that stores data must have a mount. Examples are a database, a queue, a cache and an object store. Add the mount in the same `service_add` call that creates the service.
+
+- A mount has two parts. `folder` is one name, for example `mongo-data`. It names a folder in the environment's own volume. `path` is the data directory in the container.
+- The folder is part of the environment's volume, so it is saved in every snapshot.
+- Use the data directory of the image:
+  - `mongo`: `/data/db`
+  - `postgres`: `/var/lib/postgresql/data`
+  - `mysql` and `mariadb`: `/var/lib/mysql`
+  - `redis`: `/data`
+  - `rabbitmq`: `/var/lib/rabbitmq`
+  - `minio`: `/data`
+  - Another image: read the documentation of the image.
+- Example: `{"name": "mongodb", "image": "mongo:7", "ports": [27017], "mounts": [{"folder": "mongo-data", "path": "/data/db"}]}`.
+- A stateless service needs no mount. An example is a web frontend or an API that keeps its data in a database.
+- If a service that stores data has no mount, add one with `service_update` before the service gets data.
+
 **Service image.** When you add a service, you select its image. You can use a public image. To build an image, use the `container_build` tool:
 
 - Give `tags: ["name:tag"]`.

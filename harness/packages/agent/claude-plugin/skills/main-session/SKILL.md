@@ -189,7 +189,7 @@ The person asks: "Add a comments feature. Add an API in the backend and a commen
 
 ## Test with the team environment
 
-1. Set up the environment yourself. Use `env_get`. If a service is missing, use `env_create` or `service_add`. Example: a database.
+1. Set up the environment yourself. Use `env_get`. If a service is missing, use `env_create` or `service_add`. Example: a database. A service that stores data gets a mount for its data directory (see "Service data" in the kloudlite skill).
 2. Use `workspace_ask` to tell the workspace to run its service and intercept it in that environment. The workspace starts the service and calls `intercept`, because it owns the service.
 3. When the person is done, ask the workspace to release the intercept.
 
