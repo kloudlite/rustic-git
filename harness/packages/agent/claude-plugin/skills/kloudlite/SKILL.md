@@ -54,21 +54,16 @@ Use one workspace for each component, for example frontend, backend, worker or t
 
 **Environment.** A shared stack of services for a team. Example: the backend, its database and a queue. Each service runs as its own StatefulSet. Use `service_add`, `service_update` and `service_remove` to add, change and remove services.
 
-**Service data.** A service with no `mounts` loses its data each time its pod restarts. Its data is also lost when the environment stops, restarts or moves. A service that stores data must have a mount. Examples are a database, a queue, a cache and an object store. Add the mount in the same `service_add` call that creates the service.
+**Service data.** A service with no `mounts` loses everything it writes each time its pod restarts. It also loses it when the environment stops, restarts or moves. Before each `service_add` or `service_update`, check the service for data that must persist:
 
-- A mount has two parts. `folder` is one name, for example `mongo-data`. It names a folder in the environment's own volume. `path` is the data directory in the container.
-- The folder is part of the environment's volume, so it is saved in every snapshot.
-- Use the data directory of the image:
-  - `mongo`: `/data/db`
-  - `postgres`: `/var/lib/postgresql/data`
-  - `mysql` and `mariadb`: `/var/lib/mysql`
-  - `redis`: `/data`
-  - `rabbitmq`: `/var/lib/rabbitmq`
-  - `minio`: `/data`
-  - Another image: read the documentation of the image.
+1. Ask what the service writes to disk and whether that data must still be there after a restart. Records, uploads, queues, indexes and sessions must persist. Temporary files and build output need not.
+2. Find each directory that holds such data. For a public image, read its documentation or its Dockerfile `VOLUME` lines. For an image that you build, read the code: find where it writes files and the paths in its config and env.
+3. Give each directory a mount in the same call that creates the service. Never add the mount later: the data that the service writes before the mount is lost.
+4. If the service keeps all its data in another service, for example an API that stores its data in a database, it needs no mount. State this in your report.
+
+- A mount has two parts. `folder` is one name, for example `mongo-data`. It names a folder in the environment's own volume, so it is saved in every snapshot. `path` is the directory in the container.
 - Example: `{"name": "mongodb", "image": "mongo:7", "ports": [27017], "mounts": [{"folder": "mongo-data", "path": "/data/db"}]}`.
-- A stateless service needs no mount. An example is a web frontend or an API that keeps its data in a database.
-- If a service that stores data has no mount, add one with `service_update` before the service gets data.
+- If you find a service that persists data and has no mount, add the mount with `service_update` and report it.
 
 **Service image.** When you add a service, you select its image. You can use a public image. To build an image, use the `container_build` tool:
 
