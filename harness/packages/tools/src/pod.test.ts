@@ -65,6 +65,19 @@ test("a network error re-fetches the address once and retries once", async () =>
   await expect(t[0]!.run({})).rejects.toThrow("down");
 });
 
+test("a timeout is never resent: the pod may still be running the first call", async () => {
+  let posts = 0;
+  handler = (u) => {
+    if (u.endsWith("/v1/workspaces/w1/tools")) return j({ address: "10.0.0.1:7788" });
+    if (u.endsWith("/tools")) return j({ tools: [] });
+    posts++;
+    throw new DOMException("The operation timed out.", "TimeoutError");
+  };
+  const t = await podTools("w1");
+  await expect(t.find((x) => x.name === "exec")!.run({ cmd: "go test" })).rejects.toThrow("exec: The operation timed out.");
+  expect(posts).toBe(1);
+});
+
 test("a 4xx from a pod tool throws with tool name and status; a non-zero exit stays a result", async () => {
   handler = (u) => {
     if (u.endsWith("/v1/workspaces/w1/tools")) return j({ address: "10.0.0.1:7788" });

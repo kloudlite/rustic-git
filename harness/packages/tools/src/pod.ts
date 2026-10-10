@@ -86,13 +86,15 @@ export async function podTools(ws: string): Promise<ToolDef[]> {
       : name === "container_push" ? 180_000 : 60_000;
     try {
       let res: Response | undefined;
-      // a stale address (pod restarted, token rotated) shows as a network error or 401: re-resolve once
+      // a stale address (pod restarted, token rotated) shows as a network error or 401: re-resolve once.
+      // Never after our own timeout: the pod got the call and may still be running it, so a resend
+      // runs a second `go test` beside the first (2026-10-10: one exec became nine minutes).
       for (let attempt = 0; attempt < 2; attempt++) {
         try {
           res = await post(name, args, timeout);
           if (res.status !== 401 || attempt) break;
-        } catch (e) {
-          if (e instanceof NotReady || attempt) throw e;
+        } catch (e: any) {
+          if (e instanceof NotReady || attempt || e?.name === "TimeoutError") throw e;
         }
         cache = undefined;
       }

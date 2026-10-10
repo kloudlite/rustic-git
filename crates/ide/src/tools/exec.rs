@@ -133,10 +133,12 @@ pub(crate) async fn job(mut cmd: Command, timeout_ms: u64) -> Result<Value, Tool
     match tokio::time::timeout(std::time::Duration::from_millis(timeout_ms), read).await {
         Ok((o, e, status)) => {
             let code = status.map(|s| s.code().unwrap_or(-1)).unwrap_or(-1);
+            tracing::info!(pid, code, ms = started.elapsed().as_millis() as u64, "ide.exec.done");
             let ((stdout, t1), (stderr, t2)) = (o, e);
             Ok(json!({ "exit_code": code, "stdout": stdout, "stderr": stderr, "truncated": t1 || t2, "timed_out": false, "ms": started.elapsed().as_millis() as u64 }))
         }
         Err(_) => {
+            tracing::warn!(pid, timeout_ms, "ide.exec.timeout");
             if let Some(pid) = pid {
                 // The caller asked for a deadline, so the answer comes AT the deadline: the TERM, the
                 // five-second grace and the KILL run behind it (measured: a 1 s timeout answered in 6 s).
@@ -144,8 +146,10 @@ pub(crate) async fn job(mut cmd: Command, timeout_ms: u64) -> Result<Value, Tool
                     // SAFETY: the group this call created.
                     unsafe { libc::kill(-(pid as i32), libc::SIGTERM) };
                     tokio::time::sleep(std::time::Duration::from_secs(5)).await;
-                    unsafe { libc::kill(-(pid as i32), libc::SIGKILL) };
+                    // 0 = something in the group outlived TERM's grace and took the KILL.
+                    let outlived_term = unsafe { libc::kill(-(pid as i32), libc::SIGKILL) } == 0;
                     let _ = child.wait().await;
+                    tracing::info!(pid, outlived_term, "ide.exec.killed");
                 });
             }
             Ok(json!({ "exit_code": -1, "stdout": "", "stderr": format!("timed out after {timeout_ms} ms"), "truncated": false, "timed_out": true, "ms": started.elapsed().as_millis() as u64 }))
@@ -217,6 +221,9 @@ impl ToolSet for Exec {
                         return Ok(json!({ "id": id }));
                     }
                     let timeout = opt_u64(&args, "timeout_ms").unwrap_or(DEFAULT_TIMEOUT_MS).min(MAX_TIMEOUT_MS);
+                    // A job the caller gave up on is answered from these lines (2026-10-10: a test run
+                    // sat nine minutes with nothing in the pod log to say whether it started or ended).
+                    tracing::info!(tree = %t.name, timeout_ms = timeout, cmd = %line.chars().take(160).collect::<String>(), "ide.exec.start");
                     let r = job(cmd, timeout).await.map(|v| trim_output(v, &args));
                     // The TREE's graph: a command that moved a subagent's files refreshes its own.
                     t.graft.refresh_soon();
@@ -335,6 +342,23 @@ mod tests {
         let (_t, x, _trees) = exec_set();
         let v = x.call("exec", json!({ "cmd": "sleep 5", "timeout_ms": 200 })).await.unwrap();
         assert_eq!(v["timed_out"], true);
+    }
+
+    /// Answering at the deadline is half the job: the command must also be GONE, children
+    /// included, or a timed-out `go test` keeps the pod's CPU while the caller retries it.
+    #[tokio::test]
+    async fn a_timed_out_job_leaves_no_child_running() {
+        let (t, x, _trees) = exec_set();
+        let v = x.call("exec", json!({ "cmd": "sleep 30 & echo $! > kid.pid; wait", "timeout_ms": 1000 })).await.unwrap();
+        assert_eq!(v["timed_out"], true);
+        let pid: i32 = std::fs::read_to_string(t.path().join("ws/kid.pid")).unwrap().trim().parse().unwrap();
+        let gone = async {
+            // SAFETY: signal 0 only probes whether the pid exists.
+            while unsafe { libc::kill(pid, 0) } == 0 {
+                tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+            }
+        };
+        tokio::time::timeout(std::time::Duration::from_secs(8), gone).await.expect("the backgrounded sleep outlived the timeout");
     }
 
     /// Paging with the cursors the previous answer returned must repeat NOTHING — on either
