@@ -1266,6 +1266,10 @@
                       "serviceStatus": {
                         "items": {
                           "properties": {
+                            "failing": {
+                              "description": "The service cannot come up without a change from its owner: the container crash-loops,\nits image will not pull, or its config is refused. `message` names the cause (for a crash,\nthe exit code and the last lines it logged). A session polling `ready` stops on this\ninstead of waiting out a back-off that will never end (2026-10-10).",
+                              "type": "boolean"
+                            },
                             "interceptedBy": {
                               "description": "The workspace currently intercepting this service, if any — a view of `EnvironmentSpec`'s\nown `intercepts`, reported here so a browse of one service shows its own fate.",
                               "nullable": true,

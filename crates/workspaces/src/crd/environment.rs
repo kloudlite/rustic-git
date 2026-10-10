@@ -32,6 +32,12 @@ pub struct ServiceStatus {
     /// object's timestamp, which dates a different event entirely.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub unreachable_since: Option<i64>,
+    /// The service cannot come up without a change from its owner: the container crash-loops,
+    /// its image will not pull, or its config is refused. `message` names the cause (for a crash,
+    /// the exit code and the last lines it logged). A session polling `ready` stops on this
+    /// instead of waiting out a back-off that will never end (2026-10-10).
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub failing: bool,
 }
 
 

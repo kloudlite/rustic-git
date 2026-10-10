@@ -115,6 +115,7 @@ pub(crate) fn a_service_is_a_statefulset_with_a_stable_template() {
     assert_eq!(spec.service_name.as_deref(), Some("web"), "the ClusterIP Service of the same name");
     let c = &spec.template.spec.as_ref().unwrap().containers[0];
     assert_eq!(c.image_pull_policy.as_deref(), Some("Always"), "a rebuilt tag must replace the node's cached copy");
+    assert_eq!(c.termination_message_policy.as_deref(), Some("FallbackToLogsOnError"), "a crash's log reaches the status");
     let names: Vec<_> = spec.template.spec.unwrap().containers[0].env.as_ref().unwrap().iter().map(|e| e.name.clone()).collect();
     assert_eq!(names, ["A", "M", "Z"], "a stable template is what keeps the ReplicaSet from changing under a database");
 }

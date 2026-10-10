@@ -82,6 +82,9 @@ pub fn service_statefulset(
             // Always: a dev environment redeploys the same tag (`chat-api:v1`) after every
             // rebuild, and IfNotPresent kept running the node's stale copy of it (2026-10-10).
             image_pull_policy: Some("Always".to_string()),
+            // A crash's last log lines land in `lastState.terminated.message`, which the agent
+            // copies into the environment status: the session reads why without a log call.
+            termination_message_policy: Some("FallbackToLogsOnError".to_string()),
             command: (!svc.command.is_empty()).then(|| svc.command.clone()),
             // Sorted: `env` is a HashMap, and a template whose variable order differs from the
             // last apply is a new revision — a rollout nobody asked for on every reconcile.

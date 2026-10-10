@@ -235,6 +235,42 @@ mod tests {
         assert_eq!(m.chars().count(), 300);
     }
 
+    fn failing(p: Option<&Pod>) -> bool {
+        deployment_status(Some(&StatefulSet::default()), "api", None, None, None, p).failing
+    }
+
+    /// The 2026-10-10 chat-api loop: the back-off text hid `exit 1` and the NATS error behind it,
+    /// and the session polled `ready` for minutes. The status now carries the crash itself.
+    #[test]
+    fn a_crash_loop_names_the_exit_and_the_last_log_lines_and_is_failing() {
+        let w = ContainerState {
+            waiting: Some(ContainerStateWaiting { reason: Some("CrashLoopBackOff".into()), message: Some("back-off 40s restarting failed container".into()) }),
+            ..Default::default()
+        };
+        let t = ContainerState {
+            terminated: Some(ContainerStateTerminated {
+                exit_code: 1,
+                message: Some(format!("{}init store: subjects overlap\n", "x".repeat(2000))),
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+        let mut p = pod(Some(w), Some(t));
+        p.status.as_mut().unwrap().container_statuses.as_mut().unwrap()[0].restart_count = 4;
+        let m = msg(Some(&p)).unwrap();
+        assert!(m.starts_with("crashing (exit 1, 4 restarts): "), "{m}");
+        assert!(m.ends_with("init store: subjects overlap"), "the tail of the log is kept: {m}");
+        assert!(failing(Some(&p)));
+    }
+
+    #[test]
+    fn a_pull_failure_is_failing_and_a_starting_container_is_not() {
+        let w = |r: &str| ContainerState { waiting: Some(ContainerStateWaiting { reason: Some(r.into()), message: None }), ..Default::default() };
+        assert!(failing(Some(&pod(Some(w("ImagePullBackOff")), None))));
+        assert!(!failing(Some(&pod(Some(w("ContainerCreating")), None))));
+        assert!(!failing(None));
+    }
+
     fn svc(folder: &str) -> model::Service {
         serde_json::from_value(serde_json::json!({
             "name": "db", "image": "mongo:7", "command": [], "env": {},

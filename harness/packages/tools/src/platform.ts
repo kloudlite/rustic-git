@@ -96,7 +96,7 @@ function withReady(out: string): string {
     if (!Array.isArray(doc?.services)) return out;
     doc.services = doc.services.map((svc: any) => {
       const st = doc.service_status?.find((x: any) => x.name === svc.name);
-      return { ...svc, ready: st?.ready ?? false, ...(st?.message ? { message: st.message } : {}) };
+      return { ...svc, ready: st?.ready ?? false, ...(st?.message ? { message: st.message } : {}), ...(st?.failing ? { failing: true } : {}) };
     });
     return JSON.stringify(doc, null, 2);
   } catch {
@@ -220,7 +220,7 @@ export function platformTools(kind: "main" | "workspace", wsId?: string): ToolDe
       const t = await teamOf(a);
       return "err" in t ? t.err : api("DELETE", `/v1/me/environments/${seg(t.team)}`);
     }),
-    envTool("env_get", "Read the services, state and intercepts of an environment. Each `services[]` entry has `ready` (and `message`) from service_status. Poll `ready`, not the spec. The `state` is `creating`, `running`, `stopped`, `error` or `deleted`. `running` means up. Stop the poll when the state is `error` or `deleted`." + (ws ? " It defaults to the environment that the space of this workspace follows." : ""), {}, [], async (env) => withReady(await api("GET", `/v1/environments/${env}`))),
+    envTool("env_get", "Read the services, state and intercepts of an environment. Each `services[]` entry has `ready` (and `message`) from service_status. Poll `ready`, not the spec. `failing: true` means the service will not come up by waiting (a crash loop, an image that will not pull, a refused config): stop polling, read `message` (for a crash, the exit code and its last log lines), fix the cause and redeploy. The `state` is `creating`, `running`, `stopped`, `error` or `deleted`. `running` means up. Stop the poll when the state is `error` or `deleted`." + (ws ? " It defaults to the environment that the space of this workspace follows." : ""), {}, [], async (env) => withReady(await api("GET", `/v1/environments/${env}`))),
     services("service_add", "Add one service to an environment. The call fails if a service with this name exists." + ASYNC, { service: SERVICE }, ["service"], (cur, a) =>
       cur.some((s) => s.name === a.service?.name) ? `error: service exists: ${a.service?.name}` : [...cur, withServiceDefaults(a.service)]),
     services("service_update", "Replace one existing service in an environment. The tool matches the service by name." + ASYNC, { service: SERVICE }, ["service"], (cur, a) =>
@@ -257,7 +257,7 @@ export function platformTools(kind: "main" | "workspace", wsId?: string): ToolDe
     def("worktree_drop", "Remove a worktree from a workspace." + ASYNC, { workspace: WS, name: S }, ["workspace", "name"], async (a) => api("DELETE", `/v1/workspaces/${seg(a.workspace)}/trees/${seg(a.name)}`)),
     of("packages_list"),
     def("env_list", "List the environments. You can give one team.", { team: S }, [], async (a) => api("GET", `/v1/environments${qs({ owner: a.team })}`)),
-    def("env_get", "Read the services, state and intercepts of one environment. Poll this tool after any env call. Each `services[]` entry has `ready` (and `message`) from service_status. Poll `ready`, not the spec. The `state` is `creating`, `running`, `stopped`, `error` or `deleted`. `running` means up. Stop the poll when the state is `error` or `deleted`.", { env: ENV }, ["env"], async (a) => withReady(await api("GET", `/v1/environments/${seg(a.env)}`))),
+    def("env_get", "Read the services, state and intercepts of one environment. Poll this tool after any env call. Each `services[]` entry has `ready` (and `message`) from service_status. Poll `ready`, not the spec. `failing: true` means the service will not come up by waiting (a crash loop, an image that will not pull, a refused config): stop polling, read `message` (for a crash, the exit code and its last log lines), fix the cause and redeploy. The `state` is `creating`, `running`, `stopped`, `error` or `deleted`. `running` means up. Stop the poll when the state is `error` or `deleted`.", { env: ENV }, ["env"], async (a) => withReady(await api("GET", `/v1/environments/${seg(a.env)}`))),
     of("service_logs"),
     def("env_delete", "Delete an environment permanently.", { env: ENV }, ["env"], async (a) => api("DELETE", `/v1/environments/${seg(a.env)}`)),
     def("env_start", "Start a stopped environment." + ASYNC, { env: ENV }, ["env"], async (a) => api("POST", `/v1/environments/${seg(a.env)}/start`)),

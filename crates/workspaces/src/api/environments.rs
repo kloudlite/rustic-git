@@ -1161,6 +1161,7 @@ mod tests {
                 intercepted_by: Some("ws-1".into()),
                 proxy: Some("starting".into()),
                 unreachable_since: Some(1_700_000_000),
+                failing: false,
             }],
             ..Default::default()
         });
