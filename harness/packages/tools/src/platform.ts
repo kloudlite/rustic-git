@@ -148,7 +148,9 @@ export function platformTools(kind: "main" | "workspace", wsId?: string): ToolDe
     if (!ws) return { err: "error: team is required" };
     const g = await load(W);
     if ("err" in g) return g;
-    return g.doc?.team ? { team: g.doc.team } : { err: "error: workspace has no team" };
+    // `crd::space_slug`: a personal workspace's space is the owner's own handle, never "no team"
+    const team = String(g.doc?.team || g.doc?.owner || "").toLowerCase();
+    return team ? { team } : { err: "error: workspace has no owner" };
   };
   const teamProp: Props = { team: S };
 

@@ -108,6 +108,11 @@ test("workspace sessions default env through /v1/me/environments", async () => {
   routes["GET /v1/me/environments"] = json([{ team: "other", environment: "x" }]);
   await expect(tool(t, "env_get").run({})).rejects.toThrow("this workspace's space follows no environment");
   expect(t.some((x) => x.name === "workspace_create")).toBe(false);
+  // a personal workspace's space is the owner's handle (`crd::space_slug`)
+  routes["GET /v1/workspaces/w1"] = json({ owner: "Kay", team: "", packages: [] });
+  routes["GET /v1/me/environments"] = json([{ team: "kay", environment: "e9" }]);
+  await tool(t, "env_get").run({});
+  expect(calls.at(-1)!.url).toBe("/v1/environments/e9");
 });
 
 test("env_get folds service_status readiness into services[]; workspace_clone sends task only when given", async () => {
