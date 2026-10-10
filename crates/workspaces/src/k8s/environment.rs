@@ -79,6 +79,9 @@ pub fn service_statefulset(
         containers: vec![Container {
             name: svc.name.clone(),
             image: Some(svc.image.clone()),
+            // Always: a dev environment redeploys the same tag (`chat-api:v1`) after every
+            // rebuild, and IfNotPresent kept running the node's stale copy of it (2026-10-10).
+            image_pull_policy: Some("Always".to_string()),
             command: (!svc.command.is_empty()).then(|| svc.command.clone()),
             // Sorted: `env` is a HashMap, and a template whose variable order differs from the
             // last apply is a new revision — a rollout nobody asked for on every reconcile.
