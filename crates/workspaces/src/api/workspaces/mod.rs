@@ -92,7 +92,7 @@ pub(super) fn ws_doc(w: &crd::Workspace, pushed: &HashSet<String>) -> Workspace 
         placement: st.map(|s| s.node_name.clone()).filter(|n| !n.is_empty()),
         volume: ws_volume(w)
             .filter(|v| pushed.contains(*v))
-            .map(|_| format!("vol/{}/{id}", w.spec.owner)),
+            .map(|_| id.clone()),
         quota_gb: w.spec.storage.as_ref().map(|s| s.quota_gb).unwrap_or(0),
         packages: w.spec.packages.clone(),
         base_packages: st.and_then(|s| s.packages.as_ref()).map(|p| p.base.clone()).unwrap_or_default(),

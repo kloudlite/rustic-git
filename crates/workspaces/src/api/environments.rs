@@ -38,7 +38,7 @@ fn env_doc(e: &crd::Environment, pushed: &HashSet<String>) -> Environment {
         placement: st.map(|s| s.node_name.clone()).filter(|n| !n.is_empty()),
         volume: env_volume(e)
             .filter(|v| pushed.contains(*v))
-            .map(|_| format!("vol/{}/{id}", e.spec.owner)),
+            .map(|_| id.clone()),
         services: e.spec.services.clone(),
         // Only `get_env` fills this in: it is a read of the CHILD volume's status, and a listing
         // that did it per row would be an N+1 against the API server for a field one page shows.

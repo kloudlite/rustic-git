@@ -338,7 +338,7 @@ pub(crate) async fn volumes_for(
             kind,
             display_name: parent.map(|p| p.display.clone()).unwrap_or_else(|| name.clone()),
             deleted: known && parent.is_none(),
-            volume: Some(format!("vol/{owner}/{name}")),
+            volume: Some(name.clone()),
             latest_ms: rows.iter().filter_map(|sn| sn.creation_timestamp()).map(|t| t.0.as_millisecond()).max(),
             snapshots: pushes.len() as u64,
             last_push_at: pushes.iter().filter_map(|sn| sn.status.as_ref()?.ready_at.clone()).max(),

@@ -111,7 +111,7 @@ async fn a_volume_whose_parent_was_deleted_is_still_listed() {
     assert_eq!(live["deleted"], false);
     assert_eq!(live["kind"], "workspace");
     assert_eq!(live["display_name"], "web", "a live parent names itself");
-    assert_eq!(live["volume"], "vol/karthik/ws-live", "the field the web already reads");
+    assert_eq!(live["volume"], "ws-live", "the field the web already reads");
 
     let gone = rows.iter().find(|v| v["name"] == "ws-gone").unwrap();
     assert_eq!(gone["deleted"], true, "no live workspace of that name: {gone}");
@@ -598,7 +598,7 @@ async fn a_foreign_snapshot_keeps_the_volume_after_my_last_snapshot_goes() {
     assert_eq!(deletes, vec![format!("DELETE {SNAPS}/ws-1-a")], "the volume is alice's too: {deletes:?}");
 }
 
-/// `list_volumes` derives the row's `vol/{owner}/{name}` from the first snapshot's `spec.owner`,
+/// `list_volumes` derives the row's owner from the first snapshot's `spec.owner`,
 /// so a mislabelled snapshot both appears in the wrong person's list and mislabels who owns it.
 #[tokio::test]
 async fn list_volumes_drops_a_mislabelled_snapshot() {

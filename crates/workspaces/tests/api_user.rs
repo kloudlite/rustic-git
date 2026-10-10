@@ -2101,7 +2101,7 @@ async fn a_stop_response_reports_the_volume_it_has() {
         .await
         .unwrap();
     let body: Value = resp.json().await.unwrap();
-    assert_eq!(body["volume"], "vol/karthik/ws-0000000000000001", "a pushed volume is not null: {body}");
+    assert_eq!(body["volume"], "ws-0000000000000001", "a pushed volume is not null: {body}");
 }
 
 /// The volume pointer on a workspace doc is answered by the snapshots in the cluster, not by a
@@ -2123,5 +2123,5 @@ async fn a_workspace_doc_reports_its_volume_without_an_upstream() {
         .await
         .unwrap();
     let body: Value = resp.json().await.unwrap();
-    assert_eq!(body["volume"], "vol/karthik/ws-0000000000000001", "{body}");
+    assert_eq!(body["volume"], "ws-0000000000000001", "{body}");
 }
