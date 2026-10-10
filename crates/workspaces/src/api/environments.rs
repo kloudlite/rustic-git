@@ -113,7 +113,7 @@ pub(crate) async fn patch_env_services(
     method: axum::http::Method,
     uri: axum::extract::OriginalUri,
     Named(id): Named,
-    Json(body): Json<ServicesBody>,
+    Json(mut body): Json<ServicesBody>,
 ) -> Result<Response, Response> {
     let caller_id = caller_for(&s, &headers, &method, uri.path()).await?;
     let e = find_env(&s, &caller_id, &id).await?;
@@ -143,6 +143,7 @@ pub(crate) async fn patch_env_services(
             .collect();
         guard_alloc(&s, &e.spec.owner, e.spec.owner != caller_id.name, &want).await?;
     }
+    super::image_pin::pin_images(&s, &e.spec.owner, &mut body.services).await;
     let api: Api<crd::Environment> = Api::all(kube(&s)?.clone());
     let patch = serde_json::json!({"spec": {"services": body.services}});
     let e = api.patch(&id, &PatchParams::default(), &Patch::Merge(&patch)).await.map_err(kube_err)?;
@@ -176,7 +177,7 @@ pub(crate) async fn create_env(
     headers: axum::http::HeaderMap,
     method: axum::http::Method,
     uri: axum::extract::OriginalUri,
-    Json(body): Json<NewEnvironment>,
+    Json(mut body): Json<NewEnvironment>,
 ) -> Result<Response, Response> {
     let caller_id = caller_for(&s, &headers, &method, uri.path()).await?;
     // Mounts name volumes (folders inside the env's own subvolume), not workspaces. The name is
@@ -189,6 +190,7 @@ pub(crate) async fn create_env(
     let c = kube(&s)?;
     let quota_gb = clamp_quota(&s, body.quota_gb);
     guard_alloc(&s, &owner, owner != caller_id.name, &environment_cost(body.services.len())).await?;
+    super::image_pin::pin_images(&s, &owner, &mut body.services).await;
     let id = rid("env");
     let e = create_environment(
         &s,
@@ -298,7 +300,7 @@ pub(crate) async fn restore_env(
     // mounts and a hand-edited `state` is no more trusted than a request body.
     // An environment always has services: an empty body list is "use the snapshot's", never
     // "restore the data with nothing running" — the owner ruled the latter out on 2026-09-03.
-    let services = body
+    let mut services = body
         .services
         .clone()
         .filter(|l| !l.is_empty())
@@ -315,6 +317,7 @@ pub(crate) async fn restore_env(
     };
     let c = kube(&s)?;
     guard_alloc(&s, &owner, owner != caller_id.name, &environment_cost(services.len())).await?;
+    super::image_pin::pin_images(&s, &owner, &mut services).await;
     // The source environment may be long gone; the Volume holding the bytes still names its region.
     let region = match body.region {
         Some(r) => r,

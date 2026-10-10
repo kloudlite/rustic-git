@@ -58,6 +58,7 @@ pub mod admin;
 
 mod env_pull;
 mod environments;
+mod image_pin;
 
 pub mod keys;
 

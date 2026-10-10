@@ -75,7 +75,7 @@ const SERVICE = {
   type: "object",
   properties: {
     name: S,
-    image: S,
+    image: { type: "string", description: "repo:tag. The platform pins it to the tag's current digest (repo:tag@sha256:…), so redeploying a rebuilt tag runs the new bytes." },
     command: SL,
     env: OBJ,
     mounts: { type: "array", items: { type: "object", properties: { folder: S, path: S }, required: ["folder", "path"] } },
