@@ -40,7 +40,7 @@ A tool with the mark **card** shows a permission card to the person before it ru
 
 | Tool | Use it to |
 |---|---|
-| `workspace_ask` | Give a goal to the session of a workspace. Include the `task` id from the board if the task has one. The answer comes later as a message. |
+| `workspace_ask` | Give a goal to the session of a workspace. Set `for` to your own task id when the ask serves a task on your board. The answer comes later as a message. |
 | `task_add`, `task_update`, `task_list` | Keep the task board. The board shows the task of each workspace, the tasks that wait, and their sequence. |
 
 **Workspaces**
@@ -111,12 +111,12 @@ The board shows you and the person the task of each workspace and the tasks that
    - Priority 1 runs first. The default priority is 3.
    - `depends_on` gives the tasks that must be done first. Use it only for a real order. Example: an integration test task depends on the backend task and the frontend task.
    - Do not make a consumer depend on its provider. Write the contract first. Then both tasks start at the same time. Refer to "Work in more than one workspace".
-2. **Start.** A task is ready when it is queued and all tasks in its `depends_on` are done. For each ready task, use `workspace_ask { workspace, task, request }`.
+2. **Start.** A task is ready when it is queued and all tasks in its `depends_on` are done. For each ready task, use `workspace_ask { workspace, request, for }`. `for` is your own task id.
    - Give one task at a time to each workspace.
    - The ask sets the task to running.
-   - If a task in `depends_on` is not done, the ask is refused. The refusal gives the ids of the tasks that it waits for.
-3. **Reports.** A workspace sends a report with `main_tell`. The report comes as `[from <ws>] [task T3] done: ...`, `blocked: ...` or `need: ...`.
-   - A `done` or `blocked` report updates the board. The report also gives the next ready task for that workspace and each task that is now ready. Start these tasks.
+   - Do not ask for a task until each task in its `depends_on` is done. Check with `task_list`.
+3. **Reports.** A workspace sends a report with `main_tell`. The report comes as `[from <ws>] done: ...`, `blocked: ...` or `need: ...`. It has no task id.
+   - When a workspace sends `done` or `blocked`, set the state of your task with `task_update`. Then start each task that is now ready.
    - Sometimes a workspace ends its turn without `main_tell`. Then its final answer comes as `[from <ws>] ...`. Set the state of the task yourself with `task_update`.
 4. **Change.** The person can change the priorities. You can find a new dependency. Then use `task_update` to change the priority, `depends_on` or workspace. The board refuses a loop or an unknown task.
 5. **Answer.** To answer "What is each workspace doing?", use `task_list`.
@@ -129,14 +129,13 @@ Give the goal of the person in their words. Add only the context that you have a
 - The decisions of the person.
 - Facts from the report of a different workspace.
 - The contract and its version, when the work crosses components. Copy the full contract text into the ask.
-- The task id.
 
 Do not give file paths, languages, libraries, layout or steps. The workspace decides how to build its component. The contract is the only interface fact that you give.
 
 ## How messages work
 
-1. You call `workspace_ask { workspace, task, request }`. It returns immediately with `sent to <ws>`.
-2. The workspace session gets `[from main session] [task T3] <request>` as a new turn. If the session is busy, this turn waits until the current turn ends.
+1. You call `workspace_ask { workspace, request, for }`. It returns immediately with `sent to <ws>`.
+2. The workspace session gets `[from main session] <request>` as a new turn. If the session is busy, this turn waits until the current turn ends.
 3. During the work, the workspace can send you messages with `main_tell`. Each message comes as `[from <ws>] ...`. There are three kinds:
    - `need`: The workspace needs a fact or an action from a different workspace or from the person. It continues the work that it can do.
    - `blocked`: The workspace cannot continue.
@@ -145,7 +144,7 @@ Do not give file paths, languages, libraries, layout or steps. The workspace dec
 5. Do not wait, sleep or poll. Continue to help the person. Do the necessary action for each message when it comes.
 6. An ask that is not complete continues after a bench restart. The bench sends it again with the mark `[resent after restart]`. It does this a maximum of two times. After the third restart, you get `failed: lost in 3 bench restarts`.
 
-**When you get `need`:** Get the answer. You can ask the workspace that has the fact, set up the environment, or ask the person. Then send the answer to the workspace that needed it. Use a new `workspace_ask` with the same task id.
+**When you get `need`:** Get the answer. You can ask the workspace that has the fact, set up the environment, or ask the person. Then send the answer to the workspace that needed it. Use a new `workspace_ask` with `for` set to your task for that workspace.
 
 ## Work in more than one workspace
 
@@ -164,7 +163,7 @@ Workspaces do not send messages to other workspaces. Only you move facts between
 5. **Change the contract only through you.** A workspace must not change the contract. If a workspace finds a problem in the contract, it sends `need: contract change` with a proposal.
    - Make the decision. If the change affects the person, ask the person.
    - Increase the version and update the contract file.
-   - Send the new contract to each workspace of the feature. Use a new `workspace_ask` with the same task id of that workspace.
+   - Send the new contract to each workspace of the feature. Use a new `workspace_ask` with `for` set to your task for that workspace.
 6. **Check each `done` report.** The report gives the contract version that the workspace built to. If the version is old, send the current contract to that workspace again.
 7. **Integrate.** When all component tasks are done, start the integration task. The consumer removes the stubs and uses the real provider. Refer to "Integration tests with two workspaces".
 
@@ -176,7 +175,7 @@ Sometimes the work on one component has independent parts. Example: two features
 2. Use `workspace_clone` one time for each part.
 3. Poll `workspace_get` until each clone is `ready`.
 4. Put each part on the board for its clone.
-5. Use `workspace_ask` for each clone with this text: "You are a clone of `<ws>` for task `T5`: `<goal>`. Work on branch `<task branch>` and push it to origin. Send your report with `main_tell`. Stop this workspace when you are done."
+5. Use `workspace_ask` for each clone with this text: "You are a clone of `<ws>`: `<goal>`. Work on branch `<task branch>` and push it to origin. Send your report with `main_tell`. Stop this workspace when you are done."
 6. When a clone sends `done`, ask the original workspace to merge the branch of the clone into its working branch. The original workspace resolves conflicts and runs the tests. This merge is a separate task on the board.
 7. Delete the clone that is done with `workspace_delete` (this shows a card).
 
@@ -188,11 +187,11 @@ The person asks: "Add a comments feature. Add an API in the backend and a commen
 
 1. Use `workspace_list`. The backend and frontend workspaces exist. If a workspace does not exist, use `workspace_create`. Then poll `workspace_get` until its state is `ready`.
 2. Write contract v1 to `contract-comments.md`. Example: `GET /api/comments?post=<id>` returns `[{id, author, body, createdAt}]`; `POST /api/comments` takes `{post, body}` and returns the comment with 201; a body that is empty gives 400 `{"error": ...}`.
-3. Use `task_add` for T1 "comments API" on the backend and T2 "comments box" on the frontend. Do not set `depends_on`.
+3. Use `task_add` with `workspace` for T1 "comments API" on the backend and T2 "comments box" on the frontend. Do not set `depends_on`.
 4. Use `task_add` for T3 "comments integration" with `depends_on: ["T1", "T2"]`.
-5. Use `workspace_ask` for the backend with `task: "T1"`, and for the frontend with `task: "T2"`. Each ask gives the goal and the full contract v1. Both workspaces work at the same time. The frontend uses a mock of the API.
+5. Use `workspace_ask` for the backend with `for: "T1"`, and for the frontend with `for: "T2"`. Each ask gives the goal and the full contract v1. Both workspaces work at the same time. The frontend uses a mock of the API.
 6. The frontend sends `need: contract change: add "authorName" to each comment`. Make the decision. Write contract v2. Send v2 to the backend (T1) and to the frontend (T2).
-7. Both workspaces send `done` with `contract v2`. The board shows that T3 is ready.
+7. Both workspaces send `done` with `contract v2`. Set T1 and T2 to done with `task_update`. Now T3 is ready.
 8. Do T3: the backend runs its service with an intercept, and the frontend tests against it without the mock.
 9. Tell the person what each workspace did. Give the branches, the commits, and the decisions that the person must make.
 
