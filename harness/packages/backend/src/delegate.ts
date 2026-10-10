@@ -10,6 +10,7 @@
 //! session's board. The CALLER's own board is the platform's: `workspace_ask` with `for` moves that
 //! task to running; without `for` it adds a running row (`note: ask:<ws>`) that replaces that
 //! workspace's open row, and that workspace's `main_tell` done|blocked moves it to done|blocked. The
+//! same tell closes the sender's own board: done finishes every open step, blocked its running ones. The
 //! message log (messages.ts) is the one place that links a message to the sender's task (`for`) or to
 //! the ask it answers (`reply`).
 //! Delegated sessions ask through `deps.permit`, the daemon's gate: the card is raised for the caller's key on every connected TUI.
@@ -347,6 +348,11 @@ export function delegateTools(kind: "main" | "workspace", ws: string | undefined
           // the platform keeps main's row for this ask (see header)
           const board = tasksFile(to, deps.tasks ?? tasksDir());
           for (const t of readTasks(board)) if (t.note === `ask:${ws}` && t.state !== "done") updateTask(board, t.id, { state: i.kind });
+          // and closes the sender's own steps: a session ends its turn on the report, so a last step
+          // like "report to main" would otherwise stay running forever
+          const own = tasksFile(ws!, deps.tasks ?? tasksDir());
+          for (const t of readTasks(own))
+            if (i.kind === "done" ? t.state !== "done" : t.state === "running") updateTask(own, t.id, { state: i.kind });
         }
         recordMessage(deps.messages ?? messagesFile(), { from: base(ws!), to: base(to), text: msg, kind: i.kind, reply: deps.lastAsk?.get(ws!) });
         await deliver(deps, to, callerSettings(deps, ws!, caller), msg, ws!);

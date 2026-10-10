@@ -316,6 +316,22 @@ test("main_tell done|blocked closes only that ws's open ask row; need leaves it"
   await flush();
 });
 
+test("main_tell blocked blocks the sender's running steps; done finishes every open step", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "kl-board-"));
+  const own = tasksFile("w", dir);
+  for (const n of ["a", "b", "c"]) addTask(own, { title: n });
+  updateTask(own, "T1", { state: "done" });
+  updateTask(own, "T2", { state: "running" });
+  const tell = () => tellOf(D({ messages: board(), tasks: dir, open: route(fake(), fake()) }), "w");
+  await tell().run({ kind: "need", text: "?" });
+  expect(readTasks(own).map((t) => t.state)).toEqual(["done", "running", "queued"]);
+  await tell().run({ kind: "blocked", text: "b" });
+  expect(readTasks(own).map((t) => t.state)).toEqual(["done", "blocked", "queued"]);
+  await tell().run({ kind: "done", text: "d" });
+  expect(readTasks(own).map((t) => t.state)).toEqual(["done", "done", "done"]);
+  await flush();
+});
+
 test("workspace_ask lends the caller's typed words to the workspace key before prompting", async () => {
   const lent: [string, string[]][] = [];
   const ws = fake("ok");
