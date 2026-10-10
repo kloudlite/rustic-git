@@ -720,7 +720,7 @@ export function Transcript({
       })}
     </scrollbox>
       {away && (
-        <box height={1} justifyContent="center" onMouseDown={toBottom}>
+        <box position="absolute" bottom={0} left={0} right={0} height={1} justifyContent="center" backgroundColor={theme.bg} onMouseDown={toBottom}>
           <text selectable={false} fg={theme.accent}>
             ↓ jump to bottom <span fg={theme.muted}>end</span>
           </text>

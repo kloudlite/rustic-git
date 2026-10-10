@@ -32,7 +32,7 @@ export function foldRepeats(entries: Entry[]): Entry[] {
   for (const e of entries) {
     const p = out[out.length - 1];
     if (p && isTool(e) && isTool(p) && e.id?.includes("/") && p.id?.includes("/") && p.name === e.name && p.summary === e.summary) {
-      out[out.length - 1] = { ...e, repeats: (p.repeats ?? 1) + 1 };
+      out[out.length - 1] = { ...e, id: p.id, repeats: (p.repeats ?? 1) + 1 };
     } else out.push(e);
   }
   return out;

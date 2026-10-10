@@ -20,7 +20,7 @@ test("a different tool, a user message between, or an ok row keep both", () => {
 
 test("consecutive identical codemode inner calls collapse into the latest with a count", () => {
   const out = foldRepeats([tool("p", "codemode", "running"), tool("p/1", "env_get", "ok", "e1"), tool("p/2", "env_get", "ok", "e1"), tool("p/3", "env_get", "running", "e1"), tool("p/4", "read", "ok", "f")]);
-  expect(out.map((e: any) => [e.id, e.repeats])).toEqual([["p", undefined], ["p/3", 3], ["p/4", undefined]]);
+  expect(out.map((e: any) => [e.id, e.repeats])).toEqual([["p", undefined], ["p/1", 3], ["p/4", undefined]]);
 });
 
 test("the reload fold replaces a failed row once its status is known", () => {
