@@ -3,7 +3,11 @@
 //!
 //! Two rules, and they answer differently on purpose (spec §3.5, §4.4):
 //!
-//!   * An ABSOLUTE path is a 400 — "paths are relative to your working directory". There is
+//!   * An absolute path UNDER the tree's root is that path relative to the root: it is what `pwd`
+//!     inside an exec prints (the tree is bound at the same path), so a model spells it back, and
+//!     6 of 12 workspace sessions lost a call to the 400 below (2026-10-10). The remainder still
+//!     goes through every check, so `/root/../etc` is the same 403 as `../etc`.
+//!   * Any other ABSOLUTE path is a 400 — "paths are relative to your working directory". There is
 //!     nothing to deny, only a shape to correct, and a model told it was denied would go looking
 //!     for a way in rather than re-spelling what it already had. The home used to be an allowed
 //!     absolute prefix here, so a model could edit dotfiles; that is the person's shell's job now,
@@ -37,10 +41,13 @@ pub fn lexical(tree: &TreeCtx, given: &str) -> PathBuf {
 }
 
 pub fn confine(tree: &TreeCtx, given: &str) -> Result<PathBuf, ToolError> {
-    if Path::new(given).is_absolute() {
-        return Err(ToolError::Invalid(RELATIVE_ONLY.into()));
-    }
-    let resolved = resolve_existing_prefix(&lexical(tree, given));
+    let p = Path::new(given);
+    let rel = if p.is_absolute() {
+        p.strip_prefix(&tree.root).map_err(|_| ToolError::Invalid(RELATIVE_ONLY.into()))?
+    } else {
+        p
+    };
+    let resolved = resolve_existing_prefix(&lexical(tree, &rel.to_string_lossy()));
     let root = tree.root.canonicalize().unwrap_or_else(|_| tree.root.clone());
     if !resolved.starts_with(&root) {
         return Err(ToolError::Denied(format!("EACCES {given}: outside your working directory")));
@@ -122,9 +129,17 @@ mod tests {
         assert_eq!(confine(&main, "src/main.rs").unwrap(), main.root.join("src/main.rs"));
         let e = confine(&main, "../../../../etc/passwd").unwrap_err();
         assert!(matches!(e, ToolError::Denied(ref m) if m.contains("etc/passwd")), "{e:?}");
-        // Absolute is a SHAPE error, whatever it points at — the tree's own root included.
+        // Absolute outside the root is a SHAPE error; under it, it is the relative path.
         assert!(matches!(confine(&main, "/etc/passwd"), Err(ToolError::Invalid(_))));
-        assert!(matches!(confine(&main, &main.root.to_string_lossy()), Err(ToolError::Invalid(_))));
+        let r = main.root.to_string_lossy().into_owned();
+        assert_eq!(confine(&main, &r).unwrap(), main.root);
+        assert_eq!(confine(&main, &format!("{r}/src/main.rs")).unwrap(), main.root.join("src/main.rs"));
+        // The remainder is checked like any relative path: no climbing out, no `.agents/`.
+        assert!(matches!(confine(&main, &format!("{r}/../../etc/passwd")), Err(ToolError::Denied(_))));
+        assert!(matches!(confine(&main, &format!("{r}/.agents/x/f")), Err(ToolError::Denied(_))));
+        // A subagent's tree root is its fence: the workspace's absolute path is not under it.
+        let x = trees.resolve(Some("x")).unwrap();
+        assert!(matches!(confine(&x, &format!("{r}/src/main.rs")), Err(ToolError::Invalid(_))));
         // A symlink inside the tree resolves to its target: what was checked is what is opened.
         std::fs::create_dir_all(main.root.join("real")).unwrap();
         std::os::unix::fs::symlink(main.root.join("real"), main.root.join("link")).unwrap();

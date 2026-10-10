@@ -36,7 +36,7 @@ fn main_tree(app: &Arc<App>) -> Arc<TreeCtx> {
 }
 
 #[test]
-fn an_absolute_path_is_a_400_naming_the_shape_to_correct() {
+fn an_absolute_path_outside_the_tree_is_a_400_naming_the_shape_to_correct() {
     let (_t, app) = workspace();
     let t = main_tree(&app);
     let e = confine(&t, "/home/kl/x").unwrap_err();
@@ -44,9 +44,9 @@ fn an_absolute_path_is_a_400_naming_the_shape_to_correct() {
         matches!(&e, ToolError::Invalid(m) if m.contains("paths are relative to your working directory")),
         "a 400, not a 403: {e:?}"
     );
-    // The tree's OWN absolute path is refused the same way. There is one shape, and it is relative.
+    // The tree's OWN absolute path is what `pwd` prints inside an exec: it is the relative path.
     let own = t.root.join("src/main.rs").to_string_lossy().into_owned();
-    assert!(matches!(confine(&t, &own), Err(ToolError::Invalid(_))), "even its own root spelled absolutely");
+    assert_eq!(confine(&t, &own).unwrap(), t.root.join("src/main.rs"));
 }
 
 /// The one place under its own root the main tree may not look. Named in the denial, because the
