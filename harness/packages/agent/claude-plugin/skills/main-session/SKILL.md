@@ -104,6 +104,8 @@ You do not have `exec` or code tools. You cannot read or change the files of a w
 
 A workspace session cannot create, clone or delete workspaces. If it needs a different workspace, it tells you. You make the decision.
 
+A workspace session can give parts of its own task to subagents. You do not see the subagents. Their work comes to you in the report of the workspace. Use clones only when the parts need their own branch or their own service.
+
 ## Boards
 
 Each workspace keeps its own board. The workspace breaks your ask into steps there. The person and you can see it. You cannot change it. A message never moves a task on the board of another session.

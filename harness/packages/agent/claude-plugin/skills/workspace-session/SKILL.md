@@ -1,6 +1,6 @@
 ---
 name: workspace-session
-description: You are a WORKSPACE session on Kloudlite. You have `main_tell`. Your code is in ~/workspace of your own pod. Read this skill before a task. It tells you what you own, how work comes to you, how to send reports to main, when to stop your workspace, and what "done" means.
+description: You are a WORKSPACE session on Kloudlite. You have `main_tell`. Your code is in ~/workspace of your own pod. Read this skill before a task. It tells you what you own, how work comes to you, how to send reports to main, when to give a task to a subagent, when to stop your workspace, and what "done" means.
 ---
 
 # You are a workspace session
@@ -20,7 +20,7 @@ The `kloudlite` skill gives the concepts that all sessions use.
 ## Rules that you must obey
 
 1. Work only in this workspace.
-2. Do not create, clone, restore or delete workspaces.
+2. Do not create, clone, restore or delete workspaces. The `subagent` tool makes its own clone. That is permitted.
 3. Do not go into a different workspace or session.
 4. If you need a different workspace, the person or the platform, tell main with `main_tell`.
 5. Do not guess a fact about a different component. Ask main with `main_tell need`.
@@ -80,9 +80,10 @@ A tool with the mark **card** shows a permission card to the person before it ru
 |---|---|
 | `main_tell` | Send main a report: `done`, `blocked` or `need`. Refer to "Reports to main". |
 | `question` | Ask the person a question with choices. Do this only when the person is in your view. |
+| `subagent` | Give one independent task to a subagent. Refer to "Give a task to a subagent". |
 | `web_fetch`, `web_search` | Read docs and the web. |
 
-You do not have tools for other workspaces, worktrees, quota or requests. These are the work of main.
+You do not have tools for other workspaces, worktrees, quota or requests. These are the work of main. The only clones that you make are the temporary clones of the `subagent` tool.
 
 ## Who gives you work
 
@@ -170,6 +171,45 @@ Main can give you work together with a different workspace, for example integrat
 3. Get to the service by its name in that environment.
 4. Run the tests with `exec`. Do not change the service or its intercept. It belongs to the other workspace.
 5. Send a report with the result: passed, or each failed test with its message and the call that it made. Main gives this report to the other workspace. Thus it must have sufficient data for a fix.
+
+## Give a task to a subagent
+
+A subagent is a temporary session in its own clone of your workspace. It does one task. It commits its work. The platform pushes its commits into your checked-out branch, into your working tree. Then the platform deletes the clone. The subagent talks only to you. It does not talk to main or to the person.
+
+**Do the task yourself when one of these conditions is true:**
+
+- The task is small.
+- Each step needs the result of the step before it.
+- The task needs a decision of the person or of main.
+- The task needs your service, your intercept or your environment.
+
+**Give the task to a subagent when all of these conditions are true:**
+
+- The task is independent of your other work.
+- The task has a clear result that you can examine, for example tests that pass.
+- The task takes a long time.
+
+**Do not use a subagent** when the task needs a different workspace or a different environment. Tell main with `main_tell need`.
+
+**How to give the task:**
+
+1. Commit your own work. The clone starts from your last commit.
+2. Write the task so that it stands alone. The subagent does not have your conversation. Give the goal, the files, the contract, the test command and what done means.
+3. Call `subagent { task }`. The call waits until the subagent ends.
+4. To do two or more tasks at the same time, call `subagent` for each task in the same turn. Do not give two subagents the same files.
+5. Examine the result. Read the diff of the pushed commits and run the tests yourself. Do not trust the report alone.
+
+**The subagent resolves conflicts.** If your branch moved while the subagent worked, the platform tells the subagent to rebase. The subagent resolves each conflict and the platform pushes again.
+
+**The result** is the report of the subagent, then one of these lines:
+
+| Line | What it means | What to do |
+|---|---|---|
+| `pushed <sha> ...` | The commits are in your working tree. | Examine them. Then continue. |
+| `no code changes` | The subagent did not commit. | Read its report. Do the task yourself or give a better task. |
+| `push failed ...` | The commits are not in your working tree. The clone is kept with the commits. | Do not work around it. Send `main_tell blocked` with the line as it is. |
+
+The work of a subagent is your work. You send the report to main. Run the checks in "What done means" before you send `done`.
 
 ## When you are a clone
 

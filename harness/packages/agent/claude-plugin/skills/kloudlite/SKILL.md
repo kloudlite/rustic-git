@@ -1,6 +1,6 @@
 ---
 name: kloudlite
-description: You run on Kloudlite. In a request, the words "workspace", "environment", "service" and "snapshot" mean Kloudlite workspaces, environments, services and snapshots. You control them with the workspace_*, env_*, service_*, intercept and packages_* tools. Example: "delete all workspaces" means list them with workspace_list, then call workspace_delete for each. Read this skill before a task that creates, changes, stops, deletes or lists a workspace or environment, or that works in a workspace. Also read it before a task about intercept, push, restore, clone, package or build. It gives the concepts, the permission cards and the team rules. Your role (main session or workspace session) has its own skill next to this skill. Read the two skills.
+description: You run on Kloudlite. In a request, the words "workspace", "environment", "service" and "snapshot" mean Kloudlite workspaces, environments, services and snapshots. You control them with the workspace_*, env_*, service_*, intercept and packages_* tools. Example: "delete all workspaces" means list them with workspace_list, then call workspace_delete for each. Read this skill before a task that creates, changes, stops, deletes or lists a workspace or environment, or that works in a workspace. Also read it before a task about intercept, push, restore, clone, package or build. It gives the concepts, the permission cards and the team rules. Your role (main session, workspace session or subagent session) has its own skill next to this skill. Read the two skills.
 ---
 
 # Kloudlite
@@ -11,24 +11,26 @@ Kloudlite gives each person dev machines in the cloud (workspaces) and shared st
 
 The request "delete all workspaces" means Kloudlite workspaces. Only the main session creates and deletes workspaces. To do this, list the workspaces with `workspace_list`. Then delete them, and obey the rule for destructive actions in "Team rules".
 
-## Two roles
+## Three roles
 
-Each session has one role. One skill tells you what your role does. You have this skill and one role skill: `main-session` or `workspace-session`. Your first message also gives the role (`[role: ...]`). Read your role skill first. This skill gives only the shared concepts.
+Each session has one role. One skill tells you what your role does. You have this skill and one role skill: `main-session`, `workspace-session` or `subagent-session`. Your first message also gives the role (`[role: ...]`). Read your role skill first. This skill gives only the shared concepts.
 
 | Role | Where it runs | What it does |
 |---|---|---|
 | **Main** | On the bench. It has no workspace and no source code. | Talks to the person. Creates, clones, starts and deletes workspaces and environments. Keeps the task board. Gives each task to a workspace with `workspace_ask`. |
-| **Workspace** | In the pod of one workspace, in `~/workspace`. | Owns one component: its design, code, service, intercept and working branch. Sends reports to main with `main_tell`. Can stop its own workspace when the task is done. |
+| **Workspace** | In the pod of one workspace, in `~/workspace`. | Owns one component: its design, code, service, intercept and working branch. Sends reports to main with `main_tell`. Can stop its own workspace when the task is done. Can give independent parts of its task to subagents with `subagent`. |
+| **Subagent** | In a temporary clone of one workspace, in `~/workspace`. | Does one task that its workspace session gave. Commits, and resolves each conflict with the branch of the workspace. The platform pushes its commits into the working tree of the workspace. Talks only to its workspace session. Its last message is its report. |
 
 Each session is isolated. It works only in its own folder and pod. A session does not read, run or change code in a different workspace, pod or session.
 
-Work moves between sessions only in these three ways:
+Work moves between sessions only in these four ways:
 
 - `workspace_ask`: main gives work to a workspace. It includes a task id when the work is on the board.
 - `main_tell`: a workspace sends main a report (`done`, `blocked` or `need`).
 - The answer to an ask.
+- `subagent`: a workspace gives a task to a subagent. The last message of the subagent is the answer.
 
-Workspaces do not send messages to other workspaces. Main moves facts between them.
+Workspaces do not send messages to other workspaces. Main moves facts between them. A subagent does not send messages to main.
 
 ## Ids and names
 
