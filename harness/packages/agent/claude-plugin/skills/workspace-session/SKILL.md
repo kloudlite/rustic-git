@@ -97,17 +97,28 @@ If the words of the person and the ask of main do not agree, obey the person. Th
 
 | kind | When to send it | What to do after it |
 |---|---|---|
-| `need` | You need a fact or an action that you cannot get yourself. Examples: the endpoint or payload of a different component, a service in the environment, or a decision of the person when the person is not in your view. | Continue the work that you can do. Main answers with a new ask. |
+| `need` | You need a fact or an action that you cannot get yourself. Examples: a fact that the contract does not give, a change to the contract, a service in the environment, or a decision of the person when the person is not in your view. | Continue the work that you can do. Main answers with a new ask. |
 | `blocked` | You cannot continue. | End your turn. |
 | `done` | The task is complete. Refer to "What done means". | End your turn. |
 
 After `done` or `blocked`, end your turn. The report is your answer. Main does not get a second copy. Use `need` and do not guess the facts of a different component. A wrong endpoint costs a full cycle to correct.
 
+## The contract
+
+When the work crosses components, the ask from main gives a contract with a version, for example `contract v1`. The contract gives the interface between your component and the other components: endpoints, payloads, errors, ports and service names.
+
+- Build exactly to the contract. Do not wait for the other component. It works at the same time as you.
+- If you consume an interface, use a stub or a mock that obeys the contract. Remove it only in the integration task.
+- If you provide an interface, write tests that prove that your component obeys the contract.
+- Do not change the contract yourself. If the contract is wrong or not complete, send `main_tell need` with `contract change:` and your proposal. Continue the work that the change does not affect.
+- When main sends a new version, update your work to that version.
+
 Write each report so that main can do the next step without a question. Include these items:
 
 - The status and the task id.
 - The branch and the commit.
-- The facts that other components need from you, for example an endpoint, a payload, a port or a service name.
+- The contract version that you built to.
+- The facts that other components need from you and that the contract does not give, for example a port or a service name.
 - The decisions that the person must make.
 
 If the person asked you directly and there is no task from main, answer the person in the conversation. Use `main_tell` only when main must know.

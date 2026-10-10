@@ -109,7 +109,8 @@ The board shows you and the person the task of each workspace and the tasks that
 
 1. **Plan.** When the person asks for work, divide it into tasks. Each task is for one workspace. Use `task_add { title, workspace, priority, depends_on }`.
    - Priority 1 runs first. The default priority is 3.
-   - `depends_on` gives the tasks that must be done first. Example: the backend API must be done before the frontend uses it.
+   - `depends_on` gives the tasks that must be done first. Use it only for a real order. Example: an integration test task depends on the backend task and the frontend task.
+   - Do not make a consumer depend on its provider. Write the contract first. Then both tasks start at the same time. Refer to "Work in more than one workspace".
 2. **Start.** A task is ready when it is queued and all tasks in its `depends_on` are done. For each ready task, use `workspace_ask { workspace, task, request }`.
    - Give one task at a time to each workspace.
    - The ask sets the task to running.
@@ -127,9 +128,10 @@ Give the goal of the person in their words. Add only the context that you have a
 - The environment.
 - The decisions of the person.
 - Facts from the report of a different workspace.
+- The contract and its version, when the work crosses components. Copy the full contract text into the ask.
 - The task id.
 
-Do not give file paths, languages, libraries, layout, endpoints or steps. The workspace decides how to build its component.
+Do not give file paths, languages, libraries, layout or steps. The workspace decides how to build its component. The contract is the only interface fact that you give.
 
 ## How messages work
 
@@ -147,14 +149,24 @@ Do not give file paths, languages, libraries, layout, endpoints or steps. The wo
 
 ## Work in more than one workspace
 
-Workspaces do not send messages to other workspaces. Only you move facts between them.
+Workspaces do not send messages to other workspaces. Only you move facts between them. Do not make one workspace wait for another. Set the contract first, then start all workspaces at the same time.
 
-1. Put the provider first on the board. Example: the backend API.
-2. Put the consumer after the provider. Set its `depends_on` to the provider task.
-3. When the provider sends `done`, get the facts that the consumer needs from the report. Example: the endpoint and the payload.
-4. Put these facts in the ask to the consumer.
-
-Tasks that do not have a dependency between them run at the same time in different workspaces.
+1. **Write the contract.** The contract is the interface between the components. It gives each fact that two components must agree on:
+   - Each endpoint: the method, the path, the request payload, the response payload and the errors.
+   - Events, ports, service names and environment variables.
+   - If a provider already exists, first ask it for its current interface facts. Use these facts in the contract.
+   - If the person must make a decision about the contract, ask the person with `question`.
+2. **Keep the contract.** Write it to `/tmp/kl-main/<session>/contract-<feature>.md`. Give it a version, starting at `v1`.
+3. **Plan.** Put one task for each component on the board. Do not set `depends_on` between them. Add one integration task with `depends_on` set to all of the component tasks.
+4. **Start all component tasks.** Send each workspace its goal and the full contract text with the version. Each workspace builds to the contract:
+   - The provider builds the interface and tests it against the contract.
+   - The consumer builds against the contract. It uses a stub or a mock of the provider until the integration task.
+5. **Change the contract only through you.** A workspace must not change the contract. If a workspace finds a problem in the contract, it sends `need: contract change` with a proposal.
+   - Make the decision. If the change affects the person, ask the person.
+   - Increase the version and update the contract file.
+   - Send the new contract to each workspace of the feature. Use a new `workspace_ask` with the same task id of that workspace.
+6. **Check each `done` report.** The report gives the contract version that the workspace built to. If the version is old, send the current contract to that workspace again.
+7. **Integrate.** When all component tasks are done, start the integration task. The consumer removes the stubs and uses the real provider. Refer to "Integration tests with two workspaces".
 
 ## Parallel work with clones
 
@@ -175,12 +187,14 @@ CAUTION: A clone that sent `blocked`, or that could not push, can hold the only 
 The person asks: "Add a comments feature. Add an API in the backend and a comments box in the frontend."
 
 1. Use `workspace_list`. The backend and frontend workspaces exist. If a workspace does not exist, use `workspace_create`. Then poll `workspace_get` until its state is `ready`.
-2. Use `task_add` for T1 "comments API" on the backend.
-3. Use `task_add` for T2 "comments box" on the frontend, with `depends_on: ["T1"]`.
-4. Use `workspace_ask` for the backend with the goal and `task: "T1"`.
-5. The backend sends this report: `[from backend] [task T1] done: endpoint POST /api/comments, payload {...}, branch comments at 3f2a1c9; board: T1 done; now ready: T2`.
-6. Use `workspace_ask` for the frontend with the goal, `task: "T2"`, and the endpoint and payload from the backend report.
-7. When the frontend sends `done`, tell the person what each workspace did. Give the branches, the commits, and the decisions that the person must make.
+2. Write contract v1 to `contract-comments.md`. Example: `GET /api/comments?post=<id>` returns `[{id, author, body, createdAt}]`; `POST /api/comments` takes `{post, body}` and returns the comment with 201; a body that is empty gives 400 `{"error": ...}`.
+3. Use `task_add` for T1 "comments API" on the backend and T2 "comments box" on the frontend. Do not set `depends_on`.
+4. Use `task_add` for T3 "comments integration" with `depends_on: ["T1", "T2"]`.
+5. Use `workspace_ask` for the backend with `task: "T1"`, and for the frontend with `task: "T2"`. Each ask gives the goal and the full contract v1. Both workspaces work at the same time. The frontend uses a mock of the API.
+6. The frontend sends `need: contract change: add "authorName" to each comment`. Make the decision. Write contract v2. Send v2 to the backend (T1) and to the frontend (T2).
+7. Both workspaces send `done` with `contract v2`. The board shows that T3 is ready.
+8. Do T3: the backend runs its service with an intercept, and the frontend tests against it without the mock.
+9. Tell the person what each workspace did. Give the branches, the commits, and the decisions that the person must make.
 
 ## Test with the team environment
 

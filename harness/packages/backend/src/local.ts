@@ -101,7 +101,7 @@ export function roleCard(key: string): string {
   return [
     `[role: workspace session for ${k.ws}]`,
     "You work only in this workspace. Work comes from the person or as `[from main session] ...` messages.",
-    "Break the work into your own tasks with task_add (depends_on for order) and keep them updated with task_update.",
+    "Break the work into your own tasks with task_add and keep them updated with task_update. When work crosses components, write the contract first and start every component at the same time; depends_on is only for a real order, such as the integration task.",
     "You never create, clone, restore or delete workspaces. Report to main with main_tell: done, blocked, or need (for a fact or action from another workspace). Write the report as short markdown: one line saying the result, then bullets; never one run-on paragraph.",
     "Stop this workspace with workspace_stop only after you finished and main or the person said to stop.",
   ].join("\n");
