@@ -61,7 +61,17 @@ pub(crate) async fn run_environment(
     let sets: std::collections::HashMap<String, StatefulSet> =
         deployments.list(&kube::api::ListParams::default()).await?.items.into_iter().map(|d| (d.name_any(), d)).collect();
     prune_services(e, ns, &sets, deployments, ctx).await?;
-    let service_status = read_services_back(e, &sets, &prev, &plan, &rendered).await?;
+    // ONE pod list per pass, for the same reason: it feeds the "why not ready" message only, so a
+    // failed list falls back to the generic message and never fails the reconcile.
+    let pods: std::collections::HashMap<String, Pod> =
+        match Api::<Pod>::namespaced(ctx.client.clone(), ns).list(&kube::api::ListParams::default()).await {
+            Ok(l) => l.items.into_iter().map(|p| (p.name_any(), p)).collect(),
+            Err(err) => {
+                tracing::warn!(namespace = ns, error = %err, "env.pods.list.failed");
+                Default::default()
+            }
+        };
+    let service_status = read_services_back(e, &sets, &pods, &prev, &plan, &rendered).await?;
     let (st, all_ready) = running_status(e, &prev, service_status, &id, &plan, decommissioning, gen);
     write_env_status(e, st, ctx).await?;
     // A held intercept has to be looked at again: nothing woke us for the grace running out.
@@ -464,6 +474,7 @@ async fn prune_services(
 async fn read_services_back(
     e: &crd::Environment,
     sets: &std::collections::HashMap<String, StatefulSet>,
+    pods: &std::collections::HashMap<String, Pod>,
     prev: &crd::EnvironmentStatus,
     plan: &std::collections::HashMap<&str, Intercepting>,
     // What phase 4 settled for each service — absent for one it decided nothing about (a `Keep`,
@@ -506,7 +517,7 @@ async fn read_services_back(
             }
             _ => None,
         };
-        service_status.push(deployment_status(sets.get(&svc.name), &svc.name, by, proxy, unreachable_since));
+        service_status.push(deployment_status(sets.get(&svc.name), &svc.name, by, proxy, unreachable_since, pods.get(&format!("{}-0", svc.name))));
     }
     Ok(service_status)
 }

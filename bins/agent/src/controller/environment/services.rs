@@ -22,6 +22,9 @@ pub(crate) fn deployment_status(
     // service no intercept wrote anything about.
     proxy: Option<String>,
     unreachable_since: Option<i64>,
+    // The service's `{svc}-0` pod, from the pass's ONE pod listing: the StatefulSet only says "no
+    // ready replicas", the pod says why (ImagePullBackOff, CrashLoopBackOff, ...).
+    pod: Option<&Pod>,
 ) -> crd::ServiceStatus {
     let Some(d) = set else {
         return crd::ServiceStatus {
@@ -50,11 +53,35 @@ pub(crate) fn deployment_status(
     crd::ServiceStatus {
         name: name.into(),
         ready: ready >= 1,
-        message: (ready < 1).then(|| "no ready replicas".to_string()),
+        message: (ready < 1).then(|| not_ready_reason(pod).unwrap_or_else(|| "no ready replicas".to_string())),
         intercepted_by,
         proxy,
         unreachable_since,
     }
+}
+
+
+/// Why the pod is not ready, in the kubelet's own words: a waiting container's `reason: message`,
+/// else a terminated last state's `reason (exit N)`. `None` leaves the caller's generic message.
+/// Cut at 300 chars (on a char boundary) because pull errors can run to pages and this lands in a
+/// CR status.
+fn not_ready_reason(pod: Option<&Pod>) -> Option<String> {
+    let cs = pod?.status.as_ref()?.container_statuses.as_ref()?;
+    let text = cs.iter().find_map(|c| {
+        let w = c.state.as_ref()?.waiting.as_ref()?;
+        let reason = w.reason.as_deref().unwrap_or("Waiting");
+        Some(match w.message.as_deref().filter(|m| !m.is_empty()) {
+            Some(m) => format!("{reason}: {m}"),
+            None => reason.to_string(),
+        })
+    })
+    .or_else(|| {
+        cs.iter().find_map(|c| {
+            let t = c.last_state.as_ref()?.terminated.as_ref()?;
+            Some(format!("{} (exit {})", t.reason.as_deref().unwrap_or("Terminated"), t.exit_code))
+        })
+    })?;
+    Some(text.chars().take(300).collect())
 }
 
 

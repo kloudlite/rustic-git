@@ -185,6 +185,55 @@ pub async fn apply_environment(e: &crd::Environment, ctx: &Arc<Ctx>) -> Result<A
 #[cfg(test)]
 mod tests {
     use super::*;
+    use k8s_openapi::api::core::v1::{ContainerState, ContainerStateTerminated, ContainerStateWaiting, ContainerStatus, PodStatus};
+
+    fn pod(state: Option<ContainerState>, last: Option<ContainerState>) -> Pod {
+        Pod {
+            status: Some(PodStatus {
+                container_statuses: Some(vec![ContainerStatus { state, last_state: last, ..Default::default() }]),
+                ..Default::default()
+            }),
+            ..Default::default()
+        }
+    }
+
+    fn msg(p: Option<&Pod>) -> Option<String> {
+        deployment_status(Some(&StatefulSet::default()), "api", None, None, None, p).message
+    }
+
+    #[test]
+    fn a_waiting_container_names_its_reason_and_message() {
+        let w = ContainerState {
+            waiting: Some(ContainerStateWaiting { reason: Some("ImagePullBackOff".into()), message: Some("401 Unauthorized".into()) }),
+            ..Default::default()
+        };
+        assert_eq!(msg(Some(&pod(Some(w), None))).as_deref(), Some("ImagePullBackOff: 401 Unauthorized"));
+    }
+
+    #[test]
+    fn a_terminated_last_state_names_its_exit_code() {
+        let t = ContainerState {
+            terminated: Some(ContainerStateTerminated { reason: Some("Error".into()), exit_code: 137, ..Default::default() }),
+            ..Default::default()
+        };
+        assert_eq!(msg(Some(&pod(None, Some(t)))).as_deref(), Some("Error (exit 137)"));
+    }
+
+    #[test]
+    fn no_pod_or_no_reason_keeps_the_generic_message() {
+        assert_eq!(msg(None).as_deref(), Some("no ready replicas"));
+        assert_eq!(msg(Some(&pod(None, None))).as_deref(), Some("no ready replicas"));
+    }
+
+    #[test]
+    fn a_long_reason_is_cut_on_a_char_boundary() {
+        let w = ContainerState {
+            waiting: Some(ContainerStateWaiting { reason: Some("X".into()), message: Some("é".repeat(500)) }),
+            ..Default::default()
+        };
+        let m = msg(Some(&pod(Some(w), None))).unwrap();
+        assert_eq!(m.chars().count(), 300);
+    }
 
     fn svc(folder: &str) -> model::Service {
         serde_json::from_value(serde_json::json!({
