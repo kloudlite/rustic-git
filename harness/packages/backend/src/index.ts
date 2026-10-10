@@ -56,7 +56,7 @@ export type SpaceEnvironment = {
   services: { name: string; ports: number[]; interceptedBy?: string }[];
 };
 export type TaskState = "queued" | "running" | "blocked" | "done" | "failed";
-export type BoardTask = { id: string; title: string; priority: number; dependsOn: string[]; state: TaskState; note?: string; workspace?: string; created: number };
+export type BoardTask = { id: string; title: string; priority: number; dependsOn: string[]; state: TaskState; note?: string; created: number };
 export type SpaceView = {
   available: boolean;
   error?: string;
