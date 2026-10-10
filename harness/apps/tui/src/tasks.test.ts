@@ -53,3 +53,8 @@ test("done tasks, newest first, for the ^q screen", () => {
 });
 
 test("uptime is empty without a start time", () => expect(uptime(undefined, 0)).toBe(""));
+
+test("a row noted ask:<ws> shows the workspace name before the title", () => {
+  const rows = planRows([{ session: "main", tasks: [T("T1", { state: "running", title: "build it", note: "ask:w1" })] }], names, "main");
+  expect(text(rows)).toEqual(["main", "● T1 todo-demo: build it | working"]);
+});

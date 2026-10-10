@@ -271,18 +271,49 @@ test("workspace_ask sends only words, logs the caller's task as `for`, and runs 
   expect(main.sent[0]).toBe("prompt:[from w] done it");
 });
 
-test("main_tell has no task, logs kind and the ask it answers, and never changes a board", async () => {
-  const tasks = board();
+test("main_tell logs kind and the ask it answers, and leaves a row without an ask note alone", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "kl-board-"));
+  const tasks = tasksFile("main", dir);
   addTask(tasks, { title: "first" });
   const log = join(mkdtempSync(join(tmpdir(), "kl-msgs-")), "m.json");
   const main = fake();
   const lastAsk = new Map([["w", "abc"]]);
-  const tell = tellOf(D({ messages: log, lastAsk, open: route(fake(), main) }), "w");
+  const tell = tellOf(D({ messages: log, lastAsk, tasks: dir, open: route(fake(), main) }), "w");
   await tell.run({ kind: "done", text: "shipped" });
   await flush();
   expect(main.sent[0]).toBe("prompt:[from w] done: shipped");
   expect(readTasks(tasks)[0]!.state).toBe("queued");
   expect(readMessages(log)[0]).toMatchObject({ from: "w", to: "main", kind: "done", reply: "abc" });
+});
+
+test("workspace_ask without `for` adds a running row; a second ask to the same ws replaces it; for adds none", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "kl-board-"));
+  const tasks = tasksFile("main", dir);
+  const [ask] = delegateTools("main", undefined, D({ messages: board(), tasks: dir, open: route(fake("ok"), fake()) }), caller);
+  await ask!.run({ workspace: "w", request: "  first line\nsecond" });
+  expect(readTasks(tasks)).toMatchObject([{ title: "first line", note: "ask:w", state: "running" }]);
+  await ask!.run({ workspace: "v", request: "other" });
+  await ask!.run({ workspace: "w", request: "again" });
+  expect(readTasks(tasks).map((t) => `${t.note}:${t.state}`)).toEqual(["ask:w:done", "ask:v:running", "ask:w:running"]);
+  await ask!.run({ workspace: "w", request: "x".repeat(80), for: "T2" });
+  expect(readTasks(tasks)).toHaveLength(3);
+  await ask!.run({ workspace: "u", request: "x".repeat(80) });
+  expect(readTasks(tasks)[3]!.title).toBe(`${"x".repeat(60)}…`);
+  await flush();
+});
+
+test("main_tell done|blocked closes only that ws's open ask row; need leaves it", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "kl-board-"));
+  const tasks = tasksFile("main", dir);
+  for (const n of ["ask:w", "ask:x"]) addTask(tasks, { title: n, note: n });
+  const tell = () => tellOf(D({ messages: board(), tasks: dir, open: route(fake(), fake()) }), "w");
+  await tell().run({ kind: "need", text: "?" });
+  expect(readTasks(tasks).map((t) => t.state)).toEqual(["queued", "queued"]);
+  await tell().run({ kind: "blocked", text: "b" });
+  expect(readTasks(tasks).map((t) => t.state)).toEqual(["blocked", "queued"]);
+  await tell().run({ kind: "done", text: "d" });
+  expect(readTasks(tasks).map((t) => t.state)).toEqual(["done", "queued"]);
+  await flush();
 });
 
 test("workspace_ask lends the caller's typed words to the workspace key before prompting", async () => {

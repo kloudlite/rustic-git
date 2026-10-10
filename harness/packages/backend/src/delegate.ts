@@ -6,10 +6,12 @@
 //! blocks, commits there, and the platform pushes into the parent's checked-out branch over SSH, the
 //! child resolving a moved branch itself in up to 3 rebase rounds; a push that still fails keeps the
 //! clone. Needs the bench token: a workspace token cannot clone).
-//! Messages carry only words: a task id never travels in the text and never reaches the other
-//! session's board. One exception on the CALLER's own board: `workspace_ask` moves the task it
-//! serves (`for`) from queued to running, so the Plan panel shows the handed-off work as live. The message log (messages.ts) is the one
-//! place that links a message to the sender's task (`for`) or to the ask it answers (`reply`).
+//! Messages carry only words: a task id never travels in the text and never reaches another
+//! session's board. The CALLER's own board is the platform's: `workspace_ask` with `for` moves that
+//! task to running; without `for` it adds a running row (`note: ask:<ws>`) that replaces that
+//! workspace's open row, and that workspace's `main_tell` done|blocked moves it to done|blocked. The
+//! message log (messages.ts) is the one place that links a message to the sender's task (`for`) or to
+//! the ask it answers (`reply`).
 //! Delegated sessions ask through `deps.permit`, the daemon's gate: the card is raised for the caller's key on every connected TUI.
 //! The answer is the last assistant text seen before `agent_end`: Claude sessions emit
 //! `agent_end` with an empty message list, so the events are tracked instead. It only counts after
@@ -23,7 +25,7 @@ import type { PermissionRequest, Decision, SessionHandle, SessionOpts } from "./
 import { messagesFile, recordMessage } from "./messages.ts";
 import { asksDir, dropAsk, listAsks, saveAsk, type PendingAsk } from "./asks.ts";
 import { forgetSessions } from "./forget.ts";
-import { readTasks, tasksDir, tasksFile, updateTask } from "./tasks.ts";
+import { addTask, readTasks, tasksDir, tasksFile, updateTask } from "./tasks.ts";
 
 export type DelegateDeps = {
   /** Open sessions by key (LocalBackend's map). */
@@ -340,7 +342,12 @@ export function delegateTools(kind: "main" | "workspace", ws: string | undefined
       async run(i: { kind: "done" | "blocked" | "need"; text: string }) {
         const to = deps.lastCaller?.get(ws!) ?? "main";
         const msg = `[from ${ws}] ${i.kind}: ${i.text}`;
-        if (i.kind !== "need") deps.reported?.add(ws!);
+        if (i.kind !== "need") {
+          deps.reported?.add(ws!);
+          // the platform keeps main's row for this ask (see header)
+          const board = tasksFile(to, deps.tasks ?? tasksDir());
+          for (const t of readTasks(board)) if (t.note === `ask:${ws}` && t.state !== "done") updateTask(board, t.id, { state: i.kind });
+        }
         recordMessage(deps.messages ?? messagesFile(), { from: base(ws!), to: base(to), text: msg, kind: i.kind, reply: deps.lastAsk?.get(ws!) });
         await deliver(deps, to, callerSettings(deps, ws!, caller), msg, ws!);
         return `told ${to}`;
@@ -358,9 +365,15 @@ export function delegateTools(kind: "main" | "workspace", ws: string | undefined
       const key = input.workspace;
       const text = `[from main session] ${input.request}`;
       const msg = recordMessage(deps.messages ?? messagesFile(), { from: base(callerKey), to: base(key), text, for: input.for });
+      const board = tasksFile(callerKey, deps.tasks ?? tasksDir());
       if (input.for) {
-        const board = tasksFile(callerKey, deps.tasks ?? tasksDir());
         if (readTasks(board).find((t) => t.id === input.for)?.state === "queued") updateTask(board, input.for, { state: "running" });
+      } else {
+        const note = `ask:${key}`;
+        for (const t of readTasks(board)) if (t.note === note && t.state !== "done") updateTask(board, t.id, { state: "done" });
+        const line = input.request.split("\n")[0]!.trim();
+        const row = addTask(board, { title: line.length > 60 ? `${line.slice(0, 60)}…` : line || "ask", note });
+        if (typeof row !== "string") updateTask(board, row.id, { state: "running" });
       }
       // Not awaited: main must stay free for the person while the workspace works.
       void dispatchAsk(deps, {
