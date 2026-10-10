@@ -2,7 +2,7 @@ import { expect, test } from "bun:test";
 import { mkdtempSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { LocalBackend, ALWAYS_ASK, asking, baseHandle, mustAsk, roleCard, stripCard, shareable, installGate, registryFor, sessionCwd, sessionKind } from "./local.ts";
+import { LocalBackend, DESTRUCTIVE, asking, baseHandle, mustAsk, roleCard, stripCard, shareable, installGate, registryFor, sessionCwd, sessionKind } from "./local.ts";
 import { toolDiff } from "./diff.ts";
 import { Cards } from "./cards.ts";
 import { PROTOCOL } from "./wire.ts";
@@ -33,24 +33,11 @@ test("fs wraps git.ts", async () => {
   expect(Array.isArray(await b.fs.listDir(process.cwd(), ""))).toBe(true);
 });
 
-test("house actions always ask; file edits never do", () => {
-  const house = ["workspace_stop", "workspace_delete", "worktree_drop", "env_delete", "env_stop", "env_restore_in_place", "service_remove", "volume_delete", "snapshot_delete", "container_push", "container_build", "packages_remove", "service_update", "intercept"];
-  expect(ALWAYS_ASK.size).toBe(14);
-  const walls = { sandbox: "active", network: "fenced" };
-  for (const n of house) expect([mustAsk(n, walls, "fenced"), mustAsk(n)]).toEqual([true, true]);
-  for (const n of ["write", "edit", "patch", "read"]) expect(mustAsk(n)).toBe(false);
-});
-
-test("exec asks unless the pod reports both walls", () => {
-  expect(mustAsk("exec")).toBe(true);
-  expect(mustAsk("exec", {})).toBe(true);
-  expect(mustAsk("exec", { sandbox: "unavailable", network: "fenced" })).toBe(true);
-  expect(mustAsk("exec", { sandbox: "active", network: "open" })).toBe(true);
-  expect(mustAsk("exec", { sandbox: "active", network: "fenced" })).toBe(false);
-});
-
-test("bash and web_fetch ask unless KLOUDLITE_EGRESS is fenced", () => {
-  for (const n of ["bash", "web_fetch"]) expect([mustAsk(n, undefined, undefined), mustAsk(n, undefined, "open"), mustAsk(n, undefined, "fenced")]).toEqual([true, true, false]);
+test("only destructive house actions ask", () => {
+  const destructive = ["workspace_delete", "worktree_drop", "env_delete", "env_restore_in_place", "service_remove", "volume_delete", "snapshot_delete"];
+  expect(DESTRUCTIVE.size).toBe(7);
+  for (const n of destructive) expect(mustAsk(n)).toBe(true);
+  for (const n of ["write", "edit", "patch", "read", "exec", "bash", "web_fetch", "workspace_stop", "env_stop", "container_build", "container_push", "packages_remove", "service_update", "intercept"]) expect(mustAsk(n)).toBe(false);
 });
 
 test("pod edit ({old,new}) has no local diff; pi edit still does", () => {
@@ -90,12 +77,12 @@ test("registry per session kind", async () => {
   expect(wsReg.get("read").description).not.toContain("scratch");
   expect(ws).toContain("main_tell");
   expect((wsReg.get("packages_add").inputSchema as any).properties.workspace).toBeUndefined();
-  // the self-stop carries no card fields; main's still names the workspace and says why
+  // a stop never asks, so it carries no card fields; main's still names the workspace
   const stop: any = wsReg.get("workspace_stop").inputSchema;
   expect(stop.properties.because).toBeUndefined();
   expect(stop.properties.workspace).toBeUndefined();
   const mstop: any = (await registryFor({ kind: "main" }, deps, opts)).get("workspace_stop").inputSchema;
-  expect(mstop.required).toEqual(["workspace", "because"]);
+  expect(mstop.required).toEqual(["workspace"]);
   expect(ws).toContain("intercept");
   expect(ws).toContain("subagent");
   expect(main).not.toContain("subagent");
@@ -119,11 +106,6 @@ test("main keeps only the orchestrator's tools", async () => {
   const main = (await registryFor({ kind: "main" }, deps, { tools: [] } as any)).names();
   for (const n of ["packages_add", "packages_remove", "packages_update", "intercept", "release", "subagent"]) expect(main).not.toContain(n);
   for (const n of ["packages_list", "workspace_create", "workspace_delete", "workspace_ask"]) expect(main).toContain(n);
-});
-
-test("a workspace's own workspace_stop never asks; main's does", () => {
-  expect(mustAsk("workspace_stop", undefined, "open", "workspace")).toBe(false);
-  expect(mustAsk("workspace_stop", undefined, "open", "main")).toBe(true);
 });
 
 /** An agent that records what reached `prompt`. */
@@ -215,15 +197,15 @@ test("the gate asks for a codemode script's nested gated call, once for a top-le
   const asked: string[] = [];
   installGate(pi, async (req) => {
     asked.push(req.name);
-    return req.name === "exec" ? { block: true, reason: "no" } : {};
+    return req.name === "volume_delete" ? { block: true, reason: "no" } : {};
   });
   const call = (name: string) => ({ toolCall: { name }, args: {} });
   // nested: pi's runner calls _beforeToolCall with the parent id, never agent.beforeToolCall
-  expect(await pi._beforeToolCall(call("exec"), "cm1")).toEqual({ block: true, reason: "no" });
+  expect(await pi._beforeToolCall(call("volume_delete"), "cm1")).toEqual({ block: true, reason: "no" });
   expect(await pi._beforeToolCall(call("read"), "cm1")).toBeUndefined();
   // top level: asked once, then falls through to pi's own hook
-  await pi.agent.beforeToolCall(call("bash"));
-  expect(asked).toEqual(["exec", "bash"]);
+  await pi.agent.beforeToolCall(call("env_delete"));
+  expect(asked).toEqual(["volume_delete", "env_delete"]);
   expect(seen).toEqual(["pi", "pi"]);
 });
 
@@ -292,7 +274,7 @@ test("the gate skips the card for words the person typed, else shows the reason"
   const gate = (typed: string[]) => {
     const pi: any = { agent: {} };
     const reqs: any[] = [];
-    installGate(pi, async (req) => (reqs.push(req), {}), undefined, () => ({ typed }));
+    installGate(pi, async (req) => (reqs.push(req), {}), () => ({ typed }));
     return { pi, reqs };
   };
   const call = (because: any) => ({ toolCall: { name: "workspace_delete" }, args: { workspace: "foo", because } });

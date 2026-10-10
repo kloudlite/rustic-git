@@ -149,7 +149,7 @@ export type SessionOpts = {
   fresh?: boolean;
   /** Tools the TUI owns; their `run` executes in the TUI process. */
   tools: ToolDef[];
-  /** Called only for gated tools: house actions always; bash, exec and web_fetch unless the fence holds (`mustAsk`); never write, edit, patch. Absent on internal opens (a
+  /** Called only for destructive house actions (`mustAsk`); never exec, bash, edits, builds or stops. Absent on internal opens (a
    * view opened to deliver a reply): cards then go to every connected TUI (cards.ts). */
   permission?(req: PermissionRequest, signal: AbortSignal): Promise<Decision>;
   /** Set only by serve.ts: this view is a person at a client, so what is typed through it counts as their words (consent.ts). */

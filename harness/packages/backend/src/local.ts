@@ -23,7 +23,7 @@ import {
   writeSettings,
   type ModelRef,
 } from "@kloudlite-tui/agent";
-import { Registry, platformTools, podFence, podTools, type PodFence, scratchRoot, scratchTools, webFetch, webSearch, type ToolDef } from "@kloudlite-tui/tools";
+import { Registry, platformTools, podTools, scratchRoot, scratchTools, webFetch, webSearch, type ToolDef } from "@kloudlite-tui/tools";
 import { Cards } from "./cards.ts";
 import { claudeLogin } from "./claudelogin.ts";
 import { WORKSPACE_DIR, delegateTools, resumeAsks, type DelegateDeps } from "./delegate.ts";
@@ -39,17 +39,16 @@ import { messagesFile, readMessages } from "./messages.ts";
 import { PROTOCOL } from "./wire.ts";
 import type { Backend, BenchEvent, CatalogModel, Decision, PermMode, PermissionRequest, Hello, LiveSessionMeta, SessionEvent, SessionHandle, SessionOpts, SessionState, SpaceView, ThinkingLevel } from "./index.ts";
 
-/** House actions: they change what the person owns (or the registry), so they ask whatever walls hold. */
-export const ALWAYS_ASK = new Set([
-  "workspace_stop", "workspace_delete", "worktree_drop", "env_delete", "env_stop", "env_restore_in_place",
-  "service_remove", "volume_delete", "snapshot_delete", "container_push", "container_build",
-  "packages_remove", "service_update", "intercept",
+/** Destructive house actions: they throw away what the person owns, so they ask. Everything else
+ * runs unasked: sessions work inside a sandboxed workspace, and a stop snapshots, a build or push
+ * can be redone. A destructive command inside exec or bash (rm -rf, git reset --hard) is not seen. */
+export const DESTRUCTIVE = new Set([
+  "workspace_delete", "worktree_drop", "env_delete", "env_restore_in_place",
+  "service_remove", "volume_delete", "snapshot_delete",
 ]);
-/** Run code or reach the network: they ask unless the fence holds (see `mustAsk`). */
-export const ASK_UNLESS_FENCED = new Set(["bash", "exec", "web_fetch"]);
 
 /** Every tool `mustAsk` can be true for: each carries a required `because` (consent.ts). */
-export const GATED = new Set([...ALWAYS_ASK, ...ASK_UNLESS_FENCED]);
+export const GATED = DESTRUCTIVE;
 
 /** A gated tool with `because` in its schema, removed before the tool runs: no tool ever sees it. */
 export function asking(t: ToolDef): ToolDef {
@@ -67,19 +66,8 @@ export function asking(t: ToolDef): ToolDef {
 /** Tools that only mutate the workspace's files — never asked: `paths::confine` / the scratch folder keep them in the tree. */
 export const EDITS = new Set(["write", "edit", "patch"]);
 
-/**
- * Whether a call needs a card. exec is behind a wall only when its pod's tool server reports both
- * a live sandbox and a fenced network; a missing field (older server, failed fetch) reads as open.
- * bash and web_fetch run in the bench process, whose network is fenced when KLOUDLITE_EGRESS says
- * so (bash's scratch sandbox already fails closed).
- */
-export function mustAsk(name: string, fence?: PodFence, egress = process.env.KLOUDLITE_EGRESS, kind: "main" | "workspace" | "subagent" = "main"): boolean {
-  if (kind === "workspace" && name === "workspace_stop") return false;
-  if (ALWAYS_ASK.has(name)) return true;
-  if (!ASK_UNLESS_FENCED.has(name)) return false;
-  if (name === "exec") return !(fence?.sandbox === "active" && fence?.network === "fenced");
-  return egress !== "fenced";
-}
+/** Whether a call needs a card. */
+export const mustAsk = (name: string): boolean => DESTRUCTIVE.has(name);
 
 /** The person's own words: the first prompt carries the role card, which no view should show. */
 export function stripCard(key: string, text: string): string {
@@ -167,25 +155,23 @@ export async function registryFor(k: SessionKind, deps: DelegateDeps, opts: Sess
   const r = new Registry();
   if (k.kind === "main")
     return r.add(...[webFetch, webSearch, ...platformTools("main").map((t) => (t.name === "workspace_delete" ? forgetting(t, deps) : t)), ...delegateTools("main", undefined, deps, opts, key), ...taskTools(tasksFile(key, deps.tasks)), ...boardTools(deps.tasks), ...scratchTools(scratchRoot(key)), ...opts.tools].map(asking), ...(deps.cards ? [question(key, deps.cards)] : []));
-  // the self-stop is the one call that never asks: it only snapshots and parks the workspace
-  // that is already finished, and carries no `because` for a card to quote
   if (k.kind === "subagent") {
     // a subagent talks only to its workspace session (its last message is the tool result): nothing that
     // delegates, reports upward, asks the person, keeps a board, or holds the workspace's service/lifecycle
     const no = new Set(["workspace_stop", "intercept", "release", "task_add", "task_update", "task_list", "workspace_tasks", "workspace_ask", "main_tell", "subagent"]);
     return r.add(...[webFetch, webSearch, ...(await podTools(k.ws)), ...platformTools("workspace", k.ws).filter((t) => !no.has(t.name)), ...opts.tools].map(asking));
   }
-  return r.add(...[webFetch, webSearch, ...(await podTools(k.ws)), ...platformTools("workspace", k.ws), ...delegateTools("workspace", k.ws, deps, opts, key), ...taskTools(tasksFile(key, deps.tasks)), ...opts.tools].map((t) => (t.name === "workspace_stop" ? t : asking(t))), ...(deps.cards ? [question(key, deps.cards)] : []));
+  return r.add(...[webFetch, webSearch, ...(await podTools(k.ws)), ...platformTools("workspace", k.ws), ...delegateTools("workspace", k.ws, deps, opts, key), ...taskTools(tasksFile(key, deps.tasks)), ...opts.tools].map(asking), ...(deps.cards ? [question(key, deps.cards)] : []));
 }
 
 /** The permission gate, on both doors a call comes through: `agent.beforeToolCall` for a
  * model's own calls (pi's loop and Claude's tool server both call it), and the pi session's
  * `_beforeToolCall` for calls a codemode script makes, which pi's nested runner sends straight
  * there with the parent's id and no signal. Gated once per call: top level has no parent id. */
-export function installGate(agent: any, permission: SessionOpts["permission"], fence?: () => PodFence | undefined, words?: () => { typed: string[]; self?: string }, kind: "main" | "workspace" | "subagent" = "main"): void {
+export function installGate(agent: any, permission: SessionOpts["permission"], words?: () => { typed: string[]; self?: string }): void {
   const ask = async (ctx: any, signal: AbortSignal) => {
     const name = ctx.toolCall.name;
-    if (!mustAsk(name, fence?.(), undefined, kind)) return undefined;
+    if (!mustAsk(name)) return undefined;
     const { because, ...args } = ctx.args ?? {};
     const w = words?.();
     if (w && consented(name, args, because, w.typed, w.self)) return undefined;
@@ -617,7 +603,7 @@ export class LocalBackend implements Backend {
       role: k.kind,
       cwd,
     });
-    installGate(agent, opts.permission ?? ((req, signal) => this.permit(key, req, signal)), k.kind === "main" ? undefined : () => podFence(k.ws), () => ({ typed: this.#words(key).get(), self: k.kind === "main" ? undefined : k.ws }), k.kind);
+    installGate(agent, opts.permission ?? ((req, signal) => this.permit(key, req, signal)), () => ({ typed: this.#words(key).get(), self: k.kind === "main" ? undefined : k.ws }));
     const state: SessionState = {
       type: "session_state",
       model: { provider: want.provider, id: want.id },
