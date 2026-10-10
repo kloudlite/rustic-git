@@ -30,6 +30,8 @@ export type Ask = {
 
 /** Rows shown at once in list layout; the window follows the selection. */
 const LIST_MAX = 8;
+/** Widest button strip, in cells, before the options stack as a list. */
+const STRIP_MAX = 48;
 
 /**
  * opencode's permission panel, ported 1:1: warning ┃ border on the panel bg,
@@ -41,7 +43,9 @@ export function AskPanel({ ask }: { ask: Ask }) {
   const [sel, setSel] = useState(0);
   const [query, setQuery] = useState("");
 
-  const list = ask.layout === "list";
+  // A strip of long labels runs off the right edge (2026-10-10: a question's second answer was cut),
+  // so anything wider than a short permission strip ("Allow once / Always / Reject") becomes a list.
+  const list = ask.layout === "list" || ask.options.reduce((w, o) => w + o.label.length + 3, 0) > STRIP_MAX;
   // list layout is searchable: typing filters the options
   const options =
     list && query
@@ -94,9 +98,12 @@ export function AskPanel({ ask }: { ask: Ask }) {
         paddingBottom={1}
       >
         <box flexDirection="column">
-          <box flexDirection="row" gap={1} paddingLeft={1}>
-            <text selectable={false} fg={theme.warning}>△</text>
-            <text selectable={false} fg={theme.fg}>{ask.title}</text>
+          {/* one text, so a wrapped title keeps the space after △ */}
+          <box paddingLeft={1}>
+            <text selectable={false} fg={theme.fg}>
+              <span fg={theme.warning}>△ </span>
+              {ask.title}
+            </text>
           </box>
           {ask.subtitle && (
             <box flexDirection="row" gap={1} paddingLeft={2}>
